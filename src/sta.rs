@@ -1,9 +1,8 @@
 //! 初始化wifi sta
 
 use crate::driver::FirewallDevice;
-use core::net::Ipv4Addr;
 use embassy_net::{
-    Ipv4Cidr, StackResources, StaticConfigV4,
+    StackResources,
     udp::{PacketMetadata, UdpSocket},
 };
 use esp_hal::{peripherals::WIFI, rng::Rng};
@@ -13,8 +12,6 @@ use static_cell::StaticCell;
 
 const SSID: &str = env!("WIFI_SSID");
 const PASSWORD: &str = env!("WIFI_PASSWORD");
-const IP_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 0, 1, 64);
-const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 1, 1);
 const UDP_PORT: u16 = 8080;
 const HEADER_SIZE: usize = 32;
 
@@ -49,13 +46,8 @@ pub fn init_sta(
     info!("Wrapping WiFi interface (XDP RX path enabled)");
     let xdp_device = FirewallDevice::new(sta);
 
-    let sta_config = embassy_net::Config::ipv4_static(StaticConfigV4 {
-        address: Ipv4Cidr::new(IP_ADDRESS, 24),
-        gateway: Some(GATEWAY),
-        dns_servers: Default::default(),
-    });
-    info!("STA config ip: {}", IP_ADDRESS);
-    info!("STA config gateway: {}", GATEWAY);
+    let sta_config = embassy_net::Config::dhcpv4(Default::default());
+    info!("STA using DHCPv4");
 
     let rng = Rng::new();
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
@@ -69,6 +61,12 @@ pub fn init_sta(
 
 #[inline]
 pub async fn handler(sta_stack: embassy_net::Stack<'static>) {
+    info!("Waiting for DHCP lease...");
+    sta_stack.wait_config_up().await;
+    if let Some(cfg) = sta_stack.config_v4() {
+        info!("STA got IP {} gw={:?}", cfg.address, cfg.gateway);
+    }
+
     let mut socket = UdpSocket::new(
         sta_stack,
         RX_META.init([PacketMetadata::EMPTY; 16]),
