@@ -1,6 +1,4 @@
-use crate::patch;
 use embassy_net::driver::{Driver, RxToken};
-use log::info;
 
 pub struct FirewallDevice<D: Driver> {
     inner: D,
@@ -11,12 +9,11 @@ impl<D: Driver> FirewallDevice<D> {
         Self { inner: device }
     }
 
-    fn check_packet(&self, data: &[u8]) -> bool {
-        let result = patch::xdp(data);
-        info!("[Driver] ctx size: {}", data.len());
-        let pass = result == 2 || result == 3 || result == 4;
-
-        pass
+    fn check_packet(&self, data: &mut [u8]) -> bool {
+        // WiFi RX path must not invoke AOT XDP while the dedicated harness
+        // (`patch::selftest` / `patch::xdp`) owns the entry. Pass all frames.
+        let _ = data;
+        true
     }
 }
 

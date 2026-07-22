@@ -1,0 +1,245 @@
+//! Sync BPF map helper ABI (AOT `map` arg → pool Id → concrete ops).
+//!
+//! # Alias table (weak sync)
+//!
+//! Writers update [`MAP_ALIASES`] under `critical_section` then bump
+//! [`ALIAS_EPOCH`] (`Release`). Readers (`resolve_map_id`) load the epoch with
+//! `Acquire` before scanning — single-core MCU: no full lock on the XDP path,
+//! just publish ordering so a torn update is not observed mid-helper.
+
+use core::cell::RefCell;
+
+use critical_section::Mutex;
+
+use super::array::BpfArrayMap;
+use super::hash::BpfHashMap;
+use super::pool::{MapKind, ResourceId, POOL};
+use super::ringbuf::BpfRingBuf;
+
+/// Linux `bpf_map_update_elem` flags (low bits).
+pub const BPF_ANY: u64 = 0;
+pub const BPF_NOEXIST: u64 = 1;
+pub const BPF_EXIST: u64 = 2;
+
+pub const MAX_MAP_ALIASES: usize = 16;
+
+/// Bumped under CS after alias table writes (weak publish token for readers).
+static ALIAS_EPOCH: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
+/// `(aot_addr, ResourceId)` slots; mutated only inside `critical_section`.
+static MAP_ALIASES: Mutex<RefCell<[Option<(usize, ResourceId)>; MAX_MAP_ALIASES]>> =
+    Mutex::new(RefCell::new([None; MAX_MAP_ALIASES]));
+
+fn publish_aliases() {
+    critical_section::with(|cs| {
+        let mut e = ALIAS_EPOCH.borrow_ref_mut(cs);
+        *e = e.wrapping_add(1);
+    });
+}
+
+/// Bind an AOT `.maps` object address to a firmware [`ResourceId`].
+///
+/// Returns `false` if the alias table is full.
+pub fn register_map_addr(addr: usize, id: ResourceId) -> bool {
+    if addr == 0 {
+        return true;
+    }
+    let ok = critical_section::with(|cs| {
+        let mut table = MAP_ALIASES.borrow_ref_mut(cs);
+        for slot in table.iter_mut() {
+            if let Some((a, _)) = *slot {
+                if a == addr {
+                    *slot = Some((addr, id));
+                    return true;
+                }
+            }
+        }
+        for slot in table.iter_mut() {
+            if slot.is_none() {
+                *slot = Some((addr, id));
+                return true;
+            }
+        }
+        false
+    });
+    if ok {
+        publish_aliases();
+    }
+    ok
+}
+
+/// Remove a single AOT address binding (no-op if absent).
+pub fn unbind_map_addr(addr: usize) {
+    if addr == 0 {
+        return;
+    }
+    critical_section::with(|cs| {
+        let mut table = MAP_ALIASES.borrow_ref_mut(cs);
+        for slot in table.iter_mut() {
+            if matches!(*slot, Some((a, _)) if a == addr) {
+                *slot = None;
+            }
+        }
+    });
+    publish_aliases();
+}
+
+/// Replace the entire alias table (dynamic ABI install path).
+///
+/// `binds` entries with `addr == 0` are skipped. Fails if filtered length
+/// exceeds [`MAX_MAP_ALIASES`].
+pub fn set_map_aliases(binds: &[(usize, ResourceId)]) -> Result<(), AliasError> {
+    let filtered: heapless::Vec<(usize, ResourceId), MAX_MAP_ALIASES> = {
+        let mut v = heapless::Vec::new();
+        for &(addr, id) in binds {
+            if addr == 0 {
+                continue;
+            }
+            if v.push((addr, id)).is_err() {
+                return Err(AliasError::Full);
+            }
+        }
+        v
+    };
+
+    critical_section::with(|cs| {
+        let mut table = MAP_ALIASES.borrow_ref_mut(cs);
+        *table = [None; MAX_MAP_ALIASES];
+        for (i, &(addr, id)) in filtered.iter().enumerate() {
+            table[i] = Some((addr, id));
+        }
+    });
+    publish_aliases();
+    Ok(())
+}
+
+/// Clear every alias (e.g. before a full ABI reload).
+pub fn clear_map_aliases() {
+    critical_section::with(|cs| {
+        *MAP_ALIASES.borrow_ref_mut(cs) = [None; MAX_MAP_ALIASES];
+    });
+    publish_aliases();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AliasError {
+    Full,
+}
+
+/// Resolve helper `map` arg: AOT pointer alias or bare ResourceId.
+pub fn resolve_map_id(map: usize) -> Option<ResourceId> {
+    critical_section::with(|cs| {
+        // Touch epoch so reads are sequenced after the last publish (weak sync).
+        let _epoch = *ALIAS_EPOCH.borrow_ref(cs);
+        let table = MAP_ALIASES.borrow_ref(cs);
+        for slot in table.iter() {
+            if let Some((a, id)) = *slot {
+                if a == map {
+                    return Some(id);
+                }
+            }
+        }
+        Some(map as ResourceId)
+    })
+}
+
+/// Registry entry viewed as a concrete BPF map.
+pub(super) enum TypedMap<'a> {
+    Array(&'a mut BpfArrayMap),
+    Hash(&'a mut BpfHashMap),
+    Ringbuf(&'a mut BpfRingBuf),
+}
+
+pub(super) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> R) -> Option<R> {
+    let mut guard = POOL.try_write()?;
+    let table = guard.as_mut()?;
+    let res = table.get_mut(&id)?;
+    let typed = match res.kind? {
+        MapKind::Array => TypedMap::Array(unsafe { res.as_mut() }),
+        MapKind::Hash => TypedMap::Hash(unsafe { res.as_mut() }),
+        MapKind::Ringbuf => TypedMap::Ringbuf(unsafe { res.as_mut() }),
+    };
+    Some(f(typed))
+}
+
+/// Sync BPF helper entry: resolve `map` as AOT pointer or [`ResourceId`].
+pub fn helper_lookup(map: usize, key: usize) -> usize {
+    let Some(id) = resolve_map_id(map) else {
+        return 0;
+    };
+    let key = key as *const u8;
+    with_typed_map(id, |typed| match typed {
+        TypedMap::Array(m) => m.lookup(key) as usize,
+        TypedMap::Hash(m) => m.lookup(key) as usize,
+        TypedMap::Ringbuf(_) => 0,
+    })
+    .unwrap_or(0)
+}
+
+pub fn helper_update(map: usize, key: usize, value: usize, flags: usize) -> usize {
+    let Some(id) = resolve_map_id(map) else {
+        return (-22i32) as usize;
+    };
+    let key = key as *const u8;
+    let value = value as *const u8;
+    with_typed_map(id, |typed| match typed {
+        TypedMap::Array(m) => m.update(key, value, flags as u64) as usize,
+        TypedMap::Hash(m) => m.update(key, value, flags as u64) as usize,
+        TypedMap::Ringbuf(_) => (-22i32) as usize,
+    })
+    .unwrap_or((-22i32) as usize)
+}
+
+pub fn helper_delete(map: usize, key: usize) -> usize {
+    let Some(id) = resolve_map_id(map) else {
+        return (-22i32) as usize;
+    };
+    let key = key as *const u8;
+    with_typed_map(id, |typed| match typed {
+        TypedMap::Array(m) => m.delete(key) as usize,
+        TypedMap::Hash(m) => m.delete(key) as usize,
+        TypedMap::Ringbuf(_) => (-22i32) as usize,
+    })
+    .unwrap_or((-22i32) as usize)
+}
+
+type ForEachCb = extern "C" fn(usize, usize, usize, usize) -> i32;
+
+/// Linux callback: `long (*cb)(struct bpf_map *, void *key, void *value, void *ctx)`.
+pub fn helper_for_each_map_elem(
+    map: usize,
+    callback_fn: usize,
+    callback_ctx: usize,
+    _flags: usize,
+) -> usize {
+    if callback_fn == 0 {
+        return (-22i32) as usize;
+    }
+    let Some(id) = resolve_map_id(map) else {
+        return (-2i32) as usize;
+    };
+    let cb = unsafe { core::mem::transmute::<usize, ForEachCb>(callback_fn) };
+
+    let mut guard = match POOL.try_write() {
+        Some(g) => g,
+        None => return (-11i32) as usize, // EAGAIN
+    };
+    let table = match guard.as_mut() {
+        Some(t) => t,
+        None => return (-22i32) as usize,
+    };
+    let res = match table.get_mut(&id) {
+        Some(r) => r,
+        None => return (-2i32) as usize,
+    };
+    match res.kind {
+        Some(MapKind::Hash) => {
+            let m: &mut BpfHashMap = unsafe { res.as_mut() };
+            m.for_each_elems(map, cb, callback_ctx)
+        }
+        Some(MapKind::Array) => {
+            let m: &mut BpfArrayMap = unsafe { res.as_mut() };
+            m.for_each_elems(map, cb, callback_ctx)
+        }
+        _ => (-22i32) as usize,
+    }
+}

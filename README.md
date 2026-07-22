@@ -80,7 +80,7 @@ cargo build --release
 cargo run --release
 
 # 或使用 espflash 直接烧录
-espflash flash --monitor --chip esp32c3 --partition-table partitions.csv target/riscv32imc-unknown-none-elf/release/firmware
+espflash flash --monitor --no-addresses --chip esp32c3 --partition-table partitions.csv target/riscv32imc-unknown-none-elf/release/firmware
 ```
 
 ## 项目结构
@@ -130,7 +130,7 @@ firmware/
 
 固件支持从 Flash 的 `payload.bin` 加载并执行外部代码：
 
-- 代码加载到 IRAM 的特定区域（`0x403A1000`）
+- 代码加载到 IRAM 的特定区域（`0x403A1000`，与 AOT `HOT_REGION` 一致）
 - 支持 BSS 段初始化
 - 执行前刷新指令缓存（`fence.i`）
 - 提供辅助函数调度机制（`helper_jump`）
@@ -139,8 +139,11 @@ firmware/
 
 自定义链接器脚本定义了特殊的内存段：
 
-- `0x403A0000`: Helper 函数调度器区域
-- `0x403A1000`: 热加载代码区域（4KB）
+- `mem_map.toml`: 固件侧地址契约（生成 `OUT_DIR/mem_map.rs` + `custom-sections.x`）
+- AOT `esp32c3.ld` 仅由 **libbpf-mcu** 维护，固件构建不会改写
+- `0x40380000`: `helper_dispatcher`（4KB，DRAM dummy 防双映射清零）
+- `0x40381000`: `HOT_REGION` 占位（4KB）
+- `load()` 启动时 `assert` 链接地址与 `mem_map.toml` 一致
 
 ## Flash 分区表
 
@@ -170,9 +173,16 @@ firmware/
 项目使用 `log` 和 `esp-println` 进行日志输出：
 
 ```bash
-# 设置日志级别（在 .cargo/config.toml 中）
+# 设置日志级别（在 .cargo/config.toml 或运行时环境变量）
 ESP_LOG="info"  # 可选: trace, debug, info, warn, error
+
+# BPF helper 逐调用 trace（参数 + 返回值），需 debug 级别：
+ESP_LOG=debug cargo run --release --features hw-selftest
 ```
+
+`ESP_LOG=debug` 时，每次经 `helper_dispatcher` 的调用会输出一行 `DEBUG - bpf map_update_elem (#2) a1=… -> ok=0`（参数为十进制，避免 espflash 把 `0x…` 当地址做 addr2line）。
+
+若单独用 `espflash monitor`，请加 `--no-addresses`，否则 monitor 仍可能对日志里的十六进制做符号解析并插入 `HOT_REGION` / `g_shared_buffers` 等行。
 
 烧录后通过串口监控可以看到：
 

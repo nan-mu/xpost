@@ -46,8 +46,9 @@ pub fn init_sta(
 
     let sta = interfaces.station;
 
-    // 包装 WiFi interface 为 XDP 防火墙设备
-    info!("Wrapping WiFi interface with XDP firewall");
+    // Wrapper kept for API stability; WiFi RX currently bypasses AOT XDP
+    // (see FirewallDevice::check_packet). Dedicated tests call patch::xdp.
+    info!("Wrapping WiFi interface (XDP RX path disabled)");
     let xdp_device = FirewallDevice::new(sta);
 
     let sta_config = embassy_net::Config::ipv4_static(StaticConfigV4 {
