@@ -2,7 +2,11 @@
 edition      = "2024"
 name         = "firmware"
 rust-version = "1.88"
-version      = "0.1.0"
+version      = "0.1.1"
+
+[lib]
+test = false
+bench = false
 
 [lib]
 test = false
@@ -13,10 +17,21 @@ name = "firmware"
 path = "./src/bin/main.rs"
 test = false
 bench = false
+<<<<<<< HEAD
+=======
+
+[features]
+default = ["patch-sync-embassy"]
+# Patch pool/slots: embassy-sync async RwLock (control plane .await)
+patch-sync-embassy = ["dep:embassy-sync"]
+# Patch pool/slots: single-thread RefCell (control plane sync; no IRQ→helper)
+patch-sync-st = []
+# On-device serial selftest markers for scripts/hw_expect.py
+hw-selftest = []
+>>>>>>> feat/patch-loader
 
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
-
 esp-rtos = { version = "0.3.0", features = [
   "embassy",
   "esp-alloc",
@@ -24,10 +39,12 @@ esp-rtos = { version = "0.3.0", features = [
   "esp32c3",
   "log-04",
 ] }
-
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c3", "log-04"] }
 log                    = "0.4.27"
+<<<<<<< HEAD
 
+=======
+>>>>>>> feat/patch-loader
 embassy-net = { version = "0.9.1", features = [
   "dhcpv4",
   "log",
@@ -65,7 +82,17 @@ smoltcp = { version = "0.13.0", default-features = false, features = [
 critical-section = "1.2.0"
 static_cell      = { version = "2.1.1", features = ["nightly"] }
 embassy-futures = "0.1.2"
-
+esp-storage = { version = "0.9.0", features = ["esp32c3"] }
+embedded-storage = "0.3.1"
+nom = { version = "8.0.0", default-features = false, features = ["alloc"] }
+heapless = "0.9.3"
+anyhow = { version = "1.0.102", default-features = false }
+talc = { version = "5.0", features = ["counters"] }
+allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
+allocator-api2-v02 = { version = "0.2", package = "allocator-api2", default-features = false, features = ["alloc"] }
+hashbrown = { version = "0.17", default-features = false, features = ["allocator-api2", "default-hasher"] }
+embassy-sync = { version = "0.8.0", features = ["log"], optional = true }
+ringbuf = { version = "0.3.3", default-features = false }
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
 [profile.dev]
@@ -78,3 +105,10 @@ codegen-units = 1     # LLVM can perform better optimizations using a single thr
 debug         = 2     # prefer slower builds but better debugging experience
 lto           = 'fat'
 opt-level     = 's'
+
+[build-dependencies]
+dotenv-build = "0.1"
+toml = "1.1.3"
+
+[package.metadata.espflash]
+partition_table = "partitions.csv"

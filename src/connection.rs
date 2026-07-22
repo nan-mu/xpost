@@ -3,10 +3,25 @@ use embassy_time::{Duration, Timer};
 use esp_radio::wifi;
 use log::{error, info};
 
+#[embassy_executor::task(pool_size = 2)]
+pub async fn net_task(mut runner: embassy_net::Runner<'static, wifi::Interface<'static>>) {
+    runner.run().await
+}
+
+#[embassy_executor::task(pool_size = 2)]
+pub async fn net_task_xdp(
+    mut runner: embassy_net::Runner<
+        'static,
+        crate::driver::FirewallDevice<wifi::Interface<'static>>,
+    >,
+) {
+    runner.run().await
+}
+
 #[embassy_executor::task]
 pub async fn connection(mut controller: wifi::WifiController<'static>) -> ! {
     info!("Starting connection task");
-        loop {
+    loop {
         match controller.connect_async().await {
             Ok(_) => {
                 // wait until we're no longer connected
@@ -30,12 +45,26 @@ pub async fn connection(mut controller: wifi::WifiController<'static>) -> ! {
                                     esp_radio::wifi::AccessPointStationEventInfo::Connected(
                                         access_point_station_connected_info,
                                     ) => {
+<<<<<<< HEAD
                                         info!("Station connected: {:?}", access_point_station_connected_info);
+=======
+                                        info!(
+                                            "Station connected: {:?}",
+                                            access_point_station_connected_info
+                                        );
+>>>>>>> feat/patch-loader
                                     }
                                     esp_radio::wifi::AccessPointStationEventInfo::Disconnected(
                                         access_point_station_disconnected_info,
                                     ) => {
+<<<<<<< HEAD
                                         info!("Station disconnected: {:?}", access_point_station_disconnected_info);
+=======
+                                        info!(
+                                            "Station disconnected: {:?}",
+                                            access_point_station_disconnected_info
+                                        );
+>>>>>>> feat/patch-loader
                                     }
                                 }
                             }
@@ -49,4 +78,8 @@ pub async fn connection(mut controller: wifi::WifiController<'static>) -> ! {
             }
         }
     }
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> feat/patch-loader

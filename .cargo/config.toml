@@ -1,10 +1,11 @@
 [target.riscv32imc-unknown-none-elf]
-runner = "espflash flash --monitor --chip esp32c3"
+# --no-addresses: do not addr2line-decode hex in UART log (avoids spam after DEBUG lines).
+runner = "espflash flash --monitor --no-addresses --chip esp32c3 --partition-table partitions.csv --port /dev/cu.usbmodem211101"
 
 [env]
-ESP_LOG="info"
-WIFI_SSID=""
-WIFI_PASSWORD=""
+ESP_LOG="debug"
+WIFI_SSID="your_wifi_ssid"
+WIFI_PASSWORD="your_wifi_password"
 
 [build]
 rustflags = [

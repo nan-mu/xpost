@@ -1,0 +1,20 @@
+# ESP32-C3 patch IRAM map — firmware-side contract (mem_map.rs + custom-sections.x).
+# AOT linker script is owned solely by libbpf-mcu (`make/linker/esp32c3.ld`);
+# this repo must NOT generate or overwrite it. Keep numbers in sync by hand.
+#
+# Both windows sit at IRAM origin so DRAM dual-map can be skipped via
+# .rwdata_dummy_bs. Do NOT place HOT_REGION at 0x403A1000 — that aliases
+# into .bss/.stack (0x3FCA1000) and WiFi timer state gets corrupted on load.
+
+[helper]
+# Absolute IRAM entry for `helper_dispatcher` (AOT `call helper_dispatcher`).
+base = 0x40380000
+# Full window reserved so .bss dual-map cannot reclaim this page.
+length = 0x1000
+
+[hot_region]
+# Absolute IRAM load / entry address for AOT payload (`HOT_REGION`).
+# Immediately after the helper window (contiguous patch arena at IRAM head).
+base = 0x40381000
+# Firmware occupies a full 4KiB page; AOT MEMORY LENGTH matches.
+length = 0x1000
