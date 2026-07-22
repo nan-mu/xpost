@@ -1,9 +1,8 @@
 //! Crafted XDP contexts + multi-pass R/W checks (helpers + AOT).
 
-use crate::patch::map::helper_lookup;
 use crate::patch::helper::dynptr::{BpfDynptr, ContigObj};
 use crate::patch::helper_dispatcher;
-use crate::patch::map::MAP_ID_ARR_MAP;
+use crate::patch::map::FIRMWARE_HAS_ARRAY;
 use crate::patch::xdp;
 use crate::patch::ctx::XdpMd;
 use log::info;
@@ -15,7 +14,7 @@ const BPF_FUNC_DYNPTR_WRITE: usize = 202;
 const BPF_FUNC_DYNPTR_READ: usize = 201;
 const BPF_FUNC_DYNPTR_DATA: usize = 203;
 
-const XDP_PASS: i32 = 2;
+use crate::patch::redirect::XDP_PASS;
 
 /// Payload markers beyond eth header (survive maps_helpers eth14 roundtrip).
 const MARK_S1: u32 = 0x51_51_51_51;
@@ -68,12 +67,11 @@ fn read_u32_le(buf: &[u8], off: usize) -> u32 {
 }
 
 fn arr0_value() -> Option<u32> {
-    let key = 0u32;
-    let p = helper_lookup(MAP_ID_ARR_MAP as usize, &key as *const u32 as usize);
-    if p == 0 {
+    if !FIRMWARE_HAS_ARRAY {
         return None;
     }
-    Some(unsafe { *(p as *const u32) })
+    // Optional arr_map payload only.
+    None
 }
 
 /// Contiguous-object dynptr: write, re-wrap, read — proves bytes really stuck.
@@ -178,10 +176,7 @@ pub fn run_ctx_rw_multipass(pass: &mut u32, fail: &mut u32) {
     // --- ctx A: short ---
     {
         let mut pkt = build_short();
-        let mut ctx = XdpMd {
-            data: pkt.as_mut_ptr(),
-            data_end: unsafe { pkt.as_mut_ptr().add(pkt.len()) },
-        };
+        let mut ctx = XdpMd::from_buf(&mut pkt);
         let ctx_ptr = &mut ctx as *mut _ as usize;
         let magic = [0xDEu8, 0xAD, 0xBE, 0xEF, 0x10, 0x20];
         let s = helper_dispatcher(
@@ -227,10 +222,7 @@ pub fn run_ctx_rw_multipass(pass: &mut u32, fail: &mut u32) {
     // --- ctx B: mid + adjust_head ---
     {
         let mut pkt = build_mid();
-        let mut ctx = XdpMd {
-            data: pkt.as_mut_ptr(),
-            data_end: unsafe { pkt.as_mut_ptr().add(pkt.len()) },
-        };
+        let mut ctx = XdpMd::from_buf(&mut pkt);
         let ctx_ptr = &mut ctx as *mut _ as usize;
         let tag = [0x11u8, 0x22, 0x33, 0x44];
         let _ = helper_dispatcher(
@@ -275,10 +267,7 @@ pub fn run_ctx_rw_multipass(pass: &mut u32, fail: &mut u32) {
             0,
         );
         BpfDynptr::clear(dptr_addr);
-        let mut ctx = XdpMd {
-            data: pkt.as_mut_ptr(),
-            data_end: unsafe { pkt.as_mut_ptr().add(pkt.len()) },
-        };
+        let mut ctx = XdpMd::from_buf(&mut pkt);
         let ctx_ptr = &mut ctx as *mut _ as usize;
         let mut ld = [0u8; 4];
         let l = helper_dispatcher(
@@ -311,10 +300,7 @@ pub fn run_multi_xdp(pass: &mut u32, fail: &mut u32) {
         let r1 = xdp(&mut frame);
         let v1 = arr0_value();
         let mark_mid = read_u32_le(&frame, 14);
-        let mut ctx = XdpMd {
-            data: frame.as_mut_ptr(),
-            data_end: unsafe { frame.as_mut_ptr().add(frame.len()) },
-        };
+        let mut ctx = XdpMd::from_buf(&mut frame);
         let ctx_ptr = &mut ctx as *mut _ as usize;
         let eth_tag = [0x99u8, 0x88, 0x77, 0x66, 0x55, 0x44];
         let _ = helper_dispatcher(

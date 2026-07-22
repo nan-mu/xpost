@@ -5,7 +5,7 @@
 
 use allocator_api2::alloc::AllocError;
 
-use super::array::create_bpf_array;
+use super::array::{create_bpf_array, create_bpf_devmap};
 use super::hash::create_bpf_hash;
 use super::pool::{MapKind, RawResource, ResourceId};
 use super::ringbuf::create_bpf_ringbuf;
@@ -80,6 +80,12 @@ pub async fn create_map(cmd: MapCreateCmd) -> Result<ResourceId, MapCtrlError> {
             }
             create_bpf_ringbuf(id, cmd.max_entries).await?;
         }
+        MapKind::Devmap => {
+            if cmd.max_entries == 0 {
+                return Err(MapCtrlError::BadSpec);
+            }
+            create_bpf_devmap(id, cmd.max_entries).await?;
+        }
     }
 
     Ok(id)
@@ -115,6 +121,12 @@ pub fn create_map(cmd: MapCreateCmd) -> Result<ResourceId, MapCtrlError> {
                 return Err(MapCtrlError::BadSpec);
             }
             create_bpf_ringbuf(id, cmd.max_entries)?;
+        }
+        MapKind::Devmap => {
+            if cmd.max_entries == 0 {
+                return Err(MapCtrlError::BadSpec);
+            }
+            create_bpf_devmap(id, cmd.max_entries)?;
         }
     }
 

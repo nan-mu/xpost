@@ -147,6 +147,7 @@ pub(super) enum TypedMap<'a> {
     Array(&'a mut BpfArrayMap),
     Hash(&'a mut BpfHashMap),
     Ringbuf(&'a mut BpfRingBuf),
+    Devmap(&'a mut BpfArrayMap),
 }
 
 pub(super) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> R) -> Option<R> {
@@ -157,6 +158,7 @@ pub(super) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> 
         MapKind::Array => TypedMap::Array(unsafe { res.as_mut() }),
         MapKind::Hash => TypedMap::Hash(unsafe { res.as_mut() }),
         MapKind::Ringbuf => TypedMap::Ringbuf(unsafe { res.as_mut() }),
+        MapKind::Devmap => TypedMap::Devmap(unsafe { res.as_mut() }),
     };
     Some(f(typed))
 }
@@ -168,7 +170,7 @@ pub fn helper_lookup(map: usize, key: usize) -> usize {
     };
     let key = key as *const u8;
     with_typed_map(id, |typed| match typed {
-        TypedMap::Array(m) => m.lookup(key) as usize,
+        TypedMap::Array(m) | TypedMap::Devmap(m) => m.lookup(key) as usize,
         TypedMap::Hash(m) => m.lookup(key) as usize,
         TypedMap::Ringbuf(_) => 0,
     })
@@ -182,7 +184,7 @@ pub fn helper_update(map: usize, key: usize, value: usize, flags: usize) -> usiz
     let key = key as *const u8;
     let value = value as *const u8;
     with_typed_map(id, |typed| match typed {
-        TypedMap::Array(m) => m.update(key, value, flags as u64) as usize,
+        TypedMap::Array(m) | TypedMap::Devmap(m) => m.update(key, value, flags as u64) as usize,
         TypedMap::Hash(m) => m.update(key, value, flags as u64) as usize,
         TypedMap::Ringbuf(_) => (-22i32) as usize,
     })
@@ -195,7 +197,7 @@ pub fn helper_delete(map: usize, key: usize) -> usize {
     };
     let key = key as *const u8;
     with_typed_map(id, |typed| match typed {
-        TypedMap::Array(m) => m.delete(key) as usize,
+        TypedMap::Array(m) | TypedMap::Devmap(m) => m.delete(key) as usize,
         TypedMap::Hash(m) => m.delete(key) as usize,
         TypedMap::Ringbuf(_) => (-22i32) as usize,
     })
@@ -236,7 +238,7 @@ pub fn helper_for_each_map_elem(
             let m: &mut BpfHashMap = unsafe { res.as_mut() };
             m.for_each_elems(map, cb, callback_ctx)
         }
-        Some(MapKind::Array) => {
+        Some(MapKind::Array) | Some(MapKind::Devmap) => {
             let m: &mut BpfArrayMap = unsafe { res.as_mut() };
             m.for_each_elems(map, cb, callback_ctx)
         }

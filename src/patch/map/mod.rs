@@ -17,7 +17,7 @@ pub use abi::{
     register_map_addr, resolve_map_id, set_map_aliases, unbind_map_addr, AliasError, BPF_ANY,
     BPF_EXIST, BPF_NOEXIST, MAX_MAP_ALIASES,
 };
-pub use array::{create_array, create_bpf_array, BpfArrayMap};
+pub use array::{create_array, create_bpf_array, create_bpf_devmap, BpfArrayMap};
 pub use ctrl::{create_map, destroy_map, MapCreateCmd, MapCtrlError, MAX_MAP_IDS};
 pub use hash::{create_bpf_hash, create_hashmap, BpfHashMap, SharedHashMap};
 pub use pool::{allocator, init, MapKind, RawResource, ResourceId, TalcAlloc};

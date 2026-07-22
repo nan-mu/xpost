@@ -217,6 +217,38 @@ pub fn create_bpf_array(
     create_array(id, value_size, max_entries)
 }
 
+/// `BPF_MAP_TYPE_DEVMAP`: ARRAY of `u32` ifindex values, tagged [`MapKind::Devmap`].
+#[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
+pub async fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
+    let (raw, layout, value_size, stride) = alloc_array(4, max_entries)?;
+    RawResource::insert(
+        id,
+        raw,
+        layout,
+        drop_array,
+        Some(MapKind::Devmap),
+        4,
+        value_size,
+        stride,
+    )
+    .await
+}
+
+#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+pub fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
+    let (raw, layout, value_size, stride) = alloc_array(4, max_entries)?;
+    RawResource::insert(
+        id,
+        raw,
+        layout,
+        drop_array,
+        Some(MapKind::Devmap),
+        4,
+        value_size,
+        stride,
+    )
+}
+
 /// HW selftest for the first ARRAY map in bpf.toml (when present).
 #[cfg(feature = "hw-selftest")]
 pub fn run_selftest(pass: &mut u32, fail: &mut u32) {

@@ -1,9 +1,6 @@
 //! 初始化wifi sta
 
-<<<<<<< HEAD
-=======
 use crate::driver::FirewallDevice;
->>>>>>> feat/patch-loader
 use core::net::Ipv4Addr;
 use embassy_net::{
     Ipv4Cidr, StackResources, StaticConfigV4,
@@ -16,17 +13,9 @@ use static_cell::StaticCell;
 
 const SSID: &str = env!("WIFI_SSID");
 const PASSWORD: &str = env!("WIFI_PASSWORD");
-<<<<<<< HEAD
-const IP_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 0, 1, 4);
-const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 1, 1);
-const UDP_PORT: u16 = 8080;
-const MTU: usize = 1500;
-=======
 const IP_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 0, 1, 64);
 const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 1, 1);
 const UDP_PORT: u16 = 8080;
-// const MTU: usize = 1500;
->>>>>>> feat/patch-loader
 const HEADER_SIZE: usize = 32;
 
 static STACK_RESOURCES: StaticCell<StackResources<4>> = StaticCell::new();
@@ -41,11 +30,7 @@ pub fn init_sta(
 ) -> (
     wifi::WifiController<'static>,
     embassy_net::Stack<'static>,
-<<<<<<< HEAD
-    embassy_net::Runner<'static, wifi::Interface<'static>>,
-=======
     embassy_net::Runner<'static, FirewallDevice<wifi::Interface<'static>>>,
->>>>>>> feat/patch-loader
 ) {
     info!("STA Initialization");
     let sta = Config::Station(
@@ -59,15 +44,11 @@ pub fn init_sta(
         wifi::new(wifi, ControllerConfig::default().with_initial_config(sta)).unwrap();
 
     let sta = interfaces.station;
-<<<<<<< HEAD
-=======
 
-    // Wrapper kept for API stability; WiFi RX currently bypasses AOT XDP
-    // (see FirewallDevice::check_packet). Dedicated tests call patch::xdp.
-    info!("Wrapping WiFi interface (XDP RX path disabled)");
+    // WiFi RX frames are filtered by AOT XDP via FirewallDevice::check_packet.
+    info!("Wrapping WiFi interface (XDP RX path enabled)");
     let xdp_device = FirewallDevice::new(sta);
 
->>>>>>> feat/patch-loader
     let sta_config = embassy_net::Config::ipv4_static(StaticConfigV4 {
         address: Ipv4Cidr::new(IP_ADDRESS, 24),
         gateway: Some(GATEWAY),
@@ -81,11 +62,7 @@ pub fn init_sta(
 
     info!("STA starting with seed: {}", seed);
     let resources = STACK_RESOURCES.init(StackResources::<4>::new());
-<<<<<<< HEAD
-    let (sta_stack, sta_runner) = embassy_net::new(sta, sta_config, resources, seed);
-=======
     let (sta_stack, sta_runner) = embassy_net::new(xdp_device, sta_config, resources, seed);
->>>>>>> feat/patch-loader
 
     (controller, sta_stack, sta_runner)
 }

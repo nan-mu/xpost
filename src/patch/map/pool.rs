@@ -94,6 +94,8 @@ pub enum MapKind {
     Array,
     Hash,
     Ringbuf,
+    /// `BPF_MAP_TYPE_DEVMAP`: key `u32` → value `u32` ifindex (ARRAY layout).
+    Devmap,
 }
 
 type PoolMap = HashMap<ResourceId, RawResource, hashbrown::DefaultHashBuilder, TalcAlloc>;

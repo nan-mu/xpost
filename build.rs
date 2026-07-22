@@ -173,6 +173,10 @@ fn generate_bpf_maps() {
             write_generated(&format!(
                 "// no [maps.*] entries in bpf.toml\n\
                  pub const FIRMWARE_MAP_COUNT: usize = 0;\n\
+                 pub const FIRMWARE_HAS_ARRAY: bool = false;\n\
+                 pub const FIRMWARE_HAS_HASH: bool = false;\n\
+                 pub const FIRMWARE_HAS_DEVMAP: bool = false;\n\
+                 pub const FIRMWARE_HAS_RINGBUF: bool = false;\n\
                  pub const SELFTEST_MAP_ID: ResourceId = 0;\n\
                  pub const SELFTEST_MAP_TYPE: &str = \"\";\n\
                  pub const SELFTEST_KEY_SIZE: usize = 0;\n\
@@ -255,8 +259,24 @@ fn generate_bpf_maps() {
         "// heap check: estimated={total_estimated} + reserved={POOL_RESERVED} <= HEAP_SIZE={HEAP_SIZE}\n"
     ));
     out.push_str(&format!(
-        "pub const FIRMWARE_MAP_COUNT: usize = {};\n\n",
+        "pub const FIRMWARE_MAP_COUNT: usize = {};\n",
         map_specs.len()
+    ));
+    out.push_str(&format!(
+        "pub const FIRMWARE_HAS_ARRAY: bool = {};\n",
+        map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_ARRAY")
+    ));
+    out.push_str(&format!(
+        "pub const FIRMWARE_HAS_HASH: bool = {};\n",
+        map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_HASH")
+    ));
+    out.push_str(&format!(
+        "pub const FIRMWARE_HAS_DEVMAP: bool = {};\n",
+        map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_DEVMAP")
+    ));
+    out.push_str(&format!(
+        "pub const FIRMWARE_HAS_RINGBUF: bool = {};\n\n",
+        map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_RINGBUF")
     ));
 
     if let Some(first) = map_specs.first() {
@@ -300,7 +320,7 @@ fn generate_bpf_maps() {
             "BPF_MAP_TYPE_RINGBUF" => {
                 emit_struct(&mut out, &val_ty, &spec.value_fields, false);
             }
-            "BPF_MAP_TYPE_HASH" | "BPF_MAP_TYPE_ARRAY" => {
+            "BPF_MAP_TYPE_HASH" | "BPF_MAP_TYPE_ARRAY" | "BPF_MAP_TYPE_DEVMAP" => {
                 let key_ty = format!("{type_stem}Key");
                 emit_struct(&mut out, &key_ty, &spec.key_fields, true);
                 emit_struct(&mut out, &val_ty, &spec.value_fields, false);
@@ -323,12 +343,16 @@ fn generate_bpf_maps() {
 
     let needs_hash = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_HASH");
     let needs_array = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_ARRAY");
+    let needs_devmap = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_DEVMAP");
     let needs_ring = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_RINGBUF");
-    if needs_hash || needs_array || needs_ring {
+    if needs_hash || needs_array || needs_devmap || needs_ring {
         out.push_str("    use crate::patch::map::{");
         let mut parts = Vec::new();
         if needs_array {
             parts.push("create_bpf_array");
+        }
+        if needs_devmap {
+            parts.push("create_bpf_devmap");
         }
         if needs_hash {
             parts.push("create_bpf_hash");
@@ -354,6 +378,12 @@ fn generate_bpf_maps() {
             "BPF_MAP_TYPE_ARRAY" => {
                 out.push_str(&format!(
                     "    create_bpf_array({id_const}, {value_size}, {}){await_suffix}?;\n",
+                    spec.max_entries
+                ));
+            }
+            "BPF_MAP_TYPE_DEVMAP" => {
+                out.push_str(&format!(
+                    "    create_bpf_devmap({id_const}, {}){await_suffix}?;\n",
                     spec.max_entries
                 ));
             }

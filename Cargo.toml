@@ -8,17 +8,11 @@ version      = "0.1.1"
 test = false
 bench = false
 
-[lib]
-test = false
-bench = false
-
 [[bin]]
 name = "firmware"
 path = "./src/bin/main.rs"
 test = false
 bench = false
-<<<<<<< HEAD
-=======
 
 [features]
 default = ["patch-sync-embassy"]
@@ -28,7 +22,6 @@ patch-sync-embassy = ["dep:embassy-sync"]
 patch-sync-st = []
 # On-device serial selftest markers for scripts/hw_expect.py
 hw-selftest = []
->>>>>>> feat/patch-loader
 
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
@@ -41,10 +34,6 @@ esp-rtos = { version = "0.3.0", features = [
 ] }
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c3", "log-04"] }
 log                    = "0.4.27"
-<<<<<<< HEAD
-
-=======
->>>>>>> feat/patch-loader
 embassy-net = { version = "0.9.1", features = [
   "dhcpv4",
   "log",

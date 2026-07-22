@@ -12,11 +12,6 @@ use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use log::{error, info};
 
-<<<<<<< HEAD
-use firmware::connection::connection;
-use firmware::net_task::net_task;
-use firmware::sta;
-=======
 use firmware::patch;
 
 #[cfg(not(feature = "hw-selftest"))]
@@ -24,7 +19,6 @@ use firmware::{
     connection::{connection, net_task_xdp},
     sta,
 };
->>>>>>> feat/patch-loader
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -82,9 +76,6 @@ async fn main(spawner: Spawner) {
 
     info!("Read partition table / load XDP payload");
     patch::load(peripherals.FLASH);
-    // TEMP: exercise AOT without WiFi RX (maps_helpers → bpf_printk flood).
-    let _ = patch::smoke_xdp();
-    patch::smoke_multi_ctx();
 
     #[cfg(feature = "hw-selftest")]
     {
