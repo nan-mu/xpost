@@ -179,7 +179,7 @@ pub async fn create_array(
     .await
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn create_array(
     id: ResourceId,
     value_size: usize,
@@ -208,7 +208,7 @@ pub async fn create_bpf_array(
     create_array(id, value_size, max_entries).await
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn create_bpf_array(
     id: ResourceId,
     value_size: usize,
@@ -234,7 +234,7 @@ pub async fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(),
     .await
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
     let (raw, layout, value_size, stride) = alloc_array(4, max_entries)?;
     RawResource::insert(

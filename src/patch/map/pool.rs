@@ -189,7 +189,7 @@ impl RawResource {
     }
 
     /// Insert into the pool. On Id collision the new entry is dropped (talc freed).
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub(crate) fn insert(
         id: ResourceId,
         ptr: *mut u8,
@@ -218,7 +218,7 @@ impl RawResource {
         Some(f(unsafe { resource.as_ref() }))
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn read<T, R>(id: ResourceId, f: impl FnOnce(&T) -> R) -> Option<R> {
         let guard = POOL.read();
         let table = guard.as_ref()?;
@@ -238,7 +238,7 @@ impl RawResource {
         Some(f(unsafe { resource.as_mut() }))
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn with_mut<T, R>(id: ResourceId, f: impl FnOnce(&mut T) -> R) -> Option<R> {
         let mut guard = POOL.write();
         let table = guard.as_mut()?;
@@ -260,7 +260,7 @@ impl RawResource {
         table.remove(&id).is_some()
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn destroy(id: ResourceId) -> bool {
         let mut guard = POOL.write();
         let table = match guard.as_mut() {
@@ -277,7 +277,7 @@ impl RawResource {
         guard.as_ref().is_some_and(|t| t.contains_key(&id))
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn contains(id: ResourceId) -> bool {
         let guard = POOL.read();
         guard.as_ref().is_some_and(|t| t.contains_key(&id))
@@ -289,7 +289,7 @@ impl RawResource {
         Some(guard.as_ref()?.get(&id)?.users)
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn users(id: ResourceId) -> Option<u32> {
         let guard = POOL.read();
         Some(guard.as_ref()?.get(&id)?.users)
@@ -307,7 +307,7 @@ impl RawResource {
         true
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn add_user(id: ResourceId) -> bool {
         let mut guard = POOL.write();
         let res = match guard.as_mut().and_then(|t| t.get_mut(&id)) {
@@ -330,7 +330,7 @@ impl RawResource {
         true
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn remove_user(id: ResourceId) -> bool {
         let mut guard = POOL.write();
         let res = match guard.as_mut().and_then(|t| t.get_mut(&id)) {
@@ -349,7 +349,7 @@ impl RawResource {
         (0..max_id).find(|id| !table.contains_key(id))
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn alloc_id(max_id: ResourceId) -> Option<ResourceId> {
         let guard = POOL.read();
         let table = guard.as_ref()?;

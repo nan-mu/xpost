@@ -106,7 +106,7 @@ pub async fn verify_pool() -> Result<(), &'static str> {
     Ok(())
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn verify_pool() -> Result<(), &'static str> {
     use crate::patch::map::hash;
     use crate::patch::map::pool::ALLOCATOR;

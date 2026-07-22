@@ -59,7 +59,7 @@ async fn main(spawner: Spawner) {
         Ok(()) => info!("[Init][MAP] talc resource pool verification passed"),
         Err(e) => error!("[Init][MAP] talc resource pool verification failed: {}", e),
     }
-    #[cfg(all(feature = "hw-selftest", feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(all(feature = "hw-selftest", feature = "patch-sync-st"))]
     match patch::hwtest::verify_pool() {
         Ok(()) => info!("[Init][MAP] talc resource pool verification passed"),
         Err(e) => error!("[Init][MAP] talc resource pool verification failed: {}", e),
@@ -69,7 +69,7 @@ async fn main(spawner: Spawner) {
     patch::map::init_firmware_maps()
         .await
         .expect("init_firmware_maps: talc pool OOM for bpf.toml maps");
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     patch::map::init_firmware_maps()
         .expect("init_firmware_maps: talc pool OOM for bpf.toml maps");
     info!("firmware maps from bpf.toml initialized");

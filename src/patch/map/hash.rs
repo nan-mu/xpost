@@ -54,7 +54,7 @@ where
     RawResource::insert(id, raw_ptr, layout, drop_hashmap::<K, V>, None, 0, 0, 0).await
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn create_hashmap<K, V>(id: ResourceId, capacity: usize) -> Result<(), AllocError>
 where
     K: core::hash::Hash + Eq + Send + 'static,
@@ -248,7 +248,7 @@ pub async fn create_bpf_hash(
     .await
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn create_bpf_hash(
     id: ResourceId,
     key_size: usize,

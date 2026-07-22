@@ -77,7 +77,7 @@ pub async fn create_ringbuf<T: Send + 'static>(
     RawResource::insert(id, raw_ptr, layout, drop_ringbuf::<T>, None, 0, 0, 0).await
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn create_ringbuf<T: Send + 'static>(
     id: ResourceId,
     capacity: usize,
@@ -130,7 +130,7 @@ pub async fn create_bpf_ringbuf(
     RawResource::insert(id, raw, layout, drop_ring, Some(MapKind::Ringbuf), 0, 0, 0).await
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn create_bpf_ringbuf(id: ResourceId, byte_capacity: usize) -> Result<(), AllocError> {
     let raw = alloc_bpf_ringbuf(byte_capacity)?;
     let layout = Layout::new::<BpfRingBuf>();

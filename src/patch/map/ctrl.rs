@@ -91,7 +91,7 @@ pub async fn create_map(cmd: MapCreateCmd) -> Result<ResourceId, MapCtrlError> {
     Ok(id)
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn create_map(cmd: MapCreateCmd) -> Result<ResourceId, MapCtrlError> {
     let id = match cmd.id {
         Some(id) => {
@@ -148,7 +148,7 @@ pub async fn destroy_map(id: ResourceId) -> Result<(), MapCtrlError> {
     }
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn destroy_map(id: ResourceId) -> Result<(), MapCtrlError> {
     match RawResource::users(id) {
         None => return Err(MapCtrlError::NotFound),

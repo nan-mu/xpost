@@ -3,7 +3,7 @@
 runner = "espflash flash --monitor --no-addresses --chip esp32c3 --partition-table partitions.csv --port /dev/cu.usbmodem211101"
 
 [env]
-ESP_LOG="debug"
+ESP_LOG="info"
 WIFI_SSID="your_wifi_ssid"
 WIFI_PASSWORD="your_wifi_password"
 
