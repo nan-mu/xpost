@@ -13,7 +13,7 @@ use allocator_api2::boxed::Box;
 use hashbrown::HashMap;
 
 use super::abi::{BPF_EXIST, BPF_NOEXIST};
-use super::pool::{allocator, MapKind, RawResource, ResourceId, TalcAlloc};
+use super::pool::{MapKind, RawResource, ResourceId, TalcAlloc, allocator};
 
 const MAX_KEY_BYTES: usize = 64;
 const MAX_VAL_BYTES: usize = 256;
@@ -25,9 +25,7 @@ unsafe fn drop_hashmap<K, V>(ptr: *mut u8) {
     let _ = unsafe { Box::from_raw_in(ptr as *mut SharedHashMap<K, V>, allocator()) };
 }
 
-fn alloc_hashmap<K, V>(
-    capacity: usize,
-) -> Result<(*mut u8, Layout), AllocError>
+fn alloc_hashmap<K, V>(capacity: usize) -> Result<(*mut u8, Layout), AllocError>
 where
     K: core::hash::Hash + Eq + Send + 'static,
     V: Send + 'static,

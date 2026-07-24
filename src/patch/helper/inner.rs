@@ -30,7 +30,7 @@ pub(super) mod redirect {
 
 pub(super) mod redirect_map {
     use crate::patch::map::pool::POOL;
-    use crate::patch::map::{resolve_map_id, MapKind};
+    use crate::patch::map::{MapKind, resolve_map_id};
     use crate::patch::redirect::{self as xdp_redir, XDP_REDIRECT};
     use log::error;
 
@@ -110,7 +110,12 @@ pub(super) mod map_delete_elem {
 }
 
 pub(super) mod for_each_map_elem {
-    pub(crate) fn inner(map: usize, callback_fn: usize, callback_ctx: usize, flags: usize) -> usize {
+    pub(crate) fn inner(
+        map: usize,
+        callback_fn: usize,
+        callback_ctx: usize,
+        flags: usize,
+    ) -> usize {
         crate::patch::map::helper_for_each_map_elem(map, callback_fn, callback_ctx, flags)
     }
 }

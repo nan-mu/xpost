@@ -17,8 +17,8 @@ use talc::source::Manual;
 
 use crate::patch::helper::dynptr::BpfDynptr;
 
-use super::abi::{resolve_map_id, with_typed_map, TypedMap};
-use super::pool::{allocator, MapKind, RawResource, ResourceId, HEAP_SIZE, POOL};
+use super::abi::{TypedMap, resolve_map_id, with_typed_map};
+use super::pool::{HEAP_SIZE, MapKind, POOL, RawResource, ResourceId, allocator};
 
 const MAX_RECORD_BYTES: usize = 256;
 
@@ -121,10 +121,7 @@ fn alloc_bpf_ringbuf(byte_capacity: usize) -> Result<*mut u8, AllocError> {
 
 /// Create a ringbuf with `byte_capacity` data area (Linux `max_entries`).
 #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
-pub async fn create_bpf_ringbuf(
-    id: ResourceId,
-    byte_capacity: usize,
-) -> Result<(), AllocError> {
+pub async fn create_bpf_ringbuf(id: ResourceId, byte_capacity: usize) -> Result<(), AllocError> {
     let raw = alloc_bpf_ringbuf(byte_capacity)?;
     let layout = Layout::new::<BpfRingBuf>();
     RawResource::insert(id, raw, layout, drop_ring, Some(MapKind::Ringbuf), 0, 0, 0).await
@@ -245,8 +242,7 @@ pub fn helper_ringbuf_output(map: usize, data: usize, size: usize, _flags: usize
     let Some(id) = resolve_map_id(map) else {
         return (-22i32) as usize;
     };
-    with_ring(id, |rb| rb.output(data as *const u8, size) as usize)
-        .unwrap_or((-22i32) as usize)
+    with_ring(id, |rb| rb.output(data as *const u8, size) as usize).unwrap_or((-22i32) as usize)
 }
 
 pub fn helper_ringbuf_query(map: usize, _flags: usize) -> usize {
@@ -257,12 +253,7 @@ pub fn helper_ringbuf_query(map: usize, _flags: usize) -> usize {
 }
 
 /// `bpf_ringbuf_reserve_dynptr(map, size, flags, ptr)` → 0 / negated errno.
-pub fn helper_ringbuf_reserve_dynptr(
-    map: usize,
-    size: usize,
-    _flags: usize,
-    ptr: usize,
-) -> usize {
+pub fn helper_ringbuf_reserve_dynptr(map: usize, size: usize, _flags: usize, ptr: usize) -> usize {
     if ptr == 0 || size == 0 {
         return (-22i32) as usize;
     }

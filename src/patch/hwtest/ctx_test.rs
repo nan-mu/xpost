@@ -1,10 +1,10 @@
 //! Crafted XDP contexts + multi-pass R/W checks (helpers + AOT).
 
+use crate::patch::ctx::XdpMd;
 use crate::patch::helper::dynptr::{BpfDynptr, ContigObj};
 use crate::patch::helper_dispatcher;
 use crate::patch::map::FIRMWARE_HAS_ARRAY;
 use crate::patch::xdp;
-use crate::patch::ctx::XdpMd;
 use log::info;
 
 const BPF_FUNC_XDP_ADJUST_HEAD: usize = 44;
@@ -82,12 +82,7 @@ pub fn run_contig_dynptr(pass: &mut u32, fail: &mut u32) {
     let dptr_addr = &mut dptr as *mut _ as usize;
 
     let fr = BpfDynptr::from_contig(ContigObj::from_slice(&mut obj), dptr_addr);
-    check(
-        "contig_from",
-        fr == 0 && dptr.is_contig(),
-        pass,
-        fail,
-    );
+    check("contig_from", fr == 0 && dptr.is_contig(), pass, fail);
 
     let a = [0xA1u8, 0xA2, 0xA3, 0xA4];
     let b = [0xB1u8, 0xB2, 0xB3, 0xB4];
@@ -211,12 +206,7 @@ pub fn run_ctx_rw_multipass(pass: &mut u32, fail: &mut u32) {
             6,
             0,
         );
-        check(
-            "ctx_short_persist",
-            l2 == 0 && ld2 == magic,
-            pass,
-            fail,
-        );
+        check("ctx_short_persist", l2 == 0 && ld2 == magic, pass, fail);
     }
 
     // --- ctx B: mid + adjust_head ---

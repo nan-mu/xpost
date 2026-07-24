@@ -42,11 +42,7 @@ pub fn take_pending() -> Option<u32> {
         let mut slot = PENDING_IFINDEX.borrow_ref_mut(cs);
         let v = *slot;
         *slot = NONE;
-        if v == NONE {
-            None
-        } else {
-            Some(v)
-        }
+        if v == NONE { None } else { Some(v) }
     })
 }
 

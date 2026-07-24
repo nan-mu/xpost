@@ -130,7 +130,10 @@ async fn install_inner(cmd: XdpInstallCmd<'_>) -> Result<ProgramId, ProgramError
     }
 
     let mut guard = SLOTS.write().await;
-    let slot_idx = guard.iter().position(|s| !s.used).ok_or(ProgramError::NoSlot)?;
+    let slot_idx = guard
+        .iter()
+        .position(|s| !s.used)
+        .ok_or(ProgramError::NoSlot)?;
 
     copy_image(slot_idx, cmd.image);
 
@@ -192,7 +195,10 @@ fn install_inner(cmd: XdpInstallCmd<'_>) -> Result<ProgramId, ProgramError> {
     }
 
     let mut guard = SLOTS.write();
-    let slot_idx = guard.iter().position(|s| !s.used).ok_or(ProgramError::NoSlot)?;
+    let slot_idx = guard
+        .iter()
+        .position(|s| !s.used)
+        .ok_or(ProgramError::NoSlot)?;
 
     copy_image(slot_idx, cmd.image);
 

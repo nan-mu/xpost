@@ -5,7 +5,7 @@ use esp_hal::peripherals::FLASH;
 use log::info;
 
 use super::helper_dispatcher;
-use super::mem_map::{assert_linked_addresses, HOT_REGION_LEN};
+use super::mem_map::{HOT_REGION_LEN, assert_linked_addresses};
 use super::redirect::clear_pending;
 
 /// Firmware-owned HOT_REGION placeholder. Linker places this at [`HOT_REGION_BASE`].
@@ -46,10 +46,7 @@ pub fn load(_flash: FLASH<'static>) {
     }
 
     super::map::bind_aot_map_addrs();
-    info!(
-        "[AOT] map aliases bound={}",
-        super::map::AOT_MAP_BIND_COUNT
-    );
+    info!("[AOT] map aliases bound={}", super::map::AOT_MAP_BIND_COUNT);
 }
 
 pub use super::ctx::XdpContext;

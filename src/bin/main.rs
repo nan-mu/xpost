@@ -54,7 +54,11 @@ async fn main(spawner: Spawner) {
     patch::map::init();
     info!("[Init][MAP] MAP resource pool initialized");
 
-    #[cfg(all(feature = "hw-selftest", feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
+    #[cfg(all(
+        feature = "hw-selftest",
+        feature = "patch-sync-embassy",
+        not(feature = "patch-sync-st")
+    ))]
     match patch::hwtest::verify_pool().await {
         Ok(()) => info!("[Init][MAP] talc resource pool verification passed"),
         Err(e) => error!("[Init][MAP] talc resource pool verification failed: {}", e),
@@ -68,13 +72,12 @@ async fn main(spawner: Spawner) {
     #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
     patch::map::init_firmware_maps()
         .await
-        .expect("init_firmware_maps: talc pool OOM for bpf.toml maps");
+        .expect("[Init][MAP] talc pool OOM for bpf.toml maps");
     #[cfg(feature = "patch-sync-st")]
-    patch::map::init_firmware_maps()
-        .expect("init_firmware_maps: talc pool OOM for bpf.toml maps");
-    info!("firmware maps from bpf.toml initialized");
+    patch::map::init_firmware_maps().expect("[Init][MAP] talc pool OOM for bpf.toml maps");
+    info!("[Init][MAP] firmware maps from bpf.toml initialized");
 
-    info!("Read partition table / load XDP payload");
+    info!("[Init][XDP] Read partition table / load XDP payload");
     patch::load(peripherals.FLASH);
 
     #[cfg(feature = "hw-selftest")]

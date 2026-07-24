@@ -182,7 +182,15 @@ impl RawResource {
         value_size: usize,
         value_stride: usize,
     ) -> Result<(), AllocError> {
-        let resource = Self::build(ptr, layout, drop_fn, kind, key_size, value_size, value_stride);
+        let resource = Self::build(
+            ptr,
+            layout,
+            drop_fn,
+            kind,
+            key_size,
+            value_size,
+            value_stride,
+        );
         let mut guard = POOL.write().await;
         let table = guard.as_mut().expect("pool not initialized");
         Self::insert_into(table, id, resource)
@@ -200,7 +208,15 @@ impl RawResource {
         value_size: usize,
         value_stride: usize,
     ) -> Result<(), AllocError> {
-        let resource = Self::build(ptr, layout, drop_fn, kind, key_size, value_size, value_stride);
+        let resource = Self::build(
+            ptr,
+            layout,
+            drop_fn,
+            kind,
+            key_size,
+            value_size,
+            value_stride,
+        );
         let mut guard = POOL.write();
         let table = guard.as_mut().expect("pool not initialized");
         Self::insert_into(table, id, resource)

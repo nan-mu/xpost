@@ -2,8 +2,8 @@ use embassy_net::driver::{Driver, RxToken, TxToken};
 use log::error;
 
 use crate::patch::redirect::{
-    clear_pending, ifindex_supported, queue_egress_frame, take_egress_frame, take_pending,
-    XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX,
+    XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX, clear_pending, ifindex_supported,
+    queue_egress_frame, take_egress_frame, take_pending,
 };
 
 pub struct FirewallDevice<D: Driver> {

@@ -52,8 +52,7 @@ mod backend {
     use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
     use embassy_sync::rwlock::RwLock;
 
-    type WriteGuard<'a, T> =
-        embassy_sync::rwlock::RwLockWriteGuard<'a, CriticalSectionRawMutex, T>;
+    type WriteGuard<'a, T> = embassy_sync::rwlock::RwLockWriteGuard<'a, CriticalSectionRawMutex, T>;
     type ReadGuard<'a, T> = embassy_sync::rwlock::RwLockReadGuard<'a, CriticalSectionRawMutex, T>;
 
     /// Read/write cell: async `write`/`read`, sync `try_*` for helpers.

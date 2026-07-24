@@ -2,13 +2,11 @@
 
 pub mod ctx_test;
 
-use crate::patch::map::{
-    helper_delete, helper_lookup, helper_update, BPF_ANY,
-};
+use crate::patch::ctx::XdpMd;
 use crate::patch::helper::dynptr::BpfDynptr;
 use crate::patch::helper_dispatcher;
+use crate::patch::map::{BPF_ANY, helper_delete, helper_lookup, helper_update};
 use crate::patch::map::{FIRMWARE_HAS_RINGBUF, FIRMWARE_MAP_COUNT, SELFTEST_MAP_ID};
-use crate::patch::ctx::XdpMd;
 use crate::patch::redirect::{XDP_PASS, XDP_REDIRECT};
 use log::info;
 
@@ -27,7 +25,6 @@ const BPF_FUNC_DYNPTR_FROM_MEM: usize = 197;
 const BPF_FUNC_DYNPTR_READ: usize = 201;
 const BPF_FUNC_DYNPTR_DATA: usize = 203;
 
-
 pub(crate) fn check(name: &str, ok: bool, pass: &mut u32, fail: &mut u32) {
     if ok {
         info!("[HWTEST] HELPER {}=ok", name);
@@ -43,7 +40,7 @@ pub(crate) fn check(name: &str, ok: bool, pass: &mut u32, fail: &mut u32) {
 pub async fn verify_pool() -> Result<(), &'static str> {
     use crate::patch::map::hash;
     use crate::patch::map::pool::ALLOCATOR;
-    use crate::patch::map::{array, RawResource, ResourceId};
+    use crate::patch::map::{RawResource, ResourceId, array};
 
     const ARRAY_ID: ResourceId = 0xA1;
     const MAP_ID: ResourceId = 0xA2;
@@ -110,7 +107,7 @@ pub async fn verify_pool() -> Result<(), &'static str> {
 pub fn verify_pool() -> Result<(), &'static str> {
     use crate::patch::map::hash;
     use crate::patch::map::pool::ALLOCATOR;
-    use crate::patch::map::{array, RawResource, ResourceId};
+    use crate::patch::map::{RawResource, ResourceId, array};
 
     const ARRAY_ID: ResourceId = 0xA1;
     const MAP_ID: ResourceId = 0xA2;
@@ -165,7 +162,6 @@ pub fn verify_pool() -> Result<(), &'static str> {
     Ok(())
 }
 
-
 /// Run the selftest suite and print `[HWTEST] …` markers.
 pub fn run() {
     info!("[HWTEST] BEGIN");
@@ -198,7 +194,12 @@ pub fn run() {
     info!("[HWTEST] PRINTK end");
 
     let t = helper_dispatcher(BPF_FUNC_KTIME_GET_NS, 0, 0, 0, 0, 0);
-    check("ktime_get_ns", t != usize::MAX && t != 0, &mut pass, &mut fail);
+    check(
+        "ktime_get_ns",
+        t != usize::MAX && t != 0,
+        &mut pass,
+        &mut fail,
+    );
 
     if FIRMWARE_MAP_COUNT == 0 {
         info!("[HWTEST] MAPS=SKIP none in bpf.toml");
@@ -291,10 +292,7 @@ pub fn run() {
 
     run_xdp_payload(&mut pass, &mut fail);
 
-    info!(
-        "[HWTEST] END pass={} fail={} skip={}",
-        pass, fail, skip
-    );
+    info!("[HWTEST] END pass={} fail={} skip={}", pass, fail, skip);
 }
 
 fn run_redirect_tests(ctx_ptr: usize, pass: &mut u32, fail: &mut u32) {
@@ -314,13 +312,15 @@ fn run_redirect_tests(ctx_ptr: usize, pass: &mut u32, fail: &mut u32) {
     );
     check("redirect_map", rm == XDP_PASS as usize, pass, fail);
 
-    let tc = helper_dispatcher(BPF_FUNC_TAIL_CALL, ctx_ptr, SELFTEST_MAP_ID as usize, 0, 0, 0);
-    check(
-        "tail_call",
-        tc == (-2i32) as usize,
-        pass,
-        fail,
+    let tc = helper_dispatcher(
+        BPF_FUNC_TAIL_CALL,
+        ctx_ptr,
+        SELFTEST_MAP_ID as usize,
+        0,
+        0,
+        0,
     );
+    check("tail_call", tc == (-2i32) as usize, pass, fail);
 }
 
 fn run_ringbuf_tests(pass: &mut u32, fail: &mut u32) {
@@ -354,12 +354,7 @@ fn run_dynptr_mem_only(pass: &mut u32, fail: &mut u32) {
         0,
         0,
     );
-    check(
-        "dynptr_read",
-        rr == 0 && scratch == mem,
-        pass,
-        fail,
-    );
+    check("dynptr_read", rr == 0 && scratch == mem, pass, fail);
 
     let data_ptr = helper_dispatcher(BPF_FUNC_DYNPTR_DATA, dptr_addr, 0, 4, 0, 0);
     check(
@@ -399,7 +394,9 @@ fn run_xdp_payload(pass: &mut u32, fail: &mut u32) {
 }
 
 fn run_map_tests(pass: &mut u32, fail: &mut u32) {
-    use crate::patch::map::{SELFTEST_MAP_ID, SELFTEST_MAP_TYPE, SELFTEST_KEY_SIZE, SELFTEST_VALUE_SIZE};
+    use crate::patch::map::{
+        SELFTEST_KEY_SIZE, SELFTEST_MAP_ID, SELFTEST_MAP_TYPE, SELFTEST_VALUE_SIZE,
+    };
 
     info!(
         "[HWTEST] MAPS_OK id={} type={} key={} val={}",
@@ -421,9 +418,7 @@ fn run_map_tests(pass: &mut u32, fail: &mut u32) {
 }
 
 fn run_hash_map_tests(pass: &mut u32, fail: &mut u32) {
-    use crate::patch::map::{
-        SELFTEST_KEY_SIZE, SELFTEST_MAP_ID, SELFTEST_VALUE_SIZE,
-    };
+    use crate::patch::map::{SELFTEST_KEY_SIZE, SELFTEST_MAP_ID, SELFTEST_VALUE_SIZE};
 
     let key = [0u8; 64];
     let mut val = [0u8; 64];

@@ -13,9 +13,9 @@ use core::ptr;
 use allocator_api2::alloc::AllocError;
 use allocator_api2::boxed::Box;
 
-use super::pool::{allocator, MapKind, RawResource, ResourceId, HEAP_SIZE};
 #[cfg(feature = "hw-selftest")]
 use super::pool::POOL;
+use super::pool::{HEAP_SIZE, MapKind, RawResource, ResourceId, allocator};
 
 /// Max single-element size (same bound as other BPF maps).
 pub const MAX_ELEM_BYTES: usize = 256;
@@ -252,12 +252,10 @@ pub fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(), Alloc
 /// HW selftest for the first ARRAY map in bpf.toml (when present).
 #[cfg(feature = "hw-selftest")]
 pub fn run_selftest(pass: &mut u32, fail: &mut u32) {
-    use crate::patch::hwtest::check;
-    use crate::patch::map::{helper_lookup, helper_update, BPF_ANY};
     use crate::patch::helper_dispatcher;
-    use crate::patch::map::{
-        SELFTEST_KEY_SIZE, SELFTEST_MAP_ID, SELFTEST_VALUE_SIZE,
-    };
+    use crate::patch::hwtest::check;
+    use crate::patch::map::{BPF_ANY, helper_lookup, helper_update};
+    use crate::patch::map::{SELFTEST_KEY_SIZE, SELFTEST_MAP_ID, SELFTEST_VALUE_SIZE};
     use log::info;
 
     const BPF_FUNC_FOR_EACH_MAP_ELEM: usize = 164;

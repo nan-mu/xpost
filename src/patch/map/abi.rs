@@ -13,7 +13,7 @@ use critical_section::Mutex;
 
 use super::array::BpfArrayMap;
 use super::hash::BpfHashMap;
-use super::pool::{MapKind, ResourceId, POOL};
+use super::pool::{MapKind, POOL, ResourceId};
 use super::ringbuf::BpfRingBuf;
 
 /// Linux `bpf_map_update_elem` flags (low bits).
