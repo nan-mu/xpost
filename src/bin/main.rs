@@ -93,6 +93,8 @@ async fn main(spawner: Spawner) {
 
     #[cfg(not(feature = "hw-selftest"))]
     {
+        spawner.spawn(firmware::fw_seed::seed_firewall_rules().unwrap());
+
         let (controller, sta_stack, sta_runner) = sta::init_sta(peripherals.WIFI);
 
         spawner.spawn(connection(controller).unwrap());

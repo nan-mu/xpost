@@ -62,8 +62,9 @@ where
     RawResource::insert(id, raw_ptr, layout, drop_hashmap::<K, V>, None, 0, 0, 0)
 }
 
+/// Opaque key bytes for [`BpfHashMap`] (fixed max [`MAX_KEY_BYTES`]).
 #[derive(Clone, Copy)]
-pub(super) struct KeyBlob {
+pub struct KeyBlob {
     len: u8,
     data: [u8; MAX_KEY_BYTES],
 }
@@ -81,6 +82,19 @@ impl Hash for KeyBlob {
 }
 
 impl KeyBlob {
+    /// Copy `bytes` into a blob (`1..=MAX_KEY_BYTES`).
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() || bytes.len() > MAX_KEY_BYTES {
+            return None;
+        }
+        let mut data = [0u8; MAX_KEY_BYTES];
+        data[..bytes.len()].copy_from_slice(bytes);
+        Some(Self {
+            len: bytes.len() as u8,
+            data,
+        })
+    }
+
     fn from_ptr(p: *const u8, len: usize) -> Option<Self> {
         if p.is_null() || len == 0 || len > MAX_KEY_BYTES {
             return None;
@@ -94,13 +108,26 @@ impl KeyBlob {
     }
 }
 
-struct ValSlot {
-    #[allow(dead_code)]
+/// Opaque value slot for [`BpfHashMap`] (fixed max [`MAX_VAL_BYTES`]).
+pub struct ValSlot {
     len: usize,
     data: [u8; MAX_VAL_BYTES],
 }
 
 impl ValSlot {
+    /// Copy `bytes` into a slot (`1..=MAX_VAL_BYTES`).
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() || bytes.len() > MAX_VAL_BYTES {
+            return None;
+        }
+        let mut data = [0u8; MAX_VAL_BYTES];
+        data[..bytes.len()].copy_from_slice(bytes);
+        Some(Self {
+            len: bytes.len(),
+            data,
+        })
+    }
+
     fn from_ptr(p: *const u8, len: usize) -> Option<Self> {
         if p.is_null() || len == 0 || len > MAX_VAL_BYTES {
             return None;
@@ -124,6 +151,32 @@ pub struct BpfHashMap {
 }
 
 impl BpfHashMap {
+    /// Userspace insert via interior access to [`Self::table`].
+    ///
+    /// # Safety contract
+    /// Caller must hold a [`super::pool::POOL`] **read** lock for the duration of
+    /// this call, on a single-core executor where XDP helpers only take
+    /// `POOL.try_write()` (they soft-fail while any read lock is held). Do not
+    /// call concurrently with another `insert_entry` on the same map.
+    pub fn insert_entry(&self, key: impl Into<KeyBlob>, val: impl Into<ValSlot>) -> i32 {
+        let k = key.into();
+        let v = val.into();
+        if k.len as usize != self.key_size || v.len != self.value_size {
+            return -22; // EINVAL
+        }
+        // SAFETY: see method docs — exclusive logical mutate under POOL read lock.
+        let table = unsafe {
+            &mut *(core::ptr::addr_of!(self.table)
+                as *const HashMap<KeyBlob, ValSlot, hashbrown::DefaultHashBuilder, TalcAlloc>
+                as *mut HashMap<KeyBlob, ValSlot, hashbrown::DefaultHashBuilder, TalcAlloc>)
+        };
+        if !table.contains_key(&k) && table.len() >= self.max_entries {
+            return -12; // ENOMEM
+        }
+        table.insert(k, v);
+        0
+    }
+
     /// `bpf_map_lookup_elem`.
     pub fn lookup(&mut self, key: *const u8) -> *mut u8 {
         let Some(k) = KeyBlob::from_ptr(key, self.key_size) else {

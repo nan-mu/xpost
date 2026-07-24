@@ -9,6 +9,7 @@ pub mod abi;
 pub mod array;
 pub mod ctrl;
 pub mod hash;
+pub mod names;
 pub mod pool;
 pub mod ringbuf;
 
@@ -19,7 +20,8 @@ pub use abi::{
 };
 pub use array::{BpfArrayMap, create_array, create_bpf_array, create_bpf_devmap};
 pub use ctrl::{MAX_MAP_IDS, MapCreateCmd, MapCtrlError, create_map, destroy_map};
-pub use hash::{BpfHashMap, SharedHashMap, create_bpf_hash, create_hashmap};
+pub use hash::{BpfHashMap, KeyBlob, SharedHashMap, ValSlot, create_bpf_hash, create_hashmap};
+pub use names::{register_map_name, resolve_map_name};
 pub use pool::{MapKind, RawResource, ResourceId, TalcAlloc, allocator, init};
 pub use ringbuf::{
     BpfRingBuf, TalcRingBuf, TalcVec, create_bpf_ringbuf, create_ringbuf, helper_ringbuf_discard,
@@ -30,3 +32,6 @@ pub use ringbuf::{
 
 include!(concat!(env!("OUT_DIR"), "/bpf_maps.rs"));
 include!(concat!(env!("OUT_DIR"), "/aot_map_bind.rs"));
+
+pub mod userspace;
+pub use userspace::{hash_insert, with_hash_map};
