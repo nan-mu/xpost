@@ -93,11 +93,13 @@ async fn main(spawner: Spawner) {
 
     #[cfg(not(feature = "hw-selftest"))]
     {
-        // Seed before WiFi/XDP so firewall_rules is non-empty on first RX.
+        // Seed before datapath so firewall_rules is non-empty on first RX.
         #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
         firmware::fw_seed::seed_firewall_rules().await;
         #[cfg(feature = "patch-sync-st")]
         firmware::fw_seed::seed_firewall_rules();
+
+        patch::datapath::enable();
 
         let (controller, sta_stack, sta_runner) = sta::init_sta(peripherals.WIFI);
 

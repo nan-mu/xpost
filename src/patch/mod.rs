@@ -1,4 +1,5 @@
 pub mod ctx;
+pub mod datapath;
 mod helper;
 pub mod map;
 pub mod mem_map;
