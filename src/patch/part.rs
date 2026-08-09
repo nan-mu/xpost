@@ -5,7 +5,8 @@ use esp_hal::peripherals::FLASH;
 use log::info;
 
 use super::helper_dispatcher;
-use super::mem_map::{assert_linked_addresses, HOT_REGION_LEN};
+use super::mem_map::{HOT_REGION_LEN, assert_linked_addresses};
+use super::redirect::{clear_pending, xdp_action_name};
 
 /// Firmware-owned HOT_REGION placeholder. Linker places this at [`HOT_REGION_BASE`].
 #[unsafe(link_section = ".iram1.hotload_area")]
@@ -45,10 +46,7 @@ pub fn load(_flash: FLASH<'static>) {
     }
 
     super::map::bind_aot_map_addrs();
-    info!(
-        "[AOT] map aliases bound={}",
-        super::map::AOT_MAP_BIND_COUNT
-    );
+    info!("[AOT] map aliases bound={}", super::map::AOT_MAP_BIND_COUNT);
 }
 
 pub use super::ctx::XdpContext;
@@ -59,15 +57,20 @@ pub fn xdp(data: &mut [u8]) -> i32 {
     unsafe {
         core::arch::asm!("fence.i");
 
-        let mut ctx = XdpContext {
-            data: data.as_mut_ptr(),
-            data_end: data.as_mut_ptr().add(data.len()),
-        };
+        clear_pending();
+        let mut ctx = super::ctx::XdpMd::from_buf(data);
+
+        // Decimal pointer values — hex triggers espflash monitor addr2line spam.
+        let data_addr = ctx.data as usize;
+        let data_end_addr = ctx.data_end as usize;
+        info!(
+            "[XDP] begin data={} data_end={} len={}",
+            data_addr,
+            data_end_addr,
+            data_end_addr.saturating_sub(data_addr)
+        );
 
         let ctx_ptr = &mut ctx as *mut XdpContext;
-
-        // Keep logs free of raw pointers (espflash addr2line spam).
-        info!("[AOT] XDP call len={}", data.len());
 
         let res: i32;
         core::arch::asm!(
@@ -78,25 +81,7 @@ pub fn xdp(data: &mut [u8]) -> i32 {
             clobber_abi("C"),
         );
 
-        info!("[AOT] XDP return={}", res);
+        info!("[XDP] end action={} ({})", xdp_action_name(res), res);
         res
     }
-}
-
-/// Temporary: invoke loaded AOT once with a minimal Ethernet frame (no WiFi RX).
-///
-/// Expected for current `maps_helpers` payload: many `XDP: …` printk lines and
-/// return `XDP_PASS` (2). Remove when WiFi RX path owns XDP again.
-pub fn smoke_xdp() -> i32 {
-    info!("[AOT] smoke_xdp begin");
-    let mut frame = [
-        0xAAu8, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, // dst
-        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, // src
-        0x08, 0x00, // IPv4
-        // padding so eth+ip-ish length is comfortable for helpers
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    let rc = xdp(&mut frame);
-    info!("[AOT] smoke_xdp end rc={}", rc);
-    rc
 }

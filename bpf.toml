@@ -1,369 +1,70 @@
-source = "/Users/nan/bs/libbpf-mcu/tests/basic/maps_helpers.c"
-size = 690752
+source = "/Users/nan/bs/libbpf-mcu/tests/xdp/firewall_ipv4.c"
+size = 11728
 
 [xdp]
-size = 2808
+size = 400
 asm = """
-0000000000000000 <maps_helpers>:
-       0:	r6 = r1
-       1:	w1 = *(u32 *)(r6 + 0x4)
-       2:	w2 = *(u32 *)(r6 + 0x0)
-       3:	w3 = 0x0
-       4:	*(u32 *)(r10 - 0x4) = w3
-       5:	w4 = 0x1
-       6:	*(u32 *)(r10 - 0x8) = w4
-       7:	w4 = 0x7
-       8:	*(u32 *)(r10 - 0xc) = w4
-       9:	w4 = 0x2a
-      10:	*(u32 *)(r10 - 0x10) = w4
-      11:	*(u32 *)(r10 - 0x14) = w3
-      12:	r2 += 0xe
-      13:	if r2 > r1 goto +0x14f <maps_helpers+0xae8>
-      14:	call 0x5
-      15:	r1 = 0x0 ll
-      17:	w2 = 0xd
-      18:	w3 = w0
-      19:	call 0x6
-      20:	r7 = r10
-      21:	r7 += -0x4
-      22:	r3 = r10
-      23:	r3 += -0x10
-      24:	r1 = 0x0 ll
-      26:	r2 = r7
-      27:	r4 = 0x0
-      28:	call 0x2
-      29:	r1 = 0xd ll
-      31:	w2 = 0x13
-      32:	r3 = r0
-      33:	call 0x6
-      34:	r1 = 0x0 ll
-      36:	r2 = r7
-      37:	call 0x1
-      38:	if r0 == 0x0 goto +0x6 <maps_helpers+0x168>
-      39:	w3 = *(u32 *)(r0 + 0x0)
-      40:	r1 = 0x20 ll
-      42:	w2 = 0x13
-      43:	call 0x6
-      44:	goto +0x4 <maps_helpers+0x188>
-      45:	r1 = 0x33 ll
-      47:	w2 = 0x11
-      48:	call 0x6
-      49:	r7 = r10
-      50:	r7 += -0xc
-      51:	r3 = r10
-      52:	r3 += -0x10
-      53:	r1 = 0x0 ll
-      55:	r2 = r7
-      56:	r4 = 0x0
-      57:	call 0x2
-      58:	r1 = 0x44 ll
-      60:	w2 = 0x14
-      61:	r3 = r0
-      62:	call 0x6
-      63:	r1 = 0x0 ll
-      65:	r2 = r7
-      66:	call 0x1
-      67:	if r0 == 0x0 goto +0x6 <maps_helpers+0x250>
-      68:	w3 = *(u32 *)(r0 + 0x0)
-      69:	r1 = 0x58 ll
-      71:	w2 = 0x14
-      72:	call 0x6
-      73:	goto +0x4 <maps_helpers+0x270>
-      74:	r1 = 0x6c ll
-      76:	w2 = 0x12
-      77:	call 0x6
-      78:	r3 = r10
-      79:	r3 += -0x14
-      80:	r1 = 0x0 ll
-      82:	r2 = 0x0 ll
-      84:	r4 = 0x0
-      85:	call 0xa4
-      86:	w4 = *(u32 *)(r10 - 0x14)
-      87:	r1 = 0x7e ll
-      89:	w2 = 0x17
-      90:	r3 = r0
-      91:	call 0x6
-      92:	r2 = r10
-      93:	r2 += -0xc
-      94:	r1 = 0x0 ll
-      96:	call 0x3
-      97:	r1 = 0x95 ll
-      99:	w2 = 0x14
-     100:	r3 = r0
-     101:	call 0x6
-     102:	w1 = 0x1
-     103:	*(u32 *)(r10 - 0x40) = w1
-     104:	w1 = *(u32 *)(r10 - 0x10)
-     105:	*(u32 *)(r10 - 0x3c) = w1
-     106:	r2 = r10
-     107:	r2 += -0x40
-     108:	r1 = 0x0 ll
-     110:	r3 = 0x8
-     111:	r4 = 0x0
-     112:	call 0x82
-     113:	r1 = 0xa9 ll
-     115:	w2 = 0x12
-     116:	r3 = r0
-     117:	call 0x6
-     118:	r1 = 0x0 ll
-     120:	r2 = 0x8
-     121:	r3 = 0x0
-     122:	call 0x83
-     123:	if r0 == 0x0 goto +0xc <maps_helpers+0x440>
-     124:	w1 = 0x2
-     125:	*(u32 *)(r0 + 0x0) = w1
-     126:	w1 = *(u32 *)(r10 - 0x10)
-     127:	w1 += 0x1
-     128:	*(u32 *)(r0 + 0x4) = w1
-     129:	r1 = r0
-     130:	r2 = 0x0
-     131:	call 0x84
-     132:	r1 = 0xbb ll
-     134:	w2 = 0xe
-     135:	goto +0x3 <maps_helpers+0x458>
-     136:	r1 = 0xc9 ll
-     138:	w2 = 0x11
-     139:	call 0x6
-     140:	r1 = 0x0 ll
-     142:	r2 = 0x8
-     143:	r3 = 0x0
-     144:	call 0x83
-     145:	if r0 == 0x0 goto +0x7 <maps_helpers+0x4c8>
-     146:	r1 = r0
-     147:	r2 = 0x0
-     148:	call 0x85
-     149:	r1 = 0xda ll
-     151:	w2 = 0xf
-     152:	call 0x6
-     153:	r1 = 0x0 ll
-     155:	r2 = 0x0
-     156:	call 0x86
-     157:	r1 = 0xe9 ll
-     159:	w2 = 0xd
-     160:	w3 = w0
-     161:	call 0x6
-     162:	r2 = r10
-     163:	r2 += -0x4
-     164:	r1 = 0x0 ll
-     166:	call 0x1
-     167:	if r0 == 0x0 goto +0x23 <maps_helpers+0x658>
-     168:	r7 = r10
-     169:	r7 += -0x40
-     170:	r1 = r0
-     171:	r2 = 0x4
-     172:	r3 = 0x0
-     173:	r4 = r7
-     174:	call 0xc5
-     175:	r1 = 0xf6 ll
-     177:	w2 = 0x18
-     178:	r3 = r0
-     179:	call 0x6
-     180:	r1 = r10
-     181:	r1 += -0x58
-     182:	r2 = 0x4
-     183:	r3 = r7
-     184:	r4 = 0x0
-     185:	r5 = 0x0
-     186:	call 0xc9
-     187:	r1 = 0x10e ll
-     189:	w2 = 0x14
-     190:	r3 = r0
-     191:	call 0x6
-     192:	r1 = r7
-     193:	r2 = 0x0
-     194:	r3 = 0x4
-     195:	call 0xcb
-     196:	w3 = 0x1
-     197:	if r0 != 0x0 goto +0x1 <maps_helpers+0x638>
-     198:	w3 = 0x0
-     199:	r1 = 0x122 ll
-     201:	w2 = 0x13
-     202:	call 0x6
-     203:	r4 = r10
-     204:	r4 += -0x50
-     205:	r1 = 0x0 ll
-     207:	w2 = 0x8
-     208:	r3 = 0x0
-     209:	call 0xc6
-     210:	r7 = r0
-     211:	r1 = 0x135 ll
-     213:	w2 = 0x1a
-     214:	r3 = r7
-     215:	call 0x6
-     216:	if r7 != 0x0 goto +0x15 <maps_helpers+0x770>
-     217:	r1 = 0x6300000003 ll
-     219:	*(u64 *)(r10 - 0x28) = r1
-     220:	r7 = r10
-     221:	r7 += -0x50
-     222:	r3 = r10
-     223:	r3 += -0x28
-     224:	r1 = r7
-     225:	r2 = 0x0
-     226:	r4 = 0x8
-     227:	r5 = 0x0
-     228:	call 0xca
-     229:	r1 = 0x14f ll
-     231:	w2 = 0x15
-     232:	r3 = r0
-     233:	call 0x6
-     234:	r1 = r7
-     235:	r2 = 0x0
-     236:	call 0xc7
-     237:	goto +0x4 <maps_helpers+0x790>
-     238:	r1 = r10
-     239:	r1 += -0x50
-     240:	r2 = 0x0
-     241:	call 0xc8
-     242:	r7 = r10
-     243:	r7 += -0x50
-     244:	r1 = 0x0 ll
-     246:	w2 = 0x8
-     247:	r3 = 0x0
-     248:	r4 = r7
-     249:	call 0xc6
-     250:	r1 = r7
-     251:	r2 = 0x0
-     252:	call 0xc8
-     253:	r1 = 0x164 ll
-     255:	w2 = 0x18
-     256:	call 0x6
-     257:	r3 = r10
-     258:	r3 += -0x28
-     259:	r1 = r6
-     260:	w2 = 0x0
-     261:	w4 = 0xe
-     262:	call 0xbd
-     263:	r7 = r0
-     264:	r1 = 0x17c ll
-     266:	w2 = 0x13
-     267:	r3 = r7
-     268:	call 0x6
-     269:	if r7 != 0x0 goto +0xb <maps_helpers+0x8c8>
-     270:	r3 = r10
-     271:	r3 += -0x28
-     272:	r1 = r6
-     273:	w2 = 0x0
-     274:	w4 = 0xe
-     275:	call 0xbe
-     276:	r1 = 0x18f ll
-     278:	w2 = 0x14
-     279:	r3 = r0
-     280:	call 0x6
-     281:	w1 = 0x200007f
-     282:	*(u32 *)(r10 - 0x30) = w1
-     283:	w1 = 0x100007f
-     284:	*(u32 *)(r10 - 0x2c) = w1
-     285:	r1 = r10
-     286:	r1 += -0x2c
-     287:	r3 = r10
-     288:	r3 += -0x30
-     289:	w2 = 0x4
-     290:	w4 = 0x4
-     291:	w5 = 0x0
-     292:	call 0x1c
-     293:	r1 = 0x1a3 ll
-     295:	w2 = 0xe
-     296:	w3 = w0
-     297:	call 0x6
-     298:	r1 = r6
-     299:	w2 = 0x0
-     300:	call 0x2c
-     301:	r1 = 0x1b1 ll
-     303:	w2 = 0x14
-     304:	r3 = r0
-     305:	call 0x6
-     306:	r1 = r6
-     307:	w2 = 0x0
-     308:	call 0x41
-     309:	r1 = 0x1c5 ll
-     311:	w2 = 0x14
-     312:	r3 = r0
-     313:	call 0x6
-     314:	r2 = r10
-     315:	r2 += -0x8
-     316:	r1 = 0x0 ll
-     318:	call 0x1
-     319:	if r0 == 0x0 goto +0x1d <maps_helpers+0xae8>
-     320:	w1 = *(u32 *)(r0 + 0x0)
-     321:	if w1 != 0xdead goto +0x1b <maps_helpers+0xae8>
-     322:	w1 = 0x1
-     323:	r2 = 0x0
-     324:	call 0x17
-     325:	r1 = 0x1d9 ll
-     327:	w2 = 0x11
-     328:	r3 = r0
-     329:	call 0x6
-     330:	w2 = *(u32 *)(r10 - 0xc)
-     331:	r1 = 0x0 ll
-     333:	r3 = 0x2
-     334:	call 0x33
-     335:	r1 = 0x1ea ll
-     337:	w2 = 0x15
-     338:	r3 = r0
-     339:	call 0x6
-     340:	r1 = r6
-     341:	r2 = 0x0 ll
-     343:	w3 = 0x0
-     344:	call 0xc
-     345:	r1 = 0x1ff ll
-     347:	w2 = 0x14
-     348:	call 0x6
-     349:	w0 = 0x2
-     350:	exit
+0000000000000000 <firewall_ipv4>:
+       0:	w2 = *(u32 *)(r1 + 0x4)
+       1:	w3 = *(u32 *)(r1 + 0x0)
+       2:	r1 = 0x0
+       3:	*(u64 *)(r10 - 0x8) = r1
+       4:	w0 = 0x2
+       5:	r1 = r3
+       6:	r1 += 0xe
+       7:	if r1 > r2 goto +0x29 <firewall_ipv4+0x188>
+       8:	w4 = *(u16 *)(r3 + 0xc)
+       9:	if w4 != 0x8 goto +0x27 <firewall_ipv4+0x188>
+      10:	r3 += 0x22
+      11:	if r3 > r2 goto +0x25 <firewall_ipv4+0x188>
+      12:	w3 = *(u8 *)(r1 + 0x0)
+      13:	w3 &= 0xf
+      14:	if w3 < 0x5 goto +0x22 <firewall_ipv4+0x188>
+      15:	w3 = *(u8 *)(r1 + 0x0)
+      16:	r3 <<= 0x2
+      17:	r3 &= 0x3c
+      18:	r4 = r1
+      19:	r4 += r3
+      20:	if r4 > r2 goto +0x1c <firewall_ipv4+0x188>
+      21:	w3 = *(u8 *)(r1 + 0x9)
+      22:	if w3 == 0x6 goto +0x2 <firewall_ipv4+0xc8>
+      23:	w3 = *(u8 *)(r1 + 0x9)
+      24:	if w3 != 0x11 goto +0x18 <firewall_ipv4+0x188>
+      25:	w4 = *(u8 *)(r1 + 0x0)
+      26:	r4 <<= 0x2
+      27:	r4 &= 0x3c
+      28:	r3 = r1
+      29:	r3 += r4
+      30:	r4 = r3
+      31:	r4 += 0x4
+      32:	if r4 > r2 goto +0x10 <firewall_ipv4+0x188>
+      33:	w1 = *(u32 *)(r1 + 0xc)
+      34:	w2 = *(u16 *)(r3 + 0x2)
+      35:	*(u32 *)(r10 - 0x8) = w1
+      36:	r2 = be16 r2
+      37:	*(u16 *)(r10 - 0x4) = w2
+      38:	r2 = r10
+      39:	r2 += -0x8
+      40:	r1 = 0x0 ll
+      42:	call 0x1
+      43:	r1 = r0
+      44:	if r1 == 0x0 goto +0x3 <firewall_ipv4+0x180>
+      45:	w0 = 0x1
+      46:	w1 = *(u8 *)(r1 + 0x0)
+      47:	if w1 != 0x0 goto +0x1 <firewall_ipv4+0x188>
+      48:	w0 = 0x2
+      49:	exit
 """
 
-[text]
-size = 128
-asm = """
-0000000000000000 <iter_hash>:
-       0:	r0 = 0x1
-       1:	if r2 == 0x0 goto +0xd <iter_hash+0x78>
-       2:	if r3 == 0x0 goto +0xc <iter_hash+0x78>
-       3:	if r4 == 0x0 goto +0xb <iter_hash+0x78>
-       4:	w1 = *(u32 *)(r3 + 0x0)
-       5:	w5 = *(u32 *)(r4 + 0x0)
-       6:	w5 += w1
-       7:	*(u32 *)(r4 + 0x0) = w5
-       8:	w4 = *(u32 *)(r3 + 0x0)
-       9:	w3 = *(u32 *)(r2 + 0x0)
-      10:	r1 = 0x213 ll
-      12:	w2 = 0x17
-      13:	call 0x6
-      14:	r0 = 0x0
-      15:	exit
-"""
-
-[maps.arr_map]
-map_type = "BPF_MAP_TYPE_ARRAY"
-max_entries = 4
-estimated_bytes = 16
-aot_addr = 0x403818cc
-key = """
-    u32 v
-"""
-value = """
-    u32 v
-"""
-
-[maps.hash_map]
+[maps.firewall_rules]
 map_type = "BPF_MAP_TYPE_HASH"
-max_entries = 16
-estimated_bytes = 128
-aot_addr = 0x403818dc
+max_entries = 64
+estimated_bytes = 576
+aot_addr = 0x403810b4
 key = """
-    u32 v
-"""
-value = """
-    u32 v
-"""
-
-[maps.rb_map]
-map_type = "BPF_MAP_TYPE_RINGBUF"
-max_entries = 4096
-estimated_bytes = 4096
-aot_addr = 0x403818ec
-key = """
-    u8 v
+    u32 src_ip
+    u16 dst_port
+    u16 pad
 """
 value = """
     u8 v
@@ -372,6 +73,13 @@ value = """
 [CORE]
 records = """
 insn_off,type_id,access_str,kind,type_name,section
-0x0008,25,0:1,0,xdp_md,xdp
-0x0010,25,0:0,0,xdp_md,xdp
+0x0000,19,0:1,0,xdp_md,xdp
+0x0008,19,0:0,0,xdp_md,xdp
+0x0040,22,0:2,0,ethhdr,xdp
+0x0060,25,0:0,0,iphdr,xdp
+0x0078,25,0:0,0,iphdr,xdp
+0x00a8,25,0:7,0,iphdr,xdp
+0x00b8,25,0:7,0,iphdr,xdp
+0x00c8,25,0:0,0,iphdr,xdp
+0x0108,25,0:9:0:0,0,iphdr,xdp
 """

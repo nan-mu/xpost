@@ -10,18 +10,79 @@ pub(super) mod ktime_get_ns {
 }
 
 pub(super) mod redirect {
-    const XDP_REDIRECT: usize = 7;
+    use crate::patch::redirect::{self as xdp_redir, XDP_REDIRECT};
+    use log::error;
+
+    /// `bpf_redirect(ifindex, flags)` — ifindex 0 = wifi; other ports unsupported.
     pub(crate) fn inner(ifindex: usize, _flags: usize) -> usize {
-        if ifindex == 0 {
-            return (-22i32) as usize;
+        let ifindex = ifindex as u32;
+        if !xdp_redir::ifindex_supported(ifindex) {
+            error!(
+                "[helper]bpf_redirect: ifindex {} unsupported (only 0=wifi)",
+                ifindex
+            );
+            return (-95i32) as usize; // -ENOTSUP
         }
-        XDP_REDIRECT
+        xdp_redir::set_pending(ifindex);
+        XDP_REDIRECT as usize
     }
 }
 
 pub(super) mod redirect_map {
-    pub(crate) fn inner(_map: usize, _key: usize, flags: usize) -> usize {
-        flags & 0xf
+    use crate::patch::map::pool::POOL;
+    use crate::patch::map::{MapKind, resolve_map_id};
+    use crate::patch::redirect::{self as xdp_redir, XDP_REDIRECT};
+    use log::error;
+
+    /// `bpf_redirect_map(map, key, flags)` — `key` is the u32 index value (not a pointer).
+    ///
+    /// On miss / wrong kind: return `flags & 0xf` (Linux fallback action bits).
+    pub(crate) fn inner(map: usize, key: usize, flags: usize) -> usize {
+        let fallback = flags & 0xf;
+        let Some(id) = resolve_map_id(map) else {
+            return fallback;
+        };
+
+        let mut guard = match POOL.try_write() {
+            Some(g) => g,
+            None => return fallback,
+        };
+        let table = match guard.as_mut() {
+            Some(t) => t,
+            None => return fallback,
+        };
+        let res = match table.get_mut(&id) {
+            Some(r) => r,
+            None => return fallback,
+        };
+        if res.kind != Some(MapKind::Devmap) {
+            error!("[helper]bpf_redirect_map: map id {} is not DEVMAP", id);
+            return fallback;
+        }
+
+        let key_u32 = key as u32;
+        let key_bytes = key_u32.to_ne_bytes();
+        let m: &mut crate::patch::map::BpfArrayMap = unsafe { res.as_mut() };
+        use crate::patch::map::ops::MapOps;
+        let val_ptr = match MapOps::lookup(m, key_bytes.as_ptr()) {
+            Ok(p) => p,
+            Err(_) => return fallback,
+        };
+        // Unpopulated slot stays 0 — treat as wifi ifindex only when explicitly written;
+        // Linux DEVMAP miss returns fallback; zero value is a valid ifindex (wifi).
+        // Distinguish empty: ARRAY is zero-filled; userspace must write before redirect.
+        // Value 0 is wifi — that is intentional for this MCU port table.
+        let ifindex = unsafe { core::ptr::read_unaligned(val_ptr as *const u32) };
+
+        if !xdp_redir::ifindex_supported(ifindex) {
+            error!(
+                "[helper]bpf_redirect_map: ifindex {} unsupported (only 0=wifi)",
+                ifindex
+            );
+            return (-95i32) as usize;
+        }
+        xdp_redir::set_pending(ifindex);
+        XDP_REDIRECT as usize
     }
 }
 
@@ -50,7 +111,12 @@ pub(super) mod map_delete_elem {
 }
 
 pub(super) mod for_each_map_elem {
-    pub(crate) fn inner(map: usize, callback_fn: usize, callback_ctx: usize, flags: usize) -> usize {
+    pub(crate) fn inner(
+        map: usize,
+        callback_fn: usize,
+        callback_ctx: usize,
+        flags: usize,
+    ) -> usize {
         crate::patch::map::helper_for_each_map_elem(map, callback_fn, callback_ctx, flags)
     }
 }

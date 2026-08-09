@@ -342,7 +342,6 @@ dependencies = [
  "embassy-executor-macros",
  "embassy-executor-timer-queue",
  "log",
- "log",
 ]
 
 [[package]]
@@ -1054,6 +1053,9 @@ dependencies = [
  "nom",
  "ringbuf",
  "smoltcp",
+ "static_cell",
+ "talc",
+ "toml",
 ]
 
 [[package]]

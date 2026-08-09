@@ -8,27 +8,21 @@ version      = "0.1.1"
 test = false
 bench = false
 
-[lib]
-test = false
-bench = false
-
 [[bin]]
 name = "firmware"
 path = "./src/bin/main.rs"
 test = false
 bench = false
-<<<<<<< HEAD
-=======
 
 [features]
 default = ["patch-sync-embassy"]
 # Patch pool/slots: embassy-sync async RwLock (control plane .await)
-patch-sync-embassy = ["dep:embassy-sync"]
-# Patch pool/slots: single-thread RefCell (control plane sync; no IRQ→helper)
+patch-sync-embassy = []
+# Patch pool/slots: single-thread RefCell (control plane sync; no IRQ→helper).
+# Overrides `patch-sync-embassy` when both are enabled (e.g. `--features patch-sync-st`).
 patch-sync-st = []
 # On-device serial selftest markers for scripts/hw_expect.py
 hw-selftest = []
->>>>>>> feat/patch-loader
 
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
@@ -41,10 +35,6 @@ esp-rtos = { version = "0.3.0", features = [
 ] }
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c3", "log-04"] }
 log                    = "0.4.27"
-<<<<<<< HEAD
-
-=======
->>>>>>> feat/patch-loader
 embassy-net = { version = "0.9.1", features = [
   "dhcpv4",
   "log",
@@ -91,7 +81,7 @@ talc = { version = "5.0", features = ["counters"] }
 allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
 allocator-api2-v02 = { version = "0.2", package = "allocator-api2", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.17", default-features = false, features = ["allocator-api2", "default-hasher"] }
-embassy-sync = { version = "0.8.0", features = ["log"], optional = true }
+embassy-sync = { version = "0.8.0", features = ["log"] }
 ringbuf = { version = "0.3.3", default-features = false }
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html

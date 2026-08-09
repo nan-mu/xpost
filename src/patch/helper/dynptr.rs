@@ -28,12 +28,14 @@ const RDONLY_BIT: u32 = 1 << 31;
 
 /// A contiguous byte object: dynptr LOCAL views this span and nothing else.
 #[derive(Clone, Copy)]
+#[allow(dead_code)] // used by `hw-selftest` / userspace contig helpers
 pub struct ContigObj {
     pub base: usize,
     pub len: usize,
 }
 
 impl ContigObj {
+    #[allow(dead_code)]
     pub fn from_slice(s: &mut [u8]) -> Self {
         Self {
             base: s.as_mut_ptr() as usize,
@@ -86,6 +88,7 @@ impl BpfDynptr {
         self.data != 0 && self.dynptr_type() != TYPE_INVALID && self.usable_size() > 0
     }
 
+    #[allow(dead_code)]
     pub fn is_contig(self) -> bool {
         self.is_valid() && self.dynptr_type() == TYPE_LOCAL
     }
@@ -96,9 +99,7 @@ impl BpfDynptr {
     }
 
     fn pack_size(usable: u32, ty: u32, rdonly: bool) -> u32 {
-        (usable & SIZE_MASK)
-            | ((ty & 0x7f) << TYPE_SHIFT)
-            | if rdonly { RDONLY_BIT } else { 0 }
+        (usable & SIZE_MASK) | ((ty & 0x7f) << TYPE_SHIFT) | if rdonly { RDONLY_BIT } else { 0 }
     }
 
     unsafe fn read_at(p: usize) -> Option<Self> {
@@ -115,6 +116,7 @@ impl BpfDynptr {
     }
 
     /// Wrap a contiguous object as `TYPE_LOCAL` dynptr (preferred entry).
+    #[allow(dead_code)]
     pub fn from_contig(obj: ContigObj, out: usize) -> usize {
         Self::from_mem(obj.base, obj.len, 0, out)
     }

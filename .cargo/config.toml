@@ -1,11 +1,15 @@
 [target.riscv32imc-unknown-none-elf]
 # --no-addresses: do not addr2line-decode hex in UART log (avoids spam after DEBUG lines).
-runner = "espflash flash --monitor --no-addresses --chip esp32c3 --partition-table partitions.csv --port /dev/cu.usbmodem211101"
+runner = "espflash flash --monitor --no-addresses --chip esp32c3 --partition-table partitions.csv"
 
 [env]
-ESP_LOG="debug"
+ESP_LOG="info"
 WIFI_SSID="your_wifi_ssid"
 WIFI_PASSWORD="your_wifi_password"
+XDP_ENABLE="1"
+FW_BLOCKED_SRC_IP="10.0.0.1"
+FW_TR3000_IP="192.168.110.142"
+FW_ECHO_PORT="18080"
 
 [build]
 rustflags = [

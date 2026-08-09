@@ -12,11 +12,6 @@ use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use log::{error, info};
 
-<<<<<<< HEAD
-use firmware::connection::connection;
-use firmware::net_task::net_task;
-use firmware::sta;
-=======
 use firmware::patch;
 
 #[cfg(not(feature = "hw-selftest"))]
@@ -24,7 +19,6 @@ use firmware::{
     connection::{connection, net_task_xdp},
     sta,
 };
->>>>>>> feat/patch-loader
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -60,12 +54,16 @@ async fn main(spawner: Spawner) {
     patch::map::init();
     info!("[Init][MAP] MAP resource pool initialized");
 
-    #[cfg(all(feature = "hw-selftest", feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
+    #[cfg(all(
+        feature = "hw-selftest",
+        feature = "patch-sync-embassy",
+        not(feature = "patch-sync-st")
+    ))]
     match patch::hwtest::verify_pool().await {
         Ok(()) => info!("[Init][MAP] talc resource pool verification passed"),
         Err(e) => error!("[Init][MAP] talc resource pool verification failed: {}", e),
     }
-    #[cfg(all(feature = "hw-selftest", feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(all(feature = "hw-selftest", feature = "patch-sync-st"))]
     match patch::hwtest::verify_pool() {
         Ok(()) => info!("[Init][MAP] talc resource pool verification passed"),
         Err(e) => error!("[Init][MAP] talc resource pool verification failed: {}", e),
@@ -74,17 +72,13 @@ async fn main(spawner: Spawner) {
     #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
     patch::map::init_firmware_maps()
         .await
-        .expect("init_firmware_maps: talc pool OOM for bpf.toml maps");
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
-    patch::map::init_firmware_maps()
-        .expect("init_firmware_maps: talc pool OOM for bpf.toml maps");
-    info!("firmware maps from bpf.toml initialized");
+        .expect("[Init][MAP] talc pool OOM for bpf.toml maps");
+    #[cfg(feature = "patch-sync-st")]
+    patch::map::init_firmware_maps().expect("[Init][MAP] talc pool OOM for bpf.toml maps");
+    info!("[Init][MAP] firmware maps from bpf.toml initialized");
 
-    info!("Read partition table / load XDP payload");
+    info!("[Init][XDP] load AOT payload into HOT_REGION");
     patch::load(peripherals.FLASH);
-    // TEMP: exercise AOT without WiFi RX (maps_helpers → bpf_printk flood).
-    let _ = patch::smoke_xdp();
-    patch::smoke_multi_ctx();
 
     #[cfg(feature = "hw-selftest")]
     {
@@ -99,6 +93,12 @@ async fn main(spawner: Spawner) {
 
     #[cfg(not(feature = "hw-selftest"))]
     {
+        // Seed before WiFi/XDP so firewall_rules is non-empty on first RX.
+        #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
+        firmware::fw_seed::seed_firewall_rules().await;
+        #[cfg(feature = "patch-sync-st")]
+        firmware::fw_seed::seed_firewall_rules();
+
         let (controller, sta_stack, sta_runner) = sta::init_sta(peripherals.WIFI);
 
         spawner.spawn(connection(controller).unwrap());

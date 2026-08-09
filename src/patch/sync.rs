@@ -2,8 +2,11 @@
 //!
 //! # Features
 //!
-//! - `patch-sync-embassy` — `embassy_sync::rwlock::RwLock` (async control plane)
+//! - `patch-sync-embassy` — `embassy_sync::rwlock::RwLock` (async control plane; **default**)
 //! - `patch-sync-st` — `RefCell` (sync control plane)
+//!
+//! If both are enabled (e.g. `cargo build --features patch-sync-st` with default
+//! features), **`patch-sync-st` wins**.
 //!
 //! Helper / AOT data plane always uses [`RwCell::try_write`] / [`RwCell::try_read`]
 //! (never `.await`).
@@ -13,11 +16,8 @@
 //! Single-core cooperative tasks only. Interrupt-level code must not enter patch
 //! helpers or talc while a [`RefCell`] borrow is active (same bound as `SyncTalc`).
 
-#[cfg(all(feature = "patch-sync-embassy", feature = "patch-sync-st"))]
-compile_error!("features `patch-sync-embassy` and `patch-sync-st` are mutually exclusive");
-
 #[cfg(not(any(feature = "patch-sync-embassy", feature = "patch-sync-st")))]
-compile_error!("enable exactly one of `patch-sync-embassy` or `patch-sync-st`");
+compile_error!("enable `patch-sync-embassy` (default) or `patch-sync-st`");
 
 use core::cell::RefCell;
 
@@ -52,8 +52,7 @@ mod backend {
     use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
     use embassy_sync::rwlock::RwLock;
 
-    type WriteGuard<'a, T> =
-        embassy_sync::rwlock::RwLockWriteGuard<'a, CriticalSectionRawMutex, T>;
+    type WriteGuard<'a, T> = embassy_sync::rwlock::RwLockWriteGuard<'a, CriticalSectionRawMutex, T>;
     type ReadGuard<'a, T> = embassy_sync::rwlock::RwLockReadGuard<'a, CriticalSectionRawMutex, T>;
 
     /// Read/write cell: async `write`/`read`, sync `try_*` for helpers.
@@ -80,14 +79,13 @@ mod backend {
         }
 
         #[inline]
-        #[allow(dead_code)]
         pub fn try_read(&self) -> Option<ReadGuard<'_, T>> {
             self.0.try_read().ok()
         }
     }
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 mod backend {
     use core::cell::{Ref, RefCell, RefMut};
 
@@ -121,7 +119,6 @@ mod backend {
         }
 
         #[inline]
-        #[allow(dead_code)]
         pub fn try_read(&self) -> Option<ReadGuard<'_, T>> {
             self.0.try_borrow().ok()
         }
@@ -130,6 +127,6 @@ mod backend {
 
 #[cfg(any(
     all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")),
-    all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")),
+    feature = "patch-sync-st",
 ))]
 pub use backend::RwCell;

@@ -1,0 +1,54 @@
+//! Static bpf.toml map-name → [`ResourceId`] aliases for userspace lookup.
+
+use core::cell::RefCell;
+
+use critical_section::Mutex;
+
+use super::pool::ResourceId;
+
+const MAX_MAP_NAMES: usize = 16;
+
+static NAME_ALIASES: Mutex<RefCell<[Option<(&'static str, ResourceId)>; MAX_MAP_NAMES]>> =
+    Mutex::new(RefCell::new([None; MAX_MAP_NAMES]));
+
+/// Bind a bpf.toml map name to a pool [`ResourceId`].
+///
+/// Returns `false` if the table is full or `name` is empty.
+pub fn register_map_name(name: &'static str, id: ResourceId) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    critical_section::with(|cs| {
+        let mut table = NAME_ALIASES.borrow_ref_mut(cs);
+        for slot in table.iter_mut() {
+            if let Some((n, _)) = *slot {
+                if n == name {
+                    *slot = Some((name, id));
+                    return true;
+                }
+            }
+        }
+        for slot in table.iter_mut() {
+            if slot.is_none() {
+                *slot = Some((name, id));
+                return true;
+            }
+        }
+        false
+    })
+}
+
+/// Resolve a registered map name to its [`ResourceId`].
+pub fn resolve_map_name(name: &str) -> Option<ResourceId> {
+    critical_section::with(|cs| {
+        let table = NAME_ALIASES.borrow_ref(cs);
+        for slot in table.iter() {
+            if let Some((n, id)) = *slot {
+                if n == name {
+                    return Some(id);
+                }
+            }
+        }
+        None
+    })
+}

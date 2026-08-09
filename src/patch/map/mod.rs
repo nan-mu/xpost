@@ -4,29 +4,39 @@
 //! - [`pool`] — talc heap + Id→[`RawResource`] table (not MCU “register”)
 //! - [`abi`] — AOT map aliases + sync helper entrypoints
 //! - [`array`] / [`hash`] / [`ringbuf`] — concrete map types
+//! - [`ops`] — XDP `MapOps` + [`MapError`]
+//! - [`userspace`] — embassy write-lock native-container access
 
 pub mod abi;
 pub mod array;
 pub mod ctrl;
 pub mod hash;
+pub mod names;
+pub mod ops;
 pub mod pool;
 pub mod ringbuf;
 
 pub use abi::{
-    clear_map_aliases, helper_delete, helper_for_each_map_elem, helper_lookup, helper_update,
-    register_map_addr, resolve_map_id, set_map_aliases, unbind_map_addr, AliasError, BPF_ANY,
-    BPF_EXIST, BPF_NOEXIST, MAX_MAP_ALIASES,
+    AliasError, BPF_ANY, BPF_EXIST, BPF_NOEXIST, MAX_MAP_ALIASES, clear_map_aliases, helper_delete,
+    helper_for_each_map_elem, helper_lookup, helper_update, register_map_addr, resolve_map_id,
+    set_map_aliases, unbind_map_addr,
 };
-pub use array::{create_array, create_bpf_array, BpfArrayMap};
-pub use ctrl::{create_map, destroy_map, MapCreateCmd, MapCtrlError, MAX_MAP_IDS};
-pub use hash::{create_bpf_hash, create_hashmap, BpfHashMap, SharedHashMap};
-pub use pool::{allocator, init, MapKind, RawResource, ResourceId, TalcAlloc};
+pub use array::{BpfArrayMap, create_bpf_array, create_bpf_devmap};
+pub use ctrl::{MAX_MAP_IDS, MapCreateCmd, MapCtrlError, create_map, destroy_map};
+pub use hash::{
+    BpfHashMap, BpfHashMapBuilder, BpfHashTable, HashBuildError, KeyBlob, ValSlot, create_bpf_hash,
+};
+pub use names::{register_map_name, resolve_map_name};
+pub use ops::MapError;
+pub use pool::{MapKind, RawResource, ResourceId, TalcAlloc, allocator, init};
 pub use ringbuf::{
-    create_bpf_ringbuf, create_ringbuf, helper_ringbuf_discard, helper_ringbuf_discard_dynptr,
+    BpfRingBuf, create_bpf_ringbuf, helper_ringbuf_discard, helper_ringbuf_discard_dynptr,
     helper_ringbuf_output, helper_ringbuf_query, helper_ringbuf_reserve,
-    helper_ringbuf_reserve_dynptr, helper_ringbuf_submit, helper_ringbuf_submit_dynptr, BpfRingBuf,
-    TalcRingBuf, TalcVec,
+    helper_ringbuf_reserve_dynptr, helper_ringbuf_submit, helper_ringbuf_submit_dynptr,
 };
 
 include!(concat!(env!("OUT_DIR"), "/bpf_maps.rs"));
 include!(concat!(env!("OUT_DIR"), "/aot_map_bind.rs"));
+
+pub mod userspace;
+pub use userspace::{with_array_map, with_hash_map, with_ringbuf_map};

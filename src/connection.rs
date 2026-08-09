@@ -20,7 +20,7 @@ pub async fn net_task_xdp(
 
 #[embassy_executor::task]
 pub async fn connection(mut controller: wifi::WifiController<'static>) -> ! {
-    info!("Starting connection task");
+    info!("[Init][WiFi] connection task start");
     loop {
         match controller.connect_async().await {
             Ok(_) => {
@@ -35,7 +35,10 @@ pub async fn connection(mut controller: wifi::WifiController<'static>) -> ! {
                     match info {
                         Either::First(station_disconnected) => {
                             if let Ok(station_disconnected) = station_disconnected {
-                                info!("Station disconnected: {:?}", station_disconnected);
+                                info!(
+                                    "[Init][WiFi] station disconnected: {:?}",
+                                    station_disconnected
+                                );
                                 break;
                             }
                         }
@@ -45,26 +48,18 @@ pub async fn connection(mut controller: wifi::WifiController<'static>) -> ! {
                                     esp_radio::wifi::AccessPointStationEventInfo::Connected(
                                         access_point_station_connected_info,
                                     ) => {
-<<<<<<< HEAD
-                                        info!("Station connected: {:?}", access_point_station_connected_info);
-=======
                                         info!(
-                                            "Station connected: {:?}",
+                                            "[Init][WiFi] AP station connected: {:?}",
                                             access_point_station_connected_info
                                         );
->>>>>>> feat/patch-loader
                                     }
                                     esp_radio::wifi::AccessPointStationEventInfo::Disconnected(
                                         access_point_station_disconnected_info,
                                     ) => {
-<<<<<<< HEAD
-                                        info!("Station disconnected: {:?}", access_point_station_disconnected_info);
-=======
                                         info!(
-                                            "Station disconnected: {:?}",
+                                            "[Init][WiFi] AP station disconnected: {:?}",
                                             access_point_station_disconnected_info
                                         );
->>>>>>> feat/patch-loader
                                     }
                                 }
                             }
@@ -73,13 +68,9 @@ pub async fn connection(mut controller: wifi::WifiController<'static>) -> ! {
                 }
             }
             Err(e) => {
-                error!("Failed to connect to wifi: {e:?}");
+                error!("[Init][WiFi] connect failed: {e:?}");
                 Timer::after(Duration::from_millis(5000)).await
             }
         }
     }
-<<<<<<< HEAD
 }
-=======
-}
->>>>>>> feat/patch-loader

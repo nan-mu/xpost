@@ -11,11 +11,7 @@ const POOL_RESERVED: usize = 2048;
 /// `(async_kw, await_suffix)` for `init_firmware_maps` under patch-sync features.
 fn map_init_asyncness() -> (&'static str, &'static str) {
     let st = env::var_os("CARGO_FEATURE_PATCH_SYNC_ST").is_some();
-    if st {
-        ("", "")
-    } else {
-        ("async ", ".await")
-    }
+    if st { ("", "") } else { ("async ", ".await") }
 }
 
 fn main() {
@@ -173,6 +169,10 @@ fn generate_bpf_maps() {
             write_generated(&format!(
                 "// no [maps.*] entries in bpf.toml\n\
                  pub const FIRMWARE_MAP_COUNT: usize = 0;\n\
+                 pub const FIRMWARE_HAS_ARRAY: bool = false;\n\
+                 pub const FIRMWARE_HAS_HASH: bool = false;\n\
+                 pub const FIRMWARE_HAS_DEVMAP: bool = false;\n\
+                 pub const FIRMWARE_HAS_RINGBUF: bool = false;\n\
                  pub const SELFTEST_MAP_ID: ResourceId = 0;\n\
                  pub const SELFTEST_MAP_TYPE: &str = \"\";\n\
                  pub const SELFTEST_KEY_SIZE: usize = 0;\n\
@@ -255,8 +255,28 @@ fn generate_bpf_maps() {
         "// heap check: estimated={total_estimated} + reserved={POOL_RESERVED} <= HEAP_SIZE={HEAP_SIZE}\n"
     ));
     out.push_str(&format!(
-        "pub const FIRMWARE_MAP_COUNT: usize = {};\n\n",
+        "pub const FIRMWARE_MAP_COUNT: usize = {};\n",
         map_specs.len()
+    ));
+    out.push_str(&format!(
+        "pub const FIRMWARE_HAS_ARRAY: bool = {};\n",
+        map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_ARRAY")
+    ));
+    out.push_str(&format!(
+        "pub const FIRMWARE_HAS_HASH: bool = {};\n",
+        map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_HASH")
+    ));
+    out.push_str(&format!(
+        "pub const FIRMWARE_HAS_DEVMAP: bool = {};\n",
+        map_specs
+            .iter()
+            .any(|s| s.map_type == "BPF_MAP_TYPE_DEVMAP")
+    ));
+    out.push_str(&format!(
+        "pub const FIRMWARE_HAS_RINGBUF: bool = {};\n\n",
+        map_specs
+            .iter()
+            .any(|s| s.map_type == "BPF_MAP_TYPE_RINGBUF")
     ));
 
     if let Some(first) = map_specs.first() {
@@ -268,7 +288,9 @@ fn generate_bpf_maps() {
             "pub const SELFTEST_MAP_TYPE: &str = \"{}\";\n",
             first.map_type
         ));
-        out.push_str(&format!("pub const SELFTEST_KEY_SIZE: usize = {key_size};\n"));
+        out.push_str(&format!(
+            "pub const SELFTEST_KEY_SIZE: usize = {key_size};\n"
+        ));
         out.push_str(&format!(
             "pub const SELFTEST_VALUE_SIZE: usize = {value_size};\n\n"
         ));
@@ -281,7 +303,10 @@ fn generate_bpf_maps() {
         let key_size = c_layout_size(&spec.key_fields);
         let value_size = c_layout_size(&spec.value_fields);
 
-        out.push_str(&format!("/// ResourceId for maps.{} from bpf.toml\n", spec.name));
+        out.push_str(&format!(
+            "/// ResourceId for maps.{} from bpf.toml\n",
+            spec.name
+        ));
         out.push_str(&format!("pub const {id_const}: ResourceId = {idx};\n"));
         out.push_str(&format!(
             "pub const {}_KEY_SIZE: usize = {key_size};\n",
@@ -300,7 +325,7 @@ fn generate_bpf_maps() {
             "BPF_MAP_TYPE_RINGBUF" => {
                 emit_struct(&mut out, &val_ty, &spec.value_fields, false);
             }
-            "BPF_MAP_TYPE_HASH" | "BPF_MAP_TYPE_ARRAY" => {
+            "BPF_MAP_TYPE_HASH" | "BPF_MAP_TYPE_ARRAY" | "BPF_MAP_TYPE_DEVMAP" => {
                 let key_ty = format!("{type_stem}Key");
                 emit_struct(&mut out, &key_ty, &spec.key_fields, true);
                 emit_struct(&mut out, &val_ty, &spec.value_fields, false);
@@ -323,12 +348,20 @@ fn generate_bpf_maps() {
 
     let needs_hash = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_HASH");
     let needs_array = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_ARRAY");
-    let needs_ring = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_RINGBUF");
-    if needs_hash || needs_array || needs_ring {
+    let needs_devmap = map_specs
+        .iter()
+        .any(|s| s.map_type == "BPF_MAP_TYPE_DEVMAP");
+    let needs_ring = map_specs
+        .iter()
+        .any(|s| s.map_type == "BPF_MAP_TYPE_RINGBUF");
+    if needs_hash || needs_array || needs_devmap || needs_ring {
         out.push_str("    use crate::patch::map::{");
         let mut parts = Vec::new();
         if needs_array {
             parts.push("create_bpf_array");
+        }
+        if needs_devmap {
+            parts.push("create_bpf_devmap");
         }
         if needs_hash {
             parts.push("create_bpf_hash");
@@ -354,6 +387,12 @@ fn generate_bpf_maps() {
             "BPF_MAP_TYPE_ARRAY" => {
                 out.push_str(&format!(
                     "    create_bpf_array({id_const}, {value_size}, {}){await_suffix}?;\n",
+                    spec.max_entries
+                ));
+            }
+            "BPF_MAP_TYPE_DEVMAP" => {
+                out.push_str(&format!(
+                    "    create_bpf_devmap({id_const}, {}){await_suffix}?;\n",
                     spec.max_entries
                 ));
             }
@@ -409,15 +448,11 @@ fn generate_aot_map_bind() {
                 continue;
             };
             if addr == 0 {
-                println!(
-                    "cargo:warning=bpf.toml [maps.{name}] aot_addr is 0 — skipped"
-                );
+                println!("cargo:warning=bpf.toml [maps.{name}] aot_addr is 0 — skipped");
                 continue;
             }
             let id_const = format!("MAP_ID_{}", name.to_ascii_uppercase());
-            out.push_str(&format!(
-                "    register_map_addr(0x{addr:x}, {id_const});\n"
-            ));
+            out.push_str(&format!("    register_map_addr(0x{addr:x}, {id_const});\n"));
             bound += 1;
         }
     }
@@ -444,9 +479,9 @@ fn parse_optional_addr(table: &toml::Table, key: &str, map_name: &str) -> Option
         } else {
             s.parse::<usize>()
         };
-        return Some(addr.unwrap_or_else(|e| {
-            panic!("[maps.{map_name}].{key}: invalid address `{s}`: {e}")
-        }));
+        return Some(
+            addr.unwrap_or_else(|e| panic!("[maps.{map_name}].{key}: invalid address `{s}`: {e}")),
+        );
     }
     panic!("[maps.{map_name}].{key}: expected integer or hex string");
 }

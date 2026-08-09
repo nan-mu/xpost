@@ -13,9 +13,10 @@ use core::ptr;
 use allocator_api2::alloc::AllocError;
 use allocator_api2::boxed::Box;
 
-use super::pool::{allocator, MapKind, RawResource, ResourceId, HEAP_SIZE};
+use super::ops::{MapError, MapOps};
 #[cfg(feature = "hw-selftest")]
 use super::pool::POOL;
+use super::pool::{HEAP_SIZE, MapKind, RawResource, ResourceId, allocator};
 
 /// Max single-element size (same bound as other BPF maps).
 pub const MAX_ELEM_BYTES: usize = 256;
@@ -34,43 +35,22 @@ pub struct BpfArrayMap {
 impl BpfArrayMap {
     /// Absolute pointer to element `idx`, or null if out of range.
     #[inline]
-    pub fn elem_ptr(&mut self, idx: usize) -> *mut u8 {
+    pub fn elem_ptr(&self, idx: usize) -> *mut u8 {
         if idx >= self.max_entries {
             return ptr::null_mut();
         }
-        unsafe { self.data.as_mut_ptr().add(idx * self.value_stride) }
+        // SAFETY: index in range; BPF may write value bytes through the pointer.
+        unsafe { self.data.as_ptr().add(idx * self.value_stride) as *mut u8 }
     }
 
-    /// `bpf_map_lookup_elem` — key is a `u32` index.
-    pub fn lookup(&mut self, key: *const u8) -> *mut u8 {
-        if key.is_null() {
-            return ptr::null_mut();
-        }
-        let idx = unsafe { ptr::read_unaligned(key as *const u32) } as usize;
-        self.elem_ptr(idx)
-    }
-
-    /// `bpf_map_update_elem`.
-    pub fn update(&mut self, key: *const u8, value: *const u8, _flags: u64) -> i32 {
-        if key.is_null() || value.is_null() {
-            return -22;
-        }
-        let idx = unsafe { ptr::read_unaligned(key as *const u32) } as usize;
-        let dst = self.elem_ptr(idx);
-        if dst.is_null() {
-            return -22;
-        }
-        unsafe { ptr::copy_nonoverlapping(value, dst, self.value_size) };
-        0
-    }
-
-    /// `bpf_map_delete_elem` (unsupported on Linux → `-EINVAL`).
-    pub fn delete(&mut self, _key: *const u8) -> i32 {
-        -22
+    /// Userspace: contiguous storage (hold `POOL` write lock).
+    #[inline]
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.data
     }
 
     /// `bpf_for_each_map_elem` walk.
-    pub fn for_each_elems(
+    pub(super) fn for_each_elems(
         &mut self,
         map_arg: usize,
         cb: extern "C" fn(usize, usize, usize, usize) -> i32,
@@ -121,6 +101,46 @@ impl BpfArrayMap {
     }
 }
 
+impl MapOps for BpfArrayMap {
+    fn lookup(&self, key: *const u8) -> Result<*mut u8, MapError> {
+        if key.is_null() {
+            let e = MapError::InvalidArg;
+            e.log_if_bug("array.lookup");
+            return Err(e);
+        }
+        let idx = unsafe { ptr::read_unaligned(key as *const u32) } as usize;
+        let p = self.elem_ptr(idx);
+        if p.is_null() {
+            Err(MapError::NotFound)
+        } else {
+            Ok(p)
+        }
+    }
+
+    fn update(&mut self, key: *const u8, value: *const u8, _flags: u64) -> Result<(), MapError> {
+        if key.is_null() || value.is_null() {
+            let e = MapError::InvalidArg;
+            e.log_if_bug("array.update");
+            return Err(e);
+        }
+        let idx = unsafe { ptr::read_unaligned(key as *const u32) } as usize;
+        let dst = self.elem_ptr(idx);
+        if dst.is_null() {
+            let e = MapError::InvalidArg;
+            e.log_if_bug("array.update");
+            return Err(e);
+        }
+        unsafe { ptr::copy_nonoverlapping(value, dst, self.value_size) };
+        Ok(())
+    }
+
+    fn delete(&mut self, _key: *const u8) -> Result<(), MapError> {
+        let e = MapError::Unsupported;
+        e.log_if_bug("array.delete");
+        Err(e)
+    }
+}
+
 /// Allocate ARRAY storage; returns `(raw, layout, value_size, stride)` for insert.
 fn alloc_array(
     value_size: usize,
@@ -151,7 +171,7 @@ fn alloc_array(
 }
 
 unsafe fn drop_array(ptr: *mut u8) {
-    let _ = unsafe { Box::from_raw_in(ptr as *mut BpfArrayMap, allocator()) };
+    unsafe { super::pool::reclaim_talc_box::<BpfArrayMap>(ptr, "BpfArrayMap") };
 }
 
 /// Create a zero-filled ARRAY map and register it under `id`.
@@ -160,7 +180,7 @@ unsafe fn drop_array(ptr: *mut u8) {
 /// - `max_entries`: number of slots
 /// - Storage: `value_stride(value_size) * max_entries` bytes, all `0`
 #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
-pub async fn create_array(
+pub(crate) async fn create_array(
     id: ResourceId,
     value_size: usize,
     max_entries: usize,
@@ -179,8 +199,8 @@ pub async fn create_array(
     .await
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
-pub fn create_array(
+#[cfg(feature = "patch-sync-st")]
+pub(crate) fn create_array(
     id: ResourceId,
     value_size: usize,
     max_entries: usize,
@@ -208,7 +228,7 @@ pub async fn create_bpf_array(
     create_array(id, value_size, max_entries).await
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn create_bpf_array(
     id: ResourceId,
     value_size: usize,
@@ -217,15 +237,45 @@ pub fn create_bpf_array(
     create_array(id, value_size, max_entries)
 }
 
+/// `BPF_MAP_TYPE_DEVMAP`: ARRAY of `u32` ifindex values, tagged [`MapKind::Devmap`].
+#[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
+pub async fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
+    let (raw, layout, value_size, stride) = alloc_array(4, max_entries)?;
+    RawResource::insert(
+        id,
+        raw,
+        layout,
+        drop_array,
+        Some(MapKind::Devmap),
+        4,
+        value_size,
+        stride,
+    )
+    .await
+}
+
+#[cfg(feature = "patch-sync-st")]
+pub fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
+    let (raw, layout, value_size, stride) = alloc_array(4, max_entries)?;
+    RawResource::insert(
+        id,
+        raw,
+        layout,
+        drop_array,
+        Some(MapKind::Devmap),
+        4,
+        value_size,
+        stride,
+    )
+}
+
 /// HW selftest for the first ARRAY map in bpf.toml (when present).
 #[cfg(feature = "hw-selftest")]
 pub fn run_selftest(pass: &mut u32, fail: &mut u32) {
-    use crate::patch::hwtest::check;
-    use crate::patch::map::{helper_lookup, helper_update, BPF_ANY};
     use crate::patch::helper_dispatcher;
-    use crate::patch::map::{
-        SELFTEST_KEY_SIZE, SELFTEST_MAP_ID, SELFTEST_VALUE_SIZE,
-    };
+    use crate::patch::hwtest::check;
+    use crate::patch::map::{BPF_ANY, helper_lookup, helper_update};
+    use crate::patch::map::{SELFTEST_KEY_SIZE, SELFTEST_MAP_ID, SELFTEST_VALUE_SIZE};
     use log::info;
 
     const BPF_FUNC_FOR_EACH_MAP_ELEM: usize = 164;

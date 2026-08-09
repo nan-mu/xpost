@@ -130,7 +130,10 @@ async fn install_inner(cmd: XdpInstallCmd<'_>) -> Result<ProgramId, ProgramError
     }
 
     let mut guard = SLOTS.write().await;
-    let slot_idx = guard.iter().position(|s| !s.used).ok_or(ProgramError::NoSlot)?;
+    let slot_idx = guard
+        .iter()
+        .position(|s| !s.used)
+        .ok_or(ProgramError::NoSlot)?;
 
     copy_image(slot_idx, cmd.image);
 
@@ -168,7 +171,7 @@ async fn install_inner(cmd: XdpInstallCmd<'_>) -> Result<ProgramId, ProgramError
     Ok(slot_idx as ProgramId)
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn install(cmd: XdpInstallCmd<'_>) -> Result<ProgramId, ProgramError> {
     try_begin()?;
     let result = install_inner(cmd);
@@ -176,7 +179,7 @@ pub fn install(cmd: XdpInstallCmd<'_>) -> Result<ProgramId, ProgramError> {
     result
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 fn install_inner(cmd: XdpInstallCmd<'_>) -> Result<ProgramId, ProgramError> {
     if cmd.image.len() > XDP_SLOT_LEN {
         return Err(ProgramError::TooLarge);
@@ -192,7 +195,10 @@ fn install_inner(cmd: XdpInstallCmd<'_>) -> Result<ProgramId, ProgramError> {
     }
 
     let mut guard = SLOTS.write();
-    let slot_idx = guard.iter().position(|s| !s.used).ok_or(ProgramError::NoSlot)?;
+    let slot_idx = guard
+        .iter()
+        .position(|s| !s.used)
+        .ok_or(ProgramError::NoSlot)?;
 
     copy_image(slot_idx, cmd.image);
 
@@ -267,7 +273,7 @@ async fn remove_inner(id: ProgramId) -> Result<(), ProgramError> {
     Ok(())
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn remove(id: ProgramId) -> Result<(), ProgramError> {
     try_begin()?;
     let result = remove_inner(id);
@@ -275,7 +281,7 @@ pub fn remove(id: ProgramId) -> Result<(), ProgramError> {
     result
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 fn remove_inner(id: ProgramId) -> Result<(), ProgramError> {
     let idx = id as usize;
     if idx >= XDP_SLOT_COUNT {
@@ -319,7 +325,7 @@ pub async fn image(id: ProgramId) -> Option<&'static [u8]> {
     Some(unsafe { core::slice::from_raw_parts(ptr::addr_of!(XDP_DRAM[idx]) as *const u8, len) })
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn image(id: ProgramId) -> Option<&'static [u8]> {
     let idx = id as usize;
     if idx >= XDP_SLOT_COUNT {
@@ -347,7 +353,7 @@ pub async fn map_binds(id: ProgramId) -> Option<heapless::Vec<(usize, ResourceId
     Some(guard[idx].binds.clone())
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn map_binds(id: ProgramId) -> Option<heapless::Vec<(usize, ResourceId), XDP_MAX_BINDS>> {
     let idx = id as usize;
     if idx >= XDP_SLOT_COUNT {

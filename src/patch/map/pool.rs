@@ -5,10 +5,13 @@
 //! `patch-sync-st`).
 
 use core::alloc::{GlobalAlloc, Layout};
+use core::mem::align_of;
 use core::ptr::NonNull;
 
 use allocator_api2::alloc::AllocError;
+use allocator_api2::boxed::Box;
 use hashbrown::HashMap;
+use log::error;
 use talc::TalcCell;
 use talc::source::Manual;
 
@@ -94,11 +97,13 @@ pub enum MapKind {
     Array,
     Hash,
     Ringbuf,
+    /// `BPF_MAP_TYPE_DEVMAP`: key `u32` → value `u32` ifindex (ARRAY layout).
+    Devmap,
 }
 
 type PoolMap = HashMap<ResourceId, RawResource, hashbrown::DefaultHashBuilder, TalcAlloc>;
 
-/// Global Id → resource table. Sync XDP helpers use [`RwCell::try_write`].
+/// Global Id → resource table. Lookup uses [`RwCell::try_read`]; mutate uses [`RwCell::try_write`].
 pub(crate) static POOL: RwCell<Option<PoolMap>> = RwCell::new(None);
 
 /// Type-erased pool entry. [`Drop`] returns storage to talc — no manual free at
@@ -107,7 +112,7 @@ pub struct RawResource {
     pub ptr: *mut u8,
     pub layout: Layout,
     drop_fn: unsafe fn(*mut u8),
-    /// `None` = non-BPF pool object (`SharedHashMap`, …).
+    /// `None` = non-BPF pool object (hwtest probes, …).
     pub kind: Option<MapKind>,
     pub key_size: usize,
     pub value_size: usize,
@@ -122,10 +127,48 @@ unsafe impl Sync for RawResource {}
 impl Drop for RawResource {
     fn drop(&mut self) {
         let ptr = core::mem::replace(&mut self.ptr, core::ptr::null_mut());
-        if !ptr.is_null() {
-            unsafe { (self.drop_fn)(ptr) };
+        if ptr.is_null() {
+            return;
         }
+        let addr = ptr as usize;
+        let align = self.layout.align();
+        if addr % align != 0 {
+            error!(
+                "[pool] drop: ptr {:#x} misaligned (layout align={}, size={}, kind={:?}); leaking",
+                addr,
+                align,
+                self.layout.size(),
+                self.kind
+            );
+            return;
+        }
+        // SAFETY: ptr + drop_fn paired at insert; align checked against stored layout.
+        unsafe { (self.drop_fn)(ptr) };
     }
+}
+
+/// Drop a `Box<T, TalcAlloc>` previously produced by [`Box::into_raw`] + [`allocator`].
+///
+/// On null / misalignment: logs and **leaks** instead of calling `from_raw` (avoids UB).
+///
+/// # Safety
+/// When checks pass, `ptr` must be the unique live pointer from `Box::into_raw` for `T`
+/// allocated with [`allocator`].
+pub(crate) unsafe fn reclaim_talc_box<T>(ptr: *mut u8, tag: &'static str) {
+    if ptr.is_null() {
+        error!("[pool] reclaim {}: null pointer; skip", tag);
+        return;
+    }
+    let addr = ptr as usize;
+    let align = align_of::<T>();
+    if addr % align != 0 {
+        error!(
+            "[pool] reclaim {}: ptr {:#x} not aligned to {} (wrong type/drop_fn?); leaking",
+            tag, addr, align
+        );
+        return;
+    }
+    let _ = unsafe { Box::from_raw_in(ptr as *mut T, allocator()) };
 }
 
 impl RawResource {
@@ -180,14 +223,22 @@ impl RawResource {
         value_size: usize,
         value_stride: usize,
     ) -> Result<(), AllocError> {
-        let resource = Self::build(ptr, layout, drop_fn, kind, key_size, value_size, value_stride);
+        let resource = Self::build(
+            ptr,
+            layout,
+            drop_fn,
+            kind,
+            key_size,
+            value_size,
+            value_stride,
+        );
         let mut guard = POOL.write().await;
         let table = guard.as_mut().expect("pool not initialized");
         Self::insert_into(table, id, resource)
     }
 
     /// Insert into the pool. On Id collision the new entry is dropped (talc freed).
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub(crate) fn insert(
         id: ResourceId,
         ptr: *mut u8,
@@ -198,7 +249,15 @@ impl RawResource {
         value_size: usize,
         value_stride: usize,
     ) -> Result<(), AllocError> {
-        let resource = Self::build(ptr, layout, drop_fn, kind, key_size, value_size, value_stride);
+        let resource = Self::build(
+            ptr,
+            layout,
+            drop_fn,
+            kind,
+            key_size,
+            value_size,
+            value_stride,
+        );
         let mut guard = POOL.write();
         let table = guard.as_mut().expect("pool not initialized");
         Self::insert_into(table, id, resource)
@@ -216,7 +275,7 @@ impl RawResource {
         Some(f(unsafe { resource.as_ref() }))
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn read<T, R>(id: ResourceId, f: impl FnOnce(&T) -> R) -> Option<R> {
         let guard = POOL.read();
         let table = guard.as_ref()?;
@@ -236,7 +295,7 @@ impl RawResource {
         Some(f(unsafe { resource.as_mut() }))
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn with_mut<T, R>(id: ResourceId, f: impl FnOnce(&mut T) -> R) -> Option<R> {
         let mut guard = POOL.write();
         let table = guard.as_mut()?;
@@ -258,7 +317,7 @@ impl RawResource {
         table.remove(&id).is_some()
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn destroy(id: ResourceId) -> bool {
         let mut guard = POOL.write();
         let table = match guard.as_mut() {
@@ -275,7 +334,7 @@ impl RawResource {
         guard.as_ref().is_some_and(|t| t.contains_key(&id))
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn contains(id: ResourceId) -> bool {
         let guard = POOL.read();
         guard.as_ref().is_some_and(|t| t.contains_key(&id))
@@ -287,7 +346,7 @@ impl RawResource {
         Some(guard.as_ref()?.get(&id)?.users)
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn users(id: ResourceId) -> Option<u32> {
         let guard = POOL.read();
         Some(guard.as_ref()?.get(&id)?.users)
@@ -305,7 +364,7 @@ impl RawResource {
         true
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn add_user(id: ResourceId) -> bool {
         let mut guard = POOL.write();
         let res = match guard.as_mut().and_then(|t| t.get_mut(&id)) {
@@ -328,7 +387,7 @@ impl RawResource {
         true
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn remove_user(id: ResourceId) -> bool {
         let mut guard = POOL.write();
         let res = match guard.as_mut().and_then(|t| t.get_mut(&id)) {
@@ -347,7 +406,7 @@ impl RawResource {
         (0..max_id).find(|id| !table.contains_key(id))
     }
 
-    #[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+    #[cfg(feature = "patch-sync-st")]
     pub fn alloc_id(max_id: ResourceId) -> Option<ResourceId> {
         let guard = POOL.read();
         let table = guard.as_ref()?;

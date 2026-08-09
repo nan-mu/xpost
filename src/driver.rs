@@ -1,4 +1,11 @@
-use embassy_net::driver::{Driver, RxToken};
+use embassy_net::driver::{Driver, RxToken, TxToken};
+use log::error;
+
+use crate::fw_cfg::XDP_ENABLE;
+use crate::patch::redirect::{
+    XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX, clear_pending, ifindex_supported,
+    queue_egress_frame, take_egress_frame, take_pending,
+};
 
 pub struct FirewallDevice<D: Driver> {
     inner: D,
@@ -9,17 +16,26 @@ impl<D: Driver> FirewallDevice<D> {
         Self { inner: device }
     }
 
-    fn check_packet(&self, data: &mut [u8]) -> bool {
-        // WiFi RX path must not invoke AOT XDP while the dedicated harness
-        // (`patch::selftest` / `patch::xdp`) owns the entry. Pass all frames.
-        let _ = data;
-        true
+    /// Drain frames queued by XDP_TX / XDP_REDIRECT onto the wire.
+    fn flush_egress(&mut self, cx: &mut core::task::Context) {
+        while let Some(frame) = take_egress_frame() {
+            let Some(tx) = self.inner.transmit(cx) else {
+                // No TX credit — re-queue and try on the next poll.
+                let _ = queue_egress_frame(&frame);
+                break;
+            };
+            let len = frame.len();
+            tx.consume(len, |dst| {
+                let n = len.min(dst.len());
+                dst[..n].copy_from_slice(&frame[..n]);
+            });
+        }
     }
 }
 
 impl<D: Driver> Driver for FirewallDevice<D> {
     type RxToken<'a>
-        = FirewallRxToken<D::RxToken<'a>, D>
+        = FirewallRxToken<D::RxToken<'a>>
     where
         Self: 'a;
     type TxToken<'a>
@@ -31,19 +47,13 @@ impl<D: Driver> Driver for FirewallDevice<D> {
         &mut self,
         cx: &mut core::task::Context,
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        let firewall_ptr = self as *const _;
-        self.inner.receive(cx).map(|(rx, tx)| {
-            (
-                FirewallRxToken {
-                    inner: rx,
-                    firewall: firewall_ptr,
-                },
-                tx,
-            )
-        })
+        self.flush_egress(cx);
+        let (rx, tx) = self.inner.receive(cx)?;
+        Some((FirewallRxToken { inner: rx }, tx))
     }
 
     fn transmit(&mut self, cx: &mut core::task::Context) -> Option<Self::TxToken<'_>> {
+        self.flush_egress(cx);
         self.inner.transmit(cx)
     }
 
@@ -60,23 +70,56 @@ impl<D: Driver> Driver for FirewallDevice<D> {
     }
 }
 
-pub struct FirewallRxToken<R: RxToken, D: Driver> {
+pub struct FirewallRxToken<R: RxToken> {
     inner: R,
-    firewall: *const FirewallDevice<D>,
 }
 
-impl<R: RxToken, D: Driver> RxToken for FirewallRxToken<R, D> {
+impl<R: RxToken> RxToken for FirewallRxToken<R> {
     fn consume<Ret, F>(self, f: F) -> Ret
     where
         F: FnOnce(&mut [u8]) -> Ret,
     {
-        let firewall_ptr = self.firewall;
         self.inner.consume(|buffer| {
-            if unsafe { (*firewall_ptr).check_packet(buffer) } {
-                f(buffer)
-            } else {
-                // 丢弃包，返回默认值
-                f(&mut [])
+            if !XDP_ENABLE {
+                return f(buffer);
+            }
+            clear_pending();
+            let action = crate::patch::xdp(buffer);
+            match action {
+                XDP_PASS => f(buffer),
+                XDP_DROP => f(&mut []),
+                XDP_ABORTED => {
+                    error!("[xdp] aborted");
+                    let _ = take_pending();
+                    f(&mut [])
+                }
+                XDP_TX => {
+                    if !queue_egress_frame(buffer) {
+                        error!("[xdp] TX: frame too large or queue full");
+                    }
+                    f(&mut [])
+                }
+                XDP_REDIRECT => {
+                    match take_pending() {
+                        Some(ifindex) if ifindex_supported(ifindex) => {
+                            if !queue_egress_frame(buffer) {
+                                error!("[xdp] REDIRECT: frame too large or queue full");
+                            }
+                        }
+                        Some(ifindex) => {
+                            error!("[xdp] redirect ifindex {} unsupported", ifindex);
+                        }
+                        None => {
+                            error!("[xdp] XDP_REDIRECT without pending ifindex");
+                        }
+                    }
+                    f(&mut [])
+                }
+                other => {
+                    error!("[xdp] unexpected action {}", other);
+                    let _ = take_pending();
+                    f(&mut [])
+                }
             }
         })
     }

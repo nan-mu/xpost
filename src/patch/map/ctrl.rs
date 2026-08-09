@@ -5,7 +5,7 @@
 
 use allocator_api2::alloc::AllocError;
 
-use super::array::create_bpf_array;
+use super::array::{create_bpf_array, create_bpf_devmap};
 use super::hash::create_bpf_hash;
 use super::pool::{MapKind, RawResource, ResourceId};
 use super::ringbuf::create_bpf_ringbuf;
@@ -80,12 +80,18 @@ pub async fn create_map(cmd: MapCreateCmd) -> Result<ResourceId, MapCtrlError> {
             }
             create_bpf_ringbuf(id, cmd.max_entries).await?;
         }
+        MapKind::Devmap => {
+            if cmd.max_entries == 0 {
+                return Err(MapCtrlError::BadSpec);
+            }
+            create_bpf_devmap(id, cmd.max_entries).await?;
+        }
     }
 
     Ok(id)
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn create_map(cmd: MapCreateCmd) -> Result<ResourceId, MapCtrlError> {
     let id = match cmd.id {
         Some(id) => {
@@ -116,6 +122,12 @@ pub fn create_map(cmd: MapCreateCmd) -> Result<ResourceId, MapCtrlError> {
             }
             create_bpf_ringbuf(id, cmd.max_entries)?;
         }
+        MapKind::Devmap => {
+            if cmd.max_entries == 0 {
+                return Err(MapCtrlError::BadSpec);
+            }
+            create_bpf_devmap(id, cmd.max_entries)?;
+        }
     }
 
     Ok(id)
@@ -136,7 +148,7 @@ pub async fn destroy_map(id: ResourceId) -> Result<(), MapCtrlError> {
     }
 }
 
-#[cfg(all(feature = "patch-sync-st", not(feature = "patch-sync-embassy")))]
+#[cfg(feature = "patch-sync-st")]
 pub fn destroy_map(id: ResourceId) -> Result<(), MapCtrlError> {
     match RawResource::users(id) {
         None => return Err(MapCtrlError::NotFound),

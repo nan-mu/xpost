@@ -6,10 +6,10 @@
 
 这是一个运行在 ESP32-C3 (RISC-V 架构) 上的嵌入式固件项目，主要功能包括：
 
-- **WiFi Station 模式**：连接到指定的 WiFi 网络
-- **UDP 服务器**：监听端口 8080，接收并转发 UDP 数据包
-- **智能分包**：当数据包超过 MTU 时自动拆分为头部和载荷
-- **动态代码加载**：支持从 Flash 分区加载和执行外部代码（AOT 热加载）
+- **WiFi Station 模式**：连接到指定的 WiFi 网络（DHCP）
+- **AOT XDP**：WiFi RX 上运行 libbpf-mcu 编出的防火墙（按源 IP + 目的端口 DROP）
+- **UDP :8080 → 固定 echo**：过 XDP 到达 userspace 的 UDP 不解析载荷，向 TR3000 发硬编码 echo（`0x42`）
+- **动态代码加载**：从 `esp32c3.bin` 加载 AOT 到 `HOT_REGION`
 - **Embassy 异步运行时**：使用现代异步编程模型
 
 ## 硬件要求
@@ -42,23 +42,24 @@ cargo install espflash
 
 ## 项目配置
 
-### WiFi 配置
+联调相关变量写在 `.env`（可参考 `.env.example`）或 `.cargo/config.toml` 的 `[env]`：
 
-在 `src/sta.rs` 中修改以下常量：
+| 变量 | 含义 |
+|------|------|
+| `WIFI_SSID` / `WIFI_PASSWORD` | STA 凭据 |
+| `XDP_ENABLE` | `1`/`true` 启用 RX 上 AOT XDP |
+| `FW_BLOCKED_SRC_IP` | seed 进 `firewall_rules` 的 DROP 源 IP（对齐探针 `blocked`） |
+| `FW_TR3000_IP` | 固定 echo 目的 IP（**TR3000 本机 LAN IP**，不是主路由/网关） |
+| `FW_ECHO_PORT` | 固定 echo 目的端口（默认 `18080`） |
+
+拓扑约定：主路由只做 DHCP/网关；TR3000 做 AP + 探针。`FW_TR3000_IP` 必须是 TR3000（例 `192.168.110.142`），不要写成主路由 `…1`。
+
+监听端口固定为 `8080`。探针伪造源 IP 发包；未 seed 的源过 XDP 后触发 echo。
+
+### 网络参数（代码常量）
 
 ```rust
-const SSID: &str = "你的WiFi名称";
-const PASSWORD: &str = "你的WiFi密码";
-const IP_ADDRESS: Ipv4Addr = Ipv4Addr::new(10, 0, 1, 4);  // 静态IP地址
-const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 1, 1);     // 网关地址
-```
-
-### 网络参数
-
-```rust
-const UDP_PORT: u16 = 8080;        // UDP 监听端口
-const MTU: usize = 1500;           // 最大传输单元
-const HEADER_SIZE: usize = 32;     // 数据包头部大小
+const FW_LISTEN_PORT: u16 = 8080;  // UDP 监听端口
 ```
 
 ## 构建和烧录
@@ -118,13 +119,11 @@ firmware/
 
 固件启动后自动连接到配置的 WiFi 网络，使用静态 IP 地址配置。连接管理任务会自动处理断线重连。
 
-### 2. UDP 数据处理
+### 2. UDP / 防火墙联调
 
 - 监听端口 8080
-- 接收 UDP 数据包
-- 根据数据包大小决定处理方式：
-  - **小于 MTU**：直接转发
-  - **大于 MTU**：拆分为头部（32 字节）和载荷两个包分别发送
+- XDP（`firewall_ipv4`）按 `(src_ip, dst_port)` 查 map；seed 对 `FW_BLOCKED_SRC_IP:8080` 写 DROP
+- 到达 userspace 的任意 UDP（不读载荷）→ 向 `FW_TR3000_IP:FW_ECHO_PORT` 发送固定载荷 `0x42`
 
 ### 3. 动态代码加载（AOT 热加载）
 
