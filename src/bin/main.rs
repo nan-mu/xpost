@@ -93,7 +93,8 @@ async fn main(spawner: Spawner) {
 
     #[cfg(not(feature = "hw-selftest"))]
     {
-        spawner.spawn(firmware::fw_seed::seed_firewall_rules().unwrap());
+        // Seed before WiFi/XDP so firewall_rules is non-empty on first RX.
+        firmware::fw_seed::seed_firewall_rules().await;
 
         let (controller, sta_stack, sta_runner) = sta::init_sta(peripherals.WIFI);
 

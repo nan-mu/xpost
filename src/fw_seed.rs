@@ -7,7 +7,9 @@ use crate::patch::map::{
 use log::{error, info};
 
 /// Insert DROP (1) for `FW_BLOCKED_SRC_IP` on UDP listen port.
-#[embassy_executor::task]
+///
+/// Must complete before WiFi/XDP RX is up; otherwise an empty `firewall_rules`
+/// map fail-opens blocked traffic.
 pub async fn seed_firewall_rules() {
     log_cfg();
 
