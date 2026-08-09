@@ -94,6 +94,11 @@ impl ValSlot {
     fn as_mut_ptr(&mut self) -> *mut u8 {
         self.data.as_mut_ptr()
     }
+
+    /// Value bytes for BPF lookup (caller may write through the pointer).
+    fn as_ptr(&self) -> *mut u8 {
+        self.data.as_ptr() as *mut u8
+    }
 }
 
 /// Byte-keyed BPF hash map (fixed capacity).
@@ -149,14 +154,14 @@ impl BpfHashMap {
 }
 
 impl MapOps for BpfHashMap {
-    fn lookup(&mut self, key: *const u8) -> Result<*mut u8, MapError> {
+    fn lookup(&self, key: *const u8) -> Result<*mut u8, MapError> {
         let Some(k) = (unsafe { KeyBlob::from_ptr(key, self.key_size) }) else {
             let e = MapError::InvalidArg;
             e.log_if_bug("hash.lookup");
             return Err(e);
         };
-        match self.table.get_mut(&k) {
-            Some(v) => Ok(v.as_mut_ptr()),
+        match self.table.get(&k) {
+            Some(v) => Ok(v.as_ptr()),
             None => Err(MapError::NotFound),
         }
     }
@@ -264,7 +269,10 @@ impl BpfHashMapBuilder {
         self
     }
 
-    fn finish_spec(self, capacity: usize) -> Result<(ResourceId, usize, usize, Option<&'static str>), HashBuildError> {
+    fn finish_spec(
+        self,
+        capacity: usize,
+    ) -> Result<(ResourceId, usize, usize, Option<&'static str>), HashBuildError> {
         let key_size = self.key_size.ok_or(HashBuildError::MissingKey)?;
         let value_size = self.value_size.ok_or(HashBuildError::MissingValue)?;
         let id = self.id.ok_or(HashBuildError::MissingId)?;

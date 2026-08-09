@@ -64,7 +64,7 @@ pub fn create_bpf_ringbuf(id: ResourceId, byte_capacity: usize) -> Result<(), Al
 }
 
 impl MapOps for BpfRingBuf {
-    fn lookup(&mut self, _key: *const u8) -> Result<*mut u8, MapError> {
+    fn lookup(&self, _key: *const u8) -> Result<*mut u8, MapError> {
         let e = MapError::Unsupported;
         e.log_if_bug("ringbuf.lookup");
         Err(e)

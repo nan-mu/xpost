@@ -35,11 +35,12 @@ pub struct BpfArrayMap {
 impl BpfArrayMap {
     /// Absolute pointer to element `idx`, or null if out of range.
     #[inline]
-    pub fn elem_ptr(&mut self, idx: usize) -> *mut u8 {
+    pub fn elem_ptr(&self, idx: usize) -> *mut u8 {
         if idx >= self.max_entries {
             return ptr::null_mut();
         }
-        unsafe { self.data.as_mut_ptr().add(idx * self.value_stride) }
+        // SAFETY: index in range; BPF may write value bytes through the pointer.
+        unsafe { self.data.as_ptr().add(idx * self.value_stride) as *mut u8 }
     }
 
     /// Userspace: contiguous storage (hold `POOL` write lock).
@@ -101,7 +102,7 @@ impl BpfArrayMap {
 }
 
 impl MapOps for BpfArrayMap {
-    fn lookup(&mut self, key: *const u8) -> Result<*mut u8, MapError> {
+    fn lookup(&self, key: *const u8) -> Result<*mut u8, MapError> {
         if key.is_null() {
             let e = MapError::InvalidArg;
             e.log_if_bug("array.lookup");

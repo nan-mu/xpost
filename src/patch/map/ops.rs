@@ -38,7 +38,7 @@ impl MapError {
 
 /// Pointer ABI used by AOT helpers (crate-internal; not re-exported).
 pub(crate) trait MapOps {
-    fn lookup(&mut self, key: *const u8) -> Result<*mut u8, MapError>;
+    fn lookup(&self, key: *const u8) -> Result<*mut u8, MapError>;
     fn update(&mut self, key: *const u8, value: *const u8, flags: u64) -> Result<(), MapError>;
     fn delete(&mut self, key: *const u8) -> Result<(), MapError>;
 }

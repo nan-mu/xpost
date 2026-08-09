@@ -103,7 +103,7 @@ pub enum MapKind {
 
 type PoolMap = HashMap<ResourceId, RawResource, hashbrown::DefaultHashBuilder, TalcAlloc>;
 
-/// Global Id → resource table. Sync XDP helpers use [`RwCell::try_write`].
+/// Global Id → resource table. Lookup uses [`RwCell::try_read`]; mutate uses [`RwCell::try_write`].
 pub(crate) static POOL: RwCell<Option<PoolMap>> = RwCell::new(None);
 
 /// Type-erased pool entry. [`Drop`] returns storage to talc — no manual free at

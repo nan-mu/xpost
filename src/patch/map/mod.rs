@@ -39,5 +39,4 @@ include!(concat!(env!("OUT_DIR"), "/bpf_maps.rs"));
 include!(concat!(env!("OUT_DIR"), "/aot_map_bind.rs"));
 
 pub mod userspace;
-#[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
 pub use userspace::{with_array_map, with_hash_map, with_ringbuf_map};

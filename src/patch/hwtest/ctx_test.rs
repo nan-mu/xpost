@@ -70,8 +70,17 @@ fn arr0_value() -> Option<u32> {
     if !FIRMWARE_HAS_ARRAY {
         return None;
     }
-    // Optional arr_map payload only.
+    // Optional arr_map payload only (programs that write index 0 = 42).
     None
+}
+
+/// Array-map check is skipped when `bpf.toml` has no ARRAY (e.g. firewall_ipv4).
+fn arr0_ok(v: Option<u32>) -> bool {
+    if FIRMWARE_HAS_ARRAY {
+        v == Some(42)
+    } else {
+        true
+    }
 }
 
 /// Contiguous-object dynptr: write, re-wrap, read — proves bytes really stuck.
@@ -308,8 +317,8 @@ pub fn run_multi_xdp(pass: &mut u32, fail: &mut u32) {
             "multi_xdp_short",
             r1 == XDP_PASS
                 && r2 == XDP_PASS
-                && v1 == Some(42)
-                && v2 == Some(42)
+                && arr0_ok(v1)
+                && arr0_ok(v2)
                 && mark_before == MARK_S1
                 && mark_mid == MARK_S1
                 && mark_after == MARK_S1
@@ -335,7 +344,7 @@ pub fn run_multi_xdp(pass: &mut u32, fail: &mut u32) {
                 && frame[20] == 0x12
                 && frame[21] == 0x34
                 && read_u32_le(&frame, 14) == MARK_S2
-                && arr0_value() == Some(42),
+                && arr0_ok(arr0_value()),
             pass,
             fail,
         );
@@ -347,7 +356,7 @@ pub fn run_multi_xdp(pass: &mut u32, fail: &mut u32) {
         let mut ok = true;
         for i in 0..3 {
             let rc = xdp(&mut frame);
-            if rc != XDP_PASS || arr0_value() != Some(42) {
+            if rc != XDP_PASS || !arr0_ok(arr0_value()) {
                 ok = false;
             }
             frame[64] = frame[64].wrapping_add(1);

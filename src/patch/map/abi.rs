@@ -143,12 +143,20 @@ pub fn resolve_map_id(map: usize) -> Option<ResourceId> {
     })
 }
 
-/// Registry entry viewed as a concrete BPF map.
+/// Registry entry viewed as a concrete BPF map (exclusive / write path).
 pub(super) enum TypedMap<'a> {
     Array(&'a mut BpfArrayMap),
     Hash(&'a mut BpfHashMap),
     Ringbuf(&'a mut BpfRingBuf),
     Devmap(&'a mut BpfArrayMap),
+}
+
+/// Shared view for lookup (read lock; value bytes remain writable via returned ptr).
+pub(super) enum TypedMapRef<'a> {
+    Array(&'a BpfArrayMap),
+    Hash(&'a BpfHashMap),
+    Ringbuf(&'a BpfRingBuf),
+    Devmap(&'a BpfArrayMap),
 }
 
 pub(super) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> R) -> Option<R> {
@@ -164,16 +172,37 @@ pub(super) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> 
     Some(f(typed))
 }
 
+pub(super) fn with_typed_map_ref<R>(
+    id: ResourceId,
+    f: impl FnOnce(TypedMapRef<'_>) -> R,
+) -> Option<R> {
+    let guard = POOL.try_read()?;
+    let table = guard.as_ref()?;
+    let res = table.get(&id)?;
+    let typed = match res.kind? {
+        MapKind::Array => TypedMapRef::Array(unsafe { res.as_ref() }),
+        MapKind::Hash => TypedMapRef::Hash(unsafe { res.as_ref() }),
+        MapKind::Ringbuf => TypedMapRef::Ringbuf(unsafe { res.as_ref() }),
+        MapKind::Devmap => TypedMapRef::Devmap(unsafe { res.as_ref() }),
+    };
+    Some(f(typed))
+}
+
 /// Sync BPF helper entry: resolve `map` as AOT pointer or [`ResourceId`].
+///
+/// Uses a pool **read** lock so lookups do not exclusive-contend with each other.
+/// `Busy` (writer held) still returns null — same ABI as a key miss; BPF programs
+/// that fail-open on null cannot distinguish the two. Prefer completing userspace
+/// map writes before enabling RX (see `fw_seed`).
 pub fn helper_lookup(map: usize, key: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
         return 0;
     };
     let key = key as *const u8;
-    match with_typed_map(id, |typed| match typed {
-        TypedMap::Array(m) | TypedMap::Devmap(m) => MapOps::lookup(m, key),
-        TypedMap::Hash(m) => MapOps::lookup(m, key),
-        TypedMap::Ringbuf(m) => MapOps::lookup(m, key),
+    match with_typed_map_ref(id, |typed| match typed {
+        TypedMapRef::Array(m) | TypedMapRef::Devmap(m) => MapOps::lookup(m, key),
+        TypedMapRef::Hash(m) => MapOps::lookup(m, key),
+        TypedMapRef::Ringbuf(m) => MapOps::lookup(m, key),
     }) {
         Some(Ok(p)) => p as usize,
         Some(Err(MapError::NotFound)) => 0,

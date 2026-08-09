@@ -79,7 +79,6 @@ mod backend {
         }
 
         #[inline]
-        #[allow(dead_code)]
         pub fn try_read(&self) -> Option<ReadGuard<'_, T>> {
             self.0.try_read().ok()
         }
@@ -120,7 +119,6 @@ mod backend {
         }
 
         #[inline]
-        #[allow(dead_code)]
         pub fn try_read(&self) -> Option<ReadGuard<'_, T>> {
             self.0.try_borrow().ok()
         }

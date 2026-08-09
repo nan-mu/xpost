@@ -1,9 +1,7 @@
 //! WiFi STA + firewall test: UDP :8080 → fixed echo to TR3000.
 
 use crate::driver::FirewallDevice;
-use crate::fw_cfg::{
-    FW_ECHO_PORT, FW_LISTEN_PORT, FW_TR3000_IP, XDP_ENABLE, log_cfg,
-};
+use crate::fw_cfg::{FW_ECHO_PORT, FW_LISTEN_PORT, FW_TR3000_IP, XDP_ENABLE, log_cfg};
 use embassy_net::{
     IpAddress, IpEndpoint, Ipv4Address, StackResources,
     udp::{PacketMetadata, UdpSocket},
@@ -115,11 +113,7 @@ async fn recv_loop(udp_socket: UdpSocket<'static>) {
     );
     info!(
         "[FWTEST] echo → {}.{}.{}.{}:{}",
-        FW_TR3000_IP[0],
-        FW_TR3000_IP[1],
-        FW_TR3000_IP[2],
-        FW_TR3000_IP[3],
-        FW_ECHO_PORT
+        FW_TR3000_IP[0], FW_TR3000_IP[1], FW_TR3000_IP[2], FW_TR3000_IP[3], FW_ECHO_PORT
     );
 
     let mut rx_buffer = [0u8; 1536];
