@@ -27,6 +27,19 @@ pub const XDP_PASS: i32 = 2;
 pub const XDP_TX: i32 = 3;
 pub const XDP_REDIRECT: i32 = 4;
 
+/// Name for AOT / driver log lines (`enum xdp_action`).
+#[inline]
+pub fn xdp_action_name(action: i32) -> &'static str {
+    match action {
+        XDP_ABORTED => "XDP_ABORTED",
+        XDP_DROP => "XDP_DROP",
+        XDP_PASS => "XDP_PASS",
+        XDP_TX => "XDP_TX",
+        XDP_REDIRECT => "XDP_REDIRECT",
+        _ => "XDP_UNKNOWN",
+    }
+}
+
 /// Record redirect destination before returning [`XDP_REDIRECT`].
 #[inline]
 pub fn set_pending(ifindex: u32) {

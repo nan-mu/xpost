@@ -1,7 +1,9 @@
 pub mod dynptr;
 mod inner;
 
-use log::debug;
+use log::{debug, info};
+
+use crate::patch::map::resolve_map_id;
 
 /// Known helper ids — Linux `bpf_func_id` / `include/uapi/linux/bpf.h`.
 ///
@@ -142,6 +144,25 @@ pub extern "C" fn helper_dispatcher(
     dispatch_helper(idx, a1, a2, a3, a4, a5)
 }
 
+fn is_map_helper(idx: usize) -> bool {
+    matches!(
+        idx,
+        HelperIdx::BPF_FUNC_MAP_LOOKUP_ELEM
+            | HelperIdx::BPF_FUNC_MAP_UPDATE_ELEM
+            | HelperIdx::BPF_FUNC_MAP_DELETE_ELEM
+            | HelperIdx::BPF_FUNC_FOR_EACH_MAP_ELEM
+            | HelperIdx::BPF_FUNC_REDIRECT_MAP
+            | HelperIdx::BPF_FUNC_RINGBUF_OUTPUT
+            | HelperIdx::BPF_FUNC_RINGBUF_RESERVE
+            | HelperIdx::BPF_FUNC_RINGBUF_SUBMIT
+            | HelperIdx::BPF_FUNC_RINGBUF_DISCARD
+            | HelperIdx::BPF_FUNC_RINGBUF_QUERY
+            | HelperIdx::BPF_FUNC_RINGBUF_RESERVE_DYNPTR
+            | HelperIdx::BPF_FUNC_RINGBUF_SUBMIT_DYNPTR
+            | HelperIdx::BPF_FUNC_RINGBUF_DISCARD_DYNPTR
+    )
+}
+
 #[inline(never)]
 fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> usize {
     let ret = match idx {
@@ -176,17 +197,47 @@ fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
         _ => usize::MAX,
     };
     let (ret_kind, ret_val) = fmt_ret(ret);
-    debug!(
-        "bpf {} (#{}) a1={} a2={} a3={} a4={} a5={} -> {}={}",
-        helper_name(idx),
-        idx,
-        log_u(a1),
-        log_u(a2),
-        log_u(a3),
-        log_u(a4),
-        log_u(a5),
-        ret_kind,
-        ret_val,
-    );
+    if is_map_helper(idx) {
+        let map_id = resolve_map_id(a1);
+        match map_id {
+            Some(id) => info!(
+                "[Helper][MAP] {} (#{}) map_id={} a2={} a3={} a4={} a5={} -> {}={}",
+                helper_name(idx),
+                idx,
+                id,
+                log_u(a2),
+                log_u(a3),
+                log_u(a4),
+                log_u(a5),
+                ret_kind,
+                ret_val,
+            ),
+            None => info!(
+                "[Helper][MAP] {} (#{}) map_arg={} a2={} a3={} a4={} a5={} -> {}={}",
+                helper_name(idx),
+                idx,
+                log_u(a1),
+                log_u(a2),
+                log_u(a3),
+                log_u(a4),
+                log_u(a5),
+                ret_kind,
+                ret_val,
+            ),
+        }
+    } else {
+        debug!(
+            "bpf {} (#{}) a1={} a2={} a3={} a4={} a5={} -> {}={}",
+            helper_name(idx),
+            idx,
+            log_u(a1),
+            log_u(a2),
+            log_u(a3),
+            log_u(a4),
+            log_u(a5),
+            ret_kind,
+            ret_val,
+        );
+    }
     ret
 }

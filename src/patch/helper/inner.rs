@@ -63,10 +63,11 @@ pub(super) mod redirect_map {
         let key_u32 = key as u32;
         let key_bytes = key_u32.to_ne_bytes();
         let m: &mut crate::patch::map::BpfArrayMap = unsafe { res.as_mut() };
-        let val_ptr = m.lookup(key_bytes.as_ptr());
-        if val_ptr.is_null() {
-            return fallback;
-        }
+        use crate::patch::map::ops::MapOps;
+        let val_ptr = match MapOps::lookup(m, key_bytes.as_ptr()) {
+            Ok(p) => p,
+            Err(_) => return fallback,
+        };
         // Unpopulated slot stays 0 — treat as wifi ifindex only when explicitly written;
         // Linux DEVMAP miss returns fallback; zero value is a valid ifindex (wifi).
         // Distinguish empty: ARRAY is zero-filled; userspace must write before redirect.

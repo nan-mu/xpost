@@ -1,93 +1,22 @@
 //! BPF_MAP_TYPE_RINGBUF — length-prefixed byte ring in the talc pool.
-//!
-//! Also hosts the generic [`TalcRingBuf`] resource used by typed ring buffers.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use core::alloc::Layout;
-use core::mem::MaybeUninit;
 use core::ptr;
 
 use allocator_api2::alloc::AllocError;
 use allocator_api2::boxed::Box;
-use ringbuf::SharedRb;
-use ringbuf::ring_buffer::Container;
-use talc::TalcCell;
-use talc::source::Manual;
 
 use crate::patch::helper::dynptr::BpfDynptr;
 
 use super::abi::{TypedMap, resolve_map_id, with_typed_map};
+use super::ops::{MapError, MapOps};
 use super::pool::{HEAP_SIZE, MapKind, POOL, RawResource, ResourceId, allocator};
 
 const MAX_RECORD_BYTES: usize = 256;
 
-/// Backing storage for `SharedRb`, allocated from the talc pool.
-pub struct TalcVec<T>(allocator_api2::vec::Vec<MaybeUninit<T>, &'static TalcCell<Manual>>);
-
-unsafe impl<T> Container<T> for TalcVec<T> {
-    type Internal = Self;
-
-    fn into_internal(self) -> Self {
-        self
-    }
-
-    unsafe fn from_internal(this: Self) -> Self {
-        this
-    }
-
-    fn as_mut_ptr(this: &Self) -> *mut MaybeUninit<T> {
-        this.0.as_ptr() as *mut _
-    }
-
-    fn len(this: &Self) -> usize {
-        this.0.len()
-    }
-}
-
-/// Heap-backed ring buffer using talc-allocated storage (`SharedRb` + `TalcVec`).
-pub type TalcRingBuf<T> = SharedRb<T, TalcVec<T>>;
-
-unsafe fn drop_ringbuf<T>(ptr: *mut u8) {
-    let _ = unsafe { Box::from_raw_in(ptr as *mut TalcRingBuf<T>, allocator()) };
-}
-
-fn alloc_ringbuf<T: Send + 'static>(capacity: usize) -> Result<(*mut u8, Layout), AllocError> {
-    if capacity == 0 {
-        return Err(AllocError);
-    }
-    let alloc = allocator();
-    let mut data = allocator_api2::vec::Vec::new_in(alloc);
-    data.try_reserve_exact(capacity).map_err(|_| AllocError)?;
-    data.resize_with(capacity, MaybeUninit::<T>::uninit);
-    let rb = unsafe { SharedRb::from_raw_parts(TalcVec(data), 0, 0) };
-    let boxed = Box::try_new_in(rb, alloc)?;
-    let raw_ptr = Box::into_raw(boxed) as *mut u8;
-    let layout = Layout::new::<TalcRingBuf<T>>();
-    Ok((raw_ptr, layout))
-}
-
-/// Create a ring buffer with fixed `capacity` and insert it into the pool.
-#[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
-pub async fn create_ringbuf<T: Send + 'static>(
-    id: ResourceId,
-    capacity: usize,
-) -> Result<(), AllocError> {
-    let (raw_ptr, layout) = alloc_ringbuf::<T>(capacity)?;
-    RawResource::insert(id, raw_ptr, layout, drop_ringbuf::<T>, None, 0, 0, 0).await
-}
-
-#[cfg(feature = "patch-sync-st")]
-pub fn create_ringbuf<T: Send + 'static>(
-    id: ResourceId,
-    capacity: usize,
-) -> Result<(), AllocError> {
-    let (raw_ptr, layout) = alloc_ringbuf::<T>(capacity)?;
-    RawResource::insert(id, raw_ptr, layout, drop_ringbuf::<T>, None, 0, 0, 0)
-}
-
-/// Byte-capacity ring with length-prefixed records. Smoke-oriented: advances
-/// a producer cursor; no consumer drain yet (query reports produced bytes).
+/// Byte-capacity ring with length-prefixed records (BPF ringbuf).
 pub struct BpfRingBuf {
     data: Box<[u8], &'static talc::TalcCell<talc::source::Manual>>,
     capacity: usize,
@@ -97,7 +26,7 @@ pub struct BpfRingBuf {
 }
 
 unsafe fn drop_ring(ptr: *mut u8) {
-    let _ = unsafe { Box::from_raw_in(ptr as *mut BpfRingBuf, allocator()) };
+    unsafe { super::pool::reclaim_talc_box::<BpfRingBuf>(ptr, "BpfRingBuf") };
 }
 
 fn alloc_bpf_ringbuf(byte_capacity: usize) -> Result<*mut u8, AllocError> {
@@ -132,6 +61,26 @@ pub fn create_bpf_ringbuf(id: ResourceId, byte_capacity: usize) -> Result<(), Al
     let raw = alloc_bpf_ringbuf(byte_capacity)?;
     let layout = Layout::new::<BpfRingBuf>();
     RawResource::insert(id, raw, layout, drop_ring, Some(MapKind::Ringbuf), 0, 0, 0)
+}
+
+impl MapOps for BpfRingBuf {
+    fn lookup(&mut self, _key: *const u8) -> Result<*mut u8, MapError> {
+        let e = MapError::Unsupported;
+        e.log_if_bug("ringbuf.lookup");
+        Err(e)
+    }
+
+    fn update(&mut self, _key: *const u8, _value: *const u8, _flags: u64) -> Result<(), MapError> {
+        let e = MapError::Unsupported;
+        e.log_if_bug("ringbuf.update");
+        Err(e)
+    }
+
+    fn delete(&mut self, _key: *const u8) -> Result<(), MapError> {
+        let e = MapError::Unsupported;
+        e.log_if_bug("ringbuf.delete");
+        Err(e)
+    }
 }
 
 impl BpfRingBuf {

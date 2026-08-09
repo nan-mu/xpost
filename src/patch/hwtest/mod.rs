@@ -1,6 +1,8 @@
 //! On-device HW selftest (`--features hw-selftest`).
 
 pub mod ctx_test;
+mod probe_hash;
+mod probe_ring;
 
 use crate::patch::ctx::XdpMd;
 use crate::patch::helper::dynptr::BpfDynptr;
@@ -38,20 +40,23 @@ pub(crate) fn check(name: &str, ok: bool, pass: &mut u32, fail: &mut u32) {
 /// Acceptance checks against the live talc pool (create / insert / OOM).
 #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
 pub async fn verify_pool() -> Result<(), &'static str> {
-    use crate::patch::map::hash;
     use crate::patch::map::pool::ALLOCATOR;
-    use crate::patch::map::{RawResource, ResourceId, array};
+    use crate::patch::map::{RawResource, ResourceId, create_bpf_array};
+
+    use self::probe_hash::{ProbeHashMap, create_probe_hashmap};
+    use self::probe_ring::{ProbeRingBuf, create_probe_ringbuf};
 
     const ARRAY_ID: ResourceId = 0xA1;
-    const MAP_ID: ResourceId = 0xA2;
+    const HASH_ID: ResourceId = 0xA2;
     const HUGE_ID: ResourceId = 0xA3;
+    const RING_ID: ResourceId = 0xA4;
 
     let before = ALLOCATOR.allocated_bytes();
-    array::create_array(ARRAY_ID, 1, 64)
+    create_bpf_array(ARRAY_ID, 1, 64)
         .await
-        .map_err(|_| "create_array failed")?;
+        .map_err(|_| "create_bpf_array failed")?;
     if ALLOCATOR.allocated_bytes() <= before {
-        return Err("create_array did not increase allocated_bytes");
+        return Err("create_bpf_array did not increase allocated_bytes");
     }
     if !RawResource::destroy(ARRAY_ID).await {
         return Err("destroy_resource(array) failed");
@@ -61,11 +66,11 @@ pub async fn verify_pool() -> Result<(), &'static str> {
     }
 
     const CAP: usize = 8;
-    hash::create_hashmap::<u32, u32>(MAP_ID, CAP)
+    create_probe_hashmap::<u32, u32>(HASH_ID, CAP)
         .await
-        .map_err(|_| "create_hashmap failed")?;
+        .map_err(|_| "create_probe_hashmap failed")?;
     let after_create = ALLOCATOR.allocated_bytes();
-    let capacity = RawResource::with_mut(MAP_ID, |m: &mut hash::SharedHashMap<u32, u32>| {
+    let capacity = RawResource::with_mut(HASH_ID, |m: &mut ProbeHashMap<u32, u32>| {
         let cap = m.capacity();
         for i in 0..CAP as u32 {
             m.insert(i, i);
@@ -73,17 +78,17 @@ pub async fn verify_pool() -> Result<(), &'static str> {
         cap
     })
     .await
-    .ok_or("hashmap missing")?;
+    .ok_or("probe hashmap missing")?;
     if capacity < CAP {
-        return Err("hashmap capacity below requested");
+        return Err("probe hashmap capacity below requested");
     }
     if ALLOCATOR.allocated_bytes() != after_create {
-        return Err("hashmap insert triggered extra allocation");
+        return Err("probe hashmap insert triggered extra allocation");
     }
-    RawResource::destroy(MAP_ID).await;
+    RawResource::destroy(HASH_ID).await;
 
     let before_oom = ALLOCATOR.allocated_bytes();
-    match hash::create_hashmap::<u32, u32>(HUGE_ID, 65_536).await {
+    match create_probe_hashmap::<u32, u32>(HUGE_ID, 65_536).await {
         Err(_) => {}
         Ok(()) => {
             RawResource::destroy(HUGE_ID).await;
@@ -93,11 +98,31 @@ pub async fn verify_pool() -> Result<(), &'static str> {
     if ALLOCATOR.allocated_bytes() != before_oom {
         return Err("failed OOM allocate leaked bytes");
     }
-    if RawResource::read::<hash::SharedHashMap<u32, u32>, _>(HUGE_ID, |_| ())
+    if RawResource::read::<ProbeHashMap<u32, u32>, _>(HUGE_ID, |_| ())
         .await
         .is_some()
     {
         return Err("OOM allocate left registry entry");
+    }
+
+    let before_ring = ALLOCATOR.allocated_bytes();
+    create_probe_ringbuf::<u8>(RING_ID, 64)
+        .await
+        .map_err(|_| "create_probe_ringbuf failed")?;
+    if ALLOCATOR.allocated_bytes() <= before_ring {
+        return Err("create_probe_ringbuf did not increase allocated_bytes");
+    }
+    if RawResource::read::<ProbeRingBuf<u8>, _>(RING_ID, |_| ())
+        .await
+        .is_none()
+    {
+        return Err("probe ringbuf missing after create");
+    }
+    if !RawResource::destroy(RING_ID).await {
+        return Err("destroy_resource(ring) failed");
+    }
+    if ALLOCATOR.allocated_bytes() != before_ring {
+        return Err("destroy ring did not restore allocated_bytes");
     }
 
     Ok(())
@@ -105,18 +130,21 @@ pub async fn verify_pool() -> Result<(), &'static str> {
 
 #[cfg(feature = "patch-sync-st")]
 pub fn verify_pool() -> Result<(), &'static str> {
-    use crate::patch::map::hash;
     use crate::patch::map::pool::ALLOCATOR;
-    use crate::patch::map::{RawResource, ResourceId, array};
+    use crate::patch::map::{RawResource, ResourceId, create_bpf_array};
+
+    use self::probe_hash::{ProbeHashMap, create_probe_hashmap};
+    use self::probe_ring::{ProbeRingBuf, create_probe_ringbuf};
 
     const ARRAY_ID: ResourceId = 0xA1;
-    const MAP_ID: ResourceId = 0xA2;
+    const HASH_ID: ResourceId = 0xA2;
     const HUGE_ID: ResourceId = 0xA3;
+    const RING_ID: ResourceId = 0xA4;
 
     let before = ALLOCATOR.allocated_bytes();
-    array::create_array(ARRAY_ID, 1, 64).map_err(|_| "create_array failed")?;
+    create_bpf_array(ARRAY_ID, 1, 64).map_err(|_| "create_bpf_array failed")?;
     if ALLOCATOR.allocated_bytes() <= before {
-        return Err("create_array did not increase allocated_bytes");
+        return Err("create_bpf_array did not increase allocated_bytes");
     }
     if !RawResource::destroy(ARRAY_ID) {
         return Err("destroy_resource(array) failed");
@@ -126,26 +154,26 @@ pub fn verify_pool() -> Result<(), &'static str> {
     }
 
     const CAP: usize = 8;
-    hash::create_hashmap::<u32, u32>(MAP_ID, CAP).map_err(|_| "create_hashmap failed")?;
+    create_probe_hashmap::<u32, u32>(HASH_ID, CAP).map_err(|_| "create_probe_hashmap failed")?;
     let after_create = ALLOCATOR.allocated_bytes();
-    let capacity = RawResource::with_mut(MAP_ID, |m: &mut hash::SharedHashMap<u32, u32>| {
+    let capacity = RawResource::with_mut(HASH_ID, |m: &mut ProbeHashMap<u32, u32>| {
         let cap = m.capacity();
         for i in 0..CAP as u32 {
             m.insert(i, i);
         }
         cap
     })
-    .ok_or("hashmap missing")?;
+    .ok_or("probe hashmap missing")?;
     if capacity < CAP {
-        return Err("hashmap capacity below requested");
+        return Err("probe hashmap capacity below requested");
     }
     if ALLOCATOR.allocated_bytes() != after_create {
-        return Err("hashmap insert triggered extra allocation");
+        return Err("probe hashmap insert triggered extra allocation");
     }
-    RawResource::destroy(MAP_ID);
+    RawResource::destroy(HASH_ID);
 
     let before_oom = ALLOCATOR.allocated_bytes();
-    match hash::create_hashmap::<u32, u32>(HUGE_ID, 65_536) {
+    match create_probe_hashmap::<u32, u32>(HUGE_ID, 65_536) {
         Err(_) => {}
         Ok(()) => {
             RawResource::destroy(HUGE_ID);
@@ -155,8 +183,23 @@ pub fn verify_pool() -> Result<(), &'static str> {
     if ALLOCATOR.allocated_bytes() != before_oom {
         return Err("failed OOM allocate leaked bytes");
     }
-    if RawResource::read::<hash::SharedHashMap<u32, u32>, _>(HUGE_ID, |_| ()).is_some() {
+    if RawResource::read::<ProbeHashMap<u32, u32>, _>(HUGE_ID, |_| ()).is_some() {
         return Err("OOM allocate left registry entry");
+    }
+
+    let before_ring = ALLOCATOR.allocated_bytes();
+    create_probe_ringbuf::<u8>(RING_ID, 64).map_err(|_| "create_probe_ringbuf failed")?;
+    if ALLOCATOR.allocated_bytes() <= before_ring {
+        return Err("create_probe_ringbuf did not increase allocated_bytes");
+    }
+    if RawResource::read::<ProbeRingBuf<u8>, _>(RING_ID, |_| ()).is_none() {
+        return Err("probe ringbuf missing after create");
+    }
+    if !RawResource::destroy(RING_ID) {
+        return Err("destroy_resource(ring) failed");
+    }
+    if ALLOCATOR.allocated_bytes() != before_ring {
+        return Err("destroy ring did not restore allocated_bytes");
     }
 
     Ok(())

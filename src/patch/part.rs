@@ -6,7 +6,7 @@ use log::info;
 
 use super::helper_dispatcher;
 use super::mem_map::{HOT_REGION_LEN, assert_linked_addresses};
-use super::redirect::clear_pending;
+use super::redirect::{clear_pending, xdp_action_name};
 
 /// Firmware-owned HOT_REGION placeholder. Linker places this at [`HOT_REGION_BASE`].
 #[unsafe(link_section = ".iram1.hotload_area")]
@@ -60,10 +60,17 @@ pub fn xdp(data: &mut [u8]) -> i32 {
         clear_pending();
         let mut ctx = super::ctx::XdpMd::from_buf(data);
 
-        let ctx_ptr = &mut ctx as *mut XdpContext;
+        // Decimal pointer values — hex triggers espflash monitor addr2line spam.
+        let data_addr = ctx.data as usize;
+        let data_end_addr = ctx.data_end as usize;
+        info!(
+            "[XDP] begin data={} data_end={} len={}",
+            data_addr,
+            data_end_addr,
+            data_end_addr.saturating_sub(data_addr)
+        );
 
-        // Keep logs free of raw pointers (espflash addr2line spam).
-        log::debug!("[AOT] XDP call len={}", data.len());
+        let ctx_ptr = &mut ctx as *mut XdpContext;
 
         let res: i32;
         core::arch::asm!(
@@ -74,7 +81,7 @@ pub fn xdp(data: &mut [u8]) -> i32 {
             clobber_abi("C"),
         );
 
-        log::debug!("[AOT] XDP return={}", res);
+        info!("[XDP] end action={} ({})", xdp_action_name(res), res);
         res
     }
 }

@@ -17,7 +17,7 @@ bench = false
 [features]
 default = ["patch-sync-embassy"]
 # Patch pool/slots: embassy-sync async RwLock (control plane .await)
-patch-sync-embassy = ["dep:embassy-sync"]
+patch-sync-embassy = []
 # Patch pool/slots: single-thread RefCell (control plane sync; no IRQ→helper).
 # Overrides `patch-sync-embassy` when both are enabled (e.g. `--features patch-sync-st`).
 patch-sync-st = []
@@ -81,7 +81,7 @@ talc = { version = "5.0", features = ["counters"] }
 allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
 allocator-api2-v02 = { version = "0.2", package = "allocator-api2", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.17", default-features = false, features = ["allocator-api2", "default-hasher"] }
-embassy-sync = { version = "0.8.0", features = ["log"], optional = true }
+embassy-sync = { version = "0.8.0", features = ["log"] }
 ringbuf = { version = "0.3.3", default-features = false }
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html

@@ -1,8 +1,14 @@
-//! Userspace (embassy control-plane) access to BPF maps by name.
+//! Userspace (embassy) access: write-lock then touch native containers.
 
-use super::hash::{BpfHashMap, KeyBlob, ValSlot};
+use log::error;
+
+use super::array::BpfArrayMap;
+use super::hash::BpfHashMap;
+use super::hash::{KeyBlob, ValSlot};
 use super::names::resolve_map_name;
+use super::ops::MapError;
 use super::pool::{MapKind, POOL};
+use super::ringbuf::BpfRingBuf;
 use super::{FirewallRulesKey, FirewallRulesValue};
 
 impl From<FirewallRulesKey> for KeyBlob {
@@ -29,46 +35,74 @@ impl From<u8> for ValSlot {
     }
 }
 
-/// Run `f` on a HASH map looked up by bpf.toml name under a `POOL` read lock.
+/// `POOL.write` then `&mut BpfHashMap` (use [`BpfHashMap::table_mut`]).
 #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
-pub async fn with_hash_map<R>(name: &str, f: impl FnOnce(&BpfHashMap) -> R) -> Option<R> {
-    let id = resolve_map_name(name)?;
-    let guard = POOL.read().await;
-    let table = guard.as_ref()?;
-    let resource = table.get(&id)?;
-    if resource.kind != Some(MapKind::Hash) {
-        return None;
-    }
-    Some(f(unsafe { resource.as_ref::<BpfHashMap>() }))
-}
-
-#[cfg(feature = "patch-sync-st")]
-pub fn with_hash_map<R>(name: &str, f: impl FnOnce(&BpfHashMap) -> R) -> Option<R> {
-    let id = resolve_map_name(name)?;
-    let guard = POOL.read();
-    let table = guard.as_ref()?;
-    let resource = table.get(&id)?;
-    if resource.kind != Some(MapKind::Hash) {
-        return None;
-    }
-    Some(f(unsafe { resource.as_ref::<BpfHashMap>() }))
-}
-
-/// Convenience: read-lock `name`, then [`BpfHashMap::insert_entry`].
-#[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
-pub async fn hash_insert(
+pub async fn with_hash_map<R>(
     name: &str,
-    key: impl Into<KeyBlob>,
-    val: impl Into<ValSlot>,
-) -> Option<i32> {
-    let key = key.into();
-    let val = val.into();
-    with_hash_map(name, |m| m.insert_entry(key, val)).await
+    f: impl FnOnce(&mut BpfHashMap) -> R,
+) -> Result<R, MapError> {
+    let Some(id) = resolve_map_name(name) else {
+        error!("[userspace] map name {:?} not registered", name);
+        return Err(MapError::NotFound);
+    };
+    let mut guard = POOL.write().await;
+    let table = guard.as_mut().ok_or(MapError::InvalidArg)?;
+    let resource = table.get_mut(&id).ok_or_else(|| {
+        error!("[userspace] map id {} missing", id);
+        MapError::NotFound
+    })?;
+    if resource.kind != Some(MapKind::Hash) {
+        error!("[userspace] map {:?} is not HASH", name);
+        return Err(MapError::Unsupported);
+    }
+    Ok(f(unsafe { resource.as_mut::<BpfHashMap>() }))
 }
 
-#[cfg(feature = "patch-sync-st")]
-pub fn hash_insert(name: &str, key: impl Into<KeyBlob>, val: impl Into<ValSlot>) -> Option<i32> {
-    let key = key.into();
-    let val = val.into();
-    with_hash_map(name, |m| m.insert_entry(key, val))
+/// `POOL.write` then `&mut BpfArrayMap`.
+#[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
+pub async fn with_array_map<R>(
+    name: &str,
+    f: impl FnOnce(&mut BpfArrayMap) -> R,
+) -> Result<R, MapError> {
+    let Some(id) = resolve_map_name(name) else {
+        error!("[userspace] map name {:?} not registered", name);
+        return Err(MapError::NotFound);
+    };
+    let mut guard = POOL.write().await;
+    let table = guard.as_mut().ok_or(MapError::InvalidArg)?;
+    let resource = table.get_mut(&id).ok_or_else(|| {
+        error!("[userspace] map id {} missing", id);
+        MapError::NotFound
+    })?;
+    match resource.kind {
+        Some(MapKind::Array) | Some(MapKind::Devmap) => {}
+        _ => {
+            error!("[userspace] map {:?} is not ARRAY/DEVMAP", name);
+            return Err(MapError::Unsupported);
+        }
+    }
+    Ok(f(unsafe { resource.as_mut::<BpfArrayMap>() }))
+}
+
+/// `POOL.write` then `&mut BpfRingBuf`.
+#[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
+pub async fn with_ringbuf_map<R>(
+    name: &str,
+    f: impl FnOnce(&mut BpfRingBuf) -> R,
+) -> Result<R, MapError> {
+    let Some(id) = resolve_map_name(name) else {
+        error!("[userspace] map name {:?} not registered", name);
+        return Err(MapError::NotFound);
+    };
+    let mut guard = POOL.write().await;
+    let table = guard.as_mut().ok_or(MapError::InvalidArg)?;
+    let resource = table.get_mut(&id).ok_or_else(|| {
+        error!("[userspace] map id {} missing", id);
+        MapError::NotFound
+    })?;
+    if resource.kind != Some(MapKind::Ringbuf) {
+        error!("[userspace] map {:?} is not RINGBUF", name);
+        return Err(MapError::Unsupported);
+    }
+    Ok(f(unsafe { resource.as_mut::<BpfRingBuf>() }))
 }

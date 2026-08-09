@@ -13,6 +13,7 @@ use critical_section::Mutex;
 
 use super::array::BpfArrayMap;
 use super::hash::BpfHashMap;
+use super::ops::{MapError, MapOps};
 use super::pool::{MapKind, POOL, ResourceId};
 use super::ringbuf::BpfRingBuf;
 
@@ -169,39 +170,58 @@ pub fn helper_lookup(map: usize, key: usize) -> usize {
         return 0;
     };
     let key = key as *const u8;
-    with_typed_map(id, |typed| match typed {
-        TypedMap::Array(m) | TypedMap::Devmap(m) => m.lookup(key) as usize,
-        TypedMap::Hash(m) => m.lookup(key) as usize,
-        TypedMap::Ringbuf(_) => 0,
-    })
-    .unwrap_or(0)
+    match with_typed_map(id, |typed| match typed {
+        TypedMap::Array(m) | TypedMap::Devmap(m) => MapOps::lookup(m, key),
+        TypedMap::Hash(m) => MapOps::lookup(m, key),
+        TypedMap::Ringbuf(m) => MapOps::lookup(m, key),
+    }) {
+        Some(Ok(p)) => p as usize,
+        Some(Err(MapError::NotFound)) => 0,
+        Some(Err(_)) => 0,
+        None => {
+            MapError::Busy.log_if_bug("helper_lookup");
+            0
+        }
+    }
 }
 
 pub fn helper_update(map: usize, key: usize, value: usize, flags: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
-        return (-22i32) as usize;
+        return MapError::InvalidArg.errno() as usize;
     };
     let key = key as *const u8;
     let value = value as *const u8;
-    with_typed_map(id, |typed| match typed {
-        TypedMap::Array(m) | TypedMap::Devmap(m) => m.update(key, value, flags as u64) as usize,
-        TypedMap::Hash(m) => m.update(key, value, flags as u64) as usize,
-        TypedMap::Ringbuf(_) => (-22i32) as usize,
-    })
-    .unwrap_or((-22i32) as usize)
+    match with_typed_map(id, |typed| match typed {
+        TypedMap::Array(m) | TypedMap::Devmap(m) => MapOps::update(m, key, value, flags as u64),
+        TypedMap::Hash(m) => MapOps::update(m, key, value, flags as u64),
+        TypedMap::Ringbuf(m) => MapOps::update(m, key, value, flags as u64),
+    }) {
+        Some(Ok(())) => 0,
+        Some(Err(e)) => e.errno() as usize,
+        None => {
+            MapError::Busy.log_if_bug("helper_update");
+            MapError::Busy.errno() as usize
+        }
+    }
 }
 
 pub fn helper_delete(map: usize, key: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
-        return (-22i32) as usize;
+        return MapError::InvalidArg.errno() as usize;
     };
     let key = key as *const u8;
-    with_typed_map(id, |typed| match typed {
-        TypedMap::Array(m) | TypedMap::Devmap(m) => m.delete(key) as usize,
-        TypedMap::Hash(m) => m.delete(key) as usize,
-        TypedMap::Ringbuf(_) => (-22i32) as usize,
-    })
-    .unwrap_or((-22i32) as usize)
+    match with_typed_map(id, |typed| match typed {
+        TypedMap::Array(m) | TypedMap::Devmap(m) => MapOps::delete(m, key),
+        TypedMap::Hash(m) => MapOps::delete(m, key),
+        TypedMap::Ringbuf(m) => MapOps::delete(m, key),
+    }) {
+        Some(Ok(())) => 0,
+        Some(Err(e)) => e.errno() as usize,
+        None => {
+            MapError::Busy.log_if_bug("helper_delete");
+            MapError::Busy.errno() as usize
+        }
+    }
 }
 
 type ForEachCb = extern "C" fn(usize, usize, usize, usize) -> i32;

@@ -77,7 +77,7 @@ async fn main(spawner: Spawner) {
     patch::map::init_firmware_maps().expect("[Init][MAP] talc pool OOM for bpf.toml maps");
     info!("[Init][MAP] firmware maps from bpf.toml initialized");
 
-    info!("[Init][XDP] Read partition table / load XDP payload");
+    info!("[Init][XDP] load AOT payload into HOT_REGION");
     patch::load(peripherals.FLASH);
 
     #[cfg(feature = "hw-selftest")]

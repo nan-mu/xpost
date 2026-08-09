@@ -27,20 +27,22 @@ const TYPE_SHIFT: u32 = 24;
 const RDONLY_BIT: u32 = 1 << 31;
 
 /// A contiguous byte object: dynptr LOCAL views this span and nothing else.
-// #[derive(Clone, Copy)]
-// pub struct ContigObj {
-//     pub base: usize,
-//     pub len: usize,
-// }
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // used by `hw-selftest` / userspace contig helpers
+pub struct ContigObj {
+    pub base: usize,
+    pub len: usize,
+}
 
-// impl ContigObj {
-//     pub fn from_slice(s: &mut [u8]) -> Self {
-//         Self {
-//             base: s.as_mut_ptr() as usize,
-//             len: s.len(),
-//         }
-//     }
-// }
+impl ContigObj {
+    #[allow(dead_code)]
+    pub fn from_slice(s: &mut [u8]) -> Self {
+        Self {
+            base: s.as_mut_ptr() as usize,
+            len: s.len(),
+        }
+    }
+}
 
 #[repr(C, align(8))]
 #[derive(Clone, Copy)]
@@ -86,9 +88,10 @@ impl BpfDynptr {
         self.data != 0 && self.dynptr_type() != TYPE_INVALID && self.usable_size() > 0
     }
 
-    // pub fn is_contig(self) -> bool {
-    //     self.is_valid() && self.dynptr_type() == TYPE_LOCAL
-    // }
+    #[allow(dead_code)]
+    pub fn is_contig(self) -> bool {
+        self.is_valid() && self.dynptr_type() == TYPE_LOCAL
+    }
 
     /// Absolute address of the first usable byte (`data + offset`).
     pub fn base_ptr(self) -> usize {
@@ -113,9 +116,10 @@ impl BpfDynptr {
     }
 
     /// Wrap a contiguous object as `TYPE_LOCAL` dynptr (preferred entry).
-    // pub fn from_contig(obj: ContigObj, out: usize) -> usize {
-    //     Self::from_mem(obj.base, obj.len, 0, out)
-    // }
+    #[allow(dead_code)]
+    pub fn from_contig(obj: ContigObj, out: usize) -> usize {
+        Self::from_mem(obj.base, obj.len, 0, out)
+    }
 
     /// `bpf_dynptr_from_mem(data, size, flags, ptr)` → 0 / negated errno.
     ///

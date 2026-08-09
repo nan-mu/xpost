@@ -5,10 +5,13 @@
 //! `patch-sync-st`).
 
 use core::alloc::{GlobalAlloc, Layout};
+use core::mem::align_of;
 use core::ptr::NonNull;
 
 use allocator_api2::alloc::AllocError;
+use allocator_api2::boxed::Box;
 use hashbrown::HashMap;
+use log::error;
 use talc::TalcCell;
 use talc::source::Manual;
 
@@ -109,7 +112,7 @@ pub struct RawResource {
     pub ptr: *mut u8,
     pub layout: Layout,
     drop_fn: unsafe fn(*mut u8),
-    /// `None` = non-BPF pool object (`SharedHashMap`, …).
+    /// `None` = non-BPF pool object (hwtest probes, …).
     pub kind: Option<MapKind>,
     pub key_size: usize,
     pub value_size: usize,
@@ -124,10 +127,48 @@ unsafe impl Sync for RawResource {}
 impl Drop for RawResource {
     fn drop(&mut self) {
         let ptr = core::mem::replace(&mut self.ptr, core::ptr::null_mut());
-        if !ptr.is_null() {
-            unsafe { (self.drop_fn)(ptr) };
+        if ptr.is_null() {
+            return;
         }
+        let addr = ptr as usize;
+        let align = self.layout.align();
+        if addr % align != 0 {
+            error!(
+                "[pool] drop: ptr {:#x} misaligned (layout align={}, size={}, kind={:?}); leaking",
+                addr,
+                align,
+                self.layout.size(),
+                self.kind
+            );
+            return;
+        }
+        // SAFETY: ptr + drop_fn paired at insert; align checked against stored layout.
+        unsafe { (self.drop_fn)(ptr) };
     }
+}
+
+/// Drop a `Box<T, TalcAlloc>` previously produced by [`Box::into_raw`] + [`allocator`].
+///
+/// On null / misalignment: logs and **leaks** instead of calling `from_raw` (avoids UB).
+///
+/// # Safety
+/// When checks pass, `ptr` must be the unique live pointer from `Box::into_raw` for `T`
+/// allocated with [`allocator`].
+pub(crate) unsafe fn reclaim_talc_box<T>(ptr: *mut u8, tag: &'static str) {
+    if ptr.is_null() {
+        error!("[pool] reclaim {}: null pointer; skip", tag);
+        return;
+    }
+    let addr = ptr as usize;
+    let align = align_of::<T>();
+    if addr % align != 0 {
+        error!(
+            "[pool] reclaim {}: ptr {:#x} not aligned to {} (wrong type/drop_fn?); leaking",
+            tag, addr, align
+        );
+        return;
+    }
+    let _ = unsafe { Box::from_raw_in(ptr as *mut T, allocator()) };
 }
 
 impl RawResource {
