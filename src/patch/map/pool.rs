@@ -38,7 +38,7 @@ impl SyncTalc {
     }
 
     #[inline]
-    #[cfg_attr(not(feature = "hw-selftest"), allow(dead_code))]
+    #[cfg_attr(not(fw_us_hw_selftest), allow(dead_code))]
     pub(crate) fn allocated_bytes(&self) -> usize {
         self.0.counters().allocated_bytes
     }

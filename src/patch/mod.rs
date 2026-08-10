@@ -8,7 +8,7 @@ pub mod program;
 pub mod redirect;
 pub(crate) mod sync;
 
-#[cfg(feature = "hw-selftest")]
+#[cfg(fw_us_hw_selftest)]
 pub mod hwtest;
 
 pub use helper::helper_dispatcher;

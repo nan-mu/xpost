@@ -3,13 +3,7 @@
 runner = "espflash flash --monitor --no-addresses --chip esp32c3 --partition-table partitions.csv"
 
 [env]
-ESP_LOG="info"
-WIFI_SSID="your_wifi_ssid"
-WIFI_PASSWORD="your_wifi_password"
-XDP_ENABLE="1"
-FW_BLOCKED_SRC_IP="10.0.0.1"
-FW_TR3000_IP="192.168.110.142"
-FW_ECHO_PORT="18080"
+ESP_LOG = "info"
 
 [build]
 rustflags = [

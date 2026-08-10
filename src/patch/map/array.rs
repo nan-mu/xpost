@@ -14,7 +14,7 @@ use allocator_api2::alloc::AllocError;
 use allocator_api2::boxed::Box;
 
 use super::ops::{MapError, MapOps};
-#[cfg(feature = "hw-selftest")]
+#[cfg(fw_us_hw_selftest)]
 use super::pool::POOL;
 use super::pool::{HEAP_SIZE, MapKind, RawResource, ResourceId, allocator};
 
@@ -270,7 +270,7 @@ pub fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(), Alloc
 }
 
 /// HW selftest for the first ARRAY map in bpf.toml (when present).
-#[cfg(feature = "hw-selftest")]
+#[cfg(fw_us_hw_selftest)]
 pub fn run_selftest(pass: &mut u32, fail: &mut u32) {
     use crate::patch::helper_dispatcher;
     use crate::patch::hwtest::check;

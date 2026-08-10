@@ -1,25 +1,26 @@
-//! WiFi STA: UDP :8080 echo + UDP :8081 VipMapOp control.
+//! WiFi STA: UDP :8080 echo; optional :8081 VipMapOp (`fw_us_vip_ctrl`).
 
 use crate::driver::FirewallDevice;
-use crate::fw_cfg::{
-    FW_CTRL_PORT, FW_ECHO_PORT, FW_LISTEN_PORT, FW_TR3000_IP, XDP_ENABLE, log_cfg,
-};
-use crate::patch::datapath;
-use crate::patch::map::ops::MapOps;
-use crate::patch::map::with_array_map;
-use crate::vip_map_op::{self, KIND_CLEAR, KIND_SET, STATUS_BAD, STATUS_OK, VipMapOp, VipMapOpAck};
-use embassy_futures::select::{Either, select};
+use crate::fw_cfg::{XDP_ENABLE, dut, log_cfg, probe, wifi};
 use embassy_net::{
     IpAddress, IpEndpoint, Ipv4Address, StackResources,
     udp::{PacketMetadata, UdpSocket},
 };
 use esp_hal::{peripherals::WIFI, rng::Rng};
-use esp_radio::wifi::{self, Config, ControllerConfig, sta::StationConfig};
+use esp_radio::wifi::{self as wifi_radio, Config, ControllerConfig, sta::StationConfig};
 use log::{error, info};
 use static_cell::StaticCell;
 
-const SSID: &str = env!("WIFI_SSID");
-const PASSWORD: &str = env!("WIFI_PASSWORD");
+#[cfg(fw_us_vip_ctrl)]
+use crate::patch::datapath;
+#[cfg(fw_us_vip_ctrl)]
+use crate::patch::map::ops::MapOps;
+#[cfg(fw_us_vip_ctrl)]
+use crate::patch::map::with_array_map;
+#[cfg(fw_us_vip_ctrl)]
+use crate::vip_map_op::{self, KIND_CLEAR, KIND_SET, STATUS_BAD, STATUS_OK, VipMapOp, VipMapOpAck};
+#[cfg(fw_us_vip_ctrl)]
+use embassy_futures::select::{Either, select};
 
 /// Fixed UDP payload for echo to TR3000 (no magic / seq).
 const ECHO_PAYLOAD: &[u8] = &[0x42];
@@ -31,18 +32,22 @@ static RX_BUFFER: StaticCell<[u8; 1536]> = StaticCell::new();
 static TX_META: StaticCell<[PacketMetadata; 16]> = StaticCell::new();
 static TX_BUFFER: StaticCell<[u8; 1536]> = StaticCell::new();
 
+#[cfg(fw_us_vip_ctrl)]
 static CTRL_RX_META: StaticCell<[PacketMetadata; 8]> = StaticCell::new();
+#[cfg(fw_us_vip_ctrl)]
 static CTRL_RX_BUFFER: StaticCell<[u8; 512]> = StaticCell::new();
+#[cfg(fw_us_vip_ctrl)]
 static CTRL_TX_META: StaticCell<[PacketMetadata; 8]> = StaticCell::new();
+#[cfg(fw_us_vip_ctrl)]
 static CTRL_TX_BUFFER: StaticCell<[u8; 512]> = StaticCell::new();
 
 #[inline]
 pub fn init_sta(
-    wifi: WIFI<'static>,
+    wifi_periph: WIFI<'static>,
 ) -> (
-    wifi::WifiController<'static>,
+    wifi_radio::WifiController<'static>,
     embassy_net::Stack<'static>,
-    embassy_net::Runner<'static, FirewallDevice<wifi::Interface<'static>>>,
+    embassy_net::Runner<'static, FirewallDevice<wifi_radio::Interface<'static>>>,
 ) {
     info!("[Init][STA] initializing");
     log_cfg();
@@ -54,13 +59,16 @@ pub fn init_sta(
 
     let sta = Config::Station(
         StationConfig::default()
-            .with_ssid(SSID)
-            .with_password(PASSWORD.into()),
+            .with_ssid(wifi::SSID)
+            .with_password(wifi::PASSWORD.into()),
     );
 
-    info!("[Init][STA] ssid={}", SSID);
-    let (controller, interfaces) =
-        wifi::new(wifi, ControllerConfig::default().with_initial_config(sta)).unwrap();
+    info!("[Init][STA] ssid={}", wifi::SSID);
+    let (controller, interfaces) = wifi_radio::new(
+        wifi_periph,
+        ControllerConfig::default().with_initial_config(sta),
+    )
+    .unwrap();
 
     let sta = interfaces.station;
     let mac = sta.mac_address();
@@ -85,7 +93,7 @@ pub fn init_sta(
     (controller, sta_stack, sta_runner)
 }
 
-/// Bind :8080 (echo) and :8081 (VipMapOp); multiplex with `select`.
+/// Bind echo on `dut.listen_port`; with `fw_us_vip_ctrl`, also ctrl on `dut.ctrl_port`.
 #[inline]
 pub async fn handler(sta_stack: embassy_net::Stack<'static>) {
     info!("[FWTEST] waiting for DHCP lease...");
@@ -101,28 +109,35 @@ pub async fn handler(sta_stack: embassy_net::Stack<'static>) {
         TX_META.init([PacketMetadata::EMPTY; 16]),
         TX_BUFFER.init([0; 1536]),
     );
-    if let Err(e) = echo.bind(FW_LISTEN_PORT) {
-        error!("[FWTEST] bind :{} failed: {:?}", FW_LISTEN_PORT, e);
+    if let Err(e) = echo.bind(dut::LISTEN_PORT) {
+        error!("[FWTEST] bind :{} failed: {:?}", dut::LISTEN_PORT, e);
         return;
     }
-    info!("[FWTEST] UDP echo bound :{}", FW_LISTEN_PORT);
+    info!("[FWTEST] UDP echo bound :{}", dut::LISTEN_PORT);
 
-    let mut ctrl = UdpSocket::new(
-        sta_stack,
-        CTRL_RX_META.init([PacketMetadata::EMPTY; 8]),
-        CTRL_RX_BUFFER.init([0; 512]),
-        CTRL_TX_META.init([PacketMetadata::EMPTY; 8]),
-        CTRL_TX_BUFFER.init([0; 512]),
-    );
-    if let Err(e) = ctrl.bind(FW_CTRL_PORT) {
-        error!("[FWTEST] bind :{} failed: {:?}", FW_CTRL_PORT, e);
-        return;
+    #[cfg(fw_us_vip_ctrl)]
+    {
+        let mut ctrl = UdpSocket::new(
+            sta_stack,
+            CTRL_RX_META.init([PacketMetadata::EMPTY; 8]),
+            CTRL_RX_BUFFER.init([0; 512]),
+            CTRL_TX_META.init([PacketMetadata::EMPTY; 8]),
+            CTRL_TX_BUFFER.init([0; 512]),
+        );
+        if let Err(e) = ctrl.bind(dut::CTRL_PORT) {
+            error!("[FWTEST] bind :{} failed: {:?}", dut::CTRL_PORT, e);
+            return;
+        }
+        info!("[FWTEST] UDP ctrl bound :{}", dut::CTRL_PORT);
+        recv_loop_with_ctrl(echo, ctrl).await;
     }
-    info!("[FWTEST] UDP ctrl bound :{}", FW_CTRL_PORT);
 
-    recv_loop(echo, ctrl).await;
+    #[cfg(not(fw_us_vip_ctrl))]
+    recv_loop_echo_only(echo).await;
 }
 
+#[cfg(fw_us_vip_ctrl)]
+#[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
 async fn apply_vip_op(op: VipMapOp) -> VipMapOpAck {
     let key = 0u32;
     let new_vip = match op.kind {
@@ -182,21 +197,85 @@ async fn apply_vip_op(op: VipMapOp) -> VipMapOpAck {
     }
 }
 
+#[cfg(fw_us_vip_ctrl)]
+#[cfg(feature = "patch-sync-st")]
+async fn apply_vip_op(op: VipMapOp) -> VipMapOpAck {
+    let key = 0u32;
+    let new_vip = match op.kind {
+        KIND_SET => op.vip_be,
+        KIND_CLEAR => 0u32,
+        _ => {
+            return VipMapOpAck {
+                kind: op.kind,
+                vip_be: 0,
+                status: STATUS_BAD,
+            };
+        }
+    };
+
+    datapath::disable();
+    let applied = with_array_map("vip_ip", |m| {
+        MapOps::update(
+            m,
+            (&raw const key) as *const u8,
+            (&raw const new_vip) as *const u8,
+            0,
+        )
+    });
+    datapath::enable();
+
+    match applied {
+        Ok(Ok(())) => {
+            let octets = new_vip.to_ne_bytes();
+            info!(
+                "[CTRL] vip_ip[0]={}.{}.{}.{} kind={}",
+                octets[0], octets[1], octets[2], octets[3], op.kind
+            );
+            VipMapOpAck {
+                kind: op.kind,
+                vip_be: new_vip,
+                status: STATUS_OK,
+            }
+        }
+        Ok(Err(e)) => {
+            error!("[CTRL] vip update map err: {:?}", e);
+            VipMapOpAck {
+                kind: op.kind,
+                vip_be: 0,
+                status: STATUS_BAD,
+            }
+        }
+        Err(e) => {
+            error!("[CTRL] vip update busy/missing: {:?}", e);
+            VipMapOpAck {
+                kind: op.kind,
+                vip_be: 0,
+                status: STATUS_BAD,
+            }
+        }
+    }
+}
+
+#[cfg(fw_us_vip_ctrl)]
 #[inline]
-async fn recv_loop(echo: UdpSocket<'static>, ctrl: UdpSocket<'static>) {
+async fn recv_loop_with_ctrl(echo: UdpSocket<'static>, ctrl: UdpSocket<'static>) {
     let echo_dest = IpEndpoint::new(
         IpAddress::Ipv4(Ipv4Address::new(
-            FW_TR3000_IP[0],
-            FW_TR3000_IP[1],
-            FW_TR3000_IP[2],
-            FW_TR3000_IP[3],
+            probe::IP[0],
+            probe::IP[1],
+            probe::IP[2],
+            probe::IP[3],
         )),
-        FW_ECHO_PORT,
+        probe::REPLY_PORT,
     );
     let ack_dest = echo_dest;
     info!(
         "[FWTEST] echo/ack → {}.{}.{}.{}:{}",
-        FW_TR3000_IP[0], FW_TR3000_IP[1], FW_TR3000_IP[2], FW_TR3000_IP[3], FW_ECHO_PORT
+        probe::IP[0],
+        probe::IP[1],
+        probe::IP[2],
+        probe::IP[3],
+        probe::REPLY_PORT
     );
 
     let mut echo_buf = [0u8; 1536];
@@ -241,6 +320,44 @@ async fn recv_loop(echo: UdpSocket<'static>, ctrl: UdpSocket<'static>) {
                 }
             }
             Either::Second(Err(e)) => error!("[CTRL] recv: {:?}", e),
+        }
+    }
+}
+
+#[cfg(not(fw_us_vip_ctrl))]
+#[inline]
+async fn recv_loop_echo_only(echo: UdpSocket<'static>) {
+    let echo_dest = IpEndpoint::new(
+        IpAddress::Ipv4(Ipv4Address::new(
+            probe::IP[0],
+            probe::IP[1],
+            probe::IP[2],
+            probe::IP[3],
+        )),
+        probe::REPLY_PORT,
+    );
+    info!(
+        "[FWTEST] echo → {}.{}.{}.{}:{}",
+        probe::IP[0],
+        probe::IP[1],
+        probe::IP[2],
+        probe::IP[3],
+        probe::REPLY_PORT
+    );
+
+    let mut echo_buf = [0u8; 1536];
+
+    loop {
+        match echo.recv_from(&mut echo_buf).await {
+            Ok((len, remote)) => {
+                info!("[FWTEST] stim from {} len={}", remote.endpoint, len);
+                if let Err(e) = echo.send_to(ECHO_PAYLOAD, echo_dest).await {
+                    error!("[FWTEST] echo send failed: {:?}", e);
+                } else {
+                    info!("[FWTEST] echo sent ({} bytes)", ECHO_PAYLOAD.len());
+                }
+            }
+            Err(e) => error!("[FWTEST] echo recv: {:?}", e),
         }
     }
 }

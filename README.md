@@ -42,25 +42,26 @@ cargo install espflash
 
 ## 项目配置
 
-联调相关变量写在 `.env`（可参考 `.env.example`）或 `.cargo/config.toml` 的 `[env]`：
+用户态配置写在 [`config.toml`](config.toml)（仿 router-probe `fwtest.toml`：`[wifi]` / `[probe]` / `[dut]` + `[[tests]]` / `[[tests.seeds]]`）。`build.rs` 据此发出 `fw_us_*` cfg 并生成常量。
 
-| 变量 | 含义 |
+**不管 AOT：** `esp32c3.bin` / `bpf.toml` 仍手拷，并与 enabled 的 `[[tests]]` 对齐。
+
+| 段 | 含义 |
 |------|------|
-| `WIFI_SSID` / `WIFI_PASSWORD` | STA 凭据 |
-| `XDP_ENABLE` | `1`/`true` 启用 RX 上 AOT XDP |
-| `FW_BLOCKED_SRC_IP` | seed 进 `firewall_rules` 的 DROP 源 IP（对齐探针 `blocked`） |
-| `FW_TR3000_IP` | 固定 echo 目的 IP（**TR3000 本机 LAN IP**，不是主路由/网关） |
-| `FW_ECHO_PORT` | 固定 echo 目的端口（默认 `18080`） |
+| `[wifi]` | STA `ssid` / `password` |
+| `[probe]` | TR3000 侧：`ip`、`reply_port`（固定 echo 目的） |
+| `[dut]` | 本机：`listen_port`、`ctrl_port` |
+| `[[tests]]` | `name` + `enabled`；启用项推导功能（如 `vip_map_ctrl` → ctrl 面） |
+| `[[tests.seeds]]` | 该测试的 map 初始化对象（`vip_ip` / `firewall_rules`） |
 
-拓扑约定：主路由只做 DHCP/网关；TR3000 做 AP + 探针。`FW_TR3000_IP` 必须是 TR3000（例 `192.168.110.142`），不要写成主路由 `…1`。
+| 测试名 | 启用后效果 |
+|------|------|
+| `xdp_forward_echo` | 网络路径 + 其 `seeds`（通常 seed `vip_ip`） |
+| `vip_map_ctrl` | UDP ctrl（VipMapOp） |
+| `firewall_echo` | 网络路径 + 其 `seeds`（通常 seed `firewall_rules`） |
+| `hw_selftest` | 板载串口自检（与其它网络测试互斥） |
 
-监听端口固定为 `8080`。探针伪造源 IP 发包；未 seed 的源过 XDP 后触发 echo。
-
-### 网络参数（代码常量）
-
-```rust
-const FW_LISTEN_PORT: u16 = 8080;  // UDP 监听端口
-```
+拓扑约定：主路由只做 DHCP/网关；TR3000 做 AP + 探针。`[probe].ip` 必须是 TR3000（例 `192.168.110.142`），不要写成主路由 `…1`。
 
 ## 构建和烧录
 
@@ -122,8 +123,8 @@ firmware/
 ### 2. UDP / 防火墙联调
 
 - 监听端口 8080
-- XDP（`firewall_ipv4`）按 `(src_ip, dst_port)` 查 map；seed 对 `FW_BLOCKED_SRC_IP:8080` 写 DROP
-- 到达 userspace 的任意 UDP（不读载荷）→ 向 `FW_TR3000_IP:FW_ECHO_PORT` 发送固定载荷 `0x42`
+- XDP（`firewall_ipv4`）按 `(src_ip, dst_port)` 查 map；`[[tests.seeds]]` 对 `firewall_rules` 写 DROP
+- 到达 userspace 的任意 UDP（不读载荷）→ 向 `[probe].ip:[probe].reply_port` 发送固定载荷 `0x42`
 
 ### 3. 动态代码加载（AOT 热加载）
 
@@ -176,7 +177,8 @@ firmware/
 ESP_LOG="info"  # 可选: trace, debug, info, warn, error
 
 # BPF helper 逐调用 trace（参数 + 返回值），需 debug 级别：
-ESP_LOG=debug cargo run --release --features hw-selftest
+# 板载自检：config.toml 里 [[tests]] name = "hw_selftest", enabled = true 后重编
+ESP_LOG=debug cargo run --release
 ```
 
 `ESP_LOG=debug` 时，每次经 `helper_dispatcher` 的调用会输出一行 `DEBUG - bpf map_update_elem (#2) a1=… -> ok=0`（参数为十进制，避免 espflash 把 `0x…` 当地址做 addr2line）。

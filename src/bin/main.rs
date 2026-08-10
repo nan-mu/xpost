@@ -14,7 +14,7 @@ use log::{error, info};
 
 use firmware::patch;
 
-#[cfg(not(feature = "hw-selftest"))]
+#[cfg(not(fw_us_hw_selftest))]
 use firmware::{
     connection::{connection, net_task_xdp},
     sta,
@@ -55,7 +55,7 @@ async fn main(spawner: Spawner) {
     info!("[Init][MAP] MAP resource pool initialized");
 
     #[cfg(all(
-        feature = "hw-selftest",
+        fw_us_hw_selftest,
         feature = "patch-sync-embassy",
         not(feature = "patch-sync-st")
     ))]
@@ -63,7 +63,7 @@ async fn main(spawner: Spawner) {
         Ok(()) => info!("[Init][MAP] talc resource pool verification passed"),
         Err(e) => error!("[Init][MAP] talc resource pool verification failed: {}", e),
     }
-    #[cfg(all(feature = "hw-selftest", feature = "patch-sync-st"))]
+    #[cfg(all(fw_us_hw_selftest, feature = "patch-sync-st"))]
     match patch::hwtest::verify_pool() {
         Ok(()) => info!("[Init][MAP] talc resource pool verification passed"),
         Err(e) => error!("[Init][MAP] talc resource pool verification failed: {}", e),
@@ -80,7 +80,7 @@ async fn main(spawner: Spawner) {
     info!("[Init][XDP] load AOT payload into HOT_REGION");
     patch::load(peripherals.FLASH);
 
-    #[cfg(feature = "hw-selftest")]
+    #[cfg(fw_us_hw_selftest)]
     {
         let _ = spawner;
         patch::hwtest::run();
@@ -91,13 +91,16 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    #[cfg(not(feature = "hw-selftest"))]
+    #[cfg(not(fw_us_hw_selftest))]
     {
-        // Seed vip_ip before datapath so first RX can VIP-bounce.
-        #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
-        firmware::fw_seed::seed_vip_redirect().await;
-        #[cfg(feature = "patch-sync-st")]
-        firmware::fw_seed::seed_vip_redirect();
+        #[cfg(all(
+            any(fw_us_vip_seed, fw_us_firewall_seed),
+            feature = "patch-sync-embassy",
+            not(feature = "patch-sync-st")
+        ))]
+        firmware::fw_seed::run_seeds().await;
+        #[cfg(all(any(fw_us_vip_seed, fw_us_firewall_seed), feature = "patch-sync-st"))]
+        firmware::fw_seed::run_seeds();
 
         patch::datapath::enable();
 

@@ -1,4 +1,4 @@
-//! On-device HW selftest (`--features hw-selftest`).
+//! On-device HW selftest (`config.toml` → `features.hw_selftest` → `fw_us_hw_selftest`).
 
 pub mod ctx_test;
 mod probe_hash;

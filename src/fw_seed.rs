@@ -1,46 +1,36 @@
-//! Seed `vip_l2_redirect` map: `vip_ip[0]` = FW_VIP_A_IP (wire-order u32).
+//! Userspace map seeding from enabled `[[tests.seeds]]` in `config.toml`.
 
-use crate::fw_cfg::{FW_VIP_A_IP, ipv4_u32};
+use crate::fw_cfg::{SEEDS, SeedOp, ipv4_u32};
 use crate::patch::map::ops::MapOps;
-use crate::patch::map::{MAP_ID_VIP_IP, register_map_name, with_array_map};
-use crate::patch::redirect::{XDP_PASS, XDP_TX, xdp_action_name};
+use crate::patch::map::{ResourceId, register_map_name};
 use log::{error, info};
 
-fn register_or_log(name: &'static str, id: crate::patch::map::ResourceId) -> bool {
-    if register_map_name(name, id) {
-        true
-    } else {
-        error!("[Seed][VIP] register_map_name({}) failed", name);
-        false
+fn map_id_for(name: &str) -> Option<ResourceId> {
+    match name {
+        #[cfg(fw_us_vip_seed)]
+        "vip_ip" => Some(crate::patch::map::MAP_ID_VIP_IP),
+        #[cfg(fw_us_firewall_seed)]
+        "firewall_rules" => Some(crate::patch::map::MAP_ID_FIREWALL_RULES),
+        _ => None,
     }
 }
 
-fn seed_vip(m: &mut crate::patch::map::BpfArrayMap) {
-    let key = 0u32;
-    let vip = ipv4_u32(FW_VIP_A_IP);
-    let _ = MapOps::update(
-        m,
-        (&raw const key) as *const u8,
-        (&raw const vip) as *const u8,
-        0,
-    );
-}
+#[cfg(fw_us_vip_seed)]
+fn smoke_vip_xdp(vip: [u8; 4]) {
+    use crate::patch::redirect::{XDP_PASS, XDP_TX, xdp_action_name};
 
-/// Minimal eth+IPv4 frame (no L4): set `daddr` at IPv4 offset 16.
-fn smoke_frame(daddr: [u8; 4]) -> [u8; 34] {
-    let mut frame = [0u8; 34];
-    frame[0..6].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
-    frame[6..12].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-    frame[12] = 0x08;
-    frame[13] = 0x00;
-    frame[14] = 0x45; // ver/ihl
-    frame[14 + 16..14 + 20].copy_from_slice(&daddr);
-    frame
-}
+    fn smoke_frame(daddr: [u8; 4]) -> [u8; 34] {
+        let mut frame = [0u8; 34];
+        frame[0..6].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        frame[6..12].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        frame[12] = 0x08;
+        frame[13] = 0x00;
+        frame[14] = 0x45;
+        frame[14 + 16..14 + 20].copy_from_slice(&daddr);
+        frame
+    }
 
-/// After seed: VIP daddr → `XDP_TX`, non-VIP → `XDP_PASS` (serial evidence without TR3000).
-pub fn smoke_vip_xdp() {
-    let mut vip_frame = smoke_frame(FW_VIP_A_IP);
+    let mut vip_frame = smoke_frame(vip);
     let vip_rc = crate::patch::xdp(&mut vip_frame);
     if vip_rc == XDP_TX {
         info!(
@@ -66,42 +56,210 @@ pub fn smoke_vip_xdp() {
     }
 }
 
-/// Bind name and write `vip_ip[0]=FW_VIP_A_IP`.
-///
-/// Must complete before WiFi/XDP RX is up.
+#[cfg(fw_us_firewall_seed)]
+#[repr(C)]
+struct FwKey {
+    src_ip: u32,
+    dst_port: u16,
+    pad: u16,
+}
+
 #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
-pub async fn seed_vip_redirect() {
-    if !register_or_log("vip_ip", MAP_ID_VIP_IP) {
-        return;
-    }
-    match with_array_map("vip_ip", seed_vip).await {
-        Ok(()) => {
-            info!(
-                "[Seed][VIP] vip_ip[0]={}.{}.{}.{}",
-                FW_VIP_A_IP[0], FW_VIP_A_IP[1], FW_VIP_A_IP[2], FW_VIP_A_IP[3]
-            );
-            smoke_vip_xdp();
+pub async fn run_seeds() {
+    for op in SEEDS {
+        match *op {
+            SeedOp::ArrayIp {
+                map,
+                index,
+                ip,
+                smoke,
+            } => {
+                #[cfg(fw_us_vip_seed)]
+                {
+                    use crate::patch::map::with_array_map;
+                    let Some(id) = map_id_for(map) else {
+                        error!("[Seed] no map id for {}", map);
+                        continue;
+                    };
+                    if !register_map_name(map, id) {
+                        error!("[Seed] register_map_name({}) failed", map);
+                        continue;
+                    }
+                    let key = index;
+                    let val = ipv4_u32(ip);
+                    match with_array_map(map, |m| {
+                        MapOps::update(
+                            m,
+                            (&raw const key) as *const u8,
+                            (&raw const val) as *const u8,
+                            0,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            info!(
+                                "[Seed] {}[{}]={}.{}.{}.{}",
+                                map, index, ip[0], ip[1], ip[2], ip[3]
+                            );
+                            if smoke {
+                                smoke_vip_xdp(ip);
+                            }
+                        }
+                        Ok(Err(e)) => error!("[Seed] {} update err: {:?}", map, e),
+                        Err(e) => error!("[Seed] {} busy/missing: {:?}", map, e),
+                    }
+                }
+                #[cfg(not(fw_us_vip_seed))]
+                {
+                    let _ = (map, index, ip, smoke);
+                    error!("[Seed] ArrayIp present but vip_seed inactive");
+                }
+            }
+            SeedOp::FirewallRule {
+                map,
+                src_ip,
+                dst_port,
+                action,
+            } => {
+                #[cfg(fw_us_firewall_seed)]
+                {
+                    use crate::patch::map::with_hash_map;
+                    let Some(id) = map_id_for(map) else {
+                        error!("[Seed] no map id for {}", map);
+                        continue;
+                    };
+                    if !register_map_name(map, id) {
+                        error!("[Seed] register_map_name({}) failed", map);
+                        continue;
+                    }
+                    let key = FwKey {
+                        src_ip: ipv4_u32(src_ip),
+                        dst_port,
+                        pad: 0,
+                    };
+                    match with_hash_map(map, |m| {
+                        MapOps::update(
+                            m,
+                            (&raw const key) as *const u8,
+                            (&raw const action) as *const u8,
+                            0,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => info!(
+                            "[Seed] {} DROP {}.{}.{}.{}:{} action={}",
+                            map, src_ip[0], src_ip[1], src_ip[2], src_ip[3], dst_port, action
+                        ),
+                        Ok(Err(e)) => error!("[Seed] {} update err: {:?}", map, e),
+                        Err(e) => error!("[Seed] {} busy/missing: {:?}", map, e),
+                    }
+                }
+                #[cfg(not(fw_us_firewall_seed))]
+                {
+                    let _ = (map, src_ip, dst_port, action);
+                    error!("[Seed] FirewallRule present but firewall_seed inactive");
+                }
+            }
         }
-        Err(e) => error!("[Seed][VIP] vip_ip seed failed: {:?}", e),
     }
 }
 
-/// Bind name and write `vip_ip[0]=FW_VIP_A_IP`.
-///
-/// Must complete before WiFi/XDP RX is up.
 #[cfg(feature = "patch-sync-st")]
-pub fn seed_vip_redirect() {
-    if !register_or_log("vip_ip", MAP_ID_VIP_IP) {
-        return;
-    }
-    match with_array_map("vip_ip", seed_vip) {
-        Ok(()) => {
-            info!(
-                "[Seed][VIP] vip_ip[0]={}.{}.{}.{}",
-                FW_VIP_A_IP[0], FW_VIP_A_IP[1], FW_VIP_A_IP[2], FW_VIP_A_IP[3]
-            );
-            smoke_vip_xdp();
+pub fn run_seeds() {
+    for op in SEEDS {
+        match *op {
+            SeedOp::ArrayIp {
+                map,
+                index,
+                ip,
+                smoke,
+            } => {
+                #[cfg(fw_us_vip_seed)]
+                {
+                    use crate::patch::map::with_array_map;
+                    let Some(id) = map_id_for(map) else {
+                        error!("[Seed] no map id for {}", map);
+                        continue;
+                    };
+                    if !register_map_name(map, id) {
+                        error!("[Seed] register_map_name({}) failed", map);
+                        continue;
+                    }
+                    let key = index;
+                    let val = ipv4_u32(ip);
+                    match with_array_map(map, |m| {
+                        MapOps::update(
+                            m,
+                            (&raw const key) as *const u8,
+                            (&raw const val) as *const u8,
+                            0,
+                        )
+                    }) {
+                        Ok(Ok(())) => {
+                            info!(
+                                "[Seed] {}[{}]={}.{}.{}.{}",
+                                map, index, ip[0], ip[1], ip[2], ip[3]
+                            );
+                            if smoke {
+                                smoke_vip_xdp(ip);
+                            }
+                        }
+                        Ok(Err(e)) => error!("[Seed] {} update err: {:?}", map, e),
+                        Err(e) => error!("[Seed] {} busy/missing: {:?}", map, e),
+                    }
+                }
+                #[cfg(not(fw_us_vip_seed))]
+                {
+                    let _ = (map, index, ip, smoke);
+                    error!("[Seed] ArrayIp present but vip_seed inactive");
+                }
+            }
+            SeedOp::FirewallRule {
+                map,
+                src_ip,
+                dst_port,
+                action,
+            } => {
+                #[cfg(fw_us_firewall_seed)]
+                {
+                    use crate::patch::map::with_hash_map;
+                    let Some(id) = map_id_for(map) else {
+                        error!("[Seed] no map id for {}", map);
+                        continue;
+                    };
+                    if !register_map_name(map, id) {
+                        error!("[Seed] register_map_name({}) failed", map);
+                        continue;
+                    }
+                    let key = FwKey {
+                        src_ip: ipv4_u32(src_ip),
+                        dst_port,
+                        pad: 0,
+                    };
+                    match with_hash_map(map, |m| {
+                        MapOps::update(
+                            m,
+                            (&raw const key) as *const u8,
+                            (&raw const action) as *const u8,
+                            0,
+                        )
+                    }) {
+                        Ok(Ok(())) => info!(
+                            "[Seed] {} DROP {}.{}.{}.{}:{} action={}",
+                            map, src_ip[0], src_ip[1], src_ip[2], src_ip[3], dst_port, action
+                        ),
+                        Ok(Err(e)) => error!("[Seed] {} update err: {:?}", map, e),
+                        Err(e) => error!("[Seed] {} busy/missing: {:?}", map, e),
+                    }
+                }
+                #[cfg(not(fw_us_firewall_seed))]
+                {
+                    let _ = (map, src_ip, dst_port, action);
+                    error!("[Seed] FirewallRule present but firewall_seed inactive");
+                }
+            }
         }
-        Err(e) => error!("[Seed][VIP] vip_ip seed failed: {:?}", e),
     }
 }

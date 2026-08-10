@@ -21,8 +21,8 @@ patch-sync-embassy = []
 # Patch pool/slots: single-thread RefCell (control plane sync; no IRQ→helper).
 # Overrides `patch-sync-embassy` when both are enabled (e.g. `--features patch-sync-st`).
 patch-sync-st = []
-# On-device serial selftest markers for scripts/hw_expect.py
-hw-selftest = []
+# Userspace gates derived from config.toml [[tests]] → rustc-cfg fw_us_*.
+# (vip_seed / vip_ctrl / firewall_seed / xdp_rx / hw_selftest)
 
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
@@ -97,7 +97,6 @@ lto           = 'fat'
 opt-level     = 's'
 
 [build-dependencies]
-dotenv-build = "0.1"
 toml = "1.1.3"
 
 [package.metadata.espflash]
