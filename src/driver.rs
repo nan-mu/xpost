@@ -2,6 +2,7 @@ use embassy_net::driver::{Driver, RxToken, TxToken};
 use log::error;
 
 use crate::fw_cfg::XDP_ENABLE;
+use crate::patch::datapath;
 use crate::patch::redirect::{
     XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX, clear_pending, ifindex_supported,
     queue_egress_frame, take_egress_frame, take_pending,
@@ -80,7 +81,8 @@ impl<R: RxToken> RxToken for FirewallRxToken<R> {
         F: FnOnce(&mut [u8]) -> Ret,
     {
         self.inner.consume(|buffer| {
-            if !XDP_ENABLE {
+            // Compile-time off, or userspace stopped datapath for map mutation.
+            if !XDP_ENABLE || !datapath::is_active() {
                 return f(buffer);
             }
             clear_pending();

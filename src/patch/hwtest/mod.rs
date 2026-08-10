@@ -4,11 +4,13 @@ pub mod ctx_test;
 mod probe_hash;
 mod probe_ring;
 
-use crate::patch::ctx::XdpMd;
+use crate::patch::ctx::{IFINDEX_WIFI, IFINDEX_WIRED, XdpMd};
 use crate::patch::helper::dynptr::BpfDynptr;
 use crate::patch::helper_dispatcher;
 use crate::patch::map::{BPF_ANY, helper_delete, helper_lookup, helper_update};
-use crate::patch::map::{FIRMWARE_HAS_RINGBUF, FIRMWARE_MAP_COUNT, SELFTEST_MAP_ID};
+use crate::patch::map::{
+    FIRMWARE_HAS_DEVMAP, FIRMWARE_HAS_RINGBUF, FIRMWARE_MAP_COUNT, SELFTEST_MAP_ID,
+};
 use crate::patch::redirect::{XDP_PASS, XDP_REDIRECT};
 use log::info;
 
@@ -339,21 +341,43 @@ pub fn run() {
 }
 
 fn run_redirect_tests(ctx_ptr: usize, pass: &mut u32, fail: &mut u32) {
-    let r0 = helper_dispatcher(BPF_FUNC_REDIRECT, 0, 0, 0, 0, 0);
+    let r0 = helper_dispatcher(BPF_FUNC_REDIRECT, IFINDEX_WIFI as usize, 0, 0, 0, 0);
     check("redirect", r0 == XDP_REDIRECT as usize, pass, fail);
 
-    let r1 = helper_dispatcher(BPF_FUNC_REDIRECT, 1, 0, 0, 0, 0);
+    let r1 = helper_dispatcher(BPF_FUNC_REDIRECT, IFINDEX_WIRED as usize, 0, 0, 0, 0);
     check("redirect_unsup", r1 == (-95i32) as usize, pass, fail);
 
-    let rm = helper_dispatcher(
-        BPF_FUNC_REDIRECT_MAP,
-        SELFTEST_MAP_ID as usize,
-        0,
-        XDP_PASS as usize,
-        0,
-        0,
-    );
-    check("redirect_map", rm == XDP_PASS as usize, pass, fail);
+    if FIRMWARE_HAS_DEVMAP {
+        use crate::patch::map::MAP_ID_TX_PORT_MAP;
+        let key = 0u32;
+        let ifindex = IFINDEX_WIFI;
+        let map = MAP_ID_TX_PORT_MAP as usize;
+        let _ = helper_update(
+            map,
+            (&raw const key) as *const u8 as usize,
+            (&raw const ifindex) as *const u8 as usize,
+            BPF_ANY as usize,
+        );
+        let rm = helper_dispatcher(
+            BPF_FUNC_REDIRECT_MAP,
+            map,
+            key as usize,
+            XDP_PASS as usize,
+            0,
+            0,
+        );
+        check("redirect_map", rm == XDP_REDIRECT as usize, pass, fail);
+    } else {
+        let rm = helper_dispatcher(
+            BPF_FUNC_REDIRECT_MAP,
+            SELFTEST_MAP_ID as usize,
+            0,
+            XDP_PASS as usize,
+            0,
+            0,
+        );
+        check("redirect_map", rm == XDP_PASS as usize, pass, fail);
+    }
 
     let tc = helper_dispatcher(
         BPF_FUNC_TAIL_CALL,
@@ -425,9 +449,9 @@ fn run_xdp_payload(pass: &mut u32, fail: &mut u32) {
     let res = crate::patch::xdp(&mut frame);
     info!("[HWTEST] XDP result={}", res);
 
-    // firewall_ipv4: incomplete L3 → XDP_PASS
+    // vip_l2_redirect: zero daddr / unseeded VIP → XDP_PASS
     if res == XDP_PASS {
-        info!("[HWTEST] XDP=ok firewall_ipv4");
+        info!("[HWTEST] XDP=ok vip_l2_redirect PASS");
         *pass += 1;
     } else {
         info!("[HWTEST] XDP=fail rc={}", res);

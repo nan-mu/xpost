@@ -1,7 +1,14 @@
-//! WiFi STA + firewall test: UDP :8080 → fixed echo to TR3000.
+//! WiFi STA: UDP :8080 echo + UDP :8081 VipMapOp control.
 
 use crate::driver::FirewallDevice;
-use crate::fw_cfg::{FW_ECHO_PORT, FW_LISTEN_PORT, FW_TR3000_IP, XDP_ENABLE, log_cfg};
+use crate::fw_cfg::{
+    FW_CTRL_PORT, FW_ECHO_PORT, FW_LISTEN_PORT, FW_TR3000_IP, XDP_ENABLE, log_cfg,
+};
+use crate::patch::datapath;
+use crate::patch::map::ops::MapOps;
+use crate::patch::map::with_array_map;
+use crate::vip_map_op::{self, KIND_CLEAR, KIND_SET, STATUS_BAD, STATUS_OK, VipMapOp, VipMapOpAck};
+use embassy_futures::select::{Either, select};
 use embassy_net::{
     IpAddress, IpEndpoint, Ipv4Address, StackResources,
     udp::{PacketMetadata, UdpSocket},
@@ -23,6 +30,11 @@ static RX_META: StaticCell<[PacketMetadata; 16]> = StaticCell::new();
 static RX_BUFFER: StaticCell<[u8; 1536]> = StaticCell::new();
 static TX_META: StaticCell<[PacketMetadata; 16]> = StaticCell::new();
 static TX_BUFFER: StaticCell<[u8; 1536]> = StaticCell::new();
+
+static CTRL_RX_META: StaticCell<[PacketMetadata; 8]> = StaticCell::new();
+static CTRL_RX_BUFFER: StaticCell<[u8; 512]> = StaticCell::new();
+static CTRL_TX_META: StaticCell<[PacketMetadata; 8]> = StaticCell::new();
+static CTRL_TX_BUFFER: StaticCell<[u8; 512]> = StaticCell::new();
 
 #[inline]
 pub fn init_sta(
@@ -73,7 +85,7 @@ pub fn init_sta(
     (controller, sta_stack, sta_runner)
 }
 
-/// Bind :8080; any datagram that reaches userspace triggers a fixed echo to TR3000.
+/// Bind :8080 (echo) and :8081 (VipMapOp); multiplex with `select`.
 #[inline]
 pub async fn handler(sta_stack: embassy_net::Stack<'static>) {
     info!("[FWTEST] waiting for DHCP lease...");
@@ -82,26 +94,96 @@ pub async fn handler(sta_stack: embassy_net::Stack<'static>) {
         info!("[FWTEST] STA IP {} gw={:?}", cfg.address, cfg.gateway);
     }
 
-    let mut socket = UdpSocket::new(
+    let mut echo = UdpSocket::new(
         sta_stack,
         RX_META.init([PacketMetadata::EMPTY; 16]),
         RX_BUFFER.init([0; 1536]),
         TX_META.init([PacketMetadata::EMPTY; 16]),
         TX_BUFFER.init([0; 1536]),
     );
-    if let Err(e) = socket.bind(FW_LISTEN_PORT) {
-        error!(
-            "[FWTEST] Failed to bind UDP socket to port {}: {:?}",
-            FW_LISTEN_PORT, e
-        );
+    if let Err(e) = echo.bind(FW_LISTEN_PORT) {
+        error!("[FWTEST] bind :{} failed: {:?}", FW_LISTEN_PORT, e);
         return;
     }
-    info!("[FWTEST] UDP socket bound to port {}", FW_LISTEN_PORT);
-    recv_loop(socket).await;
+    info!("[FWTEST] UDP echo bound :{}", FW_LISTEN_PORT);
+
+    let mut ctrl = UdpSocket::new(
+        sta_stack,
+        CTRL_RX_META.init([PacketMetadata::EMPTY; 8]),
+        CTRL_RX_BUFFER.init([0; 512]),
+        CTRL_TX_META.init([PacketMetadata::EMPTY; 8]),
+        CTRL_TX_BUFFER.init([0; 512]),
+    );
+    if let Err(e) = ctrl.bind(FW_CTRL_PORT) {
+        error!("[FWTEST] bind :{} failed: {:?}", FW_CTRL_PORT, e);
+        return;
+    }
+    info!("[FWTEST] UDP ctrl bound :{}", FW_CTRL_PORT);
+
+    recv_loop(echo, ctrl).await;
+}
+
+async fn apply_vip_op(op: VipMapOp) -> VipMapOpAck {
+    let key = 0u32;
+    let new_vip = match op.kind {
+        KIND_SET => op.vip_be,
+        KIND_CLEAR => 0u32,
+        _ => {
+            return VipMapOpAck {
+                kind: op.kind,
+                vip_be: 0,
+                status: STATUS_BAD,
+            };
+        }
+    };
+
+    // Stop AOT XDP so userspace may update ARRAY (driver PASSes frames meanwhile).
+    datapath::disable();
+    let applied = with_array_map("vip_ip", |m| {
+        MapOps::update(
+            m,
+            (&raw const key) as *const u8,
+            (&raw const new_vip) as *const u8,
+            0,
+        )
+    })
+    .await;
+    datapath::enable();
+
+    match applied {
+        Ok(Ok(())) => {
+            let octets = new_vip.to_ne_bytes();
+            info!(
+                "[CTRL] vip_ip[0]={}.{}.{}.{} kind={}",
+                octets[0], octets[1], octets[2], octets[3], op.kind
+            );
+            VipMapOpAck {
+                kind: op.kind,
+                vip_be: new_vip,
+                status: STATUS_OK,
+            }
+        }
+        Ok(Err(e)) => {
+            error!("[CTRL] vip update map err: {:?}", e);
+            VipMapOpAck {
+                kind: op.kind,
+                vip_be: 0,
+                status: STATUS_BAD,
+            }
+        }
+        Err(e) => {
+            error!("[CTRL] vip update busy/missing: {:?}", e);
+            VipMapOpAck {
+                kind: op.kind,
+                vip_be: 0,
+                status: STATUS_BAD,
+            }
+        }
+    }
 }
 
 #[inline]
-async fn recv_loop(udp_socket: UdpSocket<'static>) {
+async fn recv_loop(echo: UdpSocket<'static>, ctrl: UdpSocket<'static>) {
     let echo_dest = IpEndpoint::new(
         IpAddress::Ipv4(Ipv4Address::new(
             FW_TR3000_IP[0],
@@ -111,35 +193,54 @@ async fn recv_loop(udp_socket: UdpSocket<'static>) {
         )),
         FW_ECHO_PORT,
     );
+    let ack_dest = echo_dest;
     info!(
-        "[FWTEST] echo → {}.{}.{}.{}:{}",
+        "[FWTEST] echo/ack → {}.{}.{}.{}:{}",
         FW_TR3000_IP[0], FW_TR3000_IP[1], FW_TR3000_IP[2], FW_TR3000_IP[3], FW_ECHO_PORT
     );
 
-    let mut rx_buffer = [0u8; 1536];
+    let mut echo_buf = [0u8; 1536];
+    let mut ctrl_buf = [0u8; 512];
+    let mut ack_buf = [0u8; 64];
+
     loop {
-        match udp_socket.recv_from(&mut rx_buffer).await {
-            Ok((len, remote_endpoint)) => {
-                info!(
-                    "[FWTEST] stim from {} len={}",
-                    remote_endpoint.endpoint, len
-                );
-                match udp_socket.send_to(ECHO_PAYLOAD, echo_dest).await {
-                    Ok(()) => info!(
-                        "[FWTEST] echo sent to {}.{}.{}.{}:{} ({} bytes)",
-                        FW_TR3000_IP[0],
-                        FW_TR3000_IP[1],
-                        FW_TR3000_IP[2],
-                        FW_TR3000_IP[3],
-                        FW_ECHO_PORT,
-                        ECHO_PAYLOAD.len()
-                    ),
-                    Err(e) => error!("[FWTEST] echo send failed: {:?}", e),
+        match select(echo.recv_from(&mut echo_buf), ctrl.recv_from(&mut ctrl_buf)).await {
+            Either::First(Ok((len, remote))) => {
+                info!("[FWTEST] stim from {} len={}", remote.endpoint, len);
+                if let Err(e) = echo.send_to(ECHO_PAYLOAD, echo_dest).await {
+                    error!("[FWTEST] echo send failed: {:?}", e);
+                } else {
+                    info!("[FWTEST] echo sent ({} bytes)", ECHO_PAYLOAD.len());
                 }
             }
-            Err(e) => {
-                error!("[FWTEST] UDP receive error: {:?}", e);
+            Either::First(Err(e)) => error!("[FWTEST] echo recv: {:?}", e),
+            Either::Second(Ok((len, remote))) => {
+                info!("[CTRL] from {} len={}", remote.endpoint, len);
+                let ack = match vip_map_op::decode_op(&ctrl_buf[..len]) {
+                    Ok(op) => apply_vip_op(op).await,
+                    Err(e) => {
+                        error!("[CTRL] decode: {:?}", e);
+                        VipMapOpAck {
+                            kind: 0,
+                            vip_be: 0,
+                            status: STATUS_BAD,
+                        }
+                    }
+                };
+                if let Some(n) = vip_map_op::encode_ack(&ack, &mut ack_buf) {
+                    if let Err(e) = ctrl.send_to(&ack_buf[..n], ack_dest).await {
+                        error!("[CTRL] ack send failed: {:?}", e);
+                    } else {
+                        info!(
+                            "[CTRL] ack kind={} status={} vip_be={:#x}",
+                            ack.kind, ack.status, ack.vip_be
+                        );
+                    }
+                } else {
+                    error!("[CTRL] ack encode failed");
+                }
             }
+            Either::Second(Err(e)) => error!("[CTRL] recv: {:?}", e),
         }
     }
 }

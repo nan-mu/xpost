@@ -93,11 +93,11 @@ async fn main(spawner: Spawner) {
 
     #[cfg(not(feature = "hw-selftest"))]
     {
-        // Seed before datapath so firewall_rules is non-empty on first RX.
+        // Seed vip_ip before datapath so first RX can VIP-bounce.
         #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
-        firmware::fw_seed::seed_firewall_rules().await;
+        firmware::fw_seed::seed_vip_redirect().await;
         #[cfg(feature = "patch-sync-st")]
-        firmware::fw_seed::seed_firewall_rules();
+        firmware::fw_seed::seed_vip_redirect();
 
         patch::datapath::enable();
 

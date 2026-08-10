@@ -13,13 +13,14 @@ pub(super) mod redirect {
     use crate::patch::redirect::{self as xdp_redir, XDP_REDIRECT};
     use log::error;
 
-    /// `bpf_redirect(ifindex, flags)` — ifindex 0 = wifi; other ports unsupported.
+    /// `bpf_redirect(ifindex, flags)` — [`IFINDEX_WIFI`] only on C3; wired stub `-ENOTSUP`.
     pub(crate) fn inner(ifindex: usize, _flags: usize) -> usize {
+        use crate::patch::ctx::IFINDEX_WIFI;
         let ifindex = ifindex as u32;
         if !xdp_redir::ifindex_supported(ifindex) {
             error!(
-                "[helper]bpf_redirect: ifindex {} unsupported (only 0=wifi)",
-                ifindex
+                "[helper]bpf_redirect: ifindex {} unsupported (only {}=wifi)",
+                ifindex, IFINDEX_WIFI
             );
             return (-95i32) as usize; // -ENOTSUP
         }
@@ -75,9 +76,10 @@ pub(super) mod redirect_map {
         let ifindex = unsafe { core::ptr::read_unaligned(val_ptr as *const u32) };
 
         if !xdp_redir::ifindex_supported(ifindex) {
+            use crate::patch::ctx::IFINDEX_WIFI;
             error!(
-                "[helper]bpf_redirect_map: ifindex {} unsupported (only 0=wifi)",
-                ifindex
+                "[helper]bpf_redirect_map: ifindex {} unsupported (only {}=wifi)",
+                ifindex, IFINDEX_WIFI
             );
             return (-95i32) as usize;
         }

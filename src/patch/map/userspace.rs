@@ -19,36 +19,10 @@ use crate::patch::datapath;
 
 use super::array::BpfArrayMap;
 use super::hash::BpfHashMap;
-use super::hash::{KeyBlob, ValSlot};
 use super::names::resolve_map_name;
 use super::ops::MapError;
 use super::pool::{MapKind, POOL};
 use super::ringbuf::BpfRingBuf;
-use super::{FirewallRulesKey, FirewallRulesValue};
-
-impl From<FirewallRulesKey> for KeyBlob {
-    fn from(k: FirewallRulesKey) -> Self {
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                (&raw const k) as *const u8,
-                core::mem::size_of::<FirewallRulesKey>(),
-            )
-        };
-        KeyBlob::from_bytes(bytes).expect("FirewallRulesKey fits KeyBlob")
-    }
-}
-
-impl From<FirewallRulesValue> for ValSlot {
-    fn from(v: FirewallRulesValue) -> Self {
-        ValSlot::from_bytes(core::slice::from_ref(&v.v)).expect("u8 fits ValSlot")
-    }
-}
-
-impl From<u8> for ValSlot {
-    fn from(v: u8) -> Self {
-        ValSlot::from_bytes(core::slice::from_ref(&v)).expect("u8 fits ValSlot")
-    }
-}
 
 fn kind_label(kind: Option<MapKind>) -> &'static str {
     match kind {

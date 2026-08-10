@@ -53,12 +53,16 @@ pub const fn parse_dotted_ipv4(s: &str) -> [u8; 4] {
     out
 }
 
-/// Source IP seeded as XDP DROP on [`FW_LISTEN_PORT`].
+/// Source IP seeded as XDP DROP on [`FW_LISTEN_PORT`] (firewall payload builds).
 pub const FW_BLOCKED_SRC_IP: [u8; 4] = parse_dotted_ipv4(env!("FW_BLOCKED_SRC_IP"));
 pub const FW_TR3000_IP: [u8; 4] = parse_dotted_ipv4(env!("FW_TR3000_IP"));
+/// VIP (A): XDP L2 rewrite + TX; stack never owns this address.
+pub const FW_VIP_A_IP: [u8; 4] = parse_dotted_ipv4(env!("FW_VIP_A_IP"));
 /// UDP destination port on TR3000 for the fixed echo.
 pub const FW_ECHO_PORT: u16 = parse_u16(env!("FW_ECHO_PORT"));
 pub const FW_LISTEN_PORT: u16 = 8080;
+/// UDP control port for `VipMapOp` (XDP always PASSes this dport).
+pub const FW_CTRL_PORT: u16 = 8081;
 
 /// Wire-order octets as native `u32` (matches LE load of `iph->saddr`).
 pub const fn ipv4_u32(octets: [u8; 4]) -> u32 {
@@ -67,12 +71,16 @@ pub const fn ipv4_u32(octets: [u8; 4]) -> u32 {
 
 pub fn log_cfg() {
     log::info!(
-        "[FWTEST] cfg xdp={} blocked={}.{}.{}.{} tr3000={}.{}.{}.{}:{} listen=:{}",
+        "[FWTEST] cfg xdp={} blocked={}.{}.{}.{} vip_a={}.{}.{}.{} tr3000={}.{}.{}.{}:{} listen=:{}",
         XDP_ENABLE as u8,
         FW_BLOCKED_SRC_IP[0],
         FW_BLOCKED_SRC_IP[1],
         FW_BLOCKED_SRC_IP[2],
         FW_BLOCKED_SRC_IP[3],
+        FW_VIP_A_IP[0],
+        FW_VIP_A_IP[1],
+        FW_VIP_A_IP[2],
+        FW_VIP_A_IP[3],
         FW_TR3000_IP[0],
         FW_TR3000_IP[1],
         FW_TR3000_IP[2],

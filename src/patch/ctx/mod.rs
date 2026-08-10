@@ -6,8 +6,11 @@
 
 use core::ptr;
 
-/// WiFi ingress ifindex (compile-time port table: 0 = wifi).
+/// Compile-time logical port table (stable across SoCs; not Linux ifindex).
+/// WiFi egress / ingress.
 pub const IFINDEX_WIFI: u32 = 0;
+/// Wired NIC — stub on ESP32-C3 (`bpf_redirect` returns `-ENOTSUP`).
+pub const IFINDEX_WIRED: u32 = 1;
 
 #[repr(C)]
 pub struct XdpMd {

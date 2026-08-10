@@ -1,7 +1,8 @@
 //! Pending XDP redirect target + TX frame side channel.
 //!
 //! Helpers set the ifindex; the WiFi RX path queues the frame for egress when
-//! AOT returns `XDP_TX` / `XDP_REDIRECT` (ifindex 0 = wifi).
+//! AOT returns `XDP_TX` / `XDP_REDIRECT`. Only [`IFINDEX_WIFI`] is implemented
+//! on ESP32-C3; `IFINDEX_WIRED` (1) is a reserved stub (`-ENOTSUP` from helpers).
 
 use core::cell::RefCell;
 
@@ -68,6 +69,8 @@ pub fn clear_pending() {
 }
 
 /// Queue a frame for wifi egress (XDP_TX / supported REDIRECT).
+///
+/// Depth 1: returns `false` if the slot is occupied or `buf` is too large.
 #[inline]
 pub fn queue_egress_frame(buf: &[u8]) -> bool {
     if buf.len() > PENDING_FRAME_CAP {
@@ -78,9 +81,13 @@ pub fn queue_egress_frame(buf: &[u8]) -> bool {
         return false;
     }
     critical_section::with(|cs| {
-        *PENDING_FRAME.borrow_ref_mut(cs) = Some(v);
-    });
-    true
+        let mut slot = PENDING_FRAME.borrow_ref_mut(cs);
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(v);
+        true
+    })
 }
 
 /// Take a queued egress frame, if any.
@@ -89,7 +96,9 @@ pub fn take_egress_frame() -> Option<Vec<u8, PENDING_FRAME_CAP>> {
     critical_section::with(|cs| PENDING_FRAME.borrow_ref_mut(cs).take())
 }
 
-/// True if `ifindex` is the only implemented egress (wifi).
+/// True if `ifindex` has an implemented egress path (wifi only on C3).
+///
+/// `IFINDEX_WIRED` (1) is reserved for multi-NIC SoCs; callers get `-ENOTSUP`.
 #[inline]
 pub fn ifindex_supported(ifindex: u32) -> bool {
     ifindex == IFINDEX_WIFI

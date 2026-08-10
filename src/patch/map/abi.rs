@@ -193,7 +193,7 @@ pub(super) fn with_typed_map_ref<R>(
 /// Uses a pool **read** lock so lookups do not exclusive-contend with each other.
 /// `Busy` (writer held) still returns null — same ABI as a key miss; BPF programs
 /// that fail-open on null cannot distinguish the two. Prefer completing userspace
-/// map writes before enabling RX (see `fw_seed`).
+/// map writes before enabling RX (see `fw_seed::seed_vip_redirect`).
 pub fn helper_lookup(map: usize, key: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
         return 0;

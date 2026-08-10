@@ -1,85 +1,130 @@
-source = "/Users/nan/bs/libbpf-mcu/tests/xdp/firewall_ipv4.c"
-size = 11728
+source = "/Users/nan/bs/libbpf-mcu/tests/xdp/vip_l2_redirect.c"
+size = 13064
 
 [xdp]
-size = 400
+size = 744
 asm = """
-0000000000000000 <firewall_ipv4>:
-       0:	w2 = *(u32 *)(r1 + 0x4)
-       1:	w3 = *(u32 *)(r1 + 0x0)
-       2:	r1 = 0x0
-       3:	*(u64 *)(r10 - 0x8) = r1
+0000000000000000 <vip_l2_redirect>:
+       0:	w9 = *(u32 *)(r1 + 0x4)
+       1:	w6 = *(u32 *)(r1 + 0x0)
+       2:	w1 = 0x0
+       3:	*(u32 *)(r10 - 0x4) = w1
        4:	w0 = 0x2
-       5:	r1 = r3
-       6:	r1 += 0xe
-       7:	if r1 > r2 goto +0x29 <firewall_ipv4+0x188>
-       8:	w4 = *(u16 *)(r3 + 0xc)
-       9:	if w4 != 0x8 goto +0x27 <firewall_ipv4+0x188>
-      10:	r3 += 0x22
-      11:	if r3 > r2 goto +0x25 <firewall_ipv4+0x188>
-      12:	w3 = *(u8 *)(r1 + 0x0)
-      13:	w3 &= 0xf
-      14:	if w3 < 0x5 goto +0x22 <firewall_ipv4+0x188>
-      15:	w3 = *(u8 *)(r1 + 0x0)
-      16:	r3 <<= 0x2
-      17:	r3 &= 0x3c
-      18:	r4 = r1
-      19:	r4 += r3
-      20:	if r4 > r2 goto +0x1c <firewall_ipv4+0x188>
-      21:	w3 = *(u8 *)(r1 + 0x9)
-      22:	if w3 == 0x6 goto +0x2 <firewall_ipv4+0xc8>
-      23:	w3 = *(u8 *)(r1 + 0x9)
-      24:	if w3 != 0x11 goto +0x18 <firewall_ipv4+0x188>
-      25:	w4 = *(u8 *)(r1 + 0x0)
-      26:	r4 <<= 0x2
-      27:	r4 &= 0x3c
-      28:	r3 = r1
-      29:	r3 += r4
-      30:	r4 = r3
-      31:	r4 += 0x4
-      32:	if r4 > r2 goto +0x10 <firewall_ipv4+0x188>
-      33:	w1 = *(u32 *)(r1 + 0xc)
-      34:	w2 = *(u16 *)(r3 + 0x2)
-      35:	*(u32 *)(r10 - 0x8) = w1
-      36:	r2 = be16 r2
-      37:	*(u16 *)(r10 - 0x4) = w2
-      38:	r2 = r10
-      39:	r2 += -0x8
-      40:	r1 = 0x0 ll
-      42:	call 0x1
-      43:	r1 = r0
-      44:	if r1 == 0x0 goto +0x3 <firewall_ipv4+0x180>
-      45:	w0 = 0x1
-      46:	w1 = *(u8 *)(r1 + 0x0)
-      47:	if w1 != 0x0 goto +0x1 <firewall_ipv4+0x188>
-      48:	w0 = 0x2
-      49:	exit
+       5:	r8 = r6
+       6:	r8 += 0xe
+       7:	if r8 > r9 goto +0x54 <vip_l2_redirect+0x2e0>
+       8:	w1 = *(u16 *)(r6 + 0xc)
+       9:	if w1 != 0x8 goto +0x52 <vip_l2_redirect+0x2e0>
+      10:	r7 = r6
+      11:	r7 += 0x22
+      12:	if r7 > r9 goto +0x4f <vip_l2_redirect+0x2e0>
+      13:	r2 = r6
+      14:	r2 += 0x2a
+      15:	w4 = *(u32 *)(r8 + 0x10)
+      16:	r4 = be32 r4
+      17:	w3 = *(u32 *)(r8 + 0xc)
+      18:	r3 = be32 r3
+      19:	w1 = *(u8 *)(r8 + 0x9)
+      20:	if w1 != 0x11 goto +0x7 <vip_l2_redirect+0xe0>
+      21:	if r2 > r9 goto +0x6 <vip_l2_redirect+0xe0>
+      22:	w1 = *(u16 *)(r7 + 0x2)
+      23:	if w1 != 0x911f goto +0x4 <vip_l2_redirect+0xe0>
+      24:	r1 = 0x0 ll
+      26:	w2 = 0x11
+      27:	goto +0x19 <vip_l2_redirect+0x1a8>
+      28:	*(u64 *)(r10 - 0x10) = r2
+      29:	*(u64 *)(r10 - 0x20) = r3
+      30:	*(u64 *)(r10 - 0x18) = r4
+      31:	r2 = r10
+      32:	r2 += -0x4
+      33:	r1 = 0x0 ll
+      35:	call 0x1
+      36:	if r0 == 0x0 goto +0x4 <vip_l2_redirect+0x148>
+      37:	w1 = *(u32 *)(r0 + 0x0)
+      38:	if w1 == 0x0 goto +0x2 <vip_l2_redirect+0x148>
+      39:	w2 = *(u32 *)(r8 + 0x10)
+      40:	if w2 == w1 goto +0xf <vip_l2_redirect+0x1c0>
+      41:	w1 = *(u8 *)(r8 + 0x9)
+      42:	w0 = 0x2
+      43:	if w1 != 0x11 goto +0x30 <vip_l2_redirect+0x2e0>
+      44:	r1 = *(u64 *)(r10 - 0x10)
+      45:	if r1 > r9 goto +0x2e <vip_l2_redirect+0x2e0>
+      46:	w1 = *(u16 *)(r7 + 0x2)
+      47:	if w1 != 0x901f goto +0x2c <vip_l2_redirect+0x2e0>
+      48:	r1 = 0x11 ll
+      50:	w2 = 0x11
+      51:	r3 = *(u64 *)(r10 - 0x20)
+      52:	r4 = *(u64 *)(r10 - 0x18)
+      53:	call 0x6
+      54:	w0 = 0x2
+      55:	goto +0x24 <vip_l2_redirect+0x2e0>
+      56:	r1 = 0x22 ll
+      58:	w2 = 0x13
+      59:	r3 = *(u64 *)(r10 - 0x20)
+      60:	r4 = *(u64 *)(r10 - 0x18)
+      61:	call 0x6
+      62:	r2 = 0x6
+      63:	w1 = *(u8 *)(r6 + 0x6)
+      64:	r3 = 0x0
+      65:	w4 = *(u8 *)(r6 + 0x0)
+      66:	*(u8 *)(r6 + 0x0) = w1
+      67:	*(u8 *)(r6 + 0x6) = w4
+      68:	r1 = r6
+      69:	r1 += r2
+      70:	w2 = *(u8 *)(r1 + 0x1)
+      71:	r6 += r3
+      72:	w3 = *(u8 *)(r6 + 0x1)
+      73:	*(u8 *)(r6 + 0x1) = w2
+      74:	*(u8 *)(r1 + 0x1) = w3
+      75:	w2 = *(u8 *)(r1 + 0x2)
+      76:	w3 = *(u8 *)(r6 + 0x2)
+      77:	*(u8 *)(r6 + 0x2) = w2
+      78:	*(u8 *)(r1 + 0x2) = w3
+      79:	w2 = *(u8 *)(r1 + 0x3)
+      80:	w3 = *(u8 *)(r6 + 0x3)
+      81:	*(u8 *)(r6 + 0x3) = w2
+      82:	*(u8 *)(r1 + 0x3) = w3
+      83:	w2 = *(u8 *)(r1 + 0x4)
+      84:	w3 = *(u8 *)(r6 + 0x4)
+      85:	*(u8 *)(r6 + 0x4) = w2
+      86:	*(u8 *)(r1 + 0x4) = w3
+      87:	w2 = *(u8 *)(r1 + 0x5)
+      88:	w3 = *(u8 *)(r6 + 0x5)
+      89:	*(u8 *)(r6 + 0x5) = w2
+      90:	*(u8 *)(r1 + 0x5) = w3
+      91:	w0 = 0x3
+      92:	exit
 """
 
-[maps.firewall_rules]
-map_type = "BPF_MAP_TYPE_HASH"
-max_entries = 64
-estimated_bytes = 576
-aot_addr = 0x403810b4
+[maps.vip_ip]
+map_type = "BPF_MAP_TYPE_ARRAY"
+max_entries = 1
+estimated_bytes = 4
+aot_addr = 0x403811e0
 key = """
-    u32 src_ip
-    u16 dst_port
-    u16 pad
+    u32 v
 """
 value = """
-    u8 v
+    u32 v
 """
 
 [CORE]
 records = """
 insn_off,type_id,access_str,kind,type_name,section
-0x0000,19,0:1,0,xdp_md,xdp
-0x0008,19,0:0,0,xdp_md,xdp
-0x0040,22,0:2,0,ethhdr,xdp
-0x0060,25,0:0,0,iphdr,xdp
-0x0078,25,0:0,0,iphdr,xdp
-0x00a8,25,0:7,0,iphdr,xdp
-0x00b8,25,0:7,0,iphdr,xdp
-0x00c8,25,0:0,0,iphdr,xdp
-0x0108,25,0:9:0:0,0,iphdr,xdp
+0x0000,13,0:1,0,xdp_md,xdp
+0x0008,13,0:0,0,xdp_md,xdp
+0x0040,16,0:2,0,ethhdr,xdp
+0x0078,22,0:9:0:1,0,iphdr,xdp
+0x0088,22,0:9:0:0,0,iphdr,xdp
+0x0098,22,0:7,0,iphdr,xdp
+0x00b0,29,0:1,0,udphdr,xdp
+0x0138,22,0:9:0:1,0,iphdr,xdp
+0x0148,22,0:7,0,iphdr,xdp
+0x0170,29,0:1,0,udphdr,xdp
+0x01f0,16,0:1,0,ethhdr,xdp
+0x01f8,16,0:1,0,ethhdr,xdp
+0x0200,16,0:0,0,ethhdr,xdp
+0x0208,16,0:0,0,ethhdr,xdp
+0x0210,16,0:0,0,ethhdr,xdp
+0x0218,16,0:1,0,ethhdr,xdp
 """
