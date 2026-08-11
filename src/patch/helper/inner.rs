@@ -89,8 +89,43 @@ pub(super) mod redirect_map {
 }
 
 pub(super) mod tail_call {
-    pub(crate) fn inner(_ctx: usize, _map: usize, _index: usize) -> usize {
-        (-2i32) as usize
+    use crate::patch::map::abi::{TypedMapRef, with_typed_map_ref};
+    use crate::patch::map::ops::MapOps;
+    use crate::patch::map::resolve_map_id;
+    use crate::patch::prog_table;
+
+    /// `bpf_tail_call(ctx, map, index)`.
+    ///
+    /// Resolves the target from the firmware prog table first, then from a
+    /// `BPF_MAP_TYPE_PROG_ARRAY` (value = absolute entry `u32`). On success
+    /// transfers and does not return; on failure returns `-ENOENT` (-2).
+    pub(crate) fn inner(ctx: usize, map: usize, index: usize) -> usize {
+        let entry = prog_table::get(index).or_else(|| prog_array_entry(map, index));
+        let Some(entry) = entry.filter(|&e| e != 0) else {
+            return (-2i32) as usize;
+        };
+        if !prog_table::bump_tail_depth() {
+            return (-2i32) as usize;
+        }
+        unsafe { prog_table::transfer_to_entry(ctx, entry) }
+    }
+
+    fn prog_array_entry(map: usize, index: usize) -> Option<usize> {
+        let id = resolve_map_id(map)?;
+        with_typed_map_ref(id, |typed| match typed {
+            TypedMapRef::ProgArray(m) => {
+                let key = (index as u32).to_ne_bytes();
+                match MapOps::lookup(m, key.as_ptr()) {
+                    Ok(p) if !p.is_null() => {
+                        let v = unsafe { core::ptr::read_unaligned(p as *const u32) };
+                        if v == 0 { None } else { Some(v as usize) }
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .flatten()
     }
 }
 

@@ -34,7 +34,7 @@ action = 1
 # Baseline forward + VIP bounce; seeds vip_ip before RX.
 [[tests]]
 name = "xdp_forward_echo"
-enabled = true
+enabled = false
 
 [[tests.seeds]]
 map = "vip_ip"
@@ -42,10 +42,22 @@ index = 0
 ip = "192.168.110.200"
 smoke = true
 
-# UDP :8081 VipMapOp control plane (no boot seed required).
+# UDP :8081 HotLoadOp — stash current hot IRAM into DRAM slot 1, write AOT payload into HOT_B.
+# Wire format: proto/hot_load_op.proto (kind=SWAP=10). Ctrl RX buffer is 4608 bytes.
 [[tests]]
-name = "vip_map_ctrl"
+name = "hot_load_ctrl"
+enabled = false
+
+# Full hash-map firewall + hot-replace test (fw_hash_bounce/drop XDP pair).
+# Requires fw_hash_bounce AOT loaded at boot, fw_hash_drop in assets.
+[[tests]]
+name = "fw_hash_test"
 enabled = true
+
+[[tests.seeds]]
+map = "fw_rules"
+src_ip = "192.168.110.50"
+action = 1
 
 # On-device serial suite; skips WiFi. Mutex with other enabled tests.
 [[tests]]

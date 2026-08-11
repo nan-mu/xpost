@@ -387,7 +387,22 @@ fn run_redirect_tests(ctx_ptr: usize, pass: &mut u32, fail: &mut u32) {
         0,
         0,
     );
-    check("tail_call", tc == (-2i32) as usize, pass, fail);
+    check("tail_call_empty", tc == (-2i32) as usize, pass, fail);
+
+    // Prog table round-trip (no transfer — XDP_FRAME unset in helper-only tests).
+    {
+        use crate::patch::prog_table::{self, SlotId};
+        let _ = prog_table::set(1, Some(0x4038_1000));
+        check(
+            "prog_table_set_get",
+            prog_table::get(1) == Some(0x4038_1000),
+            pass,
+            fail,
+        );
+        prog_table::clear(1);
+        check("prog_table_clear", prog_table::get(1).is_none(), pass, fail);
+        let _ = SlotId::B;
+    }
 }
 
 fn run_ringbuf_tests(pass: &mut u32, fail: &mut u32) {

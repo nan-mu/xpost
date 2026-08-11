@@ -11,26 +11,29 @@ fn map_id_for(name: &str) -> Option<ResourceId> {
         "vip_ip" => Some(crate::patch::map::MAP_ID_VIP_IP),
         #[cfg(fw_us_firewall_seed)]
         "firewall_rules" => Some(crate::patch::map::MAP_ID_FIREWALL_RULES),
+        #[cfg(fw_us_fw_rules_seed)]
+        "fw_rules" => Some(crate::patch::map::MAP_ID_FW_RULES),
         _ => None,
     }
+}
+
+fn smoke_ipv4_frame(saddr: [u8; 4], daddr: [u8; 4]) -> [u8; 34] {
+    let mut frame = [0u8; 34];
+    frame[0..6].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    frame[6..12].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    frame[12] = 0x08;
+    frame[13] = 0x00;
+    frame[14] = 0x45;
+    frame[14 + 12..14 + 16].copy_from_slice(&saddr);
+    frame[14 + 16..14 + 20].copy_from_slice(&daddr);
+    frame
 }
 
 #[cfg(fw_us_vip_seed)]
 fn smoke_vip_xdp(vip: [u8; 4]) {
     use crate::patch::redirect::{XDP_PASS, XDP_TX, xdp_action_name};
 
-    fn smoke_frame(daddr: [u8; 4]) -> [u8; 34] {
-        let mut frame = [0u8; 34];
-        frame[0..6].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
-        frame[6..12].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
-        frame[12] = 0x08;
-        frame[13] = 0x00;
-        frame[14] = 0x45;
-        frame[14 + 16..14 + 20].copy_from_slice(&daddr);
-        frame
-    }
-
-    let mut vip_frame = smoke_frame(vip);
+    let mut vip_frame = smoke_ipv4_frame([192, 168, 110, 96], vip);
     let vip_rc = crate::patch::xdp(&mut vip_frame);
     if vip_rc == XDP_TX {
         info!(
@@ -44,7 +47,7 @@ fn smoke_vip_xdp(vip: [u8; 4]) {
         );
     }
 
-    let mut other = smoke_frame([192, 168, 110, 103]);
+    let mut other = smoke_ipv4_frame([192, 168, 110, 96], [192, 168, 110, 103]);
     let other_rc = crate::patch::xdp(&mut other);
     if other_rc == XDP_PASS {
         info!("[Seed][VIP] smoke sta→XDP_PASS ok");
@@ -54,6 +57,47 @@ fn smoke_vip_xdp(vip: [u8; 4]) {
             xdp_action_name(other_rc)
         );
     }
+}
+
+#[cfg(fw_us_fw_rules_seed)]
+fn smoke_fw_rules_xdp(hit_src: [u8; 4]) {
+    use crate::patch::redirect::{XDP_PASS, XDP_TX, xdp_action_name};
+
+    let mut hit = smoke_ipv4_frame(hit_src, [192, 168, 110, 103]);
+    let hit_rc = crate::patch::xdp(&mut hit);
+    if hit_rc == XDP_TX {
+        info!(
+            "[Seed][FW] smoke {}→{} ok",
+            format_ip(hit_src),
+            xdp_action_name(hit_rc)
+        );
+    } else {
+        error!(
+            "[Seed][FW] smoke {}→{} want XDP_TX",
+            format_ip(hit_src),
+            xdp_action_name(hit_rc)
+        );
+    }
+
+    let miss_src = [192, 168, 110, 33];
+    let mut miss = smoke_ipv4_frame(miss_src, [192, 168, 110, 103]);
+    let miss_rc = crate::patch::xdp(&mut miss);
+    if miss_rc == XDP_PASS {
+        info!("[Seed][FW] smoke miss {}→XDP_PASS ok", format_ip(miss_src));
+    } else {
+        error!(
+            "[Seed][FW] smoke miss {}→{} want XDP_PASS",
+            format_ip(miss_src),
+            xdp_action_name(miss_rc)
+        );
+    }
+}
+
+fn format_ip(ip: [u8; 4]) -> heapless::String<16> {
+    use core::fmt::Write;
+    let mut s = heapless::String::new();
+    let _ = write!(s, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+    s
 }
 
 #[cfg(fw_us_firewall_seed)]
@@ -162,6 +206,50 @@ pub async fn run_seeds() {
                     error!("[Seed] FirewallRule present but firewall_seed inactive");
                 }
             }
+            SeedOp::FwRulesEntry {
+                map,
+                src_ip,
+                action,
+            } => {
+                #[cfg(fw_us_fw_rules_seed)]
+                {
+                    use crate::patch::map::with_hash_map;
+                    let Some(id) = map_id_for(map) else {
+                        error!("[Seed] no map id for {}", map);
+                        continue;
+                    };
+                    if !register_map_name(map, id) {
+                        error!("[Seed] register_map_name({}) failed", map);
+                        continue;
+                    }
+                    let key = ipv4_u32(src_ip);
+                    match with_hash_map(map, |m| {
+                        MapOps::update(
+                            m,
+                            (&raw const key) as *const u8,
+                            (&raw const action) as *const u8,
+                            0,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            info!(
+                                "[Seed] {} key={}.{}.{}.{} action={}",
+                                map, src_ip[0], src_ip[1], src_ip[2], src_ip[3], action
+                            );
+                            smoke_fw_rules_xdp(src_ip);
+                        }
+                        Ok(Err(e)) => error!("[Seed] {} update err: {:?}", map, e),
+                        Err(e) => error!("[Seed] {} busy/missing: {:?}", map, e),
+                    }
+                }
+                #[cfg(not(fw_us_fw_rules_seed))]
+                {
+                    let _ = (map, src_ip, action);
+                    error!("[Seed] FwRulesEntry present but fw_rules_seed inactive");
+                }
+            }
         }
     }
 }
@@ -258,6 +346,48 @@ pub fn run_seeds() {
                 {
                     let _ = (map, src_ip, dst_port, action);
                     error!("[Seed] FirewallRule present but firewall_seed inactive");
+                }
+            }
+            SeedOp::FwRulesEntry {
+                map,
+                src_ip,
+                action,
+            } => {
+                #[cfg(fw_us_fw_rules_seed)]
+                {
+                    use crate::patch::map::with_hash_map;
+                    let Some(id) = map_id_for(map) else {
+                        error!("[Seed] no map id for {}", map);
+                        continue;
+                    };
+                    if !register_map_name(map, id) {
+                        error!("[Seed] register_map_name({}) failed", map);
+                        continue;
+                    }
+                    let key = ipv4_u32(src_ip);
+                    match with_hash_map(map, |m| {
+                        MapOps::update(
+                            m,
+                            (&raw const key) as *const u8,
+                            (&raw const action) as *const u8,
+                            0,
+                        )
+                    }) {
+                        Ok(Ok(())) => {
+                            info!(
+                                "[Seed] {} key={}.{}.{}.{} action={}",
+                                map, src_ip[0], src_ip[1], src_ip[2], src_ip[3], action
+                            );
+                            smoke_fw_rules_xdp(src_ip);
+                        }
+                        Ok(Err(e)) => error!("[Seed] {} update err: {:?}", map, e),
+                        Err(e) => error!("[Seed] {} busy/missing: {:?}", map, e),
+                    }
+                }
+                #[cfg(not(fw_us_fw_rules_seed))]
+                {
+                    let _ = (map, src_ip, action);
+                    error!("[Seed] FwRulesEntry present but fw_rules_seed inactive");
                 }
             }
         }

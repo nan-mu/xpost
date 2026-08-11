@@ -77,7 +77,7 @@ async fn main(spawner: Spawner) {
     patch::map::init_firmware_maps().expect("[Init][MAP] talc pool OOM for bpf.toml maps");
     info!("[Init][MAP] firmware maps from bpf.toml initialized");
 
-    info!("[Init][XDP] load AOT payload into HOT_REGION");
+    info!("[Init][XDP] load AOT payload into HOT_A");
     patch::load(peripherals.FLASH);
 
     #[cfg(fw_us_hw_selftest)]
@@ -94,12 +94,15 @@ async fn main(spawner: Spawner) {
     #[cfg(not(fw_us_hw_selftest))]
     {
         #[cfg(all(
-            any(fw_us_vip_seed, fw_us_firewall_seed),
+            any(fw_us_vip_seed, fw_us_firewall_seed, fw_us_fw_rules_seed),
             feature = "patch-sync-embassy",
             not(feature = "patch-sync-st")
         ))]
         firmware::fw_seed::run_seeds().await;
-        #[cfg(all(any(fw_us_vip_seed, fw_us_firewall_seed), feature = "patch-sync-st"))]
+        #[cfg(all(
+            any(fw_us_vip_seed, fw_us_firewall_seed, fw_us_fw_rules_seed),
+            feature = "patch-sync-st"
+        ))]
         firmware::fw_seed::run_seeds();
 
         patch::datapath::enable();

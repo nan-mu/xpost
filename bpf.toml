@@ -1,130 +1,120 @@
-source = "/Users/nan/bs/libbpf-mcu/tests/xdp/vip_l2_redirect.c"
-size = 13064
+source = "/Users/nan/bs/libbpf-mcu/tests/xdp/fw_hash_bounce.c"
+size = 11856
 
 [xdp]
-size = 744
+size = 576
 asm = """
-0000000000000000 <vip_l2_redirect>:
-       0:	w9 = *(u32 *)(r1 + 0x4)
-       1:	w6 = *(u32 *)(r1 + 0x0)
-       2:	w1 = 0x0
-       3:	*(u32 *)(r10 - 0x4) = w1
-       4:	w0 = 0x2
-       5:	r8 = r6
-       6:	r8 += 0xe
-       7:	if r8 > r9 goto +0x54 <vip_l2_redirect+0x2e0>
-       8:	w1 = *(u16 *)(r6 + 0xc)
-       9:	if w1 != 0x8 goto +0x52 <vip_l2_redirect+0x2e0>
-      10:	r7 = r6
-      11:	r7 += 0x22
-      12:	if r7 > r9 goto +0x4f <vip_l2_redirect+0x2e0>
-      13:	r2 = r6
-      14:	r2 += 0x2a
-      15:	w4 = *(u32 *)(r8 + 0x10)
-      16:	r4 = be32 r4
-      17:	w3 = *(u32 *)(r8 + 0xc)
-      18:	r3 = be32 r3
-      19:	w1 = *(u8 *)(r8 + 0x9)
-      20:	if w1 != 0x11 goto +0x7 <vip_l2_redirect+0xe0>
-      21:	if r2 > r9 goto +0x6 <vip_l2_redirect+0xe0>
-      22:	w1 = *(u16 *)(r7 + 0x2)
-      23:	if w1 != 0x911f goto +0x4 <vip_l2_redirect+0xe0>
-      24:	r1 = 0x0 ll
-      26:	w2 = 0x11
-      27:	goto +0x19 <vip_l2_redirect+0x1a8>
-      28:	*(u64 *)(r10 - 0x10) = r2
-      29:	*(u64 *)(r10 - 0x20) = r3
-      30:	*(u64 *)(r10 - 0x18) = r4
-      31:	r2 = r10
-      32:	r2 += -0x4
-      33:	r1 = 0x0 ll
-      35:	call 0x1
-      36:	if r0 == 0x0 goto +0x4 <vip_l2_redirect+0x148>
-      37:	w1 = *(u32 *)(r0 + 0x0)
-      38:	if w1 == 0x0 goto +0x2 <vip_l2_redirect+0x148>
-      39:	w2 = *(u32 *)(r8 + 0x10)
-      40:	if w2 == w1 goto +0xf <vip_l2_redirect+0x1c0>
-      41:	w1 = *(u8 *)(r8 + 0x9)
-      42:	w0 = 0x2
-      43:	if w1 != 0x11 goto +0x30 <vip_l2_redirect+0x2e0>
-      44:	r1 = *(u64 *)(r10 - 0x10)
-      45:	if r1 > r9 goto +0x2e <vip_l2_redirect+0x2e0>
-      46:	w1 = *(u16 *)(r7 + 0x2)
-      47:	if w1 != 0x901f goto +0x2c <vip_l2_redirect+0x2e0>
-      48:	r1 = 0x11 ll
-      50:	w2 = 0x11
-      51:	r3 = *(u64 *)(r10 - 0x20)
-      52:	r4 = *(u64 *)(r10 - 0x18)
-      53:	call 0x6
-      54:	w0 = 0x2
-      55:	goto +0x24 <vip_l2_redirect+0x2e0>
-      56:	r1 = 0x22 ll
-      58:	w2 = 0x13
-      59:	r3 = *(u64 *)(r10 - 0x20)
-      60:	r4 = *(u64 *)(r10 - 0x18)
-      61:	call 0x6
-      62:	r2 = 0x6
-      63:	w1 = *(u8 *)(r6 + 0x6)
-      64:	r3 = 0x0
-      65:	w4 = *(u8 *)(r6 + 0x0)
-      66:	*(u8 *)(r6 + 0x0) = w1
-      67:	*(u8 *)(r6 + 0x6) = w4
-      68:	r1 = r6
-      69:	r1 += r2
-      70:	w2 = *(u8 *)(r1 + 0x1)
-      71:	r6 += r3
-      72:	w3 = *(u8 *)(r6 + 0x1)
-      73:	*(u8 *)(r6 + 0x1) = w2
-      74:	*(u8 *)(r1 + 0x1) = w3
-      75:	w2 = *(u8 *)(r1 + 0x2)
-      76:	w3 = *(u8 *)(r6 + 0x2)
-      77:	*(u8 *)(r6 + 0x2) = w2
-      78:	*(u8 *)(r1 + 0x2) = w3
-      79:	w2 = *(u8 *)(r1 + 0x3)
-      80:	w3 = *(u8 *)(r6 + 0x3)
-      81:	*(u8 *)(r6 + 0x3) = w2
-      82:	*(u8 *)(r1 + 0x3) = w3
-      83:	w2 = *(u8 *)(r1 + 0x4)
-      84:	w3 = *(u8 *)(r6 + 0x4)
-      85:	*(u8 *)(r6 + 0x4) = w2
-      86:	*(u8 *)(r1 + 0x4) = w3
-      87:	w2 = *(u8 *)(r1 + 0x5)
-      88:	w3 = *(u8 *)(r6 + 0x5)
-      89:	*(u8 *)(r6 + 0x5) = w2
-      90:	*(u8 *)(r1 + 0x5) = w3
-      91:	w0 = 0x3
-      92:	exit
+0000000000000000 <fw_hash_bounce>:
+       0:	w0 = 0x2
+       1:	w6 = *(u32 *)(r1 + 0x4)
+       2:	w9 = *(u32 *)(r1 + 0x0)
+       3:	r8 = r9
+       4:	r8 += 0xe
+       5:	if r8 > r6 goto +0x41 <fw_hash_bounce+0x238>
+       6:	w1 = *(u16 *)(r9 + 0xc)
+       7:	if w1 != 0x8 goto +0x3f <fw_hash_bounce+0x238>
+       8:	r7 = r9
+       9:	r7 += 0x22
+      10:	if r7 > r6 goto +0x3c <fw_hash_bounce+0x238>
+      11:	r3 = r9
+      12:	r3 += 0x2a
+      13:	w1 = *(u8 *)(r8 + 0x9)
+      14:	if w1 != 0x11 goto +0x3 <fw_hash_bounce+0x90>
+      15:	if r3 > r6 goto +0x2 <fw_hash_bounce+0x90>
+      16:	w1 = *(u16 *)(r7 + 0x2)
+      17:	if w1 == 0x911f goto +0x35 <fw_hash_bounce+0x238>
+      18:	w1 = *(u32 *)(r8 + 0xc)
+      19:	*(u32 *)(r10 - 0x4) = w1
+      20:	r2 = r10
+      21:	r2 += -0x4
+      22:	r1 = 0x0 ll
+      24:	*(u64 *)(r10 - 0x10) = r3
+      25:	call 0x1
+      26:	r5 = *(u64 *)(r10 - 0x10)
+      27:	r1 = r0
+      28:	w0 = 0x2
+      29:	if r1 == 0x0 goto +0x29 <fw_hash_bounce+0x238>
+      30:	r2 = 0x6
+      31:	w1 = *(u8 *)(r9 + 0x6)
+      32:	r3 = 0x0
+      33:	w4 = *(u8 *)(r9 + 0x0)
+      34:	*(u8 *)(r9 + 0x0) = w1
+      35:	*(u8 *)(r9 + 0x6) = w4
+      36:	r1 = r9
+      37:	r1 += r2
+      38:	w2 = *(u8 *)(r1 + 0x1)
+      39:	r9 += r3
+      40:	w3 = *(u8 *)(r9 + 0x1)
+      41:	*(u8 *)(r9 + 0x1) = w2
+      42:	*(u8 *)(r1 + 0x1) = w3
+      43:	w2 = *(u8 *)(r1 + 0x2)
+      44:	w3 = *(u8 *)(r9 + 0x2)
+      45:	*(u8 *)(r9 + 0x2) = w2
+      46:	*(u8 *)(r1 + 0x2) = w3
+      47:	w2 = *(u8 *)(r1 + 0x3)
+      48:	w3 = *(u8 *)(r9 + 0x3)
+      49:	*(u8 *)(r9 + 0x3) = w2
+      50:	*(u8 *)(r1 + 0x3) = w3
+      51:	w2 = *(u8 *)(r1 + 0x4)
+      52:	w3 = *(u8 *)(r9 + 0x4)
+      53:	*(u8 *)(r9 + 0x4) = w2
+      54:	*(u8 *)(r1 + 0x4) = w3
+      55:	w2 = *(u8 *)(r1 + 0x5)
+      56:	w3 = *(u8 *)(r9 + 0x5)
+      57:	*(u8 *)(r9 + 0x5) = w2
+      58:	*(u8 *)(r1 + 0x5) = w3
+      59:	w1 = *(u32 *)(r8 + 0x10)
+      60:	w2 = *(u32 *)(r8 + 0xc)
+      61:	*(u32 *)(r8 + 0xc) = w1
+      62:	*(u32 *)(r8 + 0x10) = w2
+      63:	w0 = 0x3
+      64:	w1 = *(u8 *)(r8 + 0x9)
+      65:	if w1 != 0x11 goto +0x5 <fw_hash_bounce+0x238>
+      66:	if r5 > r6 goto +0x4 <fw_hash_bounce+0x238>
+      67:	w1 = *(u16 *)(r7 + 0x2)
+      68:	w2 = *(u16 *)(r7 + 0x0)
+      69:	*(u16 *)(r7 + 0x0) = w1
+      70:	*(u16 *)(r7 + 0x2) = w2
+      71:	exit
 """
 
-[maps.vip_ip]
-map_type = "BPF_MAP_TYPE_ARRAY"
-max_entries = 1
-estimated_bytes = 4
-aot_addr = 0x403811e0
+[maps.fw_rules]
+map_type = "BPF_MAP_TYPE_HASH"
+max_entries = 16
+estimated_bytes = 80
+# Boot AOT = fw_hash_bounce. Hot-sibling fw_hash_drop embeds a different
+# `.maps` VMA in HOT_A; both must alias the same pool ResourceId.
+aot_addr = 0x40380318
+aot_aliases = [0x40380278]
 key = """
     u32 v
 """
 value = """
-    u32 v
+    u8 v
 """
 
 [CORE]
 records = """
 insn_off,type_id,access_str,kind,type_name,section
-0x0000,13,0:1,0,xdp_md,xdp
-0x0008,13,0:0,0,xdp_md,xdp
-0x0040,16,0:2,0,ethhdr,xdp
-0x0078,22,0:9:0:1,0,iphdr,xdp
-0x0088,22,0:9:0:0,0,iphdr,xdp
-0x0098,22,0:7,0,iphdr,xdp
-0x00b0,29,0:1,0,udphdr,xdp
-0x0138,22,0:9:0:1,0,iphdr,xdp
-0x0148,22,0:7,0,iphdr,xdp
-0x0170,29,0:1,0,udphdr,xdp
-0x01f0,16,0:1,0,ethhdr,xdp
-0x01f8,16,0:1,0,ethhdr,xdp
-0x0200,16,0:0,0,ethhdr,xdp
-0x0208,16,0:0,0,ethhdr,xdp
-0x0210,16,0:0,0,ethhdr,xdp
-0x0218,16,0:1,0,ethhdr,xdp
+0x0008,16,0:1,0,xdp_md,xdp
+0x0010,16,0:0,0,xdp_md,xdp
+0x0030,19,0:2,0,ethhdr,xdp
+0x0068,24,0:7,0,iphdr,xdp
+0x0080,30,0:1,0,udphdr,xdp
+0x0090,24,0:9:0:0,0,iphdr,xdp
+0x00f0,19,0:1,0,ethhdr,xdp
+0x00f8,19,0:1,0,ethhdr,xdp
+0x0100,19,0:0,0,ethhdr,xdp
+0x0108,19,0:0,0,ethhdr,xdp
+0x0110,19,0:0,0,ethhdr,xdp
+0x0118,19,0:1,0,ethhdr,xdp
+0x01d8,24,0:9:0:1,0,iphdr,xdp
+0x01e0,24,0:9:0:0,0,iphdr,xdp
+0x01e8,24,0:9:0:0,0,iphdr,xdp
+0x01f0,24,0:9:0:1,0,iphdr,xdp
+0x0200,24,0:7,0,iphdr,xdp
+0x0218,30,0:1,0,udphdr,xdp
+0x0220,30,0:0,0,udphdr,xdp
+0x0228,30,0:0,0,udphdr,xdp
+0x0230,30,0:1,0,udphdr,xdp
 """

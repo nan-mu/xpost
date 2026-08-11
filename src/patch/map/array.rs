@@ -269,6 +269,38 @@ pub fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(), Alloc
     )
 }
 
+/// `BPF_MAP_TYPE_PROG_ARRAY`: ARRAY of `u32` absolute XDP entry addresses.
+#[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
+pub async fn create_bpf_prog_array(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
+    let (raw, layout, value_size, stride) = alloc_array(4, max_entries)?;
+    RawResource::insert(
+        id,
+        raw,
+        layout,
+        drop_array,
+        Some(MapKind::ProgArray),
+        4,
+        value_size,
+        stride,
+    )
+    .await
+}
+
+#[cfg(feature = "patch-sync-st")]
+pub fn create_bpf_prog_array(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
+    let (raw, layout, value_size, stride) = alloc_array(4, max_entries)?;
+    RawResource::insert(
+        id,
+        raw,
+        layout,
+        drop_array,
+        Some(MapKind::ProgArray),
+        4,
+        value_size,
+        stride,
+    )
+}
+
 /// HW selftest for the first ARRAY map in bpf.toml (when present).
 #[cfg(fw_us_hw_selftest)]
 pub fn run_selftest(pass: &mut u32, fail: &mut u32) {

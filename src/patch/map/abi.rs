@@ -144,22 +144,24 @@ pub fn resolve_map_id(map: usize) -> Option<ResourceId> {
 }
 
 /// Registry entry viewed as a concrete BPF map (exclusive / write path).
-pub(super) enum TypedMap<'a> {
+pub(crate) enum TypedMap<'a> {
     Array(&'a mut BpfArrayMap),
     Hash(&'a mut BpfHashMap),
     Ringbuf(&'a mut BpfRingBuf),
     Devmap(&'a mut BpfArrayMap),
+    ProgArray(&'a mut BpfArrayMap),
 }
 
 /// Shared view for lookup (read lock; value bytes remain writable via returned ptr).
-pub(super) enum TypedMapRef<'a> {
+pub(crate) enum TypedMapRef<'a> {
     Array(&'a BpfArrayMap),
     Hash(&'a BpfHashMap),
     Ringbuf(&'a BpfRingBuf),
     Devmap(&'a BpfArrayMap),
+    ProgArray(&'a BpfArrayMap),
 }
 
-pub(super) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> R) -> Option<R> {
+pub(crate) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> R) -> Option<R> {
     let mut guard = POOL.try_write()?;
     let table = guard.as_mut()?;
     let res = table.get_mut(&id)?;
@@ -168,11 +170,12 @@ pub(super) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> 
         MapKind::Hash => TypedMap::Hash(unsafe { res.as_mut() }),
         MapKind::Ringbuf => TypedMap::Ringbuf(unsafe { res.as_mut() }),
         MapKind::Devmap => TypedMap::Devmap(unsafe { res.as_mut() }),
+        MapKind::ProgArray => TypedMap::ProgArray(unsafe { res.as_mut() }),
     };
     Some(f(typed))
 }
 
-pub(super) fn with_typed_map_ref<R>(
+pub(crate) fn with_typed_map_ref<R>(
     id: ResourceId,
     f: impl FnOnce(TypedMapRef<'_>) -> R,
 ) -> Option<R> {
@@ -184,6 +187,7 @@ pub(super) fn with_typed_map_ref<R>(
         MapKind::Hash => TypedMapRef::Hash(unsafe { res.as_ref() }),
         MapKind::Ringbuf => TypedMapRef::Ringbuf(unsafe { res.as_ref() }),
         MapKind::Devmap => TypedMapRef::Devmap(unsafe { res.as_ref() }),
+        MapKind::ProgArray => TypedMapRef::ProgArray(unsafe { res.as_ref() }),
     };
     Some(f(typed))
 }
@@ -196,11 +200,15 @@ pub(super) fn with_typed_map_ref<R>(
 /// map writes before enabling RX (see `fw_seed::seed_vip_redirect`).
 pub fn helper_lookup(map: usize, key: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
+        // Distinct from Busy/miss: hot-loaded AOT used a `.maps` VMA that was never aliased.
+        log::error!("[Helper][MAP][helper_lookup]: unresolved map ptr {}", map);
         return 0;
     };
     let key = key as *const u8;
     match with_typed_map_ref(id, |typed| match typed {
-        TypedMapRef::Array(m) | TypedMapRef::Devmap(m) => MapOps::lookup(m, key),
+        TypedMapRef::Array(m) | TypedMapRef::Devmap(m) | TypedMapRef::ProgArray(m) => {
+            MapOps::lookup(m, key)
+        }
         TypedMapRef::Hash(m) => MapOps::lookup(m, key),
         TypedMapRef::Ringbuf(m) => MapOps::lookup(m, key),
     }) {
@@ -221,7 +229,9 @@ pub fn helper_update(map: usize, key: usize, value: usize, flags: usize) -> usiz
     let key = key as *const u8;
     let value = value as *const u8;
     match with_typed_map(id, |typed| match typed {
-        TypedMap::Array(m) | TypedMap::Devmap(m) => MapOps::update(m, key, value, flags as u64),
+        TypedMap::Array(m) | TypedMap::Devmap(m) | TypedMap::ProgArray(m) => {
+            MapOps::update(m, key, value, flags as u64)
+        }
         TypedMap::Hash(m) => MapOps::update(m, key, value, flags as u64),
         TypedMap::Ringbuf(m) => MapOps::update(m, key, value, flags as u64),
     }) {
@@ -240,7 +250,7 @@ pub fn helper_delete(map: usize, key: usize) -> usize {
     };
     let key = key as *const u8;
     match with_typed_map(id, |typed| match typed {
-        TypedMap::Array(m) | TypedMap::Devmap(m) => MapOps::delete(m, key),
+        TypedMap::Array(m) | TypedMap::Devmap(m) | TypedMap::ProgArray(m) => MapOps::delete(m, key),
         TypedMap::Hash(m) => MapOps::delete(m, key),
         TypedMap::Ringbuf(m) => MapOps::delete(m, key),
     }) {
@@ -287,7 +297,7 @@ pub fn helper_for_each_map_elem(
             let m: &mut BpfHashMap = unsafe { res.as_mut() };
             m.for_each_elems(map, cb, callback_ctx)
         }
-        Some(MapKind::Array) | Some(MapKind::Devmap) => {
+        Some(MapKind::Array) | Some(MapKind::Devmap) | Some(MapKind::ProgArray) => {
             let m: &mut BpfArrayMap = unsafe { res.as_mut() };
             m.for_each_elems(map, cb, callback_ctx)
         }

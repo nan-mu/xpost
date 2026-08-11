@@ -21,7 +21,7 @@ pub use abi::{
     helper_for_each_map_elem, helper_lookup, helper_update, register_map_addr, resolve_map_id,
     set_map_aliases, unbind_map_addr,
 };
-pub use array::{BpfArrayMap, create_bpf_array, create_bpf_devmap};
+pub use array::{BpfArrayMap, create_bpf_array, create_bpf_devmap, create_bpf_prog_array};
 pub use ctrl::{MAX_MAP_IDS, MapCreateCmd, MapCtrlError, create_map, destroy_map};
 pub use hash::{
     BpfHashMap, BpfHashMapBuilder, BpfHashTable, HashBuildError, KeyBlob, ValSlot, create_bpf_hash,

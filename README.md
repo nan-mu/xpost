@@ -51,13 +51,14 @@ cargo install espflash
 | `[wifi]` | STA `ssid` / `password` |
 | `[probe]` | TR3000 侧：`ip`、`reply_port`（固定 echo 目的） |
 | `[dut]` | 本机：`listen_port`、`ctrl_port` |
-| `[[tests]]` | `name` + `enabled`；启用项推导功能（如 `vip_map_ctrl` → ctrl 面） |
-| `[[tests.seeds]]` | 该测试的 map 初始化对象（`vip_ip` / `firewall_rules`） |
+| `[[tests]]` | `name` + `enabled`；启用项推导功能（如 `fw_hash_test` → map_crud + hot_load） |
+| `[[tests.seeds]]` | 该测试的 map 初始化对象（`fw_rules` / `vip_ip` / `firewall_rules`） |
 
 | 测试名 | 启用后效果 |
 |------|------|
 | `xdp_forward_echo` | 网络路径 + 其 `seeds`（通常 seed `vip_ip`） |
-| `vip_map_ctrl` | UDP ctrl（VipMapOp） |
+| `hot_load_ctrl` | UDP ctrl（HotLoadOp SWAP：热区→DRAM 一号槽，载荷→HOT_A） |
+| `fw_hash_test` | 全流程 hash map 防火墙 + 热更新（MapCrudOp + HotLoadOp UPLOAD/COPY/READBACK） |
 | `firewall_echo` | 网络路径 + 其 `seeds`（通常 seed `firewall_rules`） |
 | `hw_selftest` | 板载串口自检（与其它网络测试互斥） |
 
@@ -130,19 +131,22 @@ firmware/
 
 固件支持从 Flash 的 `payload.bin` 加载并执行外部代码：
 
-- 代码加载到 IRAM 的特定区域（`0x403A1000`，与 AOT `HOT_REGION` 一致）
+- 代码加载到 IRAM `HOT_A`（`0x40380200`，3584B；`--slot=a`）
+- 热更新 / `tail_call` 目标为 `HOT_B`（`0x40381000`，4KiB；`--slot=b`）
 - 支持 BSS 段初始化
 - 执行前刷新指令缓存（`fence.i`）
-- 提供辅助函数调度机制（`helper_jump`）
+- 提供辅助函数调度机制（`helper_dispatcher` @ `0x40380000`，512B 窗）
 
 ### 4. 内存布局
 
 自定义链接器脚本定义了特殊的内存段：
 
 - `mem_map.toml`: 固件侧地址契约（生成 `OUT_DIR/mem_map.rs` + `custom-sections.x`）
-- AOT `esp32c3.ld` 仅由 **libbpf-mcu** 维护，固件构建不会改写
-- `0x40380000`: `helper_dispatcher`（4KB，DRAM dummy 防双映射清零）
-- `0x40381000`: `HOT_REGION` 占位（4KB）
+- AOT `esp32c3.ld` / `esp32c3-slot-b.ld` 仅由 **libbpf-mcu** 维护，固件构建不会改写
+- `0x40380000`: `helper_dispatcher`（512B）
+- `0x40380200`: `HOT_A`（3584B，RX 默认入口）
+- `0x40381000`: `HOT_B`（4KiB，可热替换）
+- 合计 8KiB patch arena；`.trap` 仍从 `0x40382000` 起
 - `load()` 启动时 `assert` 链接地址与 `mem_map.toml` 一致
 
 ## Flash 分区表

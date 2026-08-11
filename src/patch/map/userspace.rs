@@ -30,6 +30,7 @@ fn kind_label(kind: Option<MapKind>) -> &'static str {
         Some(MapKind::Array) => "ARRAY",
         Some(MapKind::Ringbuf) => "RINGBUF",
         Some(MapKind::Devmap) => "DEVMAP",
+        Some(MapKind::ProgArray) => "PROG_ARRAY",
         None => "none",
     }
 }

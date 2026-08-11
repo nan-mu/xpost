@@ -14,17 +14,20 @@ const MAX_CONFIG_SCHEMA: i64 = 1;
 /// Userspace cfgs derived from enabled `[[tests]]`.
 const US_CFGS: &[&str] = &[
     "vip_seed",
-    "vip_ctrl",
+    "hot_load",
     "firewall_seed",
+    "fw_rules_seed",
     "xdp_rx",
     "hw_selftest",
+    "map_crud",
 ];
 
 /// Known `[[tests]].name` values (router-probe registry alignment).
 const KNOWN_TESTS: &[&str] = &[
     "firewall_echo",
     "xdp_forward_echo",
-    "vip_map_ctrl",
+    "hot_load_ctrl",
+    "fw_hash_test",
     "hw_selftest",
 ];
 
@@ -62,6 +65,12 @@ enum SeedSpec {
         map: String,
         src_ip: [u8; 4],
         dst_port: u16,
+        action: u8,
+    },
+    /// HASH `fw_rules`: key = src IPv4 wire `u32`, value = u8 placeholder.
+    FwRulesHash {
+        map: String,
+        src_ip: [u8; 4],
         action: u8,
     },
 }
@@ -144,9 +153,11 @@ fn apply_userspace_config() {
     }
 
     let mut vip_seed = false;
-    let mut vip_ctrl = false;
+    let mut hot_load = false;
     let mut firewall_seed = false;
+    let mut fw_rules_seed = false;
     let mut hw_selftest = false;
+    let mut map_crud = false;
     let mut net_test = false;
     let mut seeds: Vec<SeedSpec> = Vec::new();
 
@@ -191,8 +202,13 @@ fn apply_userspace_config() {
 
         match name {
             "hw_selftest" => hw_selftest = true,
-            "vip_map_ctrl" => {
-                vip_ctrl = true;
+            "hot_load_ctrl" => {
+                hot_load = true;
+                net_test = true;
+            }
+            "fw_hash_test" => {
+                map_crud = true;
+                hot_load = true;
                 net_test = true;
             }
             "xdp_forward_echo" => net_test = true,
@@ -280,9 +296,40 @@ fn apply_userspace_config() {
                         action,
                     });
                 }
+                "fw_rules" => {
+                    let src_ip = parse_toml_ipv4_value(
+                        st.get("src_ip").unwrap_or_else(|| {
+                            panic!(
+                                "config.toml: [[tests]] `{name}` seeds[{si}].src_ip required for fw_rules"
+                            )
+                        }),
+                        &format!("tests.{name}.seeds[{si}].src_ip"),
+                    );
+                    let action = st
+                        .get("action")
+                        .and_then(|v| v.as_integer())
+                        .map(|n| {
+                            assert!((0..=255).contains(&n), "seeds[{si}].action must be u8");
+                            n as u8
+                        })
+                        .unwrap_or(1);
+                    for (key, _) in st {
+                        if !matches!(key.as_str(), "map" | "src_ip" | "action") {
+                            println!(
+                                "cargo:warning=config.toml: ignoring unknown seeds[{si}].{key} in `{name}`"
+                            );
+                        }
+                    }
+                    fw_rules_seed = true;
+                    seeds.push(SeedSpec::FwRulesHash {
+                        map: map.to_string(),
+                        src_ip,
+                        action,
+                    });
+                }
                 other => panic!(
                     "config.toml: [[tests]] `{name}` seeds[{si}].map `{other}` unsupported \
-                     (known: vip_ip, firewall_rules)"
+                     (known: vip_ip, firewall_rules, fw_rules)"
                 ),
             }
         }
@@ -291,9 +338,13 @@ fn apply_userspace_config() {
     if hw_selftest && net_test {
         panic!("config.toml: hw_selftest cannot be enabled together with network tests");
     }
-    if vip_seed && firewall_seed {
+    let seed_kinds = [vip_seed, firewall_seed, fw_rules_seed]
+        .into_iter()
+        .filter(|x| *x)
+        .count();
+    if seed_kinds > 1 {
         panic!(
-            "config.toml: vip_ip and firewall_rules seeds are mutually exclusive across enabled tests"
+            "config.toml: vip_ip / firewall_rules / fw_rules seeds are mutually exclusive across enabled tests"
         );
     }
 
@@ -301,8 +352,10 @@ fn apply_userspace_config() {
 
     let mut enabled = BTreeMap::new();
     enabled.insert("vip_seed", vip_seed);
-    enabled.insert("vip_ctrl", vip_ctrl);
+    enabled.insert("hot_load", hot_load);
     enabled.insert("firewall_seed", firewall_seed);
+    enabled.insert("fw_rules_seed", fw_rules_seed);
+    enabled.insert("map_crud", map_crud);
     enabled.insert("xdp_rx", xdp_rx);
     enabled.insert("hw_selftest", hw_selftest);
 
@@ -387,6 +440,12 @@ fn write_fw_cfg_data(
                  dst_port: u16,\n\
                  action: u8,\n\
              },\n\
+             /// HASH `fw_rules`: key = src IPv4 wire u32, value = u8.\n\
+             FwRulesEntry {\n\
+                 map: &'static str,\n\
+                 src_ip: [u8; 4],\n\
+                 action: u8,\n\
+             },\n\
          }\n\n",
     );
 
@@ -416,6 +475,20 @@ fn write_fw_cfg_data(
             } => {
                 out.push_str(&format!(
                     "    SeedOp::FirewallRule {{\n        map: \"{}\",\n        src_ip: [{}, {}, {}, {}],\n        dst_port: {dst_port},\n        action: {action},\n    }},\n",
+                    escape_rust_str(map),
+                    src_ip[0],
+                    src_ip[1],
+                    src_ip[2],
+                    src_ip[3],
+                ));
+            }
+            SeedSpec::FwRulesHash {
+                map,
+                src_ip,
+                action,
+            } => {
+                out.push_str(&format!(
+                    "    SeedOp::FwRulesEntry {{\n        map: \"{}\",\n        src_ip: [{}, {}, {}, {}],\n        action: {action},\n    }},\n",
                     escape_rust_str(map),
                     src_ip[0],
                     src_ip[1],
@@ -498,29 +571,54 @@ fn generate_mem_map() {
         .get("helper")
         .and_then(|v| v.as_table())
         .expect("mem_map.toml: missing [helper]");
-    let hot = root
-        .get("hot_region")
+    let hot_a = root
+        .get("hot_region_a")
         .and_then(|v| v.as_table())
-        .expect("mem_map.toml: missing [hot_region]");
+        .expect("mem_map.toml: missing [hot_region_a]");
+    let hot_b = root
+        .get("hot_region_b")
+        .and_then(|v| v.as_table())
+        .expect("mem_map.toml: missing [hot_region_b]");
 
     let helper_base = parse_addr(helper, "base", "helper");
     let helper_len = parse_addr(helper, "length", "helper");
-    let hot_base = parse_addr(hot, "base", "hot_region");
-    let hot_len = parse_addr(hot, "length", "hot_region");
+    let hot_a_base = parse_addr(hot_a, "base", "hot_region_a");
+    let hot_a_len = parse_addr(hot_a, "length", "hot_region_a");
+    let hot_b_base = parse_addr(hot_b, "base", "hot_region_b");
+    let hot_b_len = parse_addr(hot_b, "length", "hot_region_b");
 
     assert!(
-        helper_base.is_multiple_of(4) && hot_base.is_multiple_of(4),
+        helper_base.is_multiple_of(4)
+            && hot_a_base.is_multiple_of(4)
+            && hot_b_base.is_multiple_of(4),
         "mem_map bases must be 4-byte aligned"
     );
-    assert!(helper_len > 0 && hot_len > 0, "mem_map lengths must be > 0");
     assert!(
-        helper_base.saturating_add(helper_len) <= hot_base
-            || hot_base.saturating_add(hot_len) <= helper_base,
-        "helper window and HOT_REGION overlap"
+        helper_len > 0 && hot_a_len > 0 && hot_b_len > 0,
+        "mem_map lengths must be > 0"
     );
 
     let helper_end = helper_base + helper_len;
-    let hot_end = hot_base + hot_len;
+    let hot_a_end = hot_a_base + hot_a_len;
+    let hot_b_end = hot_b_base + hot_b_len;
+
+    assert_eq!(
+        helper_end, hot_a_base,
+        "helper window must abut HOT_A (helper_end={helper_end:#x} HOT_A={hot_a_base:#x})"
+    );
+    assert_eq!(
+        hot_a_end, hot_b_base,
+        "HOT_A must abut HOT_B (HOT_A_end={hot_a_end:#x} HOT_B={hot_b_base:#x})"
+    );
+    assert_eq!(
+        helper_len + hot_a_len + hot_b_len,
+        0x2000,
+        "helper+HOT_A+HOT_B must total 8KiB"
+    );
+    assert_eq!(
+        hot_b_end, 0x4038_2000,
+        "patch arena must end at 0x40382000 (.trap); got {hot_b_end:#x}"
+    );
 
     let rs = format!(
         "// Auto-generated from mem_map.toml — do not edit.\n\
@@ -529,26 +627,38 @@ fn generate_mem_map() {
          pub const HELPER_DISPATCHER_BASE: usize = {helper_base:#x};\n\
          /// Reserved IRAM window size for the helper trampoline.\n\
          pub const HELPER_WINDOW_LEN: usize = {helper_len:#x};\n\
-         /// Absolute IRAM load / entry address for AOT payload.\n\
-         pub const HOT_REGION_BASE: usize = {hot_base:#x};\n\
-         /// Firmware-owned HOT_REGION buffer size (full reserved page).\n\
-         pub const HOT_REGION_LEN: usize = {hot_len:#x};\n\
+         /// Absolute IRAM load / entry address for slot A (RX default).\n\
+         pub const HOT_A_BASE: usize = {hot_a_base:#x};\n\
+         /// Firmware-owned HOT_A buffer size.\n\
+         pub const HOT_A_LEN: usize = {hot_a_len:#x};\n\
+         /// Absolute IRAM load / entry address for slot B (hot-replace / tail_call).\n\
+         pub const HOT_B_BASE: usize = {hot_b_base:#x};\n\
+         /// Firmware-owned HOT_B buffer size.\n\
+         pub const HOT_B_LEN: usize = {hot_b_len:#x};\n\
+         /// Alias: slot A base (boot / RX entry).\n\
+         pub const HOT_REGION_BASE: usize = HOT_A_BASE;\n\
+         /// Alias: slot A length.\n\
+         pub const HOT_REGION_LEN: usize = HOT_A_LEN;\n\
          \n\
          /// Panic if linker placed symbols off the mem_map contract.\n\
-         pub fn assert_linked_addresses(helper_addr: usize, hot_addr: usize) {{\n\
+         pub fn assert_linked_addresses(helper_addr: usize, hot_a_addr: usize, hot_b_addr: usize) {{\n\
              assert_eq!(\n\
                  helper_addr, HELPER_DISPATCHER_BASE,\n\
                  \"helper_dispatcher linked at {{helper_addr:#x}}, expected {{HELPER_DISPATCHER_BASE:#x}}\"\n\
              );\n\
              assert_eq!(\n\
-                 hot_addr, HOT_REGION_BASE,\n\
-                 \"HOT_REGION linked at {{hot_addr:#x}}, expected {{HOT_REGION_BASE:#x}}\"\n\
+                 hot_a_addr, HOT_A_BASE,\n\
+                 \"HOT_A linked at {{hot_a_addr:#x}}, expected {{HOT_A_BASE:#x}}\"\n\
+             );\n\
+             assert_eq!(\n\
+                 hot_b_addr, HOT_B_BASE,\n\
+                 \"HOT_B linked at {{hot_b_addr:#x}}, expected {{HOT_B_BASE:#x}}\"\n\
              );\n\
          }}\n"
     );
     fs::write(out_dir.join("mem_map.rs"), rs).expect("write mem_map.rs");
 
-    // Absolute IRAM sections + DRAM skip for the helper window (dual-map safe).
+    // Absolute IRAM sections + DRAM skip for the patch arena (dual-map safe).
     let sections = format!(
         "/* Auto-generated from mem_map.toml — do not edit. */\n\
          SECTIONS\n\
@@ -560,11 +670,18 @@ fn generate_mem_map() {
                  . = {helper_end:#x};\n\
              }} > IRAM\n\
          \n\
-             .iram1.hotload_area {hot_base:#x} :\n\
+             .iram1.hotload_a {hot_a_base:#x} :\n\
              {{\n\
                  . = ALIGN(4);\n\
-                 KEEP(*(.iram1.hotload_area))\n\
-                 . = {hot_end:#x};\n\
+                 KEEP(*(.iram1.hotload_a))\n\
+                 . = {hot_a_end:#x};\n\
+             }} > IRAM\n\
+         \n\
+             .iram1.hotload_b {hot_b_base:#x} :\n\
+             {{\n\
+                 . = ALIGN(4);\n\
+                 KEEP(*(.iram1.hotload_b))\n\
+                 . = {hot_b_end:#x};\n\
              }} > IRAM\n\
          }}\n\
          \n\
@@ -572,9 +689,10 @@ fn generate_mem_map() {
          {{\n\
              .rwdata_dummy_bs (NOLOAD) : ALIGN(4)\n\
              {{\n\
-                 /* Skip DRAM aliases of helper + HOT_REGION (contiguous IRAM head). */\n\
+                 /* Skip DRAM aliases of helper + HOT_A + HOT_B (8KiB IRAM head). */\n\
                  . = . + SIZEOF(.iram1.helper_dispatcher);\n\
-                 . = . + SIZEOF(.iram1.hotload_area);\n\
+                 . = . + SIZEOF(.iram1.hotload_a);\n\
+                 . = . + SIZEOF(.iram1.hotload_b);\n\
              }} > DRAM\n\
          }}\n\
          INSERT BEFORE .data;\n"
@@ -582,7 +700,7 @@ fn generate_mem_map() {
     let sections_path = out_dir.join("custom-sections.x");
     fs::write(&sections_path, sections).expect("write custom-sections.x");
     println!("cargo:rustc-link-arg=-T{}", sections_path.display());
-    // AOT `esp32c3.ld` lives only in libbpf-mcu — firmware must not generate or sync it.
+    // AOT `esp32c3*.ld` lives only in libbpf-mcu — firmware must not generate or sync it.
 }
 
 fn parse_addr(table: &toml::Table, key: &str, section: &str) -> usize {
@@ -625,6 +743,7 @@ fn generate_bpf_maps() {
                  pub const FIRMWARE_HAS_ARRAY: bool = false;\n\
                  pub const FIRMWARE_HAS_HASH: bool = false;\n\
                  pub const FIRMWARE_HAS_DEVMAP: bool = false;\n\
+                 pub const FIRMWARE_HAS_PROG_ARRAY: bool = false;\n\
                  pub const FIRMWARE_HAS_RINGBUF: bool = false;\n\
                  pub const SELFTEST_MAP_ID: ResourceId = 0;\n\
                  pub const SELFTEST_MAP_TYPE: &str = \"\";\n\
@@ -726,6 +845,12 @@ fn generate_bpf_maps() {
             .any(|s| s.map_type == "BPF_MAP_TYPE_DEVMAP")
     ));
     out.push_str(&format!(
+        "pub const FIRMWARE_HAS_PROG_ARRAY: bool = {};\n",
+        map_specs
+            .iter()
+            .any(|s| s.map_type == "BPF_MAP_TYPE_PROG_ARRAY")
+    ));
+    out.push_str(&format!(
         "pub const FIRMWARE_HAS_RINGBUF: bool = {};\n\n",
         map_specs
             .iter()
@@ -778,7 +903,10 @@ fn generate_bpf_maps() {
             "BPF_MAP_TYPE_RINGBUF" => {
                 emit_struct(&mut out, &val_ty, &spec.value_fields, false);
             }
-            "BPF_MAP_TYPE_HASH" | "BPF_MAP_TYPE_ARRAY" | "BPF_MAP_TYPE_DEVMAP" => {
+            "BPF_MAP_TYPE_HASH"
+            | "BPF_MAP_TYPE_ARRAY"
+            | "BPF_MAP_TYPE_DEVMAP"
+            | "BPF_MAP_TYPE_PROG_ARRAY" => {
                 let key_ty = format!("{type_stem}Key");
                 emit_struct(&mut out, &key_ty, &spec.key_fields, true);
                 emit_struct(&mut out, &val_ty, &spec.value_fields, false);
@@ -804,10 +932,13 @@ fn generate_bpf_maps() {
     let needs_devmap = map_specs
         .iter()
         .any(|s| s.map_type == "BPF_MAP_TYPE_DEVMAP");
+    let needs_prog_array = map_specs
+        .iter()
+        .any(|s| s.map_type == "BPF_MAP_TYPE_PROG_ARRAY");
     let needs_ring = map_specs
         .iter()
         .any(|s| s.map_type == "BPF_MAP_TYPE_RINGBUF");
-    if needs_hash || needs_array || needs_devmap || needs_ring {
+    if needs_hash || needs_array || needs_devmap || needs_prog_array || needs_ring {
         out.push_str("    use crate::patch::map::{");
         let mut parts = Vec::new();
         if needs_array {
@@ -816,12 +947,16 @@ fn generate_bpf_maps() {
         if needs_devmap {
             parts.push("create_bpf_devmap");
         }
+        if needs_prog_array {
+            parts.push("create_bpf_prog_array");
+        }
         if needs_hash {
             parts.push("create_bpf_hash");
         }
         if needs_ring {
             parts.push("create_bpf_ringbuf");
         }
+        parts.push("register_map_name");
         out.push_str(&parts.join(", "));
         out.push_str("};\n");
     }
@@ -849,6 +984,12 @@ fn generate_bpf_maps() {
                     spec.max_entries
                 ));
             }
+            "BPF_MAP_TYPE_PROG_ARRAY" => {
+                out.push_str(&format!(
+                    "    create_bpf_prog_array({id_const}, {}){await_suffix}?;\n",
+                    spec.max_entries
+                ));
+            }
             "BPF_MAP_TYPE_RINGBUF" => {
                 // Linux: max_entries is the ring data area in bytes.
                 out.push_str(&format!(
@@ -858,6 +999,10 @@ fn generate_bpf_maps() {
             }
             other => panic!("[maps.{}] unsupported map_type `{other}`", spec.name),
         }
+        out.push_str(&format!(
+            "    let _ = register_map_name(\"{}\", {id_const});\n",
+            escape_rust_str(&spec.name)
+        ));
     }
 
     out.push_str("    Ok(())\n}\n");
@@ -907,12 +1052,21 @@ fn generate_aot_map_bind() {
             let id_const = format!("MAP_ID_{}", name.to_ascii_uppercase());
             out.push_str(&format!("    register_map_addr(0x{addr:x}, {id_const});\n"));
             bound += 1;
+            for alias in parse_addr_list(table, "aot_aliases", name) {
+                if alias == 0 || alias == addr {
+                    continue;
+                }
+                out.push_str(&format!(
+                    "    register_map_addr(0x{alias:x}, {id_const});\n"
+                ));
+                bound += 1;
+            }
         }
     }
 
     out.push_str("}\n");
     out.push_str(&format!(
-        "/// Number of AOT map aliases bound from bpf.toml `aot_addr`.\n\
+        "/// Number of AOT map aliases bound from bpf.toml `aot_addr` (+ `aot_aliases`).\n\
          pub const AOT_MAP_BIND_COUNT: usize = {bound};\n"
     ));
 
@@ -921,9 +1075,13 @@ fn generate_aot_map_bind() {
 
 fn parse_optional_addr(table: &toml::Table, key: &str, map_name: &str) -> Option<usize> {
     let v = table.get(key)?;
+    Some(parse_addr_value(v, key, map_name))
+}
+
+fn parse_addr_value(v: &toml::Value, key: &str, map_name: &str) -> usize {
     if let Some(i) = v.as_integer() {
         assert!(i >= 0, "[maps.{map_name}].{key} must be non-negative");
-        return Some(i as usize);
+        return i as usize;
     }
     if let Some(s) = v.as_str() {
         let s = s.trim();
@@ -932,11 +1090,23 @@ fn parse_optional_addr(table: &toml::Table, key: &str, map_name: &str) -> Option
         } else {
             s.parse::<usize>()
         };
-        return Some(
-            addr.unwrap_or_else(|e| panic!("[maps.{map_name}].{key}: invalid address `{s}`: {e}")),
-        );
+        return addr
+            .unwrap_or_else(|e| panic!("[maps.{map_name}].{key}: invalid address `{s}`: {e}"));
     }
     panic!("[maps.{map_name}].{key}: expected integer or hex string");
+}
+
+/// Optional `[maps.*].aot_aliases = [0x…, …]` — extra AOT `.maps` VMAs for hot-siblings.
+fn parse_addr_list(table: &toml::Table, key: &str, map_name: &str) -> Vec<usize> {
+    let Some(v) = table.get(key) else {
+        return Vec::new();
+    };
+    let Some(arr) = v.as_array() else {
+        panic!("[maps.{map_name}].{key}: expected array of addresses");
+    };
+    arr.iter()
+        .map(|e| parse_addr_value(e, key, map_name))
+        .collect()
 }
 
 struct MapSpec {

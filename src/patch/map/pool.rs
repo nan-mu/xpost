@@ -99,6 +99,8 @@ pub enum MapKind {
     Ringbuf,
     /// `BPF_MAP_TYPE_DEVMAP`: key `u32` → value `u32` ifindex (ARRAY layout).
     Devmap,
+    /// `BPF_MAP_TYPE_PROG_ARRAY`: key `u32` → value `u32` absolute XDP entry.
+    ProgArray,
 }
 
 type PoolMap = HashMap<ResourceId, RawResource, hashbrown::DefaultHashBuilder, TalcAlloc>;
