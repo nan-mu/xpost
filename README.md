@@ -42,7 +42,7 @@ cargo install espflash
 
 ## 项目配置
 
-用户态配置写在 [`config.toml`](config.toml)（仿 router-probe `fwtest.toml`：`[wifi]` / `[probe]` / `[dut]` + `[[tests]]` / `[[tests.seeds]]`）。`build.rs` 据此发出 `fw_us_*` cfg 并生成常量。
+用户态配置写在 [`config.toml`](config.toml)（仿 router-probe `fwtest.toml`：`[wifi]` / `[probe]` / `[dut]` + `[[tests]]` / `[[tests.seeds]]`）。每次 `cargo build` / `cargo run` 时，精简的 `build.rs` 进程内调用 [`xtask`](xtask/) 解析 toml，写出 `OUT_DIR` 产物并发出 `fw_us_*` cfg——**无需先手动 gen**。
 
 **不管 AOT：** `esp32c3.bin` / `bpf.toml` 仍手拷，并与 enabled 的 `[[tests]]` 对齐。
 
@@ -66,10 +66,14 @@ cargo install espflash
 
 ## 构建和烧录
 
+Codegen（`config.toml` / `mem_map.toml` / `bpf.toml` → `OUT_DIR` + `fw_us_*`）由 `xtask` 库完成，经 `build.rs` 在每次构建时自动执行。
+
+可选 CLI（调试；与 workspace 的 `-Z build-std` / 默认 riscv target 冲突，**日常请直接 `cargo build`**）：见 [`xtask/`](xtask/) 源码中的 `gen` / `check` 子命令。
+
 ### 构建项目
 
 ```bash
-# 开发构建
+# 开发构建（自动跑 xtask codegen）
 cargo build
 
 # 发布构建（优化）
@@ -90,29 +94,14 @@ espflash flash --monitor --no-addresses --chip esp32c3 --partition-table partiti
 
 ```
 firmware/
-├── src/
-│   ├── bin/
-│   │   └── main.rs           # 主程序入口
-│   ├── patch/
-│   │   ├── mod.rs            # 补丁模块导出
-│   │   ├── part.rs           # 动态代码加载实现
-│   │   └── helper.rs         # 辅助函数调度器
-│   ├── connection.rs         # WiFi 连接管理
-│   ├── net_task.rs           # 网络任务
-│   ├── sta.rs                # WiFi Station 初始化和 UDP 处理
-│   └── lib.rs                # 库入口
-├── .cargo/
-│   └── config.toml           # Cargo 配置（目标平台、运行器）
-├── .github/
-│   └── workflows/
-│       └── rust_ci.yml       # CI/CD 配置
-├── build.rs                  # 构建脚本
-├── custom-sections.x         # 自定义链接器段定义
-├── partitions.csv            # Flash 分区表
-├── payload.bin               # 动态加载的代码载荷
-├── rust-toolchain.toml       # Rust 工具链配置
-├── Cargo.toml                # 项目依赖配置
-└── .clippy.toml              # Clippy 配置
+├── src/                      # 固件源码（include! OUT_DIR 生成物）
+├── xtask/                    # codegen 库 + 可选 CLI（build.rs 默认调用 lib）
+├── .cargo/config.toml        # 目标平台、runner
+├── build.rs                  # 薄封装：linker hint + xtask::generate + rustc-cfg/link-arg
+├── config.toml / mem_map.toml / bpf.toml
+├── partitions.csv
+├── Cargo.toml                # workspace：firmware + xtask
+└── rust-toolchain.toml
 ```
 
 ## 核心功能
@@ -141,7 +130,7 @@ firmware/
 
 自定义链接器脚本定义了特殊的内存段：
 
-- `mem_map.toml`: 固件侧地址契约（生成 `OUT_DIR/mem_map.rs` + `custom-sections.x`）
+- `mem_map.toml`: 固件侧地址契约（xtask 生成 `OUT_DIR/mem_map.rs` + `custom-sections.x`）
 - AOT `esp32c3.ld` / `esp32c3-slot-b.ld` 仅由 **libbpf-mcu** 维护，固件构建不会改写
 - `0x40380000`: `helper_dispatcher`（512B）
 - `0x40380200`: `HOT_A`（3584B，RX 默认入口）

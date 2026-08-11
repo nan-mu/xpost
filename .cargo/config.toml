@@ -15,5 +15,8 @@ rustflags = [
 
 target = "riscv32imc-unknown-none-elf"
 
+# Optional host CLI lives in xtask/; prefer `cargo build` (build.rs calls the lib).
+# Host `cargo run -p xtask` fights [unstable] build-std + default riscv target.
+
 [unstable]
 build-std = ["alloc", "core"]

@@ -1,4 +1,4 @@
-//! Compile-time harness config from `config.toml` (`build.rs` → `fw_cfg_data.rs` + `fw_us_*`).
+//! Compile-time harness config from `config.toml` (`xtask` via `build.rs` → `fw_cfg_data.rs` + `fw_us_*`).
 
 include!(concat!(env!("OUT_DIR"), "/fw_cfg_data.rs"));
 

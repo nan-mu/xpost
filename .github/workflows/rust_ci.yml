@@ -19,13 +19,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        action:
-          - command: build
-            args: --release
-          - command: fmt
-            args: --all -- --check
-          - command: clippy
-            args: --all-features --workspace -- -D warnings
+        include:
+          - name: build
+            run: cargo build --release -p firmware
+          - name: fmt
+            run: cargo fmt --all -- --check
+          - name: clippy-firmware
+            # -p firmware only: xtask is a host build-dep (not clippy'd as a riscv crate).
+            run: cargo clippy --all-features -p firmware -- -D warnings
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -33,9 +34,9 @@ jobs:
         uses: dtolnay/rust-toolchain@v1
         with:
           target: riscv32imc-unknown-none-elf
-          toolchain: stable
+          toolchain: nightly
           components: rust-src, rustfmt, clippy
       - name: Enable caching
         uses: Swatinem/rust-cache@v2
       - name: Run command
-        run: cargo ${{ matrix.action.command }} ${{ matrix.action.args }}
+        run: ${{ matrix.run }}
