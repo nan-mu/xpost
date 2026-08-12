@@ -9,33 +9,15 @@ use super::mem_map::{HOT_A_LEN, assert_linked_addresses};
 use super::prog_table::{self, SlotId};
 use super::redirect::{clear_pending, xdp_action_name};
 
-/// Firmware-owned HOT_A placeholder (RX default entry).
-#[unsafe(link_section = ".iram1.hotload_a")]
-#[unsafe(no_mangle)]
-static mut HOT_A: [u8; HOT_A_LEN] = [0u8; HOT_A_LEN];
+include!(concat!(env!("OUT_DIR"), "/hot_slots.rs"));
 
-/// Firmware-owned HOT_B placeholder (hot-replace / tail_call target).
-#[unsafe(link_section = ".iram1.hotload_b")]
-#[unsafe(no_mangle)]
-static mut HOT_B: [u8; super::mem_map::HOT_B_LEN] = [0u8; super::mem_map::HOT_B_LEN];
-
-/// IRAM buffer pointer for a hot slot (for promote / inspect).
-pub fn slot_buf(slot: SlotId) -> (*mut u8, usize) {
-    match slot {
-        SlotId::A => (ptr::addr_of_mut!(HOT_A) as *mut u8, HOT_A_LEN),
-        SlotId::B => (
-            ptr::addr_of_mut!(HOT_B) as *mut u8,
-            super::mem_map::HOT_B_LEN,
-        ),
-    }
+/// Verify helper + hot-slot link addresses (safe to call with empty slots).
+pub fn check_layout() {
+    assert_linked_addresses(helper_dispatcher as *const () as usize, &slot_link_addrs());
 }
 
 pub fn load(_flash: FLASH<'static>) {
-    assert_linked_addresses(
-        helper_dispatcher as *const () as usize,
-        ptr::addr_of!(HOT_A) as usize,
-        ptr::addr_of!(HOT_B) as usize,
-    );
+    check_layout();
 
     let xdp_with_footer = include_bytes!("/Users/nan/bs/firmware/esp32c3.bin");
     let bin_size = xdp_with_footer.len();
@@ -52,15 +34,15 @@ pub fn load(_flash: FLASH<'static>) {
         );
 
         info!(
-            "[AOT] Bin: {} bytes, BSS: {} bytes (HOT_A ok)",
+            "[AOT] Bin: {} bytes, BSS: {} bytes (slot0 ok)",
             bin_size, bss_size
         );
 
-        let xdp_ptr = ptr::addr_of_mut!(HOT_A) as *mut u8;
+        let (xdp_ptr, _cap) = slot_buf(0);
         ptr::copy_nonoverlapping(xdp_with_footer.as_ptr(), xdp_ptr, bin_size);
         ptr::write_bytes(xdp_ptr.add(bin_size), 0, bss_size);
 
-        info!("[AOT] load HOT_A done");
+        info!("[AOT] load slot0 done");
     }
 
     prog_table::mark_loaded_len(SlotId::A, bin_size);
@@ -76,7 +58,7 @@ pub fn read_slot(slot: SlotId) -> Option<&'static [u8]> {
     if len == 0 {
         return None;
     }
-    let (ptr, _cap) = slot_buf(slot);
+    let (ptr, _cap) = slot_buf(slot.index());
     Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len) })
 }
 
@@ -84,7 +66,7 @@ pub fn read_slot(slot: SlotId) -> Option<&'static [u8]> {
 ///
 /// Caller must hold the control-plane gate (`datapath` stopped / `ctrl_try_begin`).
 pub fn write_slot(slot: SlotId, image: &[u8]) -> Result<(), ()> {
-    let (dst, cap) = slot_buf(slot);
+    let (dst, cap) = slot_buf(slot.index());
     if image.len() > cap {
         return Err(());
     }
@@ -100,7 +82,12 @@ pub fn write_slot(slot: SlotId, image: &[u8]) -> Result<(), ()> {
 }
 
 pub fn xdp(data: &mut [u8]) -> i32 {
-    let xdp_ptr = ptr::addr_of_mut!(HOT_A) as *mut u8;
+    // RX entry is always hot slot 0. Empty IRAM must not jalr (SoftFault).
+    if !prog_table::is_loaded(SlotId::A) {
+        return 2; // XDP_PASS
+    }
+
+    let (xdp_ptr, _) = slot_buf(0);
 
     unsafe {
         core::arch::asm!("fence.i");
@@ -123,13 +110,26 @@ pub fn xdp(data: &mut [u8]) -> i32 {
         let frame = core::ptr::addr_of_mut!(prog_table::XDP_FRAME);
 
         let res: i32;
-        // Save SP + continuation RA so bpf_tail_call can unwind to this frame
-        // and transfer to another program that still returns here.
+        // Save SP + continuation RA + callee-saved s0–s11 so bpf_tail_call can
+        // unwind past the helper/A frames and transfer to another program that
+        // still returns here with a valid Rust frame pointer.
         core::arch::asm!(
             "mv t0, sp",
             "lla t1, 1f",
             "sw t0, 0({frame})",
             "sw t1, 4({frame})",
+            "sw s0, 8({frame})",
+            "sw s1, 12({frame})",
+            "sw s2, 16({frame})",
+            "sw s3, 20({frame})",
+            "sw s4, 24({frame})",
+            "sw s5, 28({frame})",
+            "sw s6, 32({frame})",
+            "sw s7, 36({frame})",
+            "sw s8, 40({frame})",
+            "sw s9, 44({frame})",
+            "sw s10, 48({frame})",
+            "sw s11, 52({frame})",
             "jalr {entry}",
             "1:",
             frame = in(reg) frame,

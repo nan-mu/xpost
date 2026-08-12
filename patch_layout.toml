@@ -1,0 +1,16 @@
+# Intent for IRAM patch arena layout. xtask `layout` module computes addresses
+# and writes mem.toml. Do not put absolute hot-slot bases here unless
+# overriding via [slots].lengths (equal split is the default).
+
+[arena]
+iram_base = 0x40380000
+arena_end = 0x40382000
+
+[helper]
+length = 0x200
+
+[slots]
+count = 2
+# Explicit lengths preserve current HOT_A/HOT_B bases for existing AOT bins.
+# Omit `lengths` to equal-split the arena remainder (4-byte aligned).
+lengths = [0xE00, 0x1000]

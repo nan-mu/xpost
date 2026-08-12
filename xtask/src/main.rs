@@ -17,6 +17,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Compute IRAM layout from `patch_layout.toml` and write `mem.toml`.
+    Layout,
+    /// Print IBUS/DBUS dual-map SRAM diagram from `mem.toml`.
+    Map,
     /// Parse tomls under firmware/ and write generated artifacts to `--out`.
     Gen {
         /// Output directory (defaults to a temp dir under firmware/target/xtask-gen).
@@ -39,6 +43,16 @@ fn main() -> Result<()> {
     let manifest_dir = firmware_root();
 
     match cli.cmd {
+        Cmd::Layout => {
+            let report = xtask::layout_apply(&manifest_dir)?;
+            for line in &report.lines {
+                println!("{line}");
+            }
+            println!("wrote {}", report.mem_path.display());
+        }
+        Cmd::Map => {
+            xtask::map_print(&manifest_dir)?;
+        }
         Cmd::Gen { out } => {
             let out_dir = match out {
                 Some(p) => p,

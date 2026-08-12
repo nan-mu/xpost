@@ -117,6 +117,7 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
     let mut hw_selftest = false;
     let mut map_crud = false;
     let mut net_test = false;
+    let mut cold_boot = false;
     let mut seeds: Vec<SeedSpec> = Vec::new();
 
     let tests = root
@@ -169,6 +170,12 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
                 net_test = true;
             }
             "fw_hash_test" => {
+                map_crud = true;
+                hot_load = true;
+                net_test = true;
+            }
+            "tail_call_abc" => {
+                cold_boot = true;
                 map_crud = true;
                 hot_load = true;
                 net_test = true;
@@ -300,6 +307,9 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
     if hw_selftest && net_test {
         bail!("config.toml: hw_selftest cannot be enabled together with network tests");
     }
+    if cold_boot && (vip_seed || firewall_seed || fw_rules_seed) {
+        bail!("config.toml: cold_boot (tail_call_abc) cannot combine with boot map seeds");
+    }
     let seed_kinds = [vip_seed, firewall_seed, fw_rules_seed]
         .into_iter()
         .filter(|x| *x)
@@ -320,6 +330,7 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
     enabled.insert("map_crud", map_crud);
     enabled.insert("xdp_rx", xdp_rx);
     enabled.insert("hw_selftest", hw_selftest);
+    enabled.insert("cold_boot", cold_boot);
 
     let mut enabled_us_cfgs = Vec::new();
     for name in US_CFGS {

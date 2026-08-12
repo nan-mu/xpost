@@ -9,11 +9,15 @@ pub const KIND_READBACK: u32 = 40;
 
 pub const REGION_A: u32 = 1;
 pub const REGION_B: u32 = 2;
+pub const REGION_2: u32 = 3;
+pub const REGION_3: u32 = 4;
 
 pub const STORAGE_SRAM_A: u32 = 1;
 pub const STORAGE_SRAM_B: u32 = 2;
 pub const STORAGE_DRAM_0: u32 = 3;
 pub const STORAGE_DRAM_1: u32 = 4;
+pub const STORAGE_SRAM_2: u32 = 5;
+pub const STORAGE_SRAM_3: u32 = 6;
 
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_BAD: u32 = 1;

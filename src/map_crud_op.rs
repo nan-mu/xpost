@@ -3,9 +3,11 @@
 pub const KIND_UPDATE: u32 = 1;
 pub const KIND_DELETE: u32 = 2;
 pub const KIND_LOOKUP: u32 = 3;
+pub const KIND_CREATE: u32 = 4;
 
 pub const MAP_TYPE_HASH: u32 = 1;
 pub const MAP_TYPE_ARRAY: u32 = 2;
+pub const MAP_TYPE_PROG_ARRAY: u32 = 3;
 
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_BAD: u32 = 1;
@@ -22,6 +24,10 @@ pub struct MapCrudOp<'a> {
     pub key: &'a [u8],
     pub value: &'a [u8],
     pub flags: u64,
+    pub key_size: u32,
+    pub value_size: u32,
+    pub max_entries: u32,
+    pub aot_addr: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,6 +110,10 @@ fn skip_field(buf: &[u8], i: &mut usize, wt: u32) -> Result<(), DecodeError> {
     Ok(())
 }
 
+fn known_kind(v: u32) -> bool {
+    matches!(v, KIND_UPDATE | KIND_DELETE | KIND_LOOKUP | KIND_CREATE)
+}
+
 pub fn decode_op(buf: &[u8]) -> Result<MapCrudOp<'_>, DecodeError> {
     let mut i = 0usize;
     let mut kind: Option<u32> = None;
@@ -112,6 +122,10 @@ pub fn decode_op(buf: &[u8]) -> Result<MapCrudOp<'_>, DecodeError> {
     let mut key: &[u8] = &[];
     let mut value: &[u8] = &[];
     let mut flags: u64 = 0;
+    let mut key_size: u32 = 0;
+    let mut value_size: u32 = 0;
+    let mut max_entries: u32 = 0;
+    let mut aot_addr: u64 = 0;
 
     while i < buf.len() {
         let tag = read_varint(buf, &mut i)? as u32;
@@ -120,7 +134,7 @@ pub fn decode_op(buf: &[u8]) -> Result<MapCrudOp<'_>, DecodeError> {
         match (field, wt) {
             (1, 0) => {
                 let v = read_varint(buf, &mut i)? as u32;
-                if v != KIND_UPDATE && v != KIND_DELETE && v != KIND_LOOKUP {
+                if !known_kind(v) {
                     return Err(DecodeError::UnknownKind);
                 }
                 kind = Some(v);
@@ -165,6 +179,18 @@ pub fn decode_op(buf: &[u8]) -> Result<MapCrudOp<'_>, DecodeError> {
             (6, 0) => {
                 flags = read_varint(buf, &mut i)?;
             }
+            (7, 0) => {
+                key_size = read_varint(buf, &mut i)? as u32;
+            }
+            (8, 0) => {
+                value_size = read_varint(buf, &mut i)? as u32;
+            }
+            (9, 0) => {
+                max_entries = read_varint(buf, &mut i)? as u32;
+            }
+            (10, 0) => {
+                aot_addr = read_varint(buf, &mut i)?;
+            }
             _ => skip_field(buf, &mut i, wt)?,
         }
     }
@@ -175,18 +201,19 @@ pub fn decode_op(buf: &[u8]) -> Result<MapCrudOp<'_>, DecodeError> {
         key,
         value,
         flags,
+        key_size,
+        value_size,
+        max_entries,
+        aot_addr,
     })
 }
 
 pub fn encode_ack(ack: &MapCrudAck<'_>, out: &mut [u8]) -> Option<usize> {
     let mut i = 0usize;
-    // field 1: kind
     i = put_varint(out, i, (1u64 << 3) | 0)?;
     i = put_varint(out, i, ack.kind as u64)?;
-    // field 2: status
     i = put_varint(out, i, (2u64 << 3) | 0)?;
     i = put_varint(out, i, ack.status as u64)?;
-    // field 3: value (LEN)
     if !ack.value.is_empty() {
         i = put_varint(out, i, (3u64 << 3) | 2)?;
         i = put_varint(out, i, ack.value.len() as u64)?;
@@ -204,7 +231,6 @@ pub fn encode_op(op: &MapCrudOp<'_>, out: &mut [u8]) -> Option<usize> {
     let mut i = 0usize;
     i = put_varint(out, i, (1u64 << 3) | 0)?;
     i = put_varint(out, i, op.kind as u64)?;
-    // map_name
     i = put_varint(out, i, (2u64 << 3) | 2)?;
     i = put_varint(out, i, op.map_name.len() as u64)?;
     if i + op.map_name.len() > out.len() {
@@ -212,10 +238,8 @@ pub fn encode_op(op: &MapCrudOp<'_>, out: &mut [u8]) -> Option<usize> {
     }
     out[i..i + op.map_name.len()].copy_from_slice(op.map_name.as_bytes());
     i += op.map_name.len();
-    // map_type
     i = put_varint(out, i, (3u64 << 3) | 0)?;
     i = put_varint(out, i, op.map_type as u64)?;
-    // key
     if !op.key.is_empty() {
         i = put_varint(out, i, (4u64 << 3) | 2)?;
         i = put_varint(out, i, op.key.len() as u64)?;
@@ -225,7 +249,6 @@ pub fn encode_op(op: &MapCrudOp<'_>, out: &mut [u8]) -> Option<usize> {
         out[i..i + op.key.len()].copy_from_slice(op.key);
         i += op.key.len();
     }
-    // value
     if !op.value.is_empty() {
         i = put_varint(out, i, (5u64 << 3) | 2)?;
         i = put_varint(out, i, op.value.len() as u64)?;
@@ -235,10 +258,25 @@ pub fn encode_op(op: &MapCrudOp<'_>, out: &mut [u8]) -> Option<usize> {
         out[i..i + op.value.len()].copy_from_slice(op.value);
         i += op.value.len();
     }
-    // flags
     if op.flags != 0 {
         i = put_varint(out, i, (6u64 << 3) | 0)?;
         i = put_varint(out, i, op.flags)?;
+    }
+    if op.key_size != 0 {
+        i = put_varint(out, i, (7u64 << 3) | 0)?;
+        i = put_varint(out, i, op.key_size as u64)?;
+    }
+    if op.value_size != 0 {
+        i = put_varint(out, i, (8u64 << 3) | 0)?;
+        i = put_varint(out, i, op.value_size as u64)?;
+    }
+    if op.max_entries != 0 {
+        i = put_varint(out, i, (9u64 << 3) | 0)?;
+        i = put_varint(out, i, op.max_entries as u64)?;
+    }
+    if op.aot_addr != 0 {
+        i = put_varint(out, i, (10u64 << 3) | 0)?;
+        i = put_varint(out, i, op.aot_addr)?;
     }
     Some(i)
 }

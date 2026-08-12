@@ -1,11 +1,6 @@
 [target.riscv32imc-unknown-none-elf]
 # --no-addresses: do not addr2line-decode hex in UART log (avoids spam after DEBUG lines).
 runner = "espflash flash --monitor --no-addresses --chip esp32c3 --partition-table partitions.csv"
-
-[env]
-ESP_LOG = "info"
-
-[build]
 rustflags = [
   # Required to obtain backtraces (e.g. when using the "esp-backtrace" crate.)
   # NOTE: May negatively impact performance of produced code
@@ -13,10 +8,24 @@ rustflags = [
   "-Z", "stack-protector=all",
 ]
 
+[env]
+ESP_LOG = "info"
+
+[build]
+# Firmware default target. Host CLI uses alias `xtask` (explicit host --target).
 target = "riscv32imc-unknown-none-elf"
 
-# Optional host CLI lives in xtask/; prefer `cargo build` (build.rs calls the lib).
-# Host `cargo run -p xtask` fights [unstable] build-std + default riscv target.
+# Do NOT set `[unstable] build-std` here — it applies to every --target (including
+# host) and breaks `cargo xtask` (duplicate lang items vs sysroot std).
+# Pass `-Z build-std=core,alloc` via the aliases below instead.
 
-[unstable]
-build-std = ["alloc", "core"]
+[alias]
+# Host CLI with std. First token must stay the builtin `run` (do not also alias `run`
+# to inject build-std, or this would inherit it and break host builds).
+# Usage: cargo xtask map | layout | check | gen
+xtask = "run -p xtask --features cli --target aarch64-apple-darwin --"
+# Firmware: inject build-std. Prefer `cargo build` / `cargo check` aliases.
+build = "build -Z build-std=core,alloc"
+check = "check -Z build-std=core,alloc"
+# Flash+monitor: need build-std; use this instead of bare `cargo run`.
+fwrun = "run -Z build-std=core,alloc"

@@ -17,14 +17,14 @@ use crate::patch::sync::{self, RwCell};
 use super::datapath;
 use super::map::abi::{self, AliasError, MAX_MAP_ALIASES};
 use super::map::pool::{RawResource, ResourceId};
-use super::mem_map::HOT_B_LEN;
+use super::mem_map::HOT_SLOT_LEN_MAX;
 use super::part;
 use super::prog_table::{self, SlotId};
 
 /// Concurrent staged programs (DRAM only).
 pub const XDP_SLOT_COUNT: usize = 2;
-/// Per-slot capacity — sized for the larger IRAM window (HOT_B).
-pub const XDP_SLOT_LEN: usize = HOT_B_LEN;
+/// Per-slot capacity — sized for the largest IRAM hot window.
+pub const XDP_SLOT_LEN: usize = HOT_SLOT_LEN_MAX;
 /// Max map binds recorded per program.
 pub const XDP_MAX_BINDS: usize = MAX_MAP_ALIASES;
 
@@ -123,8 +123,8 @@ fn do_promote(idx: usize, len: usize, slot: SlotId) -> Result<(), ProgramError> 
         }
         return Err(ProgramError::PromoteFailed);
     }
-    if slot == SlotId::B {
-        let _ = prog_table::set_slot(0, SlotId::B);
+    if slot.index() != 0 {
+        let _ = prog_table::set_slot(0, slot);
     }
     if was_active {
         datapath::enable();
@@ -267,8 +267,8 @@ async fn swap_hot_inner(
         }
         return Err(ProgramError::PromoteFailed);
     }
-    if hot == SlotId::B {
-        let _ = prog_table::set_slot(0, SlotId::B);
+    if hot.index() != 0 {
+        let _ = prog_table::set_slot(0, hot);
     }
 
     if was_active {
@@ -330,8 +330,8 @@ fn swap_hot_inner(
         }
         return Err(ProgramError::PromoteFailed);
     }
-    if hot == SlotId::B {
-        let _ = prog_table::set_slot(0, SlotId::B);
+    if hot.index() != 0 {
+        let _ = prog_table::set_slot(0, hot);
     }
 
     if was_active {

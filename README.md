@@ -66,9 +66,25 @@ cargo install espflash
 
 ## 构建和烧录
 
-Codegen（`config.toml` / `mem_map.toml` / `bpf.toml` → `OUT_DIR` + `fw_us_*`）由 `xtask` 库完成，经 `build.rs` 在每次构建时自动执行。
+Codegen（`config.toml` / `mem.toml` / `bpf.toml` → `OUT_DIR` + `fw_us_*`）由 `xtask` 库完成，经 `build.rs` 在每次构建时自动执行。
 
-可选 CLI（调试；与 workspace 的 `-Z build-std` / 默认 riscv target 冲突，**日常请直接 `cargo build`**）：见 [`xtask/`](xtask/) 源码中的 `gen` / `check` 子命令。
+可选 CLI（在 **host** 上跑，不要用默认 riscv target）：
+
+```sh
+cargo xtask map       # 打印 IBUS/DBUS SRAM 图（推荐）
+cargo xtask layout    # patch_layout.toml → mem.toml
+cargo xtask check
+```
+
+`cargo run -p xtask map` 会因 workspace 默认 `riscv32imc` 目标而把 clap/std 当裸机依赖编译，出现大量 `Option`/`Result` not found。请用上面的 **`cargo xtask …`** 别名（见 `.cargo/config.toml`），或显式：
+
+```sh
+cargo run -p xtask --features cli --target aarch64-apple-darwin -- map
+```
+
+固件构建仍用 `cargo build` / `cargo check`（别名已带 `-Z build-std=core,alloc`）；烧录监控用 `cargo fwrun`。
+
+或：`XTASK_PRINT_MAP=1 cargo build` 在构建固件时打印 map。
 
 ### 构建项目
 
@@ -98,7 +114,7 @@ firmware/
 ├── xtask/                    # codegen 库 + 可选 CLI（build.rs 默认调用 lib）
 ├── .cargo/config.toml        # 目标平台、runner
 ├── build.rs                  # 薄封装：linker hint + xtask::generate + rustc-cfg/link-arg
-├── config.toml / mem_map.toml / bpf.toml
+├── config.toml / mem.toml / bpf.toml
 ├── partitions.csv
 ├── Cargo.toml                # workspace：firmware + xtask
 └── rust-toolchain.toml
@@ -120,23 +136,22 @@ firmware/
 
 固件支持从 Flash 的 `payload.bin` 加载并执行外部代码：
 
-- 代码加载到 IRAM `HOT_A`（`0x40380200`，3584B；`--slot=a`）
-- 热更新 / `tail_call` 目标为 `HOT_B`（`0x40381000`，4KiB；`--slot=b`）
+- 代码加载到 IRAM 热槽 0（默认见 `patch_layout.toml` → 生成的 `mem.toml`；`--slot=0` / `a`）
+- 其它热槽可由 layout 配置（2..=4）；AOT 用 `--slot=N`（`b`≡1）
 - 支持 BSS 段初始化
 - 执行前刷新指令缓存（`fence.i`）
-- 提供辅助函数调度机制（`helper_dispatcher` @ `0x40380000`，512B 窗）
+- 提供辅助函数调度机制（`helper_dispatcher`，地址见 `mem.toml`）
 
 ### 4. 内存布局
 
-自定义链接器脚本定义了特殊的内存段：
+- **`patch_layout.toml`**：槽数 / helper 长度等意图（人改）
+- **`mem.toml`**：由 `cargo xtask layout`（或 `build.rs`）生成，含 `[[hot_regions]]`
+- xtask 再生成 `OUT_DIR/mem_map.rs`、`hot_slots.rs`、`custom-sections.x`
+- AOT `.ld`：libbpf-mcu 按 `mem.toml` 拼出 `build/.ninja/esp32c3-slot-{N}.ld`
+- 默认 2 槽时：helper@`0x40380000`、slot0@`0x40380200`、slot1@`0x40381000`，arena 止于 `0x40382000`（`.trap`）
+- `load()` 启动时 `assert` 链接地址与 `mem.toml` 一致
 
-- `mem_map.toml`: 固件侧地址契约（xtask 生成 `OUT_DIR/mem_map.rs` + `custom-sections.x`）
-- AOT `esp32c3.ld` / `esp32c3-slot-b.ld` 仅由 **libbpf-mcu** 维护，固件构建不会改写
-- `0x40380000`: `helper_dispatcher`（512B）
-- `0x40380200`: `HOT_A`（3584B，RX 默认入口）
-- `0x40381000`: `HOT_B`（4KiB，可热替换）
-- 合计 8KiB patch arena；`.trap` 仍从 `0x40382000` 起
-- `load()` 启动时 `assert` 链接地址与 `mem_map.toml` 一致
+改槽数：编辑 `patch_layout.toml` 的 `[slots].count`（可选 `lengths`），然后 `cargo xtask layout`。
 
 ## Flash 分区表
 

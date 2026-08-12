@@ -69,16 +69,26 @@ async fn main(spawner: Spawner) {
         Err(e) => error!("[Init][MAP] talc resource pool verification failed: {}", e),
     }
 
-    #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
-    patch::map::init_firmware_maps()
-        .await
-        .expect("[Init][MAP] talc pool OOM for bpf.toml maps");
-    #[cfg(feature = "patch-sync-st")]
-    patch::map::init_firmware_maps().expect("[Init][MAP] talc pool OOM for bpf.toml maps");
-    info!("[Init][MAP] firmware maps from bpf.toml initialized");
+    #[cfg(not(fw_us_cold_boot))]
+    {
+        #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
+        patch::map::init_firmware_maps()
+            .await
+            .expect("[Init][MAP] talc pool OOM for bpf.toml maps");
+        #[cfg(feature = "patch-sync-st")]
+        patch::map::init_firmware_maps().expect("[Init][MAP] talc pool OOM for bpf.toml maps");
+        info!("[Init][MAP] firmware maps from bpf.toml initialized");
 
-    info!("[Init][XDP] load AOT payload into HOT_A");
-    patch::load(peripherals.FLASH);
+        info!("[Init][XDP] load AOT payload into HOT_A");
+        patch::load(peripherals.FLASH);
+    }
+    #[cfg(fw_us_cold_boot)]
+    {
+        info!("[Init][MAP] cold_boot: skip bpf.toml maps (CREATE via control plane)");
+        info!("[Init][XDP] cold_boot: skip AOT load (empty HOT_A → XDP_PASS)");
+        patch::check_layout();
+        let _ = peripherals.FLASH;
+    }
 
     #[cfg(fw_us_hw_selftest)]
     {

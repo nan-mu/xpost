@@ -14,7 +14,8 @@ use static_cell::StaticCell;
 #[cfg(fw_us_hot_load)]
 use crate::hot_load_op::{
     self, HotLoadOp, HotLoadOpAck, KIND_COPY, KIND_MOVE, KIND_READBACK, KIND_SWAP, KIND_UPLOAD,
-    REGION_A, REGION_B, STORAGE_DRAM_0, STORAGE_DRAM_1, STORAGE_SRAM_A, STORAGE_SRAM_B,
+    REGION_2, REGION_3, REGION_A, REGION_B, STORAGE_DRAM_0, STORAGE_DRAM_1, STORAGE_SRAM_2,
+    STORAGE_SRAM_3, STORAGE_SRAM_A, STORAGE_SRAM_B,
 };
 #[cfg(fw_us_map_crud)]
 use crate::map_crud_op::{self, MapCrudAck, MapCrudOp};
@@ -23,7 +24,13 @@ use crate::patch::map::ops::MapOps;
 #[cfg(fw_us_hot_load)]
 use crate::patch::{SlotId, read_slot, stage_raw_xdp, swap_hot_xdp, xdp_image};
 #[cfg(fw_us_map_crud)]
-use crate::patch::{datapath as dp, map::with_array_map as crud_with_array, map::with_hash_map};
+use crate::patch::{
+    datapath as dp,
+    map::{
+        MapCreateCmd, MapKind, create_map, register_map_addr, register_map_name,
+        with_array_map as crud_with_array, with_hash_map,
+    },
+};
 #[cfg(any(fw_us_hot_load, fw_us_map_crud))]
 use embassy_futures::select::{Either, select};
 
@@ -166,9 +173,176 @@ pub async fn handler(sta_stack: embassy_net::Stack<'static>) {
 // ---------------------------------------------------------------------------
 
 #[cfg(fw_us_map_crud)]
+fn intern_ctrl_map_name(name: &str) -> Option<&'static str> {
+    match name {
+        "jmp_table" => Some("jmp_table"),
+        "fw_rules" => Some("fw_rules"),
+        _ => None,
+    }
+}
+
+#[cfg(fw_us_map_crud)]
+fn wire_map_kind(t: u32) -> Option<MapKind> {
+    use map_crud_op::*;
+    match t {
+        MAP_TYPE_HASH => Some(MapKind::Hash),
+        MAP_TYPE_ARRAY => Some(MapKind::Array),
+        MAP_TYPE_PROG_ARRAY => Some(MapKind::ProgArray),
+        _ => None,
+    }
+}
+
+#[cfg(fw_us_map_crud)]
+fn map_crud_bad<'a>(kind: u32) -> MapCrudAck<'a> {
+    MapCrudAck {
+        kind,
+        status: map_crud_op::STATUS_BAD,
+        value: &[],
+    }
+}
+
+#[cfg(fw_us_map_crud)]
+fn map_crud_ok<'a>(kind: u32, value: &'a [u8]) -> MapCrudAck<'a> {
+    MapCrudAck {
+        kind,
+        status: map_crud_op::STATUS_OK,
+        value,
+    }
+}
+
+#[cfg(fw_us_map_crud)]
+#[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
+async fn apply_map_create<'a>(op: MapCrudOp<'a>) -> MapCrudAck<'a> {
+    use map_crud_op::*;
+    let Some(kind) = wire_map_kind(op.map_type) else {
+        return map_crud_bad(op.kind);
+    };
+    let Some(name) = intern_ctrl_map_name(op.map_name) else {
+        error!("[CTRL][MAP] CREATE unknown map_name={}", op.map_name);
+        return map_crud_bad(op.kind);
+    };
+    if let Some(id) = crate::patch::map::resolve_map_name(name) {
+        // Same map already created: allow extra AOT address aliases (bounce vs drop).
+        if op.aot_addr != 0 {
+            if !register_map_addr(op.aot_addr as usize, id) {
+                error!("[CTRL][MAP] CREATE alias bind failed");
+                return map_crud_bad(op.kind);
+            }
+            info!(
+                "[CTRL][MAP] CREATE alias map={} id={} aot=0x{:x}",
+                name, id, op.aot_addr
+            );
+            return map_crud_ok(KIND_CREATE, &[]);
+        }
+        error!("[CTRL][MAP] CREATE name already registered: {}", name);
+        return map_crud_bad(op.kind);
+    }
+    let cmd = MapCreateCmd {
+        kind,
+        key_size: op.key_size as usize,
+        value_size: op.value_size as usize,
+        max_entries: op.max_entries as usize,
+        id: None,
+    };
+    dp::disable();
+    let result = create_map(cmd).await;
+    match result {
+        Ok(id) => {
+            if !register_map_name(name, id) {
+                error!("[CTRL][MAP] CREATE register_map_name failed");
+                dp::enable();
+                return map_crud_bad(op.kind);
+            }
+            if op.aot_addr != 0 && !register_map_addr(op.aot_addr as usize, id) {
+                error!("[CTRL][MAP] CREATE register_map_addr failed");
+                dp::enable();
+                return map_crud_bad(op.kind);
+            }
+            dp::enable();
+            info!(
+                "[CTRL][MAP] CREATE map={} id={} aot=0x{:x}",
+                name, id, op.aot_addr
+            );
+            map_crud_ok(KIND_CREATE, &[])
+        }
+        Err(e) => {
+            dp::enable();
+            error!("[CTRL][MAP] CREATE failed: {:?}", e);
+            map_crud_bad(op.kind)
+        }
+    }
+}
+
+#[cfg(fw_us_map_crud)]
+#[cfg(feature = "patch-sync-st")]
+async fn apply_map_create<'a>(op: MapCrudOp<'a>) -> MapCrudAck<'a> {
+    use map_crud_op::*;
+    let Some(kind) = wire_map_kind(op.map_type) else {
+        return map_crud_bad(op.kind);
+    };
+    let Some(name) = intern_ctrl_map_name(op.map_name) else {
+        error!("[CTRL][MAP] CREATE unknown map_name={}", op.map_name);
+        return map_crud_bad(op.kind);
+    };
+    if let Some(id) = crate::patch::map::resolve_map_name(name) {
+        // Same map already created: allow extra AOT address aliases (bounce vs drop).
+        if op.aot_addr != 0 {
+            if !register_map_addr(op.aot_addr as usize, id) {
+                error!("[CTRL][MAP] CREATE alias bind failed");
+                return map_crud_bad(op.kind);
+            }
+            info!(
+                "[CTRL][MAP] CREATE alias map={} id={} aot=0x{:x}",
+                name, id, op.aot_addr
+            );
+            return map_crud_ok(KIND_CREATE, &[]);
+        }
+        error!("[CTRL][MAP] CREATE name already registered: {}", name);
+        return map_crud_bad(op.kind);
+    }
+    let cmd = MapCreateCmd {
+        kind,
+        key_size: op.key_size as usize,
+        value_size: op.value_size as usize,
+        max_entries: op.max_entries as usize,
+        id: None,
+    };
+    dp::disable();
+    let result = create_map(cmd);
+    match result {
+        Ok(id) => {
+            if !register_map_name(name, id) {
+                error!("[CTRL][MAP] CREATE register_map_name failed");
+                dp::enable();
+                return map_crud_bad(op.kind);
+            }
+            if op.aot_addr != 0 && !register_map_addr(op.aot_addr as usize, id) {
+                error!("[CTRL][MAP] CREATE register_map_addr failed");
+                dp::enable();
+                return map_crud_bad(op.kind);
+            }
+            dp::enable();
+            info!(
+                "[CTRL][MAP] CREATE map={} id={} aot=0x{:x}",
+                name, id, op.aot_addr
+            );
+            map_crud_ok(KIND_CREATE, &[])
+        }
+        Err(e) => {
+            dp::enable();
+            error!("[CTRL][MAP] CREATE failed: {:?}", e);
+            map_crud_bad(op.kind)
+        }
+    }
+}
+
+#[cfg(fw_us_map_crud)]
 #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
 async fn apply_map_crud<'a>(op: MapCrudOp<'a>, val_out: &'a mut [u8; 256]) -> MapCrudAck<'a> {
     use map_crud_op::*;
+    if op.kind == KIND_CREATE {
+        return apply_map_create(op).await;
+    }
     dp::disable();
     let result = match (op.kind, op.map_type) {
         (KIND_UPDATE, MAP_TYPE_HASH) => with_hash_map(op.map_name, |m| {
@@ -219,11 +393,7 @@ async fn apply_map_crud<'a>(op: MapCrudOp<'a>, val_out: &'a mut [u8; 256]) -> Ma
         }
         _ => {
             dp::enable();
-            return MapCrudAck {
-                kind: op.kind,
-                status: STATUS_BAD,
-                value: &[],
-            };
+            return map_crud_bad(op.kind);
         }
     };
     dp::enable();
@@ -235,19 +405,11 @@ async fn apply_map_crud<'a>(op: MapCrudOp<'a>, val_out: &'a mut [u8; 256]) -> Ma
                 op.map_name,
                 val.len()
             );
-            MapCrudAck {
-                kind: op.kind,
-                status: map_crud_op::STATUS_OK,
-                value: val,
-            }
+            map_crud_ok(op.kind, val)
         }
         _ => {
             error!("[CTRL][MAP] kind={} map={} failed", op.kind, op.map_name);
-            MapCrudAck {
-                kind: op.kind,
-                status: map_crud_op::STATUS_BAD,
-                value: &[],
-            }
+            map_crud_bad(op.kind)
         }
     }
 }
@@ -256,6 +418,9 @@ async fn apply_map_crud<'a>(op: MapCrudOp<'a>, val_out: &'a mut [u8; 256]) -> Ma
 #[cfg(feature = "patch-sync-st")]
 async fn apply_map_crud<'a>(op: MapCrudOp<'a>, val_out: &'a mut [u8; 256]) -> MapCrudAck<'a> {
     use map_crud_op::*;
+    if op.kind == KIND_CREATE {
+        return apply_map_create(op).await;
+    }
     dp::disable();
     let result = match (op.kind, op.map_type) {
         (KIND_UPDATE, MAP_TYPE_HASH) => with_hash_map(op.map_name, |m| {
@@ -300,11 +465,7 @@ async fn apply_map_crud<'a>(op: MapCrudOp<'a>, val_out: &'a mut [u8; 256]) -> Ma
         }
         _ => {
             dp::enable();
-            return MapCrudAck {
-                kind: op.kind,
-                status: STATUS_BAD,
-                value: &[],
-            };
+            return map_crud_bad(op.kind);
         }
     };
     dp::enable();
@@ -316,19 +477,11 @@ async fn apply_map_crud<'a>(op: MapCrudOp<'a>, val_out: &'a mut [u8; 256]) -> Ma
                 op.map_name,
                 val.len()
             );
-            MapCrudAck {
-                kind: op.kind,
-                status: map_crud_op::STATUS_OK,
-                value: val,
-            }
+            map_crud_ok(op.kind, val)
         }
         _ => {
             error!("[CTRL][MAP] kind={} map={} failed", op.kind, op.map_name);
-            MapCrudAck {
-                kind: op.kind,
-                status: map_crud_op::STATUS_BAD,
-                value: &[],
-            }
+            map_crud_bad(op.kind)
         }
     }
 }
@@ -353,11 +506,14 @@ fn bad_hot_ack(op: &HotLoadOp<'_>) -> HotLoadOpAck {
 
 #[cfg(fw_us_hot_load)]
 fn storage_to_slot(id: u32) -> Option<SlotId> {
-    match id {
-        STORAGE_SRAM_A => Some(SlotId::A),
-        STORAGE_SRAM_B => Some(SlotId::B),
-        _ => None,
-    }
+    let idx = match id {
+        STORAGE_SRAM_A => 0u8,
+        STORAGE_SRAM_B => 1,
+        STORAGE_SRAM_2 => 2,
+        STORAGE_SRAM_3 => 3,
+        _ => return None,
+    };
+    SlotId::from_u8(idx)
 }
 
 #[cfg(fw_us_hot_load)]
@@ -400,9 +556,14 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
     match op.kind {
         KIND_SWAP => {
             let hot = match op.region {
-                REGION_A => SlotId::A,
-                REGION_B => SlotId::B,
-                _ => return bad_hot_ack(&op),
+                REGION_A => SlotId::from_u8(0),
+                REGION_B => SlotId::from_u8(1),
+                REGION_2 => SlotId::from_u8(2),
+                REGION_3 => SlotId::from_u8(3),
+                _ => None,
+            };
+            let Some(hot) = hot else {
+                return bad_hot_ack(&op);
             };
             #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
             let result = swap_hot_xdp(op.dram_slot as u8, hot, op.payload).await;
@@ -431,10 +592,42 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
         }
 
         KIND_UPLOAD => {
-            if op.payload.is_empty() {
-                return bad_hot_ack(&op);
-            }
-            if let Some(idx) = storage_to_dram_idx(op.dst) {
+            if let Some(slot) = storage_to_slot(op.dst) {
+                use crate::patch::part::write_slot;
+                use crate::patch::prog_table;
+                dp2::disable();
+                let r = if op.payload.is_empty() {
+                    prog_table::unload_slot(slot);
+                    Ok(())
+                } else {
+                    write_slot(slot, op.payload).map(|()| {
+                        prog_table::publish_tail_callee(slot);
+                    })
+                };
+                dp2::enable();
+                match r {
+                    Ok(()) => {
+                        info!(
+                            "[CTRL][HOT] upload sram {:?} len={}",
+                            slot,
+                            op.payload.len()
+                        );
+                        HotLoadOpAck {
+                            kind: op.kind,
+                            region: 0,
+                            dram_slot: 0,
+                            status: hot_load_op::STATUS_OK,
+                            stashed_len: 0,
+                            loaded_len: op.payload.len() as u32,
+                            readback_len: 0,
+                            copied_len: 0,
+                        }
+                    }
+                    Err(_) => bad_hot_ack(&op),
+                }
+            } else if op.payload.is_empty() {
+                bad_hot_ack(&op)
+            } else if let Some(idx) = storage_to_dram_idx(op.dst) {
                 #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
                 let r = stage_raw_xdp(idx, op.payload).await;
                 #[cfg(feature = "patch-sync-st")]
@@ -457,31 +650,6 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
                         error!("[CTRL][HOT] upload failed: {:?}", e);
                         bad_hot_ack(&op)
                     }
-                }
-            } else if let Some(slot) = storage_to_slot(op.dst) {
-                dp2::disable();
-                use crate::patch::part::write_slot;
-                let r = write_slot(slot, op.payload);
-                dp2::enable();
-                match r {
-                    Ok(()) => {
-                        info!(
-                            "[CTRL][HOT] upload sram {:?} len={}",
-                            slot,
-                            op.payload.len()
-                        );
-                        HotLoadOpAck {
-                            kind: op.kind,
-                            region: 0,
-                            dram_slot: 0,
-                            status: hot_load_op::STATUS_OK,
-                            stashed_len: 0,
-                            loaded_len: op.payload.len() as u32,
-                            readback_len: 0,
-                            copied_len: 0,
-                        }
-                    }
-                    Err(_) => bad_hot_ack(&op),
                 }
             } else {
                 bad_hot_ack(&op)
@@ -508,7 +676,11 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
             } else if let Some(slot) = storage_to_slot(op.dst) {
                 dp2::disable();
                 use crate::patch::part::write_slot;
+                use crate::patch::prog_table;
                 let r = write_slot(slot, src_bytes);
+                if r.is_ok() {
+                    prog_table::publish_tail_callee(slot);
+                }
                 dp2::enable();
                 r.is_ok()
             } else {

@@ -6,7 +6,8 @@ fn main() {
 
     println!("cargo:rerun-if-changed=esp32c3.bin");
     println!("cargo:rerun-if-changed=bpf.toml");
-    println!("cargo:rerun-if-changed=mem_map.toml");
+    println!("cargo:rerun-if-changed=mem.toml");
+    println!("cargo:rerun-if-changed=patch_layout.toml");
     println!("cargo:rerun-if-changed=config.toml");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());

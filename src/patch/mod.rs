@@ -13,7 +13,7 @@ pub(crate) mod sync;
 pub mod hwtest;
 
 pub use helper::helper_dispatcher;
-pub use part::{load, read_slot, xdp};
+pub use part::{check_layout, load, read_slot, xdp};
 pub use prog_table::SlotId;
 pub use program::{
     ProgramError, ProgramId, XDP_SLOT_COUNT, XDP_SLOT_LEN, XdpInstallCmd, image as xdp_image,

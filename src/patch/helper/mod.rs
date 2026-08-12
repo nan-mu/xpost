@@ -126,7 +126,7 @@ fn fmt_ret(ret: usize) -> (&'static str, i32) {
 
 /// Fixed-address IRAM entry for AOT helper calls.
 ///
-/// Address comes from `mem_map.toml` → [`crate::patch::mem_map::HELPER_DISPATCHER_BASE`].
+/// Address comes from `mem.toml` → [`crate::patch::mem_map::HELPER_DISPATCHER_BASE`].
 /// Keep this body a pure tail-call into flash so the IRAM window stays a thin
 /// trampoline (full match bodies belong in `dispatch_helper`).
 #[unsafe(no_mangle)]

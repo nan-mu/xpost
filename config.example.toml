@@ -50,14 +50,20 @@ enabled = false
 
 # Full hash-map firewall + hot-replace test (fw_hash_bounce/drop XDP pair).
 # Requires fw_hash_bounce AOT loaded at boot, fw_hash_drop in assets.
+# Mutually exclusive with tail_call_abc.
 [[tests]]
 name = "fw_hash_test"
-enabled = true
+enabled = false
 
 [[tests.seeds]]
 map = "fw_rules"
 src_ip = "192.168.110.50"
 action = 1
+
+# Cold-boot (empty HOT_A / no bpf.toml maps) + control-plane A/B + tail_call proof.
+[[tests]]
+name = "tail_call_abc"
+enabled = true
 
 # On-device serial suite; skips WiFi. Mutex with other enabled tests.
 [[tests]]
