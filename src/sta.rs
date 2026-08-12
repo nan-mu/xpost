@@ -2,13 +2,14 @@
 
 use crate::driver::FirewallDevice;
 use crate::fw_cfg::{XDP_ENABLE, dut, log_cfg, probe, wifi};
+use crate::{init_log, trace_log};
 use embassy_net::{
     IpAddress, IpEndpoint, Ipv4Address, StackResources,
     udp::{PacketMetadata, UdpSocket},
 };
 use esp_hal::{peripherals::WIFI, rng::Rng};
 use esp_radio::wifi::{self as wifi_radio, Config, ControllerConfig, sta::StationConfig};
-use log::{error, info};
+use log::error;
 use static_cell::StaticCell;
 
 #[cfg(fw_us_hot_load)]
@@ -78,12 +79,12 @@ pub fn init_sta(
     embassy_net::Stack<'static>,
     embassy_net::Runner<'static, FirewallDevice<wifi_radio::Interface<'static>>>,
 ) {
-    info!("[Init][STA] initializing");
+    init_log!("[Init][STA] initializing");
     log_cfg();
     if XDP_ENABLE {
-        info!("[FWTEST] XDP path enabled");
+        init_log!("[FWTEST] XDP path enabled");
     } else {
-        info!("[FWTEST] XDP path bypassed");
+        init_log!("[FWTEST] XDP path bypassed");
     }
 
     let sta = Config::Station(
@@ -92,7 +93,7 @@ pub fn init_sta(
             .with_password(wifi::PASSWORD.into()),
     );
 
-    info!("[Init][STA] ssid={}", wifi::SSID);
+    init_log!("[Init][STA] ssid={}", wifi::SSID);
     let (controller, interfaces) = wifi_radio::new(
         wifi_periph,
         ControllerConfig::default().with_initial_config(sta),
@@ -101,21 +102,26 @@ pub fn init_sta(
 
     let sta = interfaces.station;
     let mac = sta.mac_address();
-    info!(
+    init_log!(
         "[Init][STA] mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5]
     );
 
-    info!("[Init][STA] wrapping FirewallDevice");
+    init_log!("[Init][STA] wrapping FirewallDevice");
     let xdp_device = FirewallDevice::new(sta);
 
     let sta_config = embassy_net::Config::dhcpv4(Default::default());
-    info!("[Init][STA] DHCPv4");
+    init_log!("[Init][STA] DHCPv4");
 
     let rng = Rng::new();
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
 
-    info!("[Init][STA] net seed={}", seed);
+    init_log!("[Init][STA] net seed={}", seed);
     let resources = STACK_RESOURCES.init(StackResources::<8>::new());
     let (sta_stack, sta_runner) = embassy_net::new(xdp_device, sta_config, resources, seed);
 
@@ -124,10 +130,10 @@ pub fn init_sta(
 
 #[inline]
 pub async fn handler(sta_stack: embassy_net::Stack<'static>) {
-    info!("[FWTEST] waiting for DHCP lease...");
+    init_log!("[FWTEST] waiting for DHCP lease...");
     sta_stack.wait_config_up().await;
     if let Some(cfg) = sta_stack.config_v4() {
-        info!("[FWTEST] STA IP {} gw={:?}", cfg.address, cfg.gateway);
+        init_log!("[FWTEST] STA IP {} gw={:?}", cfg.address, cfg.gateway);
     }
 
     let mut echo = UdpSocket::new(
@@ -141,7 +147,7 @@ pub async fn handler(sta_stack: embassy_net::Stack<'static>) {
         error!("[FWTEST] bind :{} failed: {:?}", dut::LISTEN_PORT, e);
         return;
     }
-    info!("[FWTEST] UDP echo bound :{}", dut::LISTEN_PORT);
+    init_log!("[FWTEST] UDP echo bound :{}", dut::LISTEN_PORT);
 
     #[cfg(any(fw_us_hot_load, fw_us_map_crud))]
     {
@@ -156,7 +162,7 @@ pub async fn handler(sta_stack: embassy_net::Stack<'static>) {
             error!("[FWTEST] bind :{} failed: {:?}", dut::CTRL_PORT, e);
             return;
         }
-        info!(
+        init_log!(
             "[FWTEST] UDP ctrl bound :{} (rx_cap={})",
             dut::CTRL_PORT,
             CTRL_RX_CAP
@@ -228,9 +234,11 @@ async fn apply_map_create<'a>(op: MapCrudOp<'a>) -> MapCrudAck<'a> {
                 error!("[CTRL][MAP] CREATE alias bind failed");
                 return map_crud_bad(op.kind);
             }
-            info!(
+            trace_log!(
                 "[CTRL][MAP] CREATE alias map={} id={} aot=0x{:x}",
-                name, id, op.aot_addr
+                name,
+                id,
+                op.aot_addr
             );
             return map_crud_ok(KIND_CREATE, &[]);
         }
@@ -259,9 +267,11 @@ async fn apply_map_create<'a>(op: MapCrudOp<'a>) -> MapCrudAck<'a> {
                 return map_crud_bad(op.kind);
             }
             dp::enable();
-            info!(
+            trace_log!(
                 "[CTRL][MAP] CREATE map={} id={} aot=0x{:x}",
-                name, id, op.aot_addr
+                name,
+                id,
+                op.aot_addr
             );
             map_crud_ok(KIND_CREATE, &[])
         }
@@ -291,9 +301,11 @@ async fn apply_map_create<'a>(op: MapCrudOp<'a>) -> MapCrudAck<'a> {
                 error!("[CTRL][MAP] CREATE alias bind failed");
                 return map_crud_bad(op.kind);
             }
-            info!(
+            trace_log!(
                 "[CTRL][MAP] CREATE alias map={} id={} aot=0x{:x}",
-                name, id, op.aot_addr
+                name,
+                id,
+                op.aot_addr
             );
             return map_crud_ok(KIND_CREATE, &[]);
         }
@@ -322,9 +334,11 @@ async fn apply_map_create<'a>(op: MapCrudOp<'a>) -> MapCrudAck<'a> {
                 return map_crud_bad(op.kind);
             }
             dp::enable();
-            info!(
+            trace_log!(
                 "[CTRL][MAP] CREATE map={} id={} aot=0x{:x}",
-                name, id, op.aot_addr
+                name,
+                id,
+                op.aot_addr
             );
             map_crud_ok(KIND_CREATE, &[])
         }
@@ -399,7 +413,7 @@ async fn apply_map_crud<'a>(op: MapCrudOp<'a>, val_out: &'a mut [u8; 256]) -> Ma
     dp::enable();
     match result {
         Ok(Ok(val)) => {
-            info!(
+            trace_log!(
                 "[CTRL][MAP] kind={} map={} ok val_len={}",
                 op.kind,
                 op.map_name,
@@ -471,7 +485,7 @@ async fn apply_map_crud<'a>(op: MapCrudOp<'a>, val_out: &'a mut [u8; 256]) -> Ma
     dp::enable();
     match result {
         Ok(Ok(val)) => {
-            info!(
+            trace_log!(
                 "[CTRL][MAP] kind={} map={} ok val_len={}",
                 op.kind,
                 op.map_name,
@@ -572,7 +586,7 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
 
             match result {
                 Ok((stashed, loaded)) => {
-                    info!("[CTRL][HOT] swap stashed={} loaded={}", stashed, loaded);
+                    trace_log!("[CTRL][HOT] swap stashed={} loaded={}", stashed, loaded);
                     HotLoadOpAck {
                         kind: op.kind,
                         region: op.region,
@@ -607,7 +621,7 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
                 dp2::enable();
                 match r {
                     Ok(()) => {
-                        info!(
+                        trace_log!(
                             "[CTRL][HOT] upload sram {:?} len={}",
                             slot,
                             op.payload.len()
@@ -634,7 +648,7 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
                 let r = stage_raw_xdp(idx, op.payload);
                 match r {
                     Ok(()) => {
-                        info!("[CTRL][HOT] upload dram[{}] len={}", idx, op.payload.len());
+                        trace_log!("[CTRL][HOT] upload dram[{}] len={}", idx, op.payload.len());
                         HotLoadOpAck {
                             kind: op.kind,
                             region: 0,
@@ -700,7 +714,7 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
                 }
             }
 
-            info!(
+            trace_log!(
                 "[CTRL][HOT] {} src={} dst={} bytes={}",
                 if op.kind == KIND_COPY { "copy" } else { "move" },
                 op.src,
@@ -722,7 +736,7 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
         KIND_READBACK => {
             let src_data = read_storage(op.src).await;
             let rb_len = src_data.map(|b| b.len()).unwrap_or(0);
-            info!("[CTRL][HOT] readback src={} len={}", op.src, rb_len);
+            trace_log!("[CTRL][HOT] readback src={} len={}", op.src, rb_len);
             HotLoadOpAck {
                 kind: op.kind,
                 region: 0,
@@ -760,7 +774,7 @@ async fn recv_loop_with_ctrl(echo: UdpSocket<'static>, ctrl: UdpSocket<'static>)
         probe::REPLY_PORT,
     );
     let ack_dest = echo_dest;
-    info!(
+    trace_log!(
         "[FWTEST] echo/ack → {}.{}.{}.{}:{}",
         probe::IP[0],
         probe::IP[1],
@@ -776,17 +790,17 @@ async fn recv_loop_with_ctrl(echo: UdpSocket<'static>, ctrl: UdpSocket<'static>)
     loop {
         match select(echo.recv_from(&mut echo_buf), ctrl.recv_from(&mut ctrl_buf)).await {
             Either::First(Ok((len, remote))) => {
-                info!("[FWTEST] stim from {} len={}", remote.endpoint, len);
+                trace_log!("[FWTEST] stim from {} len={}", remote.endpoint, len);
                 let reply = echo_reply_payload(&echo_buf[..len]);
                 if let Err(e) = echo.send_to(reply, echo_dest).await {
                     error!("[FWTEST] echo send failed: {:?}", e);
                 } else {
-                    info!("[FWTEST] echo sent ({} bytes)", reply.len());
+                    trace_log!("[FWTEST] echo sent ({} bytes)", reply.len());
                 }
             }
             Either::First(Err(e)) => error!("[FWTEST] echo recv: {:?}", e),
             Either::Second(Ok((len, remote))) => {
-                info!("[CTRL] from {} len={}", remote.endpoint, len);
+                trace_log!("[CTRL] from {} len={}", remote.endpoint, len);
                 let sent = handle_ctrl(&ctrl_buf[..len], &mut ack_buf, &ctrl, ack_dest).await;
                 if !sent {
                     error!("[CTRL] no ack sent");
@@ -830,7 +844,7 @@ async fn handle_ctrl(
                 return match hot_load_op::encode_ack(&ack, ack_buf) {
                     Some(n) => match ctrl.send_to(&ack_buf[..n], ack_dest).await {
                         Ok(()) => {
-                            info!("[CTRL][HOT] ack status={}", ack.status);
+                            trace_log!("[CTRL][HOT] ack status={}", ack.status);
                             true
                         }
                         Err(e) => {
@@ -855,7 +869,7 @@ async fn handle_ctrl(
             return match map_crud_op::encode_ack(&ack, ack_buf) {
                 Some(n) => match ctrl.send_to(&ack_buf[..n], ack_dest).await {
                     Ok(()) => {
-                        info!("[CTRL][MAP] ack status={}", ack.status);
+                        trace_log!("[CTRL][MAP] ack status={}", ack.status);
                         true
                     }
                     Err(e) => {
@@ -891,7 +905,7 @@ async fn recv_loop_echo_only(echo: UdpSocket<'static>) {
         )),
         probe::REPLY_PORT,
     );
-    info!(
+    trace_log!(
         "[FWTEST] echo → {}.{}.{}.{}:{}",
         probe::IP[0],
         probe::IP[1],
@@ -904,12 +918,12 @@ async fn recv_loop_echo_only(echo: UdpSocket<'static>) {
     loop {
         match echo.recv_from(&mut echo_buf).await {
             Ok((len, remote)) => {
-                info!("[FWTEST] stim from {} len={}", remote.endpoint, len);
+                trace_log!("[FWTEST] stim from {} len={}", remote.endpoint, len);
                 let reply = echo_reply_payload(&echo_buf[..len]);
                 if let Err(e) = echo.send_to(reply, echo_dest).await {
                     error!("[FWTEST] echo send failed: {:?}", e);
                 } else {
-                    info!("[FWTEST] echo sent ({} bytes)", reply.len());
+                    trace_log!("[FWTEST] echo sent ({} bytes)", reply.len());
                 }
             }
             Err(e) => error!("[FWTEST] echo recv: {:?}", e),

@@ -1,7 +1,9 @@
 pub mod dynptr;
 mod inner;
 
-use log::{debug, info};
+use log::debug;
+
+use crate::trace_log;
 
 use crate::patch::map::resolve_map_id;
 
@@ -200,7 +202,7 @@ fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
     if is_map_helper(idx) {
         let map_id = resolve_map_id(a1);
         match map_id {
-            Some(id) => info!(
+            Some(id) => trace_log!(
                 "[Helper][MAP] {} (#{}) map_id={} a2={} a3={} a4={} a5={} -> {}={}",
                 helper_name(idx),
                 idx,
@@ -212,7 +214,7 @@ fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
                 ret_kind,
                 ret_val,
             ),
-            None => info!(
+            None => trace_log!(
                 "[Helper][MAP] {} (#{}) map_arg={} a2={} a3={} a4={} a5={} -> {}={}",
                 helper_name(idx),
                 idx,

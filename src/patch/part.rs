@@ -1,8 +1,8 @@
 // use embedded_storage::Storage;
 use core::ptr;
 use esp_hal::peripherals::FLASH;
-// use esp_storage::FlashStorage;
-use log::info;
+
+use crate::{bench_log, init_log, trace_log};
 
 use super::helper_dispatcher;
 use super::mem_map::{HOT_A_LEN, assert_linked_addresses};
@@ -33,21 +33,22 @@ pub fn load(_flash: FLASH<'static>) {
             HOT_A_LEN
         );
 
-        info!(
+        init_log!(
             "[AOT] Bin: {} bytes, BSS: {} bytes (slot0 ok)",
-            bin_size, bss_size
+            bin_size,
+            bss_size
         );
 
         let (xdp_ptr, _cap) = slot_buf(0);
         ptr::copy_nonoverlapping(xdp_with_footer.as_ptr(), xdp_ptr, bin_size);
         ptr::write_bytes(xdp_ptr.add(bin_size), 0, bss_size);
 
-        info!("[AOT] load slot0 done");
+        init_log!("[AOT] load slot0 done");
     }
 
     prog_table::mark_loaded_len(SlotId::A, bin_size);
     super::map::bind_aot_map_addrs();
-    info!("[AOT] map aliases bound={}", super::map::AOT_MAP_BIND_COUNT);
+    init_log!("[AOT] map aliases bound={}", super::map::AOT_MAP_BIND_COUNT);
 }
 
 pub use super::ctx::XdpContext;
@@ -65,11 +66,15 @@ pub fn read_slot(slot: SlotId) -> Option<&'static [u8]> {
 /// Copy `image` into an IRAM hot slot and mark it loaded.
 ///
 /// Caller must hold the control-plane gate (`datapath` stopped / `ctrl_try_begin`).
+///
+/// Timing uses Embassy's TIMG clock — ESP32-C3 does not implement RISC-V `mcycle`
+/// (CSR 0xB00 traps as illegal instruction).
 pub fn write_slot(slot: SlotId, image: &[u8]) -> Result<(), ()> {
     let (dst, cap) = slot_buf(slot.index());
     if image.len() > cap {
         return Err(());
     }
+    let t0 = embassy_time::Instant::now();
     unsafe {
         ptr::copy_nonoverlapping(image.as_ptr(), dst, image.len());
         if image.len() < cap {
@@ -78,6 +83,13 @@ pub fn write_slot(slot: SlotId, image: &[u8]) -> Result<(), ()> {
         core::arch::asm!("fence.i");
     }
     prog_table::mark_loaded_len(slot, image.len());
+    let us = (embassy_time::Instant::now() - t0).as_micros();
+    bench_log!(
+        "[HOT] swap slot={} bytes={} us={}",
+        slot.index(),
+        image.len(),
+        us
+    );
     Ok(())
 }
 
@@ -99,7 +111,7 @@ pub fn xdp(data: &mut [u8]) -> i32 {
         // Decimal pointer values — hex triggers espflash monitor addr2line spam.
         let data_addr = ctx.data as usize;
         let data_end_addr = ctx.data_end as usize;
-        info!(
+        trace_log!(
             "[XDP] begin data={} data_end={} len={}",
             data_addr,
             data_end_addr,
@@ -141,7 +153,7 @@ pub fn xdp(data: &mut [u8]) -> i32 {
             clobber_abi("C"),
         );
 
-        info!("[XDP] end action={} ({})", xdp_action_name(res), res);
+        trace_log!("[XDP] end action={} ({})", xdp_action_name(res), res);
         res
     }
 }

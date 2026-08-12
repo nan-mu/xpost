@@ -29,3 +29,5 @@ build = "build -Z build-std=core,alloc"
 check = "check -Z build-std=core,alloc"
 # Flash+monitor: need build-std; use this instead of bare `cargo run`.
 fwrun = "run -Z build-std=core,alloc"
+# Benchmark build: quiet datapath logs; init + [HOT] swap timing only.
+fwbench = "run --release -Z build-std=core,alloc --features benchmark"

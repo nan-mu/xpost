@@ -1,7 +1,8 @@
+use crate::{init_log, trace_log};
 use embassy_futures::select::Either;
 use embassy_time::{Duration, Timer};
 use esp_radio::wifi;
-use log::{error, info};
+use log::error;
 
 #[embassy_executor::task(pool_size = 2)]
 pub async fn net_task(mut runner: embassy_net::Runner<'static, wifi::Interface<'static>>) {
@@ -20,7 +21,7 @@ pub async fn net_task_xdp(
 
 #[embassy_executor::task]
 pub async fn connection(mut controller: wifi::WifiController<'static>) -> ! {
-    info!("[Init][WiFi] connection task start");
+    init_log!("[Init][WiFi] connection task start");
     loop {
         match controller.connect_async().await {
             Ok(_) => {
@@ -35,7 +36,7 @@ pub async fn connection(mut controller: wifi::WifiController<'static>) -> ! {
                     match info {
                         Either::First(station_disconnected) => {
                             if let Ok(station_disconnected) = station_disconnected {
-                                info!(
+                                trace_log!(
                                     "[Init][WiFi] station disconnected: {:?}",
                                     station_disconnected
                                 );
@@ -48,7 +49,7 @@ pub async fn connection(mut controller: wifi::WifiController<'static>) -> ! {
                                     esp_radio::wifi::AccessPointStationEventInfo::Connected(
                                         access_point_station_connected_info,
                                     ) => {
-                                        info!(
+                                        trace_log!(
                                             "[Init][WiFi] AP station connected: {:?}",
                                             access_point_station_connected_info
                                         );
@@ -56,7 +57,7 @@ pub async fn connection(mut controller: wifi::WifiController<'static>) -> ! {
                                     esp_radio::wifi::AccessPointStationEventInfo::Disconnected(
                                         access_point_station_disconnected_info,
                                     ) => {
-                                        info!(
+                                        trace_log!(
                                             "[Init][WiFi] AP station disconnected: {:?}",
                                             access_point_station_disconnected_info
                                         );

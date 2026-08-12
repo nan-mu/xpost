@@ -11,7 +11,7 @@ pub const fn ipv4_u32(octets: [u8; 4]) -> u32 {
 }
 
 pub fn log_cfg() {
-    log::info!(
+    crate::init_log!(
         "[FWTEST] cfg xdp={} probe={}.{}.{}.{}:{} listen=:{} ctrl=:{} seeds={}",
         XDP_ENABLE as u8,
         probe::IP[0],

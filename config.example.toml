@@ -2,6 +2,11 @@
 # Mirror of router-probe config/fwtest.toml: [sections] + [[tests]] / [[tests.seeds]].
 # Does NOT select AOT / bpf.toml / esp32c3.bin — copy those by hand to match enabled tests.
 #
+# Benchmark (quiet UART during tail_call_abc / hot-swap timing):
+#   cd firmware && cargo fwbench
+# Normal debug logs:
+#   cd firmware && cargo fwrun
+#
 # schema_version: required. Firmware accepts 1..=MAX (currently 1).
 # Unknown keys are ignored with a cargo warning (forward-compatible).
 schema_version = 1

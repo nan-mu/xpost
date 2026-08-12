@@ -10,9 +10,10 @@
 use embassy_executor::Spawner;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use log::{error, info};
+use log::error;
 
-use firmware::patch;
+use firmware::init_log;
+use firmware::{log_gate::init_logger, patch};
 
 #[cfg(not(fw_us_hw_selftest))]
 use firmware::{
@@ -38,7 +39,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
-    esp_println::logger::init_logger_from_env();
+    init_logger();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -49,10 +50,10 @@ async fn main(spawner: Spawner) {
     let sw_interrupt =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
-    info!("[Init][Embassy] Embassy initialized!");
+    init_log!("[Init][Embassy] Embassy initialized!");
 
     patch::map::init();
-    info!("[Init][MAP] MAP resource pool initialized");
+    init_log!("[Init][MAP] MAP resource pool initialized");
 
     #[cfg(all(
         fw_us_hw_selftest,
@@ -60,12 +61,12 @@ async fn main(spawner: Spawner) {
         not(feature = "patch-sync-st")
     ))]
     match patch::hwtest::verify_pool().await {
-        Ok(()) => info!("[Init][MAP] talc resource pool verification passed"),
+        Ok(()) => init_log!("[Init][MAP] talc resource pool verification passed"),
         Err(e) => error!("[Init][MAP] talc resource pool verification failed: {}", e),
     }
     #[cfg(all(fw_us_hw_selftest, feature = "patch-sync-st"))]
     match patch::hwtest::verify_pool() {
-        Ok(()) => info!("[Init][MAP] talc resource pool verification passed"),
+        Ok(()) => init_log!("[Init][MAP] talc resource pool verification passed"),
         Err(e) => error!("[Init][MAP] talc resource pool verification failed: {}", e),
     }
 
@@ -77,15 +78,15 @@ async fn main(spawner: Spawner) {
             .expect("[Init][MAP] talc pool OOM for bpf.toml maps");
         #[cfg(feature = "patch-sync-st")]
         patch::map::init_firmware_maps().expect("[Init][MAP] talc pool OOM for bpf.toml maps");
-        info!("[Init][MAP] firmware maps from bpf.toml initialized");
+        init_log!("[Init][MAP] firmware maps from bpf.toml initialized");
 
-        info!("[Init][XDP] load AOT payload into HOT_A");
+        init_log!("[Init][XDP] load AOT payload into HOT_A");
         patch::load(peripherals.FLASH);
     }
     #[cfg(fw_us_cold_boot)]
     {
-        info!("[Init][MAP] cold_boot: skip bpf.toml maps (CREATE via control plane)");
-        info!("[Init][XDP] cold_boot: skip AOT load (empty HOT_A → XDP_PASS)");
+        init_log!("[Init][MAP] cold_boot: skip bpf.toml maps (CREATE via control plane)");
+        init_log!("[Init][XDP] cold_boot: skip AOT load (empty HOT_A → XDP_PASS)");
         patch::check_layout();
         let _ = peripherals.FLASH;
     }
@@ -95,7 +96,7 @@ async fn main(spawner: Spawner) {
         let _ = spawner;
         patch::hwtest::run();
         // Dedicated harness owns XDP; do not bring up WiFi / RX path.
-        info!("[HWTEST] idle (WiFi skipped)");
+        init_log!("[HWTEST] idle (WiFi skipped)");
         loop {
             embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
         }
