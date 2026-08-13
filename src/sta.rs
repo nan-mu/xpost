@@ -14,9 +14,9 @@ use static_cell::StaticCell;
 
 #[cfg(fw_us_hot_load)]
 use crate::hot_load_op::{
-    self, HotLoadOp, HotLoadOpAck, KIND_COPY, KIND_MOVE, KIND_READBACK, KIND_SWAP, KIND_UPLOAD,
-    REGION_2, REGION_3, REGION_A, REGION_B, STORAGE_DRAM_0, STORAGE_DRAM_1, STORAGE_SRAM_2,
-    STORAGE_SRAM_3, STORAGE_SRAM_A, STORAGE_SRAM_B,
+    self, HotLoadOp, HotLoadOpAck, KIND_COPY, KIND_DATAPATH, KIND_MOVE, KIND_READBACK, KIND_SWAP,
+    KIND_UPLOAD, REGION_2, REGION_3, REGION_A, REGION_B, STORAGE_DRAM_0, STORAGE_DRAM_1,
+    STORAGE_SRAM_2, STORAGE_SRAM_3, STORAGE_SRAM_A, STORAGE_SRAM_B,
 };
 #[cfg(fw_us_map_crud)]
 use crate::map_crud_op::{self, MapCrudAck, MapCrudOp};
@@ -753,6 +753,38 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
             }
         }
 
+        KIND_DATAPATH => match op.region {
+            hot_load_op::DATAPATH_DISABLE => {
+                dp2::disable();
+                trace_log!("[CTRL][HOT] datapath disable");
+                HotLoadOpAck {
+                    kind: op.kind,
+                    region: op.region,
+                    dram_slot: 0,
+                    status: hot_load_op::STATUS_OK,
+                    stashed_len: 0,
+                    loaded_len: 0,
+                    readback_len: 0,
+                    copied_len: 0,
+                }
+            }
+            hot_load_op::DATAPATH_ENABLE => {
+                dp2::enable();
+                trace_log!("[CTRL][HOT] datapath enable");
+                HotLoadOpAck {
+                    kind: op.kind,
+                    region: op.region,
+                    dram_slot: 0,
+                    status: hot_load_op::STATUS_OK,
+                    stashed_len: 0,
+                    loaded_len: 0,
+                    readback_len: 0,
+                    copied_len: 0,
+                }
+            }
+            _ => bad_hot_ack(&op),
+        },
+
         _ => bad_hot_ack(&op),
     }
 }
@@ -823,7 +855,7 @@ async fn handle_ctrl(
         if let Some(k) = hot_load_op::peek_kind(pkt) {
             if matches!(
                 k,
-                KIND_SWAP | KIND_UPLOAD | KIND_COPY | KIND_MOVE | KIND_READBACK
+                KIND_SWAP | KIND_UPLOAD | KIND_COPY | KIND_MOVE | KIND_READBACK | KIND_DATAPATH
             ) {
                 let ack = match hot_load_op::decode_op(pkt) {
                     Ok(op) => apply_hot_load(op).await,

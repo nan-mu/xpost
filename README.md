@@ -42,49 +42,114 @@ cargo install espflash
 
 ## 项目配置
 
-用户态配置写在 [`config.toml`](config.toml)（仿 router-probe `fwtest.toml`：`[wifi]` / `[probe]` / `[dut]` + `[[tests]]` / `[[tests.seeds]]`）。每次 `cargo build` / `cargo run` 时，精简的 `build.rs` 进程内调用 [`xtask`](xtask/) 解析 toml，写出 `OUT_DIR` 产物并发出 `fw_us_*` cfg——**无需先手动 gen**。
+用户态与 IRAM 布局意图写在 [`config.toml`](config.toml)（模板：[`config.example.toml`](config.example.toml)）。
 
-**不管 AOT：** `esp32c3.bin` / `bpf.toml` 仍手拷，并与 enabled 的 `[[tests]]` 对齐。
+- **改 `[arena]` / `[helper]` / `[slots]` 后必须** `cargo xtask doctor`，生成只读 [`mem.toml`](mem.toml)。`cargo build` **不会**改写 `mem.toml`；不一致则硬错误。
+- **`[[tests]]`**：只保留当前要跑的项；不要堆 `enabled = false`。可省略（Phase A 布局-only）。
+- **AOT**：`esp32c3.bin` / `bpf.toml` 仍手拷。
 
 | 段 | 含义 |
 |------|------|
-| `[wifi]` | STA `ssid` / `password` |
-| `[probe]` | TR3000 侧：`ip`、`reply_port`（固定 echo 目的） |
-| `[dut]` | 本机：`listen_port`、`ctrl_port` |
-| `[[tests]]` | `name` + `enabled`；启用项推导功能（如 `fw_hash_test` → map_crud + hot_load） |
-| `[[tests.seeds]]` | 该测试的 map 初始化对象（`fw_rules` / `vip_ip` / `firewall_rules`） |
+| `[wifi]` / `[probe]` / `[dut]` | STA 与探针端口 |
+| `[arena]` / `[helper]` | IRAM 窗口意图 |
+| `[slots]` | 具名槽：`a = { length, mount }`；键名排序 = IRAM 顺序 |
+| `[[tests]]` | 可选；启用项推导 `fw_us_*` |
 
-| 测试名 | 启用后效果 |
-|------|------|
-| `xdp_forward_echo` | 网络路径 + 其 `seeds`（通常 seed `vip_ip`） |
-| `hot_load_ctrl` | UDP ctrl（HotLoadOp SWAP：热区→DRAM 一号槽，载荷→HOT_A） |
-| `fw_hash_test` | 全流程 hash map 防火墙 + 热更新（MapCrudOp + HotLoadOp UPLOAD/COPY/READBACK） |
-| `firewall_echo` | 网络路径 + 其 `seeds`（通常 seed `firewall_rules`） |
-| `hw_selftest` | 板载串口自检（与其它网络测试互斥） |
+**mount 规则**：单字符串 `call` \| `rx` \| `tx`；省略 ⇒ `call`。`call` 可多槽；`rx`/`tx` 全局各 ≤1。运行时 remount：停 datapath → 写锁改表 → enable（见 `patch::mount`）。
+
+```toml
+[slots]
+a = { length = 0xE00, mount = "tx" }
+b = { length = 0x1000, mount = "rx" }
+```
 
 拓扑约定：主路由只做 DHCP/网关；TR3000 做 AP + 探针。`[probe].ip` 必须是 TR3000（例 `192.168.110.142`），不要写成主路由 `…1`。
 
+### 测试配方（历史）
+
+`xtask` 已知名：`firewall_echo` / `xdp_forward_echo` / `hot_load_ctrl` / `fw_hash_test` / `tail_call_abc` / `tx_xdp_encap` / `hw_selftest`。多数网络测试互斥。与 router-probe `config/fwtest.toml` **同名启用**；改固件配方时必须同步关/开探针侧，否则会出现 `unknown op` / MapCrudAck 超时。
+
+**`tx_xdp_encap`** — Cycle 0.5 Phase B：透明 `FirewallTxToken` 劫持 + HotLoad。推导：`tx_hijack` + `hot_load`（**不**开 map_crud / seeds / cold_boot）。验收约定：[`docs/evidence/cycle05_tx_hijack.md`](../docs/evidence/cycle05_tx_hijack.md)。AOT：`tx_udp_encap`（sport `0x4254`）/ 变体 B（`0x4255`）。
+
+```toml
+[[tests]]
+name = "tx_xdp_encap"
+```
+
+**`tail_call_abc`** — Cycle 0：cold-boot（空 HOT_A、不建 bpf.toml maps）+ 控制面 CREATE/UPLOAD + `bpf_tail_call`。推导：`cold_boot` + `map_crud` + `hot_load` + `xdp_rx`。
+
+```toml
+[[tests]]
+name = "tail_call_abc"
+```
+
+**`fw_hash_test`** — 启动加载 `fw_hash_bounce` AOT；seed `fw_rules`；MapCrud + HotLoad 全流程。与 `tail_call_abc` 互斥。
+
+```toml
+[[tests]]
+name = "fw_hash_test"
+
+[[tests.seeds]]
+map = "fw_rules"
+src_ip = "192.168.110.50"
+action = 1
+```
+
+**`firewall_echo`** — 需 `firewall_ipv4` AOT；seed `firewall_rules` DROP。
+
+```toml
+[[tests]]
+name = "firewall_echo"
+
+[[tests.seeds]]
+map = "firewall_rules"
+src_ip = "10.0.0.1"
+# dst_port 省略时默认 dut.listen_port
+action = 1
+```
+
+**`xdp_forward_echo`** — VIP bounce + STA echo；seed `vip_ip`。
+
+```toml
+[[tests]]
+name = "xdp_forward_echo"
+
+[[tests.seeds]]
+map = "vip_ip"
+index = 0
+ip = "192.168.110.200"
+smoke = true
+```
+
+**`hot_load_ctrl`** — UDP `:8081` HotLoadOp SWAP（热区→DRAM 槽 1，载荷→HOT）。无 seeds。
+
+```toml
+[[tests]]
+name = "hot_load_ctrl"
+```
+
+**`hw_selftest`** — 板载串口自检，跳过 WiFi；与其它网络测试互斥。
+
+```toml
+[[tests]]
+name = "hw_selftest"
+```
+
 ## 构建和烧录
 
-Codegen（`config.toml` / `mem.toml` / `bpf.toml` → `OUT_DIR` + `fw_us_*`）由 `xtask` 库完成，经 `build.rs` 在每次构建时自动执行。
-
-可选 CLI（在 **host** 上跑，不要用默认 riscv target）：
+改槽位/arena 后先：
 
 ```sh
-cargo xtask map       # 打印 IBUS/DBUS SRAM 图（推荐）
-cargo xtask layout    # patch_layout.toml → mem.toml
-cargo xtask check
+cargo xtask doctor    # config.toml → mem.toml（校验 mount 唯一性等）
+cargo xtask map       # 打印 IBUS/DBUS SRAM 图
+cargo xtask check     # 校验 tomls + codegen（不持久写 OUT_DIR）
 ```
 
-`cargo run -p xtask map` 会因 workspace 默认 `riscv32imc` 目标而把 clap/std 当裸机依赖编译，出现大量 `Option`/`Result` not found。请用上面的 **`cargo xtask …`** 别名（见 `.cargo/config.toml`），或显式：
+`cargo build` / `cargo check` 消费已有 `mem.toml`（须与 config 一致）。别名见 `.cargo/config.toml`。
 
-```sh
-cargo run -p xtask --features cli --target aarch64-apple-darwin -- map
-```
+`cargo run -p xtask …` 会因默认 riscv target 把 clap/std 当裸机编；请用 **`cargo xtask …`**。
 
-固件构建仍用 `cargo build` / `cargo check`（别名已带 `-Z build-std=core,alloc`）；烧录监控用 `cargo fwrun`。
-
-或：`XTASK_PRINT_MAP=1 cargo build` 在构建固件时打印 map。
+固件烧录监控：`cargo fwrun`。`XTASK_PRINT_MAP=1 cargo build` 可在构建时打印 map。
 
 ### 构建项目
 
@@ -134,24 +199,23 @@ firmware/
 
 ### 3. 动态代码加载（AOT 热加载）
 
-固件支持从 Flash 的 `payload.bin` 加载并执行外部代码：
+固件支持加载并执行 AOT 补丁：
 
-- 代码加载到 IRAM 热槽 0（默认见 `patch_layout.toml` → 生成的 `mem.toml`；`--slot=0` / `a`）
-- 其它热槽可由 layout 配置（2..=4）；AOT 用 `--slot=N`（`b`≡1）
-- 支持 BSS 段初始化
+- 代码加载到 IRAM 具名热槽（见 `config.toml` `[slots]` → `mem.toml`）
+- 槽数 2..=4；mount `rx`/`tx`/`call` 决定入口角色（Phase B 起用于劫持）
 - 执行前刷新指令缓存（`fence.i`）
-- 提供辅助函数调度机制（`helper_dispatcher`，地址见 `mem.toml`）
+- 辅助函数调度：`helper_dispatcher`（地址见 `mem.toml`）
 
 ### 4. 内存布局
 
-- **`patch_layout.toml`**：槽数 / helper 长度等意图（人改）
-- **`mem.toml`**：由 `cargo xtask layout`（或 `build.rs`）生成，含 `[[hot_regions]]`
+- **`config.toml`**：`[arena]` / `[helper]` / `[slots]` 意图（人改）→ `cargo xtask doctor`
+- **`mem.toml`**：doctor 生成（含 `name`/`mount`）；禁止手改
 - xtask 再生成 `OUT_DIR/mem_map.rs`、`hot_slots.rs`、`custom-sections.x`
 - AOT `.ld`：libbpf-mcu 按 `mem.toml` 拼出 `build/.ninja/esp32c3-slot-{N}.ld`
-- 默认 2 槽时：helper@`0x40380000`、slot0@`0x40380200`、slot1@`0x40381000`，arena 止于 `0x40382000`（`.trap`）
-- `load()` 启动时 `assert` 链接地址与 `mem.toml` 一致
+- 默认 2 槽示例：helper@`0x40380000`、`a`@`0x40380200`（tx）、`b`@`0x40381000`（rx）
+- `load()` / `check_layout()` 启动时 `assert` 链接地址与 mem 一致；`mount::init` 加载 boot mounts
 
-改槽数：编辑 `patch_layout.toml` 的 `[slots].count`（可选 `lengths`），然后 `cargo xtask layout`。
+改槽：编辑 `[slots]` 后 `cargo xtask doctor`，再 `cargo build`。
 
 ## Flash 分区表
 
@@ -185,7 +249,7 @@ firmware/
 ESP_LOG="info"  # 可选: trace, debug, info, warn, error
 
 # BPF helper 逐调用 trace（参数 + 返回值），需 debug 级别：
-# 板载自检：config.toml 里 [[tests]] name = "hw_selftest", enabled = true 后重编
+# 板载自检：config.toml 只留 [[tests]] name = "hw_selftest" 后重编
 ESP_LOG=debug cargo run --release
 ```
 

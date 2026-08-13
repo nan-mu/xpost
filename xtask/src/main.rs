@@ -17,7 +17,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Compute IRAM layout from `patch_layout.toml` and write `mem.toml`.
+    /// Validate `config.toml` [arena]/[helper]/[slots] and write `mem.toml`.
+    Doctor,
+    /// Deprecated alias for `doctor`.
     Layout,
     /// Print IBUS/DBUS dual-map SRAM diagram from `mem.toml`.
     Map,
@@ -43,8 +45,11 @@ fn main() -> Result<()> {
     let manifest_dir = firmware_root();
 
     match cli.cmd {
-        Cmd::Layout => {
-            let report = xtask::layout_apply(&manifest_dir)?;
+        Cmd::Doctor | Cmd::Layout => {
+            if matches!(cli.cmd, Cmd::Layout) {
+                eprintln!("note: `layout` is deprecated; use `cargo xtask doctor`");
+            }
+            let report = xtask::doctor(&manifest_dir)?;
             for line in &report.lines {
                 println!("{line}");
             }

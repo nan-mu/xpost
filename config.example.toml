@@ -1,76 +1,39 @@
 # Firmware userspace config (build.rs → rustc-cfg fw_us_* + generated consts).
-# Mirror of router-probe config/fwtest.toml: [sections] + [[tests]] / [[tests.seeds]].
+# Only list [[tests]] you are actively running — do not leave enabled=false stubs here.
+# Full recipes: firmware/README.md →「测试配方（历史）」
+# Layout: [arena]/[helper]/[slots] — after edits run `cargo xtask doctor` (writes mem.toml).
 # Does NOT select AOT / bpf.toml / esp32c3.bin — copy those by hand to match enabled tests.
 #
-# Benchmark (quiet UART during tail_call_abc / hot-swap timing):
-#   cd firmware && cargo fwbench
-# Normal debug logs:
-#   cd firmware && cargo fwrun
+# Benchmark:  cargo fwbench
+# Normal:     cargo fwrun
 #
 # schema_version: required. Firmware accepts 1..=MAX (currently 1).
-# Unknown keys are ignored with a cargo warning (forward-compatible).
 schema_version = 1
 
 [wifi]
 ssid = "your_wifi_ssid"
 password = "your_wifi_password"
 
-# Peer (TR3000 / router-probe). DUT sends fixed echo here (probe reply_port).
 [probe]
 ip = "192.168.110.142"
 reply_port = 18080
 
-# Local DUT listeners (align with router-probe [target] echo_port / ctrl_port).
 [dut]
 listen_port = 8080
 ctrl_port = 8081
 
-# Requires firewall_ipv4 AOT; disabled while vip_l2_redirect is loaded.
+[arena]
+iram_base = 0x40380000
+arena_end = 0x40382000
+
+[helper]
+length = 0x200
+
+# Slot names sorted → IRAM order. mount = call|rx|tx (call may repeat; rx/tx ≤1).
+[slots]
+a = { length = 0xE00, mount = "tx" }
+b = { length = 0x1000, mount = "rx" }
+
+# Phase B: transparent TX hijack.
 [[tests]]
-name = "firewall_echo"
-enabled = false
-
-[[tests.seeds]]
-map = "firewall_rules"
-src_ip = "10.0.0.1"
-# dst_port defaults to dut.listen_port when omitted
-action = 1
-
-# Baseline forward + VIP bounce; seeds vip_ip before RX.
-[[tests]]
-name = "xdp_forward_echo"
-enabled = false
-
-[[tests.seeds]]
-map = "vip_ip"
-index = 0
-ip = "192.168.110.200"
-smoke = true
-
-# UDP :8081 HotLoadOp — stash current hot IRAM into DRAM slot 1, write AOT payload into HOT_B.
-# Wire format: proto/hot_load_op.proto (kind=SWAP=10). Ctrl RX buffer is 4608 bytes.
-[[tests]]
-name = "hot_load_ctrl"
-enabled = false
-
-# Full hash-map firewall + hot-replace test (fw_hash_bounce/drop XDP pair).
-# Requires fw_hash_bounce AOT loaded at boot, fw_hash_drop in assets.
-# Mutually exclusive with tail_call_abc.
-[[tests]]
-name = "fw_hash_test"
-enabled = false
-
-[[tests.seeds]]
-map = "fw_rules"
-src_ip = "192.168.110.50"
-action = 1
-
-# Cold-boot (empty HOT_A / no bpf.toml maps) + control-plane A/B + tail_call proof.
-[[tests]]
-name = "tail_call_abc"
-enabled = true
-
-# On-device serial suite; skips WiFi. Mutex with other enabled tests.
-[[tests]]
-name = "hw_selftest"
-enabled = false
+name = "tx_xdp_encap"

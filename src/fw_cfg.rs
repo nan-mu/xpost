@@ -5,6 +5,9 @@ include!(concat!(env!("OUT_DIR"), "/fw_cfg_data.rs"));
 /// AOT XDP on the WiFi RX path (derived from enabled network `[[tests]]`).
 pub const XDP_ENABLE: bool = XDP_RX;
 
+/// Transparent TX-path XDP (`tx_xdp_encap` → `fw_us_tx_hijack`).
+pub const TX_XDP_ENABLE: bool = TX_XDP;
+
 /// Wire-order octets as native `u32` (matches LE load of `iph->saddr`).
 pub const fn ipv4_u32(octets: [u8; 4]) -> u32 {
     u32::from_ne_bytes(octets)
@@ -12,8 +15,9 @@ pub const fn ipv4_u32(octets: [u8; 4]) -> u32 {
 
 pub fn log_cfg() {
     crate::init_log!(
-        "[FWTEST] cfg xdp={} probe={}.{}.{}.{}:{} listen=:{} ctrl=:{} seeds={}",
+        "[FWTEST] cfg xdp={} tx_xdp={} probe={}.{}.{}.{}:{} listen=:{} ctrl=:{} seeds={}",
         XDP_ENABLE as u8,
+        TX_XDP_ENABLE as u8,
         probe::IP[0],
         probe::IP[1],
         probe::IP[2],

@@ -22,7 +22,7 @@ target = "riscv32imc-unknown-none-elf"
 [alias]
 # Host CLI with std. First token must stay the builtin `run` (do not also alias `run`
 # to inject build-std, or this would inherit it and break host builds).
-# Usage: cargo xtask map | layout | check | gen
+# Usage: cargo xtask doctor | map | check | gen
 xtask = "run -p xtask --features cli --target aarch64-apple-darwin --"
 # Firmware: inject build-std. Prefer `cargo build` / `cargo check` aliases.
 build = "build -Z build-std=core,alloc"

@@ -54,6 +54,8 @@ async fn main(spawner: Spawner) {
 
     patch::map::init();
     init_log!("[Init][MAP] MAP resource pool initialized");
+    patch::mount::init();
+    init_log!("[Init][Mount] boot mounts loaded");
 
     #[cfg(all(
         fw_us_hw_selftest,
@@ -80,7 +82,7 @@ async fn main(spawner: Spawner) {
         patch::map::init_firmware_maps().expect("[Init][MAP] talc pool OOM for bpf.toml maps");
         init_log!("[Init][MAP] firmware maps from bpf.toml initialized");
 
-        init_log!("[Init][XDP] load AOT payload into HOT_A");
+        init_log!("[Init][XDP] load AOT payload into mount slot");
         patch::load(peripherals.FLASH);
     }
     #[cfg(fw_us_cold_boot)]

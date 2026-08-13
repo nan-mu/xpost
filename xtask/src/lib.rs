@@ -12,15 +12,20 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-pub use layout::{Layout, LayoutReport, MAX_SLOT_COUNT, MIN_SLOT_COUNT};
+pub use layout::{Layout, LayoutReport, MAX_SLOT_COUNT, MIN_SLOT_COUNT, MountKind};
 pub use map_view::{BusType, RenderRow, Section};
 
-/// CLI / external entry: apply `patch_layout.toml` → `mem.toml`.
-pub fn layout_apply(manifest_dir: &Path) -> Result<LayoutReport> {
-    layout::apply(manifest_dir)
+/// CLI: validate `config.toml` layout and write `mem.toml`.
+pub fn doctor(manifest_dir: &Path) -> Result<LayoutReport> {
+    layout::doctor(manifest_dir)
 }
 
-/// CLI: print IBUS/DBUS SRAM diagram from `mem.toml`.
+/// Deprecated alias for [`doctor`].
+pub fn layout_apply(manifest_dir: &Path) -> Result<LayoutReport> {
+    layout::doctor(manifest_dir)
+}
+
+/// CLI: print IBUS/DBUS dual-map SRAM diagram from `mem.toml`.
 pub fn map_print(manifest_dir: &Path) -> Result<()> {
     map_view::run_map(manifest_dir)
 }
@@ -43,6 +48,7 @@ pub const US_CFGS: &[&str] = &[
     "hw_selftest",
     "map_crud",
     "cold_boot",
+    "tx_hijack",
 ];
 
 /// Known `[[tests]].name` values (router-probe registry alignment).
@@ -52,6 +58,7 @@ pub const KNOWN_TESTS: &[&str] = &[
     "hot_load_ctrl",
     "fw_hash_test",
     "tail_call_abc",
+    "tx_xdp_encap",
     "hw_selftest",
 ];
 
@@ -61,11 +68,12 @@ pub struct GenResult {
     pub warnings: Vec<String>,
 }
 
-/// Generate all firmware build artifacts under `out_dir` from tomls in `manifest_dir`.
+/// Generate firmware build artifacts under `out_dir`.
 ///
-/// Always runs [`layout::apply`] first so `mem.toml` matches `patch_layout.toml`.
+/// Does **not** rewrite `mem.toml`. Requires it to match `config.toml` layout
+/// (run `cargo xtask doctor` after editing `[arena]`/`[helper]`/`[slots]`).
 pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<GenResult> {
-    let layout_report = layout::apply(manifest_dir)?;
+    layout::assert_mem_matches_config(manifest_dir)?;
     if std::env::var_os("XTASK_PRINT_MAP").is_some() {
         let _ = map_view::run_map(manifest_dir);
     }
@@ -76,9 +84,6 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<GenResult> {
 
     let mut warnings = cfg.warnings;
     warnings.extend(aot.warnings);
-    for line in layout_report.lines {
-        warnings.push(format!("layout: {line}"));
-    }
 
     Ok(GenResult {
         enabled_us_cfgs: cfg.enabled_us_cfgs,

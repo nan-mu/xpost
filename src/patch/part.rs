@@ -5,9 +5,10 @@ use esp_hal::peripherals::FLASH;
 use crate::{bench_log, init_log, trace_log};
 
 use super::helper_dispatcher;
-use super::mem_map::{HOT_A_LEN, assert_linked_addresses};
+use super::mem_map::assert_linked_addresses;
+use super::mount;
 use super::prog_table::{self, SlotId};
-use super::redirect::{clear_pending, xdp_action_name};
+use super::redirect::{XDP_PASS, clear_pending, xdp_action_name};
 
 include!(concat!(env!("OUT_DIR"), "/hot_slots.rs"));
 
@@ -22,31 +23,45 @@ pub fn load(_flash: FLASH<'static>) {
     let xdp_with_footer = include_bytes!("/Users/nan/bs/firmware/esp32c3.bin");
     let bin_size = xdp_with_footer.len();
 
+    #[cfg(fw_us_tx_hijack)]
+    let slot = {
+        let Some(slot) = mount::try_tx_slot() else {
+            init_log!("[AOT] tx_hijack enabled but no mount=tx; skip load");
+            return;
+        };
+        slot
+    };
+    #[cfg(not(fw_us_tx_hijack))]
+    let slot = SlotId::A;
+
+    let cap = slot.len();
     unsafe {
         let bss_size = 0;
 
         assert!(
-            bin_size + bss_size <= HOT_A_LEN,
-            "payload {}+{} exceeds HOT_A_LEN {}",
+            bin_size + bss_size <= cap,
+            "payload {}+{} exceeds slot{} len {}",
             bin_size,
             bss_size,
-            HOT_A_LEN
+            slot.index(),
+            cap
         );
 
         init_log!(
-            "[AOT] Bin: {} bytes, BSS: {} bytes (slot0 ok)",
+            "[AOT] Bin: {} bytes, BSS: {} bytes (slot{} ok)",
             bin_size,
-            bss_size
+            bss_size,
+            slot.index()
         );
 
-        let (xdp_ptr, _cap) = slot_buf(0);
+        let (xdp_ptr, _cap) = slot_buf(slot.index());
         ptr::copy_nonoverlapping(xdp_with_footer.as_ptr(), xdp_ptr, bin_size);
         ptr::write_bytes(xdp_ptr.add(bin_size), 0, bss_size);
 
-        init_log!("[AOT] load slot0 done");
+        init_log!("[AOT] load slot{} done", slot.index());
     }
 
-    prog_table::mark_loaded_len(SlotId::A, bin_size);
+    prog_table::mark_loaded_len(slot, bin_size);
     super::map::bind_aot_map_addrs();
     init_log!("[AOT] map aliases bound={}", super::map::AOT_MAP_BIND_COUNT);
 }
@@ -93,13 +108,20 @@ pub fn write_slot(slot: SlotId, image: &[u8]) -> Result<(), ()> {
     Ok(())
 }
 
-pub fn xdp(data: &mut [u8]) -> i32 {
-    // RX entry is always hot slot 0. Empty IRAM must not jalr (SoftFault).
-    if !prog_table::is_loaded(SlotId::A) {
-        return 2; // XDP_PASS
+/// Whether the TX mount slot has a loaded program (for hijack gate).
+pub fn tx_program_ready() -> bool {
+    match mount::try_tx_slot() {
+        Some(slot) => prog_table::is_loaded(slot),
+        None => false,
+    }
+}
+
+fn invoke_slot(slot: SlotId, data: &mut [u8]) -> i32 {
+    if !prog_table::is_loaded(slot) {
+        return XDP_PASS;
     }
 
-    let (xdp_ptr, _) = slot_buf(0);
+    let (xdp_ptr, _) = slot_buf(slot.index());
 
     unsafe {
         core::arch::asm!("fence.i");
@@ -108,11 +130,11 @@ pub fn xdp(data: &mut [u8]) -> i32 {
         prog_table::reset_tail_depth();
         let mut ctx = super::ctx::XdpMd::from_buf(data);
 
-        // Decimal pointer values — hex triggers espflash monitor addr2line spam.
         let data_addr = ctx.data as usize;
         let data_end_addr = ctx.data_end as usize;
         trace_log!(
-            "[XDP] begin data={} data_end={} len={}",
+            "[XDP] begin slot={} data={} data_end={} len={}",
+            slot.index(),
             data_addr,
             data_end_addr,
             data_end_addr.saturating_sub(data_addr)
@@ -122,9 +144,6 @@ pub fn xdp(data: &mut [u8]) -> i32 {
         let frame = core::ptr::addr_of_mut!(prog_table::XDP_FRAME);
 
         let res: i32;
-        // Save SP + continuation RA + callee-saved s0–s11 so bpf_tail_call can
-        // unwind past the helper/A frames and transfer to another program that
-        // still returns here with a valid Rust frame pointer.
         core::arch::asm!(
             "mv t0, sp",
             "lla t1, 1f",
@@ -153,7 +172,29 @@ pub fn xdp(data: &mut [u8]) -> i32 {
             clobber_abi("C"),
         );
 
-        trace_log!("[XDP] end action={} ({})", xdp_action_name(res), res);
+        trace_log!(
+            "[XDP] end slot={} action={} ({})",
+            slot.index(),
+            xdp_action_name(res),
+            res
+        );
         res
     }
+}
+
+/// RX hook: only `mount=rx`. Missing / empty ⇒ [`XDP_PASS`].
+pub fn xdp(data: &mut [u8]) -> i32 {
+    let Some(slot) = mount::try_rx_slot() else {
+        return XDP_PASS;
+    };
+    invoke_slot(slot, data)
+}
+
+/// TX hook: only `mount=tx`. Missing / empty ⇒ [`XDP_PASS`] (caller should have
+/// already chosen passthrough when [`tx_program_ready`] is false).
+pub fn xdp_tx(data: &mut [u8]) -> i32 {
+    let Some(slot) = mount::try_tx_slot() else {
+        return XDP_PASS;
+    };
+    invoke_slot(slot, data)
 }

@@ -1,12 +1,13 @@
 use embassy_net::driver::{Driver, RxToken, TxToken};
 use log::error;
 
-use crate::fw_cfg::XDP_ENABLE;
+use crate::fw_cfg::{TX_XDP_ENABLE, XDP_ENABLE};
 use crate::patch::datapath;
 use crate::patch::redirect::{
     XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX, clear_pending, ifindex_supported,
     queue_egress_frame, take_egress_frame, take_pending,
 };
+use crate::patch::{self, tx_scratch};
 
 pub struct FirewallDevice<D: Driver> {
     inner: D,
@@ -40,7 +41,7 @@ impl<D: Driver> Driver for FirewallDevice<D> {
     where
         Self: 'a;
     type TxToken<'a>
-        = D::TxToken<'a>
+        = FirewallTxToken<D::TxToken<'a>>
     where
         Self: 'a;
 
@@ -50,12 +51,14 @@ impl<D: Driver> Driver for FirewallDevice<D> {
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         self.flush_egress(cx);
         let (rx, tx) = self.inner.receive(cx)?;
-        Some((FirewallRxToken { inner: rx }, tx))
+        Some((FirewallRxToken { inner: rx }, FirewallTxToken { inner: tx }))
     }
 
     fn transmit(&mut self, cx: &mut core::task::Context) -> Option<Self::TxToken<'_>> {
         self.flush_egress(cx);
-        self.inner.transmit(cx)
+        self.inner
+            .transmit(cx)
+            .map(|tx| FirewallTxToken { inner: tx })
     }
 
     fn link_state(&mut self, cx: &mut core::task::Context) -> embassy_net::driver::LinkState {
@@ -124,5 +127,56 @@ impl<R: RxToken> RxToken for FirewallRxToken<R> {
                 }
             }
         })
+    }
+}
+
+/// Transparent TX hijack: passthrough when TX XDP off / empty; else scratch + `xdp_tx`.
+pub struct FirewallTxToken<T: TxToken> {
+    inner: T,
+}
+
+impl<T: TxToken> TxToken for FirewallTxToken<T> {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        let hijack = TX_XDP_ENABLE && datapath::is_active() && patch::tx_program_ready();
+
+        if !hijack {
+            return self.inner.consume(len, f);
+        }
+
+        if !tx_scratch::try_begin(len) {
+            // Busy or oversized — fail-open to passthrough.
+            return self.inner.consume(len, f);
+        }
+
+        let buf = tx_scratch::frame_mut();
+        let ret = f(buf);
+
+        let action = patch::xdp_tx(buf);
+        let wire_len = tx_scratch::frame_len();
+
+        match action {
+            XDP_TX => {
+                self.inner.consume(wire_len, |dst| {
+                    let n = wire_len.min(dst.len());
+                    dst[..n].copy_from_slice(&buf[..n]);
+                });
+            }
+            XDP_DROP | XDP_ABORTED => {
+                // Drop: do not call inner.
+            }
+            _ => {
+                // Unknown / PASS: fail-open with original stack frame.
+                self.inner.consume(wire_len, |dst| {
+                    let n = wire_len.min(dst.len());
+                    dst[..n].copy_from_slice(&buf[..n]);
+                });
+            }
+        }
+
+        tx_scratch::end();
+        ret
     }
 }
