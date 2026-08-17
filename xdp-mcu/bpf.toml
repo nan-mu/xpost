@@ -1,0 +1,11 @@
+[maps.firewall_array]
+map_type = "BPF_MAP_TYPE_ARRAY"
+max_entries = 8
+estimated_bytes = 32
+aot_addr = 0x40380350
+key = """
+    u32 v
+"""
+value = """
+    u32 v
+"""

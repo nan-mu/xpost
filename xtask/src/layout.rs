@@ -1,6 +1,6 @@
-//! Compile patch IRAM layout from `config.toml` `[arena]`/`[helper]`/`[slots]` → `mem.toml`.
+//! Compile IRAM layout from `xdp-mcu/layout.toml` `[arena]`/`[helper]`/`[slots]` → `mem.toml`.
 //!
-//! Intent lives in `config.toml`. [`doctor`](doctor) validates and writes the generated
+//! Intent lives in `layout.toml`. [`doctor`](doctor) validates and writes the generated
 //! `mem.toml`. [`crate::mem_map`] only consumes that file.
 
 use std::fmt::Write as _;
@@ -18,13 +18,11 @@ pub const MAX_SLOT_COUNT: usize = 4;
 /// Known mount roles (`mount` string in config / mem.toml).
 pub const MOUNT_CALL: &str = "call";
 pub const MOUNT_RX: &str = "rx";
-pub const MOUNT_TX: &str = "tx";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MountKind {
     Call,
     Rx,
-    Tx,
 }
 
 impl MountKind {
@@ -32,8 +30,7 @@ impl MountKind {
         match s {
             MOUNT_CALL => Ok(Self::Call),
             MOUNT_RX => Ok(Self::Rx),
-            MOUNT_TX => Ok(Self::Tx),
-            other => bail!("unknown mount `{other}` (known: call, rx, tx)"),
+            other => bail!("unknown mount `{other}` (known: call, rx)"),
         }
     }
 
@@ -41,7 +38,6 @@ impl MountKind {
         match self {
             Self::Call => MOUNT_CALL,
             Self::Rx => MOUNT_RX,
-            Self::Tx => MOUNT_TX,
         }
     }
 }
@@ -88,10 +84,12 @@ pub struct LayoutReport {
     pub lines: Vec<String>,
 }
 
-/// Validate `config.toml` layout intent and write `mem.toml` (doctor / layout CLI).
-pub fn doctor(manifest_dir: &Path) -> Result<LayoutReport> {
-    let layout = compute_from_config(manifest_dir)?;
-    let mem_path = manifest_dir.join("mem.toml");
+/// Validate `xdp-mcu/layout.toml` and write `xdp-mcu/mem.toml` (doctor / layout CLI).
+pub fn doctor(firmware_dir: &Path) -> Result<LayoutReport> {
+    let runtime_dir = firmware_dir.join("xdp-mcu");
+    let layout = compute_from_file(&runtime_dir.join("layout.toml"))?;
+    cross_check_firmware_config(firmware_dir, &runtime_dir)?;
+    let mem_path = runtime_dir.join("mem.toml");
     write_mem_toml(&mem_path, &layout)?;
     let lines = report_lines(&layout);
     Ok(LayoutReport {
@@ -101,11 +99,10 @@ pub fn doctor(manifest_dir: &Path) -> Result<LayoutReport> {
     })
 }
 
-/// Compute layout from `config.toml` without writing.
-pub fn compute_from_config(manifest_dir: &Path) -> Result<Layout> {
-    let path = manifest_dir.join("config.toml");
+/// Compute layout from a TOML file (`layout.toml` or leftover `config.toml` sections).
+pub fn compute_from_file(path: &Path) -> Result<Layout> {
     let text =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let root: toml::Table = text
         .parse()
         .with_context(|| format!("failed to parse {}", path.display()))?;
@@ -115,7 +112,7 @@ pub fn compute_from_config(manifest_dir: &Path) -> Result<Layout> {
 fn parse_usize_field(table: &toml::Table, key: &str, section: &str) -> Result<usize> {
     let v = table
         .get(key)
-        .ok_or_else(|| anyhow::anyhow!("config.toml: [{section}] missing {key}"))?;
+        .ok_or_else(|| anyhow::anyhow!("layout: [{section}] missing {key}"))?;
     Ok(parse_addr_value(v, key, section))
 }
 
@@ -123,15 +120,15 @@ pub fn compute_from_root(root: &toml::Table) -> Result<Layout> {
     let arena = root
         .get("arena")
         .and_then(|v| v.as_table())
-        .ok_or_else(|| anyhow::anyhow!("config.toml: missing [arena]"))?;
+        .ok_or_else(|| anyhow::anyhow!("layout: missing [arena]"))?;
     let helper_t = root
         .get("helper")
         .and_then(|v| v.as_table())
-        .ok_or_else(|| anyhow::anyhow!("config.toml: missing [helper]"))?;
+        .ok_or_else(|| anyhow::anyhow!("layout: missing [helper]"))?;
     let slots_t = root
         .get("slots")
         .and_then(|v| v.as_table())
-        .ok_or_else(|| anyhow::anyhow!("config.toml: missing [slots]"))?;
+        .ok_or_else(|| anyhow::anyhow!("layout: missing [slots]"))?;
 
     let iram_base = parse_usize_field(arena, "iram_base", "arena")?;
     let arena_end = parse_usize_field(arena, "arena_end", "arena")?;
@@ -176,11 +173,11 @@ pub fn compute_from_root(root: &toml::Table) -> Result<Layout> {
             .get(*name)
             .and_then(|v| v.as_table())
             .ok_or_else(|| {
-                anyhow::anyhow!("config.toml: [slots].{name} must be an inline table")
+                anyhow::anyhow!("layout: [slots].{name} must be an inline table")
             })?;
         for (key, _) in entry {
             if !matches!(key.as_str(), "length" | "mount") {
-                bail!("config.toml: [slots].{name} unknown key `{key}`");
+                bail!("layout: [slots].{name} unknown key `{key}`");
             }
         }
         let length = match entry.get("length") {
@@ -202,7 +199,7 @@ pub fn compute_from_root(root: &toml::Table) -> Result<Layout> {
         let mount = match entry.get("mount") {
             Some(v) => {
                 let s = v.as_str().ok_or_else(|| {
-                    anyhow::anyhow!("config.toml: [slots].{name}.mount must be a string")
+                    anyhow::anyhow!("layout: [slots].{name}.mount must be a string")
                 })?;
                 MountKind::parse(s)?
             }
@@ -212,7 +209,7 @@ pub fn compute_from_root(root: &toml::Table) -> Result<Layout> {
     }
 
     if any_len && !all_len {
-        bail!("config.toml: [slots] either set length on every slot or omit all for equal-split");
+        bail!("layout: [slots] either set length on every slot or omit all for equal-split");
     }
 
     let lengths: Vec<usize> = if all_len {
@@ -262,19 +259,14 @@ pub fn compute_from_root(root: &toml::Table) -> Result<Layout> {
 
 fn validate_mounts(mounts: &[MountKind]) -> Result<()> {
     let mut rx = 0usize;
-    let mut tx = 0usize;
     for m in mounts {
         match m {
             MountKind::Call => {}
             MountKind::Rx => rx += 1,
-            MountKind::Tx => tx += 1,
         }
     }
     if rx > 1 {
         bail!("mount `rx` may appear on at most one slot, found {rx}");
-    }
-    if tx > 1 {
-        bail!("mount `tx` may appear on at most one slot, found {tx}");
     }
     Ok(())
 }
@@ -332,8 +324,8 @@ pub fn write_mem_toml(path: &Path, layout: &Layout) -> Result<()> {
     let mut out = String::new();
     writeln!(
         out,
-        "# @generated by xtask doctor from config.toml — do not edit by hand.\n\
-         # AOT linker scripts / firmware codegen consume this file.\n\
+        "# @generated by xtask doctor from xdp-mcu/layout.toml — do not edit by hand.\n\
+         # AOT linker scripts / xdp-mcu codegen consume this file.\n\
          # Arena [{base:#x}, {end:#x}); do not extend past arena_end (.trap).\n",
         base = layout.iram_base,
         end = layout.arena_end
@@ -470,18 +462,44 @@ pub fn parse_mem_toml(path: &Path) -> Result<Layout> {
     Ok(layout)
 }
 
-/// Ensure on-disk `mem.toml` matches `config.toml` layout intent.
-pub fn assert_mem_matches_config(manifest_dir: &Path) -> Result<()> {
-    let expected = compute_from_config(manifest_dir)?;
-    let mem_path = manifest_dir.join("mem.toml");
+/// Ensure on-disk `mem.toml` matches `layout.toml` in the runtime crate dir.
+pub fn assert_mem_matches_layout(runtime_dir: &Path) -> Result<()> {
+    let expected = compute_from_file(&runtime_dir.join("layout.toml"))?;
+    let mem_path = runtime_dir.join("mem.toml");
     if !mem_path.exists() {
-        bail!("mem.toml missing — run `cargo xtask doctor` to generate it from config.toml");
+        bail!("mem.toml missing — run `cargo xtask doctor` to generate it from layout.toml");
     }
     let actual = parse_mem_toml(&mem_path)?;
     if actual != expected {
         bail!(
-            "mem.toml is out of sync with config.toml [arena]/[helper]/[slots]\n\
+            "mem.toml is out of sync with layout.toml [arena]/[helper]/[slots]\n\
              run: cargo xtask doctor"
+        );
+    }
+    Ok(())
+}
+
+/// If firmware `config.toml` still has `[arena]`/`[helper]`/`[slots]`, they must
+/// match `xdp-mcu/layout.toml`.
+pub fn cross_check_firmware_config(firmware_dir: &Path, runtime_dir: &Path) -> Result<()> {
+    let path = firmware_dir.join("config.toml");
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let root: toml::Table = text
+        .parse()
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let has_layout = root.get("arena").is_some()
+        || root.get("helper").is_some()
+        || root.get("slots").is_some();
+    if !has_layout {
+        return Ok(());
+    }
+    let from_cfg = compute_from_root(&root)?;
+    let from_layout = compute_from_file(&runtime_dir.join("layout.toml"))?;
+    if from_cfg != from_layout {
+        bail!(
+            "config.toml [arena]/[helper]/[slots] disagrees with xdp-mcu/layout.toml\n\
+             layout lives in xdp-mcu/; remove the firmware copy or make them match"
         );
     }
     Ok(())

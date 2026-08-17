@@ -15,22 +15,27 @@ use anyhow::Result;
 pub use layout::{Layout, LayoutReport, MAX_SLOT_COUNT, MIN_SLOT_COUNT, MountKind};
 pub use map_view::{BusType, RenderRow, Section};
 
-/// CLI: validate `config.toml` layout and write `mem.toml`.
-pub fn doctor(manifest_dir: &Path) -> Result<LayoutReport> {
-    layout::doctor(manifest_dir)
+/// Runtime crate directory (`xdp-mcu/`: layout.toml, mem.toml, bpf.toml).
+pub fn runtime_dir(firmware_dir: &Path) -> PathBuf {
+    firmware_dir.join("xdp-mcu")
+}
+
+/// CLI: validate `xdp-mcu/layout.toml` and write `xdp-mcu/mem.toml`.
+pub fn doctor(firmware_dir: &Path) -> Result<LayoutReport> {
+    layout::doctor(firmware_dir)
 }
 
 /// Deprecated alias for [`doctor`].
-pub fn layout_apply(manifest_dir: &Path) -> Result<LayoutReport> {
-    layout::doctor(manifest_dir)
+pub fn layout_apply(firmware_dir: &Path) -> Result<LayoutReport> {
+    layout::doctor(firmware_dir)
 }
 
-/// CLI: print IBUS/DBUS dual-map SRAM diagram from `mem.toml`.
-pub fn map_print(manifest_dir: &Path) -> Result<()> {
-    map_view::run_map(manifest_dir)
+/// CLI: print IBUS/DBUS dual-map SRAM diagram from `xdp-mcu/mem.toml`.
+pub fn map_print(firmware_dir: &Path) -> Result<()> {
+    map_view::run_map(&runtime_dir(firmware_dir))
 }
 
-/// Must match `HEAP_SIZE` in `src/patch/map/pool.rs`.
+/// Must match `HEAP_SIZE` in `xdp-mcu/src/map/pool.rs`.
 pub const HEAP_SIZE: usize = 65536;
 /// Reserved for talc metadata + registry HashMap overhead inside the pool.
 pub const POOL_RESERVED: usize = 2048;
@@ -44,11 +49,11 @@ pub const US_CFGS: &[&str] = &[
     "hot_load",
     "firewall_seed",
     "fw_rules_seed",
+    "firewall_array_seed",
     "xdp_rx",
     "hw_selftest",
     "map_crud",
     "cold_boot",
-    "tx_hijack",
 ];
 
 /// Known `[[tests]].name` values (router-probe registry alignment).
@@ -58,9 +63,19 @@ pub const KNOWN_TESTS: &[&str] = &[
     "hot_load_ctrl",
     "fw_hash_test",
     "tail_call_abc",
-    "tx_xdp_encap",
     "hw_selftest",
+    "test0",
 ];
+
+pub struct RuntimeGen {
+    pub custom_sections_path: PathBuf,
+    pub warnings: Vec<String>,
+}
+
+pub struct FwCfgGen {
+    pub enabled_us_cfgs: Vec<String>,
+    pub warnings: Vec<String>,
+}
 
 pub struct GenResult {
     pub enabled_us_cfgs: Vec<String>,
@@ -68,26 +83,45 @@ pub struct GenResult {
     pub warnings: Vec<String>,
 }
 
-/// Generate firmware build artifacts under `out_dir`.
+/// Generate xdp-mcu runtime artifacts (`mem_map.rs`, `hot_slots.rs`,
+/// `custom-sections.x`, `bpf_maps.rs`, `aot_map_bind.rs`).
 ///
-/// Does **not** rewrite `mem.toml`. Requires it to match `config.toml` layout
+/// Does **not** rewrite `mem.toml`. Requires it to match `layout.toml`
 /// (run `cargo xtask doctor` after editing `[arena]`/`[helper]`/`[slots]`).
-pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<GenResult> {
-    layout::assert_mem_matches_config(manifest_dir)?;
+pub fn generate_runtime(runtime_dir: &Path, out_dir: &Path) -> Result<RuntimeGen> {
+    layout::assert_mem_matches_layout(runtime_dir)?;
     if std::env::var_os("XTASK_PRINT_MAP").is_some() {
-        let _ = map_view::run_map(manifest_dir);
+        let _ = map_view::run_map(runtime_dir);
     }
-    let cfg = config::generate(manifest_dir, out_dir)?;
-    let mem = mem_map::generate(manifest_dir, out_dir)?;
-    bpf_maps::generate(manifest_dir, out_dir)?;
-    let aot = aot_bind::generate(manifest_dir, out_dir)?;
+    let mem = mem_map::generate(runtime_dir, out_dir)?;
+    bpf_maps::generate(runtime_dir, out_dir)?;
+    let aot = aot_bind::generate(runtime_dir, out_dir)?;
+    Ok(RuntimeGen {
+        custom_sections_path: mem.custom_sections_path,
+        warnings: aot.warnings,
+    })
+}
 
+/// Generate firmware DUT artifacts (`fw_cfg_data.rs` + enabled `fw_us_*` names).
+pub fn generate_fw_cfg(firmware_dir: &Path, out_dir: &Path) -> Result<FwCfgGen> {
+    let cfg = config::generate(firmware_dir, out_dir)?;
+    Ok(FwCfgGen {
+        enabled_us_cfgs: cfg.enabled_us_cfgs,
+        warnings: cfg.warnings,
+    })
+}
+
+/// CLI check/gen: runtime + fw_cfg into one `out_dir`.
+pub fn generate(firmware_dir: &Path, out_dir: &Path) -> Result<GenResult> {
+    let runtime = runtime_dir(firmware_dir);
+    layout::cross_check_firmware_config(firmware_dir, &runtime)?;
+    let rt = generate_runtime(&runtime, out_dir)?;
+    let cfg = generate_fw_cfg(firmware_dir, out_dir)?;
     let mut warnings = cfg.warnings;
-    warnings.extend(aot.warnings);
-
+    warnings.extend(rt.warnings);
     Ok(GenResult {
         enabled_us_cfgs: cfg.enabled_us_cfgs,
-        custom_sections_path: mem.custom_sections_path,
+        custom_sections_path: rt.custom_sections_path,
         warnings,
     })
 }

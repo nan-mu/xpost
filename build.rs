@@ -5,13 +5,11 @@ fn main() {
     linker_be_nice();
 
     println!("cargo:rerun-if-changed=esp32c3.bin");
-    println!("cargo:rerun-if-changed=bpf.toml");
-    println!("cargo:rerun-if-changed=mem.toml");
     println!("cargo:rerun-if-changed=config.toml");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let result = xtask::generate(&manifest_dir, &out_dir).expect("xtask generate");
+    let result = xtask::generate_fw_cfg(&manifest_dir, &out_dir).expect("xtask generate_fw_cfg");
 
     for name in xtask::US_CFGS {
         println!("cargo:rustc-check-cfg=cfg(fw_us_{name})");
@@ -23,12 +21,10 @@ fn main() {
         println!("cargo:warning={w}");
     }
 
-    // Order matches former build.rs: custom-sections before linkall.x.
-    println!(
-        "cargo:rustc-link-arg=-T{}",
-        result.custom_sections_path.display()
-    );
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+    let sections = env::var("DEP_XDP_MCU_CUSTOM_SECTIONS")
+        .expect("xdp-mcu build.rs must emit cargo:custom-sections=");
+    println!("cargo:rustc-link-arg=-T{sections}");
 }
 
 fn linker_be_nice() {

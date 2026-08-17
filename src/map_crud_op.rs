@@ -4,17 +4,23 @@ pub const KIND_UPDATE: u32 = 1;
 pub const KIND_DELETE: u32 = 2;
 pub const KIND_LOOKUP: u32 = 3;
 pub const KIND_CREATE: u32 = 4;
+pub const KIND_DESTROY_MAP: u32 = 5;
 
 pub const MAP_TYPE_HASH: u32 = 1;
 pub const MAP_TYPE_ARRAY: u32 = 2;
 pub const MAP_TYPE_PROG_ARRAY: u32 = 3;
+pub const MAP_TYPE_RINGBUF: u32 = 4;
 
-pub const STATUS_OK: u32 = 0;
-pub const STATUS_BAD: u32 = 1;
+/// HTTP-style control ack status codes.
+pub const STATUS_OK: u32 = 200;
+pub const STATUS_BAD: u32 = 400;
+pub const STATUS_NOT_FOUND: u32 = 404;
+pub const STATUS_CONFLICT: u32 = 409;
 
 const MAX_NAME: usize = 32;
 const MAX_KEY: usize = 64;
 const MAX_VAL: usize = 256;
+const MAX_REASON: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MapCrudOp<'a> {
@@ -35,6 +41,7 @@ pub struct MapCrudAck<'a> {
     pub kind: u32,
     pub status: u32,
     pub value: &'a [u8],
+    pub reason: &'a str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,7 +118,10 @@ fn skip_field(buf: &[u8], i: &mut usize, wt: u32) -> Result<(), DecodeError> {
 }
 
 fn known_kind(v: u32) -> bool {
-    matches!(v, KIND_UPDATE | KIND_DELETE | KIND_LOOKUP | KIND_CREATE)
+    matches!(
+        v,
+        KIND_UPDATE | KIND_DELETE | KIND_LOOKUP | KIND_CREATE | KIND_DESTROY_MAP
+    )
 }
 
 pub fn decode_op(buf: &[u8]) -> Result<MapCrudOp<'_>, DecodeError> {
@@ -223,6 +233,15 @@ pub fn encode_ack(ack: &MapCrudAck<'_>, out: &mut [u8]) -> Option<usize> {
         out[i..i + ack.value.len()].copy_from_slice(ack.value);
         i += ack.value.len();
     }
+    if !ack.reason.is_empty() {
+        i = put_varint(out, i, (4u64 << 3) | 2)?;
+        i = put_varint(out, i, ack.reason.len() as u64)?;
+        if i + ack.reason.len() > out.len() {
+            return None;
+        }
+        out[i..i + ack.reason.len()].copy_from_slice(ack.reason.as_bytes());
+        i += ack.reason.len();
+    }
     Some(i)
 }
 
@@ -287,6 +306,7 @@ pub fn decode_ack(buf: &[u8]) -> Result<MapCrudAck<'_>, DecodeError> {
     let mut kind: Option<u32> = None;
     let mut status: u32 = 0;
     let mut value: &[u8] = &[];
+    let mut reason: &str = "";
     while i < buf.len() {
         let tag = read_varint(buf, &mut i)? as u32;
         let field = tag >> 3;
@@ -305,6 +325,17 @@ pub fn decode_ack(buf: &[u8]) -> Result<MapCrudAck<'_>, DecodeError> {
                 value = &buf[i..i + n];
                 i += n;
             }
+            (4, 2) => {
+                let n = read_varint(buf, &mut i)? as usize;
+                if n > MAX_REASON {
+                    return Err(DecodeError::FieldTooLarge);
+                }
+                if i + n > buf.len() {
+                    return Err(DecodeError::Truncated);
+                }
+                reason = core::str::from_utf8(&buf[i..i + n]).map_err(|_| DecodeError::BadWire)?;
+                i += n;
+            }
             _ => skip_field(buf, &mut i, wt)?,
         }
     }
@@ -312,5 +343,6 @@ pub fn decode_ack(buf: &[u8]) -> Result<MapCrudAck<'_>, DecodeError> {
         kind: kind.ok_or(DecodeError::BadWire)?,
         status,
         value,
+        reason,
     })
 }

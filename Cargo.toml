@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [".", "xtask"]
+members = [".", "xdp-mcu", "xtask"]
 default-members = ["."]
 
 [package]
@@ -19,18 +19,6 @@ path = "./src/bin/main.rs"
 test = false
 bench = false
 
-[features]
-default = ["patch-sync-embassy"]
-# Patch pool/slots: embassy-sync async RwLock (control plane .await)
-patch-sync-embassy = []
-# Patch pool/slots: single-thread RefCell (control plane sync; no IRQ→helper).
-# Overrides `patch-sync-embassy` when both are enabled (e.g. `--features patch-sync-st`).
-patch-sync-st = []
-# Benchmark mode: suppress per-packet/helper/ctrl chatter; keep init + [HOT] timing.
-# Build/flash: `cargo fwbench` (see `.cargo/config.toml`).
-benchmark = []
-# Userspace gates derived from config.toml [[tests]] → rustc-cfg fw_us_*.
-# (vip_seed / vip_ctrl / firewall_seed / xdp_rx / hw_selftest)
 
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
@@ -80,16 +68,11 @@ smoltcp = { version = "0.13.0", default-features = false, features = [
 critical-section = "1.2.0"
 static_cell      = { version = "2.1.1", features = ["nightly"] }
 embassy-futures = "0.1.2"
-esp-storage = { version = "0.9.0", features = ["esp32c3"] }
-embedded-storage = "0.3.1"
-nom = { version = "8.0.0", default-features = false, features = ["alloc"] }
-heapless = "0.9.3"
-anyhow = { version = "1.0.102", default-features = false }
-talc = { version = "5.0", features = ["counters"] }
+xdp-mcu = { path = "xdp-mcu" }
+# hwtest pool probes (cfg fw_us_hw_selftest)
 allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
-allocator-api2-v02 = { version = "0.2", package = "allocator-api2", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.17", default-features = false, features = ["allocator-api2", "default-hasher"] }
-embassy-sync = { version = "0.8.0", features = ["log"] }
+talc = { version = "5.0", features = ["counters"] }
 ringbuf = { version = "0.3.3", default-features = false }
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html

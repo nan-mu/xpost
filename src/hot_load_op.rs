@@ -2,6 +2,7 @@
 //! (no nanopb/prost on freestanding firmware).
 
 pub const KIND_SWAP: u32 = 10;
+pub const KIND_HOT_SWAP: u32 = 11;
 pub const KIND_UPLOAD: u32 = 20;
 pub const KIND_COPY: u32 = 30;
 pub const KIND_MOVE: u32 = 31;
@@ -23,11 +24,12 @@ pub const STORAGE_DRAM_1: u32 = 4;
 pub const STORAGE_SRAM_2: u32 = 5;
 pub const STORAGE_SRAM_3: u32 = 6;
 
-pub const STATUS_OK: u32 = 0;
-pub const STATUS_BAD: u32 = 1;
+pub const STATUS_OK: u32 = 200;
+pub const STATUS_BAD: u32 = 400;
+pub const STATUS_CONFLICT: u32 = 409;
 
 /// Max AOT payload accepted on the control plane (HOT_B capacity).
-pub const MAX_PAYLOAD: usize = crate::patch::XDP_SLOT_LEN;
+pub const MAX_PAYLOAD: usize = xdp_mcu::XDP_SLOT_LEN;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HotLoadOp<'a> {
@@ -39,7 +41,7 @@ pub struct HotLoadOp<'a> {
     pub dst: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HotLoadOpAck {
     pub kind: u32,
     pub region: u32,
@@ -49,6 +51,10 @@ pub struct HotLoadOpAck {
     pub loaded_len: u32,
     pub readback_len: u32,
     pub copied_len: u32,
+    /// Optional sample bytes (RNG / PULL); length in `sample_len`.
+    pub sample_len: u8,
+    pub sample: [u8; 32],
+    pub reason: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,8 +163,8 @@ pub fn decode_op(buf: &[u8]) -> Result<HotLoadOp<'_>, DecodeError> {
             (1, 0) => {
                 let v = read_varint(buf, &mut i)? as u32;
                 match v {
-                    KIND_SWAP | KIND_UPLOAD | KIND_COPY | KIND_MOVE | KIND_READBACK
-                    | KIND_DATAPATH => {}
+                    KIND_SWAP | KIND_HOT_SWAP | KIND_UPLOAD | KIND_COPY | KIND_MOVE
+                    | KIND_READBACK | KIND_DATAPATH => {}
                     _ => return Err(DecodeError::UnknownKind),
                 }
                 kind = Some(v);
@@ -244,6 +250,9 @@ pub fn decode_ack(buf: &[u8]) -> Result<HotLoadOpAck, DecodeError> {
     let mut loaded_len: u32 = 0;
     let mut readback_len: u32 = 0;
     let mut copied_len: u32 = 0;
+    let mut sample_len: u8 = 0;
+    let mut sample = [0u8; 32];
+    let reason: &'static str = "";
     while i < buf.len() {
         let tag = read_varint(buf, &mut i)? as u32;
         let field = tag >> 3;
@@ -257,6 +266,28 @@ pub fn decode_ack(buf: &[u8]) -> Result<HotLoadOpAck, DecodeError> {
             (6, 0) => loaded_len = read_varint(buf, &mut i)? as u32,
             (7, 0) => readback_len = read_varint(buf, &mut i)? as u32,
             (8, 0) => copied_len = read_varint(buf, &mut i)? as u32,
+            (9, 2) => {
+                let n = read_varint(buf, &mut i)? as usize;
+                if n > 32 {
+                    return Err(DecodeError::PayloadTooLarge);
+                }
+                if i.checked_add(n).map(|e| e > buf.len()).unwrap_or(true) {
+                    return Err(DecodeError::Truncated);
+                }
+                sample[..n].copy_from_slice(&buf[i..i + n]);
+                sample_len = n as u8;
+                i += n;
+            }
+            (10, 2) => {
+                let n = read_varint(buf, &mut i)? as usize;
+                if n > 32 {
+                    return Err(DecodeError::PayloadTooLarge);
+                }
+                if i.checked_add(n).map(|e| e > buf.len()).unwrap_or(true) {
+                    return Err(DecodeError::Truncated);
+                }
+                i += n;
+            }
             _ => skip_field(buf, &mut i, wt)?,
         }
     }
@@ -269,6 +300,9 @@ pub fn decode_ack(buf: &[u8]) -> Result<HotLoadOpAck, DecodeError> {
         loaded_len,
         readback_len,
         copied_len,
+        sample_len,
+        sample,
+        reason,
     })
 }
 
@@ -302,6 +336,25 @@ pub fn encode_ack(ack: &HotLoadOpAck, out: &mut [u8]) -> Option<usize> {
     if ack.copied_len != 0 {
         i = put_varint(out, i, (8u64 << 3) | 0)?;
         i = put_varint(out, i, ack.copied_len as u64)?;
+    }
+    if ack.sample_len != 0 {
+        let n = ack.sample_len as usize;
+        i = put_varint(out, i, (9u64 << 3) | 2)?;
+        i = put_varint(out, i, n as u64)?;
+        if i + n > out.len() {
+            return None;
+        }
+        out[i..i + n].copy_from_slice(&ack.sample[..n]);
+        i += n;
+    }
+    if !ack.reason.is_empty() {
+        i = put_varint(out, i, (10u64 << 3) | 2)?;
+        i = put_varint(out, i, ack.reason.len() as u64)?;
+        if i + ack.reason.len() > out.len() {
+            return None;
+        }
+        out[i..i + ack.reason.len()].copy_from_slice(ack.reason.as_bytes());
+        i += ack.reason.len();
     }
     Some(i)
 }

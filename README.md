@@ -42,39 +42,53 @@ cargo install espflash
 
 ## 项目配置
 
-用户态与 IRAM 布局意图写在 [`config.toml`](config.toml)（模板：[`config.example.toml`](config.example.toml)）。
+用户态写在 [`config.toml`](config.toml)（模板：[`config.example.toml`](config.example.toml)）。XDP 运行时是 workspace crate [`xdp-mcu`](xdp-mcu/)；IRAM 布局意图在 [`xdp-mcu/layout.toml`](xdp-mcu/layout.toml)。
 
-- **改 `[arena]` / `[helper]` / `[slots]` 后必须** `cargo xtask doctor`，生成只读 [`mem.toml`](mem.toml)。`cargo build` **不会**改写 `mem.toml`；不一致则硬错误。
+- **改 `xdp-mcu/layout.toml` 的 `[arena]` / `[helper]` / `[slots]` 后必须** `cargo xtask doctor`，生成只读 [`xdp-mcu/mem.toml`](xdp-mcu/mem.toml)。`cargo build` **不会**改写 `mem.toml`；不一致则硬错误。
 - **`[[tests]]`**：只保留当前要跑的项；不要堆 `enabled = false`。可省略（Phase A 布局-only）。
-- **AOT**：`esp32c3.bin` / `bpf.toml` 仍手拷。
+- **AOT**：`esp32c3.bin` / `xdp-mcu/bpf.toml` 仍手拷。
 
 | 段 | 含义 |
 |------|------|
 | `[wifi]` / `[probe]` / `[dut]` | STA 与探针端口 |
-| `[arena]` / `[helper]` | IRAM 窗口意图 |
-| `[slots]` | 具名槽：`a = { length, mount }`；键名排序 = IRAM 顺序 |
+| `xdp-mcu/layout.toml` `[arena]` / `[helper]` | IRAM 窗口意图 |
+| `xdp-mcu/layout.toml` `[slots]` | 具名槽：`a = { length, mount }`；键名排序 = IRAM 顺序 |
 | `[[tests]]` | 可选；启用项推导 `fw_us_*` |
 
-**mount 规则**：单字符串 `call` \| `rx` \| `tx`；省略 ⇒ `call`。`call` 可多槽；`rx`/`tx` 全局各 ≤1。运行时 remount：停 datapath → 写锁改表 → enable（见 `patch::mount`）。
+**mount 规则**：单字符串 `call` \| `rx`；省略 ⇒ `call`。`call` 可多槽；`rx` 全局 ≤1。运行时 remount：停 datapath → 写锁改表 → enable（见 `xdp_mcu::mount`）。
 
 ```toml
 [slots]
-a = { length = 0xE00, mount = "tx" }
-b = { length = 0x1000, mount = "rx" }
+a = { length = 0xE00, mount = "rx" }
+b = { length = 0x1000, mount = "call" }
 ```
 
 拓扑约定：主路由只做 DHCP/网关；TR3000 做 AP + 探针。`[probe].ip` 必须是 TR3000（例 `192.168.110.142`），不要写成主路由 `…1`。
 
-### 测试配方（历史）
+### 测试配方
 
-`xtask` 已知名：`firewall_echo` / `xdp_forward_echo` / `hot_load_ctrl` / `fw_hash_test` / `tail_call_abc` / `tx_xdp_encap` / `hw_selftest`。多数网络测试互斥。与 router-probe `config/fwtest.toml` **同名启用**；改固件配方时必须同步关/开探针侧，否则会出现 `unknown op` / MapCrudAck 超时。
+与 router-probe `config/fwtest.toml` **同名启用**；改固件配方时必须同步关/开探针侧，否则会出现 `unknown op` / MapCrudAck 超时。多数网络测试互斥。
 
-**`tx_xdp_encap`** — Cycle 0.5 Phase B：透明 `FirewallTxToken` 劫持 + HotLoad。推导：`tx_hijack` + `hot_load`（**不**开 map_crud / seeds / cold_boot）。验收约定：[`docs/evidence/cycle05_tx_hijack.md`](../docs/evidence/cycle05_tx_hijack.md)。AOT：`tx_udp_encap`（sport `0x4254`）/ 变体 B（`0x4255`）。
+**`test0`** — 当前端到端验收：`firewall_array`（idx0 DROP / idx1 TX）+ 控制面否定路径 + 成功 `UPLOAD`/`HOT_SWAP` 换 rx + 并发满载 IP 测试。见 [docs/api test0](../docs/api/src/integration/test0.md)。
 
 ```toml
 [[tests]]
-name = "tx_xdp_encap"
+name = "test0"
+
+[[tests.seeds]]
+map = "firewall_array"
+index = 0
+ip = "10.0.0.1"
+
+[[tests.seeds]]
+map = "firewall_array"
+index = 1
+ip = "10.0.0.2"
 ```
+
+### 测试配方（历史）
+
+`xtask` 已知名：`firewall_echo` / `xdp_forward_echo` / `hot_load_ctrl` / `fw_hash_test` / `tail_call_abc` / `hw_selftest`。
 
 **`tail_call_abc`** — Cycle 0：cold-boot（空 HOT_A、不建 bpf.toml maps）+ 控制面 CREATE/UPLOAD + `bpf_tail_call`。推导：`cold_boot` + `map_crud` + `hot_load` + `xdp_rx`。
 
@@ -140,12 +154,12 @@ name = "hw_selftest"
 改槽位/arena 后先：
 
 ```sh
-cargo xtask doctor    # config.toml → mem.toml（校验 mount 唯一性等）
+cargo xtask doctor    # xdp-mcu/layout.toml → xdp-mcu/mem.toml（校验 mount 唯一性等）
 cargo xtask map       # 打印 IBUS/DBUS SRAM 图
 cargo xtask check     # 校验 tomls + codegen（不持久写 OUT_DIR）
 ```
 
-`cargo build` / `cargo check` 消费已有 `mem.toml`（须与 config 一致）。别名见 `.cargo/config.toml`。
+`cargo build` / `cargo check` 消费已有 `xdp-mcu/mem.toml`（须与 layout.toml 一致）。别名见 `.cargo/config.toml`。
 
 `cargo run -p xtask …` 会因默认 riscv target 把 clap/std 当裸机编；请用 **`cargo xtask …`**。
 
@@ -175,13 +189,16 @@ espflash flash --monitor --no-addresses --chip esp32c3 --partition-table partiti
 
 ```
 firmware/
-├── src/                      # 固件源码（include! OUT_DIR 生成物）
+├── src/                      # DUT：WiFi / UDP echo / 控制面（include! OUT_DIR 生成物）
+├── xdp-mcu/                  # XDP 运行时库（maps / helpers / slots / RX Driver）
+│   ├── layout.toml / mem.toml / bpf.toml
+│   └── src/
 ├── xtask/                    # codegen 库 + 可选 CLI（build.rs 默认调用 lib）
 ├── .cargo/config.toml        # 目标平台、runner
-├── build.rs                  # 薄封装：linker hint + xtask::generate + rustc-cfg/link-arg
-├── config.toml / mem.toml / bpf.toml
+├── build.rs                  # 薄封装：linker hint + xtask::generate_fw_cfg + rustc-cfg/link-arg
+├── config.toml               # wifi / probe / dut / [[tests]]
 ├── partitions.csv
-├── Cargo.toml                # workspace：firmware + xtask
+├── Cargo.toml                # workspace：firmware + xdp-mcu + xtask
 └── rust-toolchain.toml
 ```
 
@@ -201,21 +218,21 @@ firmware/
 
 固件支持加载并执行 AOT 补丁：
 
-- 代码加载到 IRAM 具名热槽（见 `config.toml` `[slots]` → `mem.toml`）
-- 槽数 2..=4；mount `rx`/`tx`/`call` 决定入口角色（Phase B 起用于劫持）
+- 代码加载到 IRAM 具名热槽（见 `xdp-mcu/layout.toml` `[slots]` → `mem.toml`）
+- 槽数 2..=4；mount `rx`/`call` 决定入口角色
 - 执行前刷新指令缓存（`fence.i`）
-- 辅助函数调度：`helper_dispatcher`（地址见 `mem.toml`）
+- 辅助函数调度：`helper_dispatcher`（地址见 `xdp-mcu/mem.toml`）
 
 ### 4. 内存布局
 
-- **`config.toml`**：`[arena]` / `[helper]` / `[slots]` 意图（人改）→ `cargo xtask doctor`
-- **`mem.toml`**：doctor 生成（含 `name`/`mount`）；禁止手改
-- xtask 再生成 `OUT_DIR/mem_map.rs`、`hot_slots.rs`、`custom-sections.x`
+- **`xdp-mcu/layout.toml`**：`[arena]` / `[helper]` / `[slots]` 意图（人改）→ `cargo xtask doctor`
+- **`xdp-mcu/mem.toml`**：doctor 生成（含 `name`/`mount`）；禁止手改
+- xtask 再生成 xdp-mcu `OUT_DIR/mem_map.rs`、`hot_slots.rs`、`custom-sections.x`
 - AOT `.ld`：libbpf-mcu 按 `mem.toml` 拼出 `build/.ninja/esp32c3-slot-{N}.ld`
-- 默认 2 槽示例：helper@`0x40380000`、`a`@`0x40380200`（tx）、`b`@`0x40381000`（rx）
-- `load()` / `check_layout()` 启动时 `assert` 链接地址与 mem 一致；`mount::init` 加载 boot mounts
+- 默认 2 槽示例：helper@`0x40380000`、`a`@`0x40380200`（rx）、`b`@`0x40381000`（call）
+- `load_boot_image()` / `check_layout()` 启动时 `assert` 链接地址与 mem 一致；`mount::init` 加载 boot mounts
 
-改槽：编辑 `[slots]` 后 `cargo xtask doctor`，再 `cargo build`。
+改槽：编辑 `xdp-mcu/layout.toml` `[slots]` 后 `cargo xtask doctor`，再 `cargo build`。
 
 ## Flash 分区表
 

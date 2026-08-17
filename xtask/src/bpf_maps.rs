@@ -214,33 +214,17 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<()> {
          /// AOT helpers resolve `&map` pointers via [`bind_aot_map_addrs`].\n",
     );
 
-    emit_init_fn(&mut out, &map_specs, true)?;
-    emit_init_fn(&mut out, &map_specs, false)?;
+    emit_init_fn(&mut out, &map_specs)?;
 
     fs::write(out_dir.join("bpf_maps.rs"), out).context("write bpf_maps.rs")?;
     Ok(())
 }
 
 const EMPTY_INIT: &str = "\
-#[cfg(feature = \"patch-sync-st\")]\n\
-pub fn init_firmware_maps() -> Result<(), allocator_api2::alloc::AllocError> { Ok(()) }\n\
-#[cfg(not(feature = \"patch-sync-st\"))]\n\
 pub async fn init_firmware_maps() -> Result<(), allocator_api2::alloc::AllocError> { Ok(()) }\n";
 
-fn emit_init_fn(out: &mut String, map_specs: &[MapSpec], sync: bool) -> Result<()> {
-    let (cfg, async_kw, await_suffix) = if sync {
-        ("#[cfg(feature = \"patch-sync-st\")]\n", "", "")
-    } else {
-        (
-            "#[cfg(not(feature = \"patch-sync-st\"))]\n",
-            "async ",
-            ".await",
-        )
-    };
-    out.push_str(cfg);
-    out.push_str(&format!(
-        "pub {async_kw}fn init_firmware_maps() -> Result<(), allocator_api2::alloc::AllocError> {{\n"
-    ));
+fn emit_init_fn(out: &mut String, map_specs: &[MapSpec]) -> Result<()> {
+    out.push_str("pub async fn init_firmware_maps() -> Result<(), allocator_api2::alloc::AllocError> {\n");
 
     let needs_hash = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_HASH");
     let needs_array = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_ARRAY");
@@ -254,7 +238,7 @@ fn emit_init_fn(out: &mut String, map_specs: &[MapSpec], sync: bool) -> Result<(
         .iter()
         .any(|s| s.map_type == "BPF_MAP_TYPE_RINGBUF");
     if needs_hash || needs_array || needs_devmap || needs_prog_array || needs_ring {
-        out.push_str("    use crate::patch::map::{");
+        out.push_str("    use crate::map::{");
         let mut parts = Vec::new();
         if needs_array {
             parts.push("create_bpf_array");
@@ -283,32 +267,32 @@ fn emit_init_fn(out: &mut String, map_specs: &[MapSpec], sync: bool) -> Result<(
         match spec.map_type.as_str() {
             "BPF_MAP_TYPE_HASH" => {
                 out.push_str(&format!(
-                    "    create_bpf_hash({id_const}, {key_size}, {value_size}, {}){await_suffix}?;\n",
+                    "    create_bpf_hash({id_const}, {key_size}, {value_size}, {}).await?;\n",
                     spec.max_entries
                 ));
             }
             "BPF_MAP_TYPE_ARRAY" => {
                 out.push_str(&format!(
-                    "    create_bpf_array({id_const}, {value_size}, {}){await_suffix}?;\n",
+                    "    create_bpf_array({id_const}, {value_size}, {}).await?;\n",
                     spec.max_entries
                 ));
             }
             "BPF_MAP_TYPE_DEVMAP" => {
                 out.push_str(&format!(
-                    "    create_bpf_devmap({id_const}, {}){await_suffix}?;\n",
+                    "    create_bpf_devmap({id_const}, {}).await?;\n",
                     spec.max_entries
                 ));
             }
             "BPF_MAP_TYPE_PROG_ARRAY" => {
                 out.push_str(&format!(
-                    "    create_bpf_prog_array({id_const}, {}){await_suffix}?;\n",
+                    "    create_bpf_prog_array({id_const}, {}).await?;\n",
                     spec.max_entries
                 ));
             }
             "BPF_MAP_TYPE_RINGBUF" => {
                 // Linux: max_entries is the ring data area in bytes.
                 out.push_str(&format!(
-                    "    create_bpf_ringbuf({id_const}, {}){await_suffix}?;\n",
+                    "    create_bpf_ringbuf({id_const}, {}).await?;\n",
                     spec.max_entries
                 ));
             }

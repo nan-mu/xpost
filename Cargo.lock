@@ -976,21 +976,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "esp-storage"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cf2b3f00c9f94b27c62a4f5296b19470c3a083c687c8146e554a459f9bee596"
-dependencies = [
- "document-features",
- "embedded-storage",
- "esp-hal",
- "esp-hal-procmacros",
- "esp-metadata-generated",
- "esp-rom-sys",
- "esp-sync",
-]
-
-[[package]]
 name = "esp-sync"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1142,33 +1127,27 @@ checksum = "26b73573e6edcd2af0cdf47bd6cb58f0b3839491263c314eaad1ccf24430e1de"
 name = "firmware"
 version = "0.1.1"
 dependencies = [
- "allocator-api2 0.2.21",
  "allocator-api2 0.4.0",
- "anyhow",
  "critical-section",
  "embassy-executor",
  "embassy-futures",
  "embassy-net",
- "embassy-sync 0.8.0",
  "embassy-time",
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
- "embedded-storage",
  "esp-alloc",
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
  "esp-radio",
  "esp-rtos",
- "esp-storage",
  "hashbrown",
- "heapless 0.9.3",
  "log",
- "nom",
  "ringbuf",
  "smoltcp",
  "static_cell",
  "talc",
+ "xdp-mcu",
  "xtask",
 ]
 
@@ -2156,6 +2135,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "xdp-mcu"
+version = "0.1.1"
+dependencies = [
+ "allocator-api2 0.2.21",
+ "allocator-api2 0.4.0",
+ "critical-section",
+ "embassy-net",
+ "embassy-sync 0.8.0",
+ "embassy-time",
+ "hashbrown",
+ "heapless 0.9.3",
+ "log",
+ "nom",
+ "ringbuf",
+ "talc",
+ "xtask",
 ]
 
 [[package]]

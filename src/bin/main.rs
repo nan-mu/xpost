@@ -13,7 +13,7 @@ use esp_hal::timer::timg::TimerGroup;
 use log::error;
 
 use firmware::init_log;
-use firmware::{log_gate::init_logger, patch};
+use firmware::log_gate::init_logger;
 
 #[cfg(not(fw_us_hw_selftest))]
 use firmware::{
@@ -52,51 +52,42 @@ async fn main(spawner: Spawner) {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
     init_log!("[Init][Embassy] Embassy initialized!");
 
-    patch::map::init();
+    xdp_mcu::map::init();
     init_log!("[Init][MAP] MAP resource pool initialized");
-    patch::mount::init();
+    xdp_mcu::mount::init();
     init_log!("[Init][Mount] boot mounts loaded");
 
-    #[cfg(all(
-        fw_us_hw_selftest,
-        feature = "patch-sync-embassy",
-        not(feature = "patch-sync-st")
-    ))]
-    match patch::hwtest::verify_pool().await {
-        Ok(()) => init_log!("[Init][MAP] talc resource pool verification passed"),
-        Err(e) => error!("[Init][MAP] talc resource pool verification failed: {}", e),
-    }
-    #[cfg(all(fw_us_hw_selftest, feature = "patch-sync-st"))]
-    match patch::hwtest::verify_pool() {
+    #[cfg(fw_us_hw_selftest)]
+    match firmware::hwtest::verify_pool().await {
         Ok(()) => init_log!("[Init][MAP] talc resource pool verification passed"),
         Err(e) => error!("[Init][MAP] talc resource pool verification failed: {}", e),
     }
 
     #[cfg(not(fw_us_cold_boot))]
     {
-        #[cfg(all(feature = "patch-sync-embassy", not(feature = "patch-sync-st")))]
-        patch::map::init_firmware_maps()
+        xdp_mcu::map::init_firmware_maps()
             .await
             .expect("[Init][MAP] talc pool OOM for bpf.toml maps");
-        #[cfg(feature = "patch-sync-st")]
-        patch::map::init_firmware_maps().expect("[Init][MAP] talc pool OOM for bpf.toml maps");
         init_log!("[Init][MAP] firmware maps from bpf.toml initialized");
 
         init_log!("[Init][XDP] load AOT payload into mount slot");
-        patch::load(peripherals.FLASH);
+        xdp_mcu::load_boot_image(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/esp32c3.bin"
+        )));
     }
     #[cfg(fw_us_cold_boot)]
     {
         init_log!("[Init][MAP] cold_boot: skip bpf.toml maps (CREATE via control plane)");
         init_log!("[Init][XDP] cold_boot: skip AOT load (empty HOT_A → XDP_PASS)");
-        patch::check_layout();
+        xdp_mcu::check_layout();
         let _ = peripherals.FLASH;
     }
 
     #[cfg(fw_us_hw_selftest)]
     {
         let _ = spawner;
-        patch::hwtest::run();
+        firmware::hwtest::run();
         // Dedicated harness owns XDP; do not bring up WiFi / RX path.
         init_log!("[HWTEST] idle (WiFi skipped)");
         loop {
@@ -106,26 +97,25 @@ async fn main(spawner: Spawner) {
 
     #[cfg(not(fw_us_hw_selftest))]
     {
-        #[cfg(all(
-            any(fw_us_vip_seed, fw_us_firewall_seed, fw_us_fw_rules_seed),
-            feature = "patch-sync-embassy",
-            not(feature = "patch-sync-st")
+        #[cfg(any(
+            fw_us_vip_seed,
+            fw_us_firewall_seed,
+            fw_us_fw_rules_seed,
+            fw_us_firewall_array_seed,
         ))]
         firmware::fw_seed::run_seeds().await;
-        #[cfg(all(
-            any(fw_us_vip_seed, fw_us_firewall_seed, fw_us_fw_rules_seed),
-            feature = "patch-sync-st"
-        ))]
-        firmware::fw_seed::run_seeds();
 
-        patch::datapath::enable();
+        xdp_mcu::datapath::enable();
 
         let (controller, sta_stack, sta_runner) = sta::init_sta(peripherals.WIFI);
 
         spawner.spawn(connection(controller).unwrap());
         spawner.spawn(net_task_xdp(sta_runner).unwrap());
 
-        sta::handler(sta_stack).await;
+        sta::start_udp_tasks(spawner, sta_stack);
+        loop {
+            embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
+        }
     }
 
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples

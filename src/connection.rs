@@ -13,7 +13,7 @@ pub async fn net_task(mut runner: embassy_net::Runner<'static, wifi::Interface<'
 pub async fn net_task_xdp(
     mut runner: embassy_net::Runner<
         'static,
-        crate::driver::FirewallDevice<wifi::Interface<'static>>,
+        xdp_mcu::driver::FirewallDevice<wifi::Interface<'static>>,
     >,
 ) {
     runner.run().await

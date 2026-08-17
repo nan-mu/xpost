@@ -29,6 +29,12 @@ enum SeedSpec {
         src_ip: [u8; 4],
         action: u8,
     },
+    /// ARRAY `firewall_array`: index + banned IPv4 (test0 BAN_IP).
+    FirewallArray {
+        map: String,
+        index: u32,
+        ip: [u8; 4],
+    },
 }
 
 pub struct ConfigGen {
@@ -73,6 +79,13 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
         if !known_top.contains(&key.as_str()) {
             warnings.push(format!(
                 "config.toml: ignoring unknown top-level key `{key}`"
+            ));
+        }
+    }
+    for key in ["arena", "helper", "slots"] {
+        if root.get(key).is_some() {
+            warnings.push(format!(
+                "config.toml: [{key}] ignored — layout lives in xdp-mcu/layout.toml"
             ));
         }
     }
@@ -123,11 +136,11 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
     let mut hot_load = false;
     let mut firewall_seed = false;
     let mut fw_rules_seed = false;
+    let mut firewall_array_seed = false;
     let mut hw_selftest = false;
     let mut map_crud = false;
     let mut net_test = false;
     let mut cold_boot = false;
-    let mut tx_hijack = false;
     let mut seeds: Vec<SeedSpec> = Vec::new();
 
     // Empty / omitted [[tests]] is allowed (Phase A layout-only configs).
@@ -192,10 +205,10 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
                 hot_load = true;
                 net_test = true;
             }
-            // Phase B: transparent TX hijack + HotLoad for E5; no map seeds / cold_boot.
-            "tx_xdp_encap" => {
-                tx_hijack = true;
+            "test0" => {
+                map_crud = true;
                 hot_load = true;
+                net_test = true;
             }
             "xdp_forward_echo" => net_test = true,
             "firewall_echo" => net_test = true,
@@ -313,9 +326,33 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
                         action,
                     });
                 }
+                "firewall_array" => {
+                    let index = st.get("index").and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+                    let ip = parse_toml_ipv4_value(
+                        st.get("ip").ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "config.toml: [[tests]] `{name}` seeds[{si}].ip required for firewall_array"
+                            )
+                        })?,
+                        &format!("tests.{name}.seeds[{si}].ip"),
+                    );
+                    for (key, _) in st {
+                        if !matches!(key.as_str(), "map" | "index" | "ip") {
+                            warnings.push(format!(
+                                "config.toml: ignoring unknown seeds[{si}].{key} in `{name}`"
+                            ));
+                        }
+                    }
+                    firewall_array_seed = true;
+                    seeds.push(SeedSpec::FirewallArray {
+                        map: map.to_string(),
+                        index,
+                        ip,
+                    });
+                }
                 other => bail!(
                     "config.toml: [[tests]] `{name}` seeds[{si}].map `{other}` unsupported \
-                     (known: vip_ip, firewall_rules, fw_rules)"
+                     (known: vip_ip, firewall_rules, fw_rules, firewall_array)"
                 ),
             }
         }
@@ -324,10 +361,10 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
     if hw_selftest && net_test {
         bail!("config.toml: hw_selftest cannot be enabled together with network tests");
     }
-    if cold_boot && (vip_seed || firewall_seed || fw_rules_seed) {
+    if cold_boot && (vip_seed || firewall_seed || fw_rules_seed || firewall_array_seed) {
         bail!("config.toml: cold_boot (tail_call_abc) cannot combine with boot map seeds");
     }
-    let seed_kinds = [vip_seed, firewall_seed, fw_rules_seed]
+    let seed_kinds = [vip_seed, firewall_seed, fw_rules_seed, firewall_array_seed]
         .into_iter()
         .filter(|x| *x)
         .count();
@@ -344,11 +381,11 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
     enabled.insert("hot_load", hot_load);
     enabled.insert("firewall_seed", firewall_seed);
     enabled.insert("fw_rules_seed", fw_rules_seed);
+    enabled.insert("firewall_array_seed", firewall_array_seed);
     enabled.insert("map_crud", map_crud);
     enabled.insert("xdp_rx", xdp_rx);
     enabled.insert("hw_selftest", hw_selftest);
     enabled.insert("cold_boot", cold_boot);
-    enabled.insert("tx_hijack", tx_hijack);
 
     let mut enabled_us_cfgs = Vec::new();
     for name in US_CFGS {
@@ -366,7 +403,6 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
         listen_port,
         ctrl_port,
         xdp_rx,
-        tx_hijack,
         &seeds,
     )?;
 
@@ -386,7 +422,6 @@ fn write_fw_cfg_data(
     listen_port: u16,
     ctrl_port: u16,
     xdp_rx: bool,
-    tx_hijack: bool,
     seeds: &[SeedSpec],
 ) -> Result<()> {
     let mut out = String::from("// @generated by xtask from config.toml — do not edit\n\n");
@@ -422,11 +457,6 @@ fn write_fw_cfg_data(
          pub const XDP_RX: bool = {xdp_rx};\n\n"
     ));
 
-    out.push_str(&format!(
-        "/// Transparent TX-path XDP hijack (`tx_xdp_encap`).\n\
-         pub const TX_XDP: bool = {tx_hijack};\n\n"
-    ));
-
     out.push_str(
         "/// Boot-time map seed ops from enabled `[[tests.seeds]]`.\n\
          #[derive(Clone, Copy)]\n\
@@ -450,6 +480,12 @@ fn write_fw_cfg_data(
                  map: &'static str,\n\
                  src_ip: [u8; 4],\n\
                  action: u8,\n\
+             },\n\
+             /// ARRAY `firewall_array`: banned IPv4 at index.\n\
+             FirewallArrayEntry {\n\
+                 map: &'static str,\n\
+                 index: u32,\n\
+                 ip: [u8; 4],\n\
              },\n\
          }\n\n",
     );
@@ -499,6 +535,20 @@ fn write_fw_cfg_data(
                     src_ip[1],
                     src_ip[2],
                     src_ip[3],
+                ));
+            }
+            SeedSpec::FirewallArray {
+                map,
+                index,
+                ip,
+            } => {
+                out.push_str(&format!(
+                    "    SeedOp::FirewallArrayEntry {{\n        map: \"{}\",\n        index: {index},\n        ip: [{}, {}, {}, {}],\n    }},\n",
+                    escape_rust_str(map),
+                    ip[0],
+                    ip[1],
+                    ip[2],
+                    ip[3],
                 ));
             }
         }

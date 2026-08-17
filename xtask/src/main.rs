@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -17,20 +17,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Validate `config.toml` [arena]/[helper]/[slots] and write `mem.toml`.
+    /// Validate `xdp-mcu/layout.toml` [arena]/[helper]/[slots] and write `mem.toml`.
     Doctor,
     /// Deprecated alias for `doctor`.
     Layout,
-    /// Print IBUS/DBUS dual-map SRAM diagram from `mem.toml`.
+    /// Print IBUS/DBUS dual-map SRAM diagram from `xdp-mcu/mem.toml`.
     Map,
-    /// Parse tomls under firmware/ and write generated artifacts to `--out`.
+    /// Parse tomls under firmware/ + xdp-mcu/ and write generated artifacts to `--out`.
     Gen {
         /// Output directory (defaults to a temp dir under firmware/target/xtask-gen).
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Run generate into a temp dir (validates tomls without writing durable artifacts).
-    Check,
 }
 
 fn firmware_root() -> PathBuf {
@@ -71,11 +69,6 @@ fn main() -> Result<()> {
             run_gen(&manifest_dir, &out_dir)?;
             println!("wrote codegen artifacts to {}", out_dir.display());
         }
-        Cmd::Check => {
-            let tmp = tempfile_dir(&manifest_dir)?;
-            run_gen(&manifest_dir, &tmp)?;
-            println!("xtask check ok");
-        }
     }
     Ok(())
 }
@@ -88,16 +81,4 @@ fn run_gen(manifest_dir: &PathBuf, out_dir: &PathBuf) -> Result<()> {
     println!("enabled fw_us_*: [{}]", result.enabled_us_cfgs.join(", "));
     println!("custom-sections: {}", result.custom_sections_path.display());
     Ok(())
-}
-
-fn tempfile_dir(manifest_dir: &PathBuf) -> Result<PathBuf> {
-    let base = manifest_dir.join("target/xtask-check");
-    if base.exists() {
-        std::fs::remove_dir_all(&base).with_context(|| format!("remove {}", base.display()))?;
-    }
-    std::fs::create_dir_all(&base).with_context(|| format!("mkdir {}", base.display()))?;
-    if !base.is_dir() {
-        bail!("{} is not a directory", base.display());
-    }
-    Ok(base)
 }

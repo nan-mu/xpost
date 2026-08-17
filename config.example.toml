@@ -1,7 +1,7 @@
 # Firmware userspace config (build.rs → rustc-cfg fw_us_* + generated consts).
 # Only list [[tests]] you are actively running — do not leave enabled=false stubs here.
 # Full recipes: firmware/README.md →「测试配方（历史）」
-# Layout: [arena]/[helper]/[slots] — after edits run `cargo xtask doctor` (writes mem.toml).
+# IRAM layout: xdp-mcu/layout.toml — after edits run `cargo xtask doctor` (writes xdp-mcu/mem.toml).
 # Does NOT select AOT / bpf.toml / esp32c3.bin — copy those by hand to match enabled tests.
 #
 # Benchmark:  cargo fwbench
@@ -21,19 +21,3 @@ reply_port = 18080
 [dut]
 listen_port = 8080
 ctrl_port = 8081
-
-[arena]
-iram_base = 0x40380000
-arena_end = 0x40382000
-
-[helper]
-length = 0x200
-
-# Slot names sorted → IRAM order. mount = call|rx|tx (call may repeat; rx/tx ≤1).
-[slots]
-a = { length = 0xE00, mount = "tx" }
-b = { length = 0x1000, mount = "rx" }
-
-# Phase B: transparent TX hijack.
-[[tests]]
-name = "tx_xdp_encap"

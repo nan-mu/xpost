@@ -26,11 +26,12 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<AotBindGen> {
          /// Bind absolute `.maps` addresses from the loaded AOT image to firmware map ids.\n\
          /// Call after copying the AOT bin into HOT_REGION and after [`init_firmware_maps`].\n\
          /// Addresses come from `[maps.*].aot_addr` (libbpf-mcu MCU report merge).\n\
-         pub fn bind_aot_map_addrs() {\n\
-             use crate::patch::map::register_map_addr;\n",
+         pub fn bind_aot_map_addrs() {\n",
     );
 
+    let mut body = String::new();
     let mut bound = 0usize;
+    let mut user_ids: BTreeMap<String, ()> = BTreeMap::new();
     if let Some(maps) = root.get("maps").and_then(|v| v.as_table()) {
         let maps: BTreeMap<&String, &toml::Value> = maps.iter().collect();
         for (name, entry) in maps {
@@ -48,13 +49,14 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<AotBindGen> {
                 continue;
             }
             let id_const = format!("MAP_ID_{}", name.to_ascii_uppercase());
-            out.push_str(&format!("    register_map_addr(0x{addr:x}, {id_const});\n"));
+            user_ids.insert(id_const.clone(), ());
+            body.push_str(&format!("    register_map_addr(0x{addr:x}, {id_const});\n"));
             bound += 1;
             for alias in parse_addr_list(table, "aot_aliases", name) {
                 if alias == 0 || alias == addr {
                     continue;
                 }
-                out.push_str(&format!(
+                body.push_str(&format!(
                     "    register_map_addr(0x{alias:x}, {id_const});\n"
                 ));
                 bound += 1;
@@ -62,11 +64,23 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<AotBindGen> {
         }
     }
 
+    if bound > 0 {
+        out.push_str("    use crate::map::register_map_addr;\n");
+        out.push_str(&body);
+    }
     out.push_str("}\n");
     out.push_str(&format!(
         "/// Number of AOT map aliases bound from bpf.toml `aot_addr` (+ `aot_aliases`).\n\
          pub const AOT_MAP_BIND_COUNT: usize = {bound};\n"
     ));
+    out.push_str(
+        "/// Unique pool ids referenced by the boot AOT image (`RawResource::users`).\n\
+         pub const AOT_MAP_USER_IDS: &[u32] = &[\n",
+    );
+    for id in user_ids.keys() {
+        out.push_str(&format!("    {id},\n"));
+    }
+    out.push_str("];\n");
 
     fs::write(&out_path, out).with_context(|| format!("write {}", out_path.display()))?;
 
