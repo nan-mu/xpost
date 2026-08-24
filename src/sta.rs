@@ -2,6 +2,8 @@
 
 use crate::fw_cfg::{XDP_ENABLE, dut, log_cfg, probe, wifi};
 use crate::{init_log, trace_log};
+use core::cell::RefCell;
+use critical_section::Mutex;
 use embassy_executor::Spawner;
 use embassy_net::{
     IpAddress, IpEndpoint, Ipv4Address, Stack, StackResources,
@@ -16,8 +18,8 @@ use xdp_mcu::driver::FirewallDevice;
 #[cfg(fw_us_hot_load)]
 use crate::hot_load_op::{
     self, HotLoadOp, HotLoadOpAck, KIND_COPY, KIND_DATAPATH, KIND_HOT_SWAP, KIND_MOVE,
-    KIND_READBACK, KIND_SWAP, KIND_UPLOAD, REGION_2, REGION_3, REGION_A, REGION_B, STORAGE_DRAM_0,
-    STORAGE_DRAM_1, STORAGE_SRAM_2, STORAGE_SRAM_3, STORAGE_SRAM_A, STORAGE_SRAM_B,
+    KIND_READBACK, KIND_REBOOT, KIND_SWAP, KIND_UPLOAD, REGION_2, REGION_3, REGION_A, REGION_B,
+    STORAGE_DRAM_0, STORAGE_DRAM_1, STORAGE_SRAM_2, STORAGE_SRAM_3, STORAGE_SRAM_A, STORAGE_SRAM_B,
 };
 #[cfg(fw_us_map_crud)]
 use crate::map_crud_op::{self, MapCrudAck, MapCrudOp};
@@ -36,8 +38,44 @@ use xdp_mcu::{
 
 const ECHO_PAYLOAD: &[u8] = &[0x42];
 const STIM_MAGIC: &[u8; 6] = b"FWSTIM";
+const COLLECT_MAGIC: &[u8; 6] = b"FWCOL1";
+const DUMP_MAGIC: &[u8; 6] = b"FWDMP1";
+const COLLECT_RST_MAGIC: &[u8; 6] = b"FWRST1";
 const STIM_HDR_LEN: usize = 14;
+const COLLECT_HDR_LEN: usize = 9;
+const COLLECT_CAP: usize = 256;
 const RICH_REPLY_LEN: usize = 34;
+/// Dump reply: magic(6) + n(2) + COLLECT_CAP bytes.
+const DUMP_REPLY_LEN: usize = 6 + 2 + COLLECT_CAP;
+
+/// Shared with ctrl task: dump/rst on :8081 (XDP always PASS).
+static COLLECT_BUF: Mutex<RefCell<[u8; COLLECT_CAP]>> =
+    Mutex::new(RefCell::new([0u8; COLLECT_CAP]));
+
+#[inline]
+fn collect_store(idx: usize, byte: u8) {
+    if idx < COLLECT_CAP {
+        critical_section::with(|cs| {
+            COLLECT_BUF.borrow_ref_mut(cs)[idx] = byte;
+        });
+    }
+}
+
+#[inline]
+fn collect_reset() {
+    critical_section::with(|cs| {
+        COLLECT_BUF.borrow_ref_mut(cs).fill(0);
+    });
+}
+
+#[inline]
+fn collect_copy_out(dst: &mut [u8]) -> usize {
+    let n = dst.len().min(COLLECT_CAP);
+    critical_section::with(|cs| {
+        dst[..n].copy_from_slice(&COLLECT_BUF.borrow_ref(cs)[..n]);
+    });
+    n
+}
 
 static STACK: StaticCell<Stack<'static>> = StaticCell::new();
 static STACK_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
@@ -228,6 +266,16 @@ async fn echo_udp_task(stack: Stack<'static>) {
         match echo.recv_from(&mut echo_buf).await {
             Ok((len, remote)) => {
                 trace_log!("[FWTEST] stim from {} len={}", remote.endpoint, len);
+                let pkt = &echo_buf[..len];
+
+                // Byte-stream collect only on :8080 (datapath under test).
+                // Dump / reset go via :8081 so they are not starved by WiFi RX.
+                if len >= COLLECT_HDR_LEN && pkt.starts_with(COLLECT_MAGIC) {
+                    let idx = u16::from_le_bytes([pkt[6], pkt[7]]) as usize;
+                    collect_store(idx, pkt[8]);
+                    continue;
+                }
+
                 #[cfg(any(fw_us_hot_load, fw_us_map_crud))]
                 {
                     let dst_ip = stack
@@ -236,7 +284,7 @@ async fn echo_udp_task(stack: Stack<'static>) {
                         .unwrap_or([0; 4]);
                     write_rich_echo(
                         &mut rich_reply,
-                        &echo_buf[..len],
+                        pkt,
                         ipv4_octets(remote.endpoint.addr),
                         dst_ip,
                         remote.endpoint.port,
@@ -250,7 +298,7 @@ async fn echo_udp_task(stack: Stack<'static>) {
                 }
                 #[cfg(not(any(fw_us_hot_load, fw_us_map_crud)))]
                 {
-                    let reply = echo_reply_payload(&echo_buf[..len]);
+                    let reply = echo_reply_payload(pkt);
                     if let Err(e) = echo.send_to(reply, echo_dest).await {
                         error!("[FWTEST] echo send failed: {:?}", e);
                     } else {
@@ -305,12 +353,41 @@ async fn ctrl_udp_task(stack: Stack<'static>) {
 
     let mut ctrl_buf = [0u8; CTRL_RX_CAP];
     let mut ack_buf = [0u8; CTRL_TX_CAP];
+    let mut dump_reply = [0u8; DUMP_REPLY_LEN];
 
     loop {
         match ctrl.recv_from(&mut ctrl_buf).await {
             Ok((len, remote)) => {
                 trace_log!("[CTRL] from {} len={}", remote.endpoint, len);
-                let sent = handle_ctrl(&ctrl_buf[..len], &mut ack_buf, &ctrl, ack_dest).await;
+                let pkt = &ctrl_buf[..len];
+
+                // Collect reset / dump on ctrl plane (always XDP PASS).
+                if len >= 6 && pkt.starts_with(COLLECT_RST_MAGIC) {
+                    collect_reset();
+                    if let Err(e) = ctrl.send_to(COLLECT_RST_MAGIC, ack_dest).await {
+                        error!("[CTRL] collect rst ack failed: {:?}", e);
+                    }
+                    continue;
+                }
+                if len >= 6 && pkt.starts_with(DUMP_MAGIC) {
+                    let n = if len >= 8 {
+                        let want = u16::from_le_bytes([pkt[6], pkt[7]]) as usize;
+                        want.min(COLLECT_CAP)
+                    } else {
+                        COLLECT_CAP
+                    };
+                    dump_reply[..6].copy_from_slice(DUMP_MAGIC);
+                    dump_reply[6..8].copy_from_slice(&(n as u16).to_le_bytes());
+                    collect_copy_out(&mut dump_reply[8..8 + n]);
+                    if let Err(e) = ctrl.send_to(&dump_reply[..8 + n], ack_dest).await {
+                        error!("[CTRL] dump send failed: {:?}", e);
+                    } else {
+                        trace_log!("[CTRL] dump sent ({} bytes)", 8 + n);
+                    }
+                    continue;
+                }
+
+                let sent = handle_ctrl(pkt, &mut ack_buf, &ctrl, ack_dest).await;
                 if !sent {
                     error!("[CTRL] no ack sent");
                 }
@@ -331,6 +408,13 @@ fn intern_ctrl_map_name(name: &str) -> Option<&'static str> {
         "fw_rules" => Some("fw_rules"),
         "sessions" => Some("sessions"),
         "firewall_array" => Some("firewall_array"),
+        "ddos_wl" => Some("ddos_wl"),
+        "ctrl_wl" => Some("ctrl_wl"),
+        "rate_state" => Some("rate_state"),
+        "params" => Some("params"),
+        "stats" => Some("stats"),
+        "decisions" => Some("decisions"),
+        "decision_w" => Some("decision_w"),
         _ => None,
     }
 }
@@ -405,7 +489,6 @@ async fn apply_map_destroy<'a>(op: MapCrudOp<'a>) -> MapCrudAck<'a> {
 }
 
 #[cfg(fw_us_map_crud)]
-
 #[cfg(fw_us_map_crud)]
 async fn apply_map_create<'a>(op: MapCrudOp<'a>) -> MapCrudAck<'a> {
     use map_crud_op::*;
@@ -475,7 +558,6 @@ async fn apply_map_create<'a>(op: MapCrudOp<'a>) -> MapCrudAck<'a> {
 }
 
 #[cfg(fw_us_map_crud)]
-
 #[cfg(fw_us_map_crud)]
 fn map_crud_from_result<'a>(
     kind: u32,
@@ -532,9 +614,11 @@ async fn apply_map_crud<'a>(op: MapCrudOp<'a>, val_out: &'a mut [u8; 256]) -> Ma
         })
         .await
         .map(|r| r.map(|_| &[][..])),
-        (KIND_DELETE, MAP_TYPE_HASH) => with_hash_map(op.map_name, |m| MapOps::delete(m, op.key.as_ptr()))
-            .await
-            .map(|r| r.map(|_| &[][..])),
+        (KIND_DELETE, MAP_TYPE_HASH) => {
+            with_hash_map(op.map_name, |m| MapOps::delete(m, op.key.as_ptr()))
+                .await
+                .map(|r| r.map(|_| &[][..]))
+        }
         (KIND_LOOKUP, MAP_TYPE_HASH) => {
             with_hash_map(op.map_name, |m| match MapOps::lookup(m, op.key.as_ptr()) {
                 Ok(ptr) => {
@@ -572,11 +656,9 @@ async fn apply_map_crud<'a>(op: MapCrudOp<'a>, val_out: &'a mut [u8; 256]) -> Ma
 }
 
 #[cfg(fw_us_map_crud)]
-
 // ---------------------------------------------------------------------------
 // HotLoadOp (SWAP + HOT_SWAP + UPLOAD + COPY + MOVE + READBACK)
 // ---------------------------------------------------------------------------
-
 #[cfg(fw_us_hot_load)]
 fn hot_ack(
     op: &HotLoadOp<'_>,
@@ -712,15 +794,7 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
                 return hot_ack(&op, hot_load_op::STATUS_BAD, "NotRx", 0, 0, 0, 0);
             }
             match hot_swap_rx(dst, op.payload).await {
-                Ok(loaded) => hot_ack(
-                    &op,
-                    hot_load_op::STATUS_OK,
-                    "",
-                    0,
-                    loaded as u32,
-                    0,
-                    0,
-                ),
+                Ok(loaded) => hot_ack(&op, hot_load_op::STATUS_OK, "", 0, loaded as u32, 0, 0),
                 Err(e) => {
                     error!("[CTRL][HOT] hot_swap failed: {:?}", e);
                     hot_ack(&op, hot_load_op::STATUS_BAD, prog_reason(e), 0, 0, 0, 0)
@@ -840,15 +914,7 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
                 op.dst,
                 copied
             );
-            hot_ack(
-                &op,
-                hot_load_op::STATUS_OK,
-                "",
-                0,
-                0,
-                0,
-                copied as u32,
-            )
+            hot_ack(&op, hot_load_op::STATUS_OK, "", 0, 0, 0, copied as u32)
         }
 
         KIND_READBACK => {
@@ -882,6 +948,8 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
             _ => bad_hot_ack(&op, ""),
         },
 
+        KIND_REBOOT => hot_ack(&op, hot_load_op::STATUS_OK, "", 0, 0, 0, 0),
+
         _ => bad_hot_ack(&op, ""),
     }
 }
@@ -905,6 +973,7 @@ async fn handle_ctrl(
                     | KIND_MOVE
                     | KIND_READBACK
                     | KIND_DATAPATH
+                    | KIND_REBOOT
             ) {
                 let ack = match hot_load_op::decode_op(pkt) {
                     Ok(op) => apply_hot_load(op).await,
@@ -929,10 +998,24 @@ async fn handle_ctrl(
                     Some(n) => match ctrl.send_to(&ack_buf[..n], ack_dest).await {
                         Ok(()) => {
                             trace_log!("[CTRL][HOT] ack status={}", ack.status);
+                            if k == KIND_REBOOT {
+                                embassy_time::Timer::after(embassy_time::Duration::from_millis(
+                                    100,
+                                ))
+                                .await;
+                                esp_hal::system::software_reset();
+                            }
                             true
                         }
                         Err(e) => {
                             error!("[CTRL][HOT] ack send: {:?}", e);
+                            if k == KIND_REBOOT {
+                                embassy_time::Timer::after(embassy_time::Duration::from_millis(
+                                    100,
+                                ))
+                                .await;
+                                esp_hal::system::software_reset();
+                            }
                             false
                         }
                     },

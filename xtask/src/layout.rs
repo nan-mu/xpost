@@ -172,9 +172,7 @@ pub fn compute_from_root(root: &toml::Table) -> Result<Layout> {
         let entry = slots_t
             .get(*name)
             .and_then(|v| v.as_table())
-            .ok_or_else(|| {
-                anyhow::anyhow!("layout: [slots].{name} must be an inline table")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("layout: [slots].{name} must be an inline table"))?;
         for (key, _) in entry {
             if !matches!(key.as_str(), "length" | "mount") {
                 bail!("layout: [slots].{name} unknown key `{key}`");
@@ -488,9 +486,8 @@ pub fn cross_check_firmware_config(firmware_dir: &Path, runtime_dir: &Path) -> R
     let root: toml::Table = text
         .parse()
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    let has_layout = root.get("arena").is_some()
-        || root.get("helper").is_some()
-        || root.get("slots").is_some();
+    let has_layout =
+        root.get("arena").is_some() || root.get("helper").is_some() || root.get("slots").is_some();
     if !has_layout {
         return Ok(());
     }

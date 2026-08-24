@@ -1,11 +1,11 @@
 //! Userspace map seeding from enabled `[[tests.seeds]]` in `config.toml`.
 
-use crate::fw_cfg::{SEEDS, SeedOp};
 #[allow(unused_imports)]
 use crate::fw_cfg::ipv4_u32;
+use crate::fw_cfg::{SEEDS, SeedOp};
+use log::{error, info};
 use xdp_mcu::map::ops::MapOps;
 use xdp_mcu::map::{ResourceId, register_map_name};
-use log::{error, info};
 
 fn map_id_for(name: &str) -> Option<ResourceId> {
     match name {
@@ -296,4 +296,3 @@ pub async fn run_seeds() {
         }
     }
 }
-

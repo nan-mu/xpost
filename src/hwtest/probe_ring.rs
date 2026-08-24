@@ -67,4 +67,3 @@ pub async fn create_probe_ringbuf<T: Send + 'static>(
     let (raw_ptr, layout) = alloc_probe_ringbuf::<T>(capacity)?;
     RawResource::insert(id, raw_ptr, layout, drop_probe_ringbuf::<T>, None, 0, 0, 0).await
 }
-

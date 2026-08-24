@@ -15,10 +15,14 @@ use core::ptr;
 use critical_section::Mutex;
 use log::{error, info, warn};
 use xdp_mcu::driver::ZcTx;
+use xdp_mcu::redirect::queue_egress_frame;
 
 const WIFI_IF_STA: u32 = 0;
 const ESP_OK: i32 = 0;
 const MAX_OUTSTANDING: usize = 4;
+/// Full-MTU (1492) `tx_by_ref` OOMs the leftover ~10KB Wi-Fi heap (alloc 192).
+/// Echo-sized bounce is L2=76; keep zero-copy for that only.
+const ZC_MAX_LEN: usize = 128;
 
 #[derive(Clone, Copy)]
 struct Hold {
@@ -39,6 +43,7 @@ struct ZcState {
     same_ok: u32,
     same_fail: u32,
     free_cb_hits: u32,
+    nomem: u32,
     holds: [Hold; MAX_OUTSTANDING],
 }
 
@@ -64,6 +69,7 @@ static STATE: Mutex<RefCell<ZcState>> = Mutex::new(RefCell::new(ZcState {
     same_ok: 0,
     same_fail: 0,
     free_cb_hits: 0,
+    nomem: 0,
     holds: empty_holds(),
 }));
 
@@ -160,7 +166,6 @@ unsafe extern "C" fn netstack_free(buf: *mut c_void) {
     let eb = drop_ref(buf);
     if !eb.is_null() {
         unsafe { __real_esp_wifi_internal_free_rx_buffer(eb) };
-        info!("[zctx] free_cb recycled eb={eb:p}");
     }
 }
 
@@ -218,16 +223,15 @@ fn arm(payload: *mut u8, len: usize) -> bool {
     if payload.is_null() || len < 4 {
         return false;
     }
-    let need_reclaim = critical_section::with(|cs| {
-        STATE.borrow_ref(cs).outstanding >= MAX_OUTSTANDING
-    });
+    let need_reclaim =
+        critical_section::with(|cs| STATE.borrow_ref(cs).outstanding >= MAX_OUTSTANDING);
     if need_reclaim {
         reclaim_leaked();
     }
     let tag = unsafe { load_tag(payload) };
     critical_section::with(|cs| {
         let mut s = STATE.borrow_ref_mut(cs);
-        if !s.cb_ready || len == 0 || len > 1492 {
+        if !s.cb_ready || len == 0 || len > ZC_MAX_LEN {
             return false;
         }
         if s.outstanding >= MAX_OUTSTANDING || s.want_steal || s.stolen {
@@ -286,9 +290,8 @@ fn finish() {
             s.same_fail = s.same_fail.saturating_add(1);
         }
     });
-    if len != 1492 {
-        warn!("[zctx] rx len={len} want 1492 (C3 WIFI_MTU)");
-    }
+    // Shrunk XDP_TX is the zero-copy proof (firewall_array adjust_tail). Full
+    // MTU is still 1492; do not treat a shorter window as an error.
     let hold = alloc_hold(eb);
     if hold.is_null() {
         error!("[zctx] no hold slot, free eb");
@@ -299,10 +302,28 @@ fn finish() {
         });
         return;
     }
-    info!(
-        "[zctx] same-ptr payload={payload:p} eb={eb:p} len={len} tag_ok={same} outstanding={outstanding}"
-    );
+    let logged = critical_section::with(|cs| {
+        let s = STATE.borrow_ref(cs);
+        s.same_ok.saturating_add(s.same_fail)
+    });
+    // Per-TX `info!` stalls USB-UART (~10ms/line) and overflows rx_queue=16.
+    if logged <= 1 || !same {
+        info!("[zctx] zc len={len} tag_ok={same} outstanding={outstanding}");
+    }
     let rc = unsafe { esp_wifi_internal_tx_by_ref(WIFI_IF_STA, payload.cast(), len, hold) };
+    if rc != ESP_OK {
+        let n = critical_section::with(|cs| {
+            let mut s = STATE.borrow_ref_mut(cs);
+            s.nomem = s.nomem.saturating_add(1);
+            s.nomem
+        });
+        if rc != 257 || n == 1 || n.is_multiple_of(256) {
+            warn!("[zctx] tx_by_ref err={rc} nomem={n}");
+        }
+        // Copy while `payload` is still inside the stolen RX buffer.
+        let frame = unsafe { core::slice::from_raw_parts(payload, len) };
+        let _ = queue_egress_frame(frame);
+    }
     // Always drop *our* ref (lwIP pbuf_free after tx_by_ref). If the blob never
     // calls free_cb, this is what prevents a permanent RX-pool leak.
     let leftover = critical_section::with(|cs| {
@@ -315,12 +336,9 @@ fn finish() {
     if !eb_now.is_null() {
         unsafe { __real_esp_wifi_internal_free_rx_buffer(eb_now) };
     } else if leftover > 1 {
-        info!("[zctx] wifi still holds refs after tx_by_ref (async?) leftover={leftover}");
+        log::debug!("[zctx] wifi holds leftover={leftover} after tx_by_ref");
     }
     if rc != ESP_OK {
-        warn!("[zctx] tx_by_ref err={rc}");
-        // Failed submit: drop_ref above should already have recycled. If wifi
-        // ref_cb ran anyway, reclaim that slot.
         let extra = drop_ref(hold);
         if !extra.is_null() {
             unsafe { __real_esp_wifi_internal_free_rx_buffer(extra) };
@@ -328,10 +346,14 @@ fn finish() {
     }
 }
 
+/// `arm` failed: still copy (small or large). Dropping here made 0µs Xloss 100%.
+fn copy_ok(_len: usize) -> bool {
+    true
+}
+
 pub fn init() {
-    let rc = unsafe {
-        esp_wifi_internal_reg_netstack_buf_cb(Some(netstack_ref), Some(netstack_free))
-    };
+    let rc =
+        unsafe { esp_wifi_internal_reg_netstack_buf_cb(Some(netstack_ref), Some(netstack_free)) };
     if rc != ESP_OK {
         error!("[zctx] reg_netstack_buf_cb failed rc={rc}");
         critical_section::with(|cs| {
@@ -345,4 +367,8 @@ pub fn init() {
     crate::init_log!("[zctx] tx_by_ref armed (RX steal via --wrap free_rx_buffer)");
 }
 
-pub const HOOKS: ZcTx = ZcTx { arm, finish };
+pub const HOOKS: ZcTx = ZcTx {
+    arm,
+    finish,
+    copy_ok,
+};

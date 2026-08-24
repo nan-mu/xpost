@@ -4,6 +4,7 @@ pub mod ctx_test;
 mod probe_hash;
 mod probe_ring;
 
+use log::info;
 use xdp_mcu::ctx::{IFINDEX_WIFI, IFINDEX_WIRED, XdpMd};
 use xdp_mcu::helper::dynptr::BpfDynptr;
 use xdp_mcu::helper_dispatcher;
@@ -12,7 +13,6 @@ use xdp_mcu::map::{
     FIRMWARE_HAS_DEVMAP, FIRMWARE_HAS_RINGBUF, FIRMWARE_MAP_COUNT, SELFTEST_MAP_ID,
 };
 use xdp_mcu::redirect::{XDP_PASS, XDP_REDIRECT};
-use log::info;
 
 const BPF_FUNC_TRACE_PRINTK: usize = 6;
 const BPF_FUNC_KTIME_GET_NS: usize = 5;
@@ -128,7 +128,6 @@ pub async fn verify_pool() -> Result<(), &'static str> {
 
     Ok(())
 }
-
 
 /// Run the selftest suite and print `[HWTEST] …` markers.
 pub fn run() {

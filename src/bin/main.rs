@@ -10,8 +10,6 @@
 use embassy_executor::Spawner;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use log::error;
-
 use firmware::init_log;
 use firmware::log_gate::init_logger;
 
@@ -23,8 +21,9 @@ use firmware::{
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
-    error!("{}", panic_info);
-    loop {}
+    // `log` may heap-allocate; UART then ROM reset so overnight can recover.
+    esp_println::println!("PANIC {panic_info}");
+    esp_hal::system::software_reset();
 }
 
 extern crate alloc;

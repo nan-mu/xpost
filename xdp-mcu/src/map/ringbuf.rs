@@ -58,7 +58,6 @@ pub async fn create_bpf_ringbuf(id: ResourceId, byte_capacity: usize) -> Result<
     RawResource::insert(id, raw, layout, drop_ring, Some(MapKind::Ringbuf), 0, 0, 0).await
 }
 
-
 impl MapOps for BpfRingBuf {
     fn lookup(&self, _key: *const u8) -> Result<*mut u8, MapError> {
         let e = MapError::Unsupported;

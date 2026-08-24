@@ -15,10 +15,10 @@ pub mod fw_cfg;
 pub mod fw_seed;
 #[cfg(fw_us_hot_load)]
 pub mod hot_load_op;
+#[cfg(fw_us_hw_selftest)]
+pub mod hwtest;
 pub mod log_gate;
 #[cfg(fw_us_map_crud)]
 pub mod map_crud_op;
 pub mod sta;
 pub mod wifi_zctx;
-#[cfg(fw_us_hw_selftest)]
-pub mod hwtest;

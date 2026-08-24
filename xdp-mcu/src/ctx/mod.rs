@@ -4,7 +4,10 @@
 //! Layout matches Linux `struct xdp_md` field offsets on RV32 (`ilp32`):
 //! `data`/`data_end` at 0/4, `data_meta` at 8, `ingress_ifindex` at 0xc.
 
+use core::cell::RefCell;
 use core::ptr;
+
+use critical_section::Mutex;
 
 /// Compile-time logical port table (stable across SoCs; not Linux ifindex).
 /// WiFi egress / ingress.
@@ -124,4 +127,45 @@ impl XdpMd {
         ptr::copy_nonoverlapping(buf as *const u8, start as *mut u8, len);
         0
     }
+}
+
+/// Last AOT `data`/`data_end` window (pointer as usize). `(0, 0)` = none.
+static LAST_WINDOW: Mutex<RefCell<(usize, usize)>> = Mutex::new(RefCell::new((0, 0)));
+
+/// Snapshot `data`/`data_end` after AOT so XDP_TX can `tx_by_ref` the adjusted frame.
+pub fn record_window(md: &XdpMd) {
+    let ptr = md.data as usize;
+    let end = md.data_end as usize;
+    let len = end.saturating_sub(ptr);
+    critical_section::with(|cs| {
+        *LAST_WINDOW.borrow_ref_mut(cs) = (ptr, len);
+    });
+}
+
+pub fn clear_window() {
+    critical_section::with(|cs| {
+        *LAST_WINDOW.borrow_ref_mut(cs) = (0, 0);
+    });
+}
+
+/// Clip `buffer` to the last recorded md window if it lies inside `buffer`.
+pub fn clip_to_md_window(buffer: &mut [u8]) -> &mut [u8] {
+    let (ptr, len) = critical_section::with(|cs| {
+        core::mem::replace(&mut *LAST_WINDOW.borrow_ref_mut(cs), (0, 0))
+    });
+    if ptr == 0 || len == 0 {
+        return buffer;
+    }
+    let start = buffer.as_mut_ptr() as usize;
+    if ptr < start {
+        return buffer;
+    }
+    let off = ptr - start;
+    let Some(end) = off.checked_add(len) else {
+        return buffer;
+    };
+    if end > buffer.len() {
+        return buffer;
+    }
+    &mut buffer[off..end]
 }

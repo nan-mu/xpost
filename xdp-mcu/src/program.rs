@@ -169,7 +169,6 @@ async fn clear_dram_slot(idx: usize) {
     clear_slot_dram(idx);
 }
 
-
 /// Stage raw bytes into a **fixed** DRAM slot (no map binds). Overwrites if occupied.
 pub async fn stage_raw_into(idx: usize, image: &[u8]) -> Result<(), ProgramError> {
     if idx >= XDP_SLOT_COUNT {
@@ -188,7 +187,6 @@ pub async fn stage_raw_into(idx: usize, image: &[u8]) -> Result<(), ProgramError
     };
     Ok(())
 }
-
 
 /// 切换: stop datapath, overwrite the current `rx` hot slot, re-enable.
 ///
@@ -270,8 +268,6 @@ async fn swap_rx_inner(
     Ok((stashed_len, payload.len()))
 }
 
-
-
 /// 热切换: write `dst` (must be `call`) then flip the rx mount pointer. Datapath stays on.
 pub async fn hot_swap_rx(dst: SlotId, payload: &[u8]) -> Result<usize, ProgramError> {
     try_begin()?;
@@ -285,8 +281,6 @@ async fn hot_swap_rx_inner(dst: SlotId, payload: &[u8]) -> Result<usize, Program
     mount::flip_rx(dst).await?;
     Ok(hot_swap_loaded_len(dst, payload))
 }
-
-
 
 fn hot_swap_rx_prepare(dst: SlotId, payload: &[u8]) -> Result<(), ProgramError> {
     if HOT_SLOT_COUNT < 2 {
@@ -392,8 +386,6 @@ async fn install_inner(cmd: XdpInstallCmd<'_>) -> Result<ProgramId, ProgramError
     Ok(slot_idx as ProgramId)
 }
 
-
-
 /// Copy a staged DRAM image into an IRAM hot slot and publish prog-table entry.
 ///
 /// Prefer [`SlotId::B`] for hot updates. Disables the datapath for the copy window.
@@ -418,8 +410,6 @@ async fn promote_inner(id: ProgramId, slot: SlotId) -> Result<(), ProgramError> 
     };
     do_promote(idx, len, slot)
 }
-
-
 
 /// Remove a staged program: unbind ABI, drop map users, free DRAM slot.
 pub async fn remove(id: ProgramId) -> Result<(), ProgramError> {
@@ -456,8 +446,6 @@ async fn remove_inner(id: ProgramId) -> Result<(), ProgramError> {
     Ok(())
 }
 
-
-
 /// Borrow the staged DRAM image (for IRAM promote / inspect).
 pub async fn image(id: ProgramId) -> Option<&'static [u8]> {
     let idx = id as usize;
@@ -473,7 +461,6 @@ pub async fn image(id: ProgramId) -> Option<&'static [u8]> {
     Some(unsafe { core::slice::from_raw_parts(ptr::addr_of!(XDP_DRAM[idx]) as *const u8, len) })
 }
 
-
 /// Map binds recorded for a staged program.
 pub async fn map_binds(id: ProgramId) -> Option<heapless::Vec<(usize, ResourceId), XDP_MAX_BINDS>> {
     let idx = id as usize;
@@ -486,4 +473,3 @@ pub async fn map_binds(id: ProgramId) -> Option<heapless::Vec<(usize, ResourceId
     }
     Some(guard[idx].binds.clone())
 }
-

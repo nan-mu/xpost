@@ -537,11 +537,7 @@ fn write_fw_cfg_data(
                     src_ip[3],
                 ));
             }
-            SeedSpec::FirewallArray {
-                map,
-                index,
-                ip,
-            } => {
+            SeedSpec::FirewallArray { map, index, ip } => {
                 out.push_str(&format!(
                     "    SeedOp::FirewallArrayEntry {{\n        map: \"{}\",\n        index: {index},\n        ip: [{}, {}, {}, {}],\n    }},\n",
                     escape_rust_str(map),

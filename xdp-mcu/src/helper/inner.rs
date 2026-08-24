@@ -5,6 +5,10 @@
 pub(super) mod ktime_get_ns {
     pub(crate) fn inner() -> usize {
         use embassy_time::Instant;
+        // RV32 ABI: only low 32 bits of the BPF u64 return are delivered.
+        // `*1000` turns µs into ns-scale ticks but wraps ≈4.3s — acceptable for
+        // short benches if thresh is below sustained RX pps. Prefer flashing a
+        // µs-tick helper + WINDOW_US=1e6 together when retuning clocks.
         Instant::now().as_micros() as usize * 1000
     }
 }
@@ -466,9 +470,7 @@ pub(super) mod printk {
                             if val == 0 {
                                 write!(buf, "0.0.0.0")
                             } else {
-                                let o = unsafe {
-                                    core::ptr::read_unaligned(val as *const [u8; 4])
-                                };
+                                let o = unsafe { core::ptr::read_unaligned(val as *const [u8; 4]) };
                                 write!(buf, "{}.{}.{}.{}", o[0], o[1], o[2], o[3])
                             }
                         }

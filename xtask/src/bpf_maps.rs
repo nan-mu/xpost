@@ -224,7 +224,9 @@ const EMPTY_INIT: &str = "\
 pub async fn init_firmware_maps() -> Result<(), allocator_api2::alloc::AllocError> { Ok(()) }\n";
 
 fn emit_init_fn(out: &mut String, map_specs: &[MapSpec]) -> Result<()> {
-    out.push_str("pub async fn init_firmware_maps() -> Result<(), allocator_api2::alloc::AllocError> {\n");
+    out.push_str(
+        "pub async fn init_firmware_maps() -> Result<(), allocator_api2::alloc::AllocError> {\n",
+    );
 
     let needs_hash = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_HASH");
     let needs_array = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_ARRAY");

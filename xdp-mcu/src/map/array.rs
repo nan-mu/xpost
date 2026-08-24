@@ -196,7 +196,6 @@ pub(crate) async fn create_array(
     .await
 }
 
-
 /// Alias used by `bpf.toml` codegen (`init_firmware_maps`).
 pub async fn create_bpf_array(
     id: ResourceId,
@@ -205,7 +204,6 @@ pub async fn create_bpf_array(
 ) -> Result<(), AllocError> {
     create_array(id, value_size, max_entries).await
 }
-
 
 /// `BPF_MAP_TYPE_DEVMAP`: ARRAY of `u32` ifindex values, tagged [`MapKind::Devmap`].
 pub async fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
@@ -223,7 +221,6 @@ pub async fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(),
     .await
 }
 
-
 /// `BPF_MAP_TYPE_PROG_ARRAY`: ARRAY of `u32` absolute XDP entry addresses.
 pub async fn create_bpf_prog_array(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
     let (raw, layout, value_size, stride) = alloc_array(4, max_entries)?;
@@ -239,7 +236,6 @@ pub async fn create_bpf_prog_array(id: ResourceId, max_entries: usize) -> Result
     )
     .await
 }
-
 
 fn check(name: &str, ok: bool, pass: &mut u32, fail: &mut u32) {
     if ok {

@@ -13,6 +13,8 @@ use crate::rx_scratch;
 pub struct ZcTx {
     pub arm: fn(payload: *mut u8, len: usize) -> bool,
     pub finish: fn(),
+    /// If `arm` returned false, whether a heap copy is still worth trying.
+    pub copy_ok: fn(len: usize) -> bool,
 }
 
 pub struct FirewallDevice<D: Driver> {
@@ -77,6 +79,13 @@ impl<D: Driver> Driver for FirewallDevice<D> {
         &mut self,
         cx: &mut core::task::Context,
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        // Copy-path XDP_TX only leaves the static queue when something calls
+        // `transmit()`. With u_pct=0 the stack has no echo/ARP to send, so
+        // bounce would sit in the 16-deep queue and drop (100% Xloss). Flush
+        // one frame per RX so bounce is paced by incoming packets, not by
+        // smoltcp TX. Limit 1: a burst flush of full-MTU copies OOMs Wi-Fi
+        // (`esp_wifi_internal_tx` → 257).
+        self.flush_egress(cx, MAX_FLUSH_PER_POLL);
         let (rx, tx) = self.inner.receive(cx)?;
         Some((
             FirewallRxToken {
@@ -145,14 +154,14 @@ impl<R: RxToken> RxToken for FirewallRxToken<R> {
                 }
                 XDP_TX => {
                     rx_scratch::end();
-                    let armed = zc.map(|z| (z.arm)(buffer.as_mut_ptr(), buffer.len())).unwrap_or(false);
+                    let frame = crate::ctx::clip_to_md_window(buffer);
+                    let armed = zc
+                        .map(|z| (z.arm)(frame.as_mut_ptr(), frame.len()))
+                        .unwrap_or(false);
                     if !armed {
-                        if zc.is_some() {
-                            error!("[zctx] arm failed len={} fallback copy", buffer.len());
-                        }
-                        if !queue_egress_frame(buffer) {
-                            error!("[xdp] TX: frame too large or queue full");
-                        }
+                        // zc miss (outstanding/NO_MEM/too big): copy. Never drop
+                        // here — skip-on-257 made 0µs echo Xloss 100%.
+                        let _ = queue_egress_frame(frame);
                     }
                     f(&mut [])
                 }
@@ -160,11 +169,15 @@ impl<R: RxToken> RxToken for FirewallRxToken<R> {
                     rx_scratch::end();
                     match take_pending() {
                         Some(ifindex) if ifindex_supported(ifindex) => {
+                            let frame = crate::ctx::clip_to_md_window(buffer);
                             let armed = zc
-                                .map(|z| (z.arm)(buffer.as_mut_ptr(), buffer.len()))
+                                .map(|z| (z.arm)(frame.as_mut_ptr(), frame.len()))
                                 .unwrap_or(false);
-                            if !armed && !queue_egress_frame(buffer) {
-                                error!("[xdp] REDIRECT: frame too large or queue full");
+                            if !armed {
+                                let copy = zc.map(|z| (z.copy_ok)(frame.len())).unwrap_or(true);
+                                if copy && !queue_egress_frame(frame) {
+                                    error!("[xdp] REDIRECT: frame too large or queue full");
+                                }
                             }
                         }
                         Some(ifindex) => {

@@ -8,6 +8,7 @@ pub const KIND_COPY: u32 = 30;
 pub const KIND_MOVE: u32 = 31;
 pub const KIND_READBACK: u32 = 40;
 pub const KIND_DATAPATH: u32 = 50;
+pub const KIND_REBOOT: u32 = 60;
 
 pub const REGION_A: u32 = 1;
 pub const REGION_B: u32 = 2;
@@ -164,7 +165,7 @@ pub fn decode_op(buf: &[u8]) -> Result<HotLoadOp<'_>, DecodeError> {
                 let v = read_varint(buf, &mut i)? as u32;
                 match v {
                     KIND_SWAP | KIND_HOT_SWAP | KIND_UPLOAD | KIND_COPY | KIND_MOVE
-                    | KIND_READBACK | KIND_DATAPATH => {}
+                    | KIND_READBACK | KIND_DATAPATH | KIND_REBOOT => {}
                     _ => return Err(DecodeError::UnknownKind),
                 }
                 kind = Some(v);

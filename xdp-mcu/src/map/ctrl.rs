@@ -96,7 +96,6 @@ pub async fn create_map(cmd: MapCreateCmd) -> Result<ResourceId, MapCtrlError> {
     Ok(id)
 }
 
-
 /// Destroy a map. Fails with [`MapCtrlError::InUse`] if any XDP program holds it.
 pub async fn destroy_map(id: ResourceId) -> Result<(), MapCtrlError> {
     match RawResource::users(id).await {
@@ -110,4 +109,3 @@ pub async fn destroy_map(id: ResourceId) -> Result<(), MapCtrlError> {
         Err(MapCtrlError::NotFound)
     }
 }
-

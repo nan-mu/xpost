@@ -190,17 +190,22 @@ fn invoke_slot_md(slot: SlotId, ctx: &mut super::ctx::XdpMd) -> i32 {
 
 fn invoke_slot(slot: SlotId, data: &mut [u8]) -> i32 {
     if !prog_table::is_loaded(slot) {
+        super::ctx::clear_window();
         return XDP_PASS;
     }
     let mut ctx = super::ctx::XdpMd::from_buf(data);
-    invoke_slot_md(slot, &mut ctx)
+    let res = invoke_slot_md(slot, &mut ctx);
+    super::ctx::record_window(&ctx);
+    res
 }
 
 /// RX hook: AOT runs **in place** on the Wi-Fi DMA slice so `XDP_TX` can
-/// `tx_by_ref` the same buffer. Scratch is not used here (`adjust_head` grow
-/// still needs scratch and is not on the zero-copy TX path).
+/// `tx_by_ref` the same buffer. `adjust_tail` shrink is visible via
+/// [`super::ctx::clip_to_md_window`]. Scratch is not used here (`adjust_head`
+/// grow still needs scratch and is not on the zero-copy TX path).
 pub fn xdp(data: &mut [u8]) -> i32 {
     let Some(slot) = mount::try_rx_slot() else {
+        super::ctx::clear_window();
         return XDP_PASS;
     };
     invoke_slot(slot, data)

@@ -311,7 +311,6 @@ impl BpfHashMapBuilder {
         }
         Ok(id)
     }
-
 }
 
 unsafe fn drop_hash(ptr: *mut u8) {
@@ -366,4 +365,3 @@ pub async fn create_bpf_hash(
             }
         })
 }
-

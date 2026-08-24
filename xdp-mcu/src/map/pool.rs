@@ -250,7 +250,6 @@ impl RawResource {
         Some(f(unsafe { resource.as_ref() }))
     }
 
-
     /// Mutably access a pooled resource under the write lock.
     ///
     /// # Safety contract
@@ -261,7 +260,6 @@ impl RawResource {
         let resource = table.get_mut(&id)?;
         Some(f(unsafe { resource.as_mut() }))
     }
-
 
     /// Remove a resource; [`Drop`] returns memory to talc.
     ///
@@ -276,19 +274,16 @@ impl RawResource {
         table.remove(&id).is_some()
     }
 
-
     /// Whether `id` is present in the pool.
     pub async fn contains(id: ResourceId) -> bool {
         let guard = POOL.read().await;
         guard.as_ref().is_some_and(|t| t.contains_key(&id))
     }
 
-
     pub async fn users(id: ResourceId) -> Option<u32> {
         let guard = POOL.read().await;
         Some(guard.as_ref()?.get(&id)?.users)
     }
-
 
     /// Increment program refcount. Returns `false` if map missing.
     pub async fn add_user(id: ResourceId) -> bool {
@@ -314,7 +309,6 @@ impl RawResource {
         true
     }
 
-
     /// Decrement program refcount. Returns `false` if map missing.
     pub async fn remove_user(id: ResourceId) -> bool {
         let mut guard = POOL.write().await;
@@ -326,14 +320,12 @@ impl RawResource {
         true
     }
 
-
     /// Allocate the lowest free Id in `0..max_id`.
     pub async fn alloc_id(max_id: ResourceId) -> Option<ResourceId> {
         let guard = POOL.read().await;
         let table = guard.as_ref()?;
         (0..max_id).find(|id| !table.contains_key(id))
     }
-
 }
 
 /// Return a `&'static` reference to the talc allocator cell.

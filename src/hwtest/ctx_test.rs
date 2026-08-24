@@ -1,11 +1,11 @@
 //! Crafted XDP contexts + multi-pass R/W checks (helpers + AOT).
 
+use log::info;
 use xdp_mcu::ctx::XdpMd;
 use xdp_mcu::helper::dynptr::{BpfDynptr, ContigObj};
 use xdp_mcu::helper_dispatcher;
 use xdp_mcu::map::FIRMWARE_HAS_ARRAY;
 use xdp_mcu::xdp;
-use log::info;
 
 const BPF_FUNC_XDP_ADJUST_HEAD: usize = 44;
 const BPF_FUNC_XDP_LOAD_BYTES: usize = 189;
