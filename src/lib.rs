@@ -20,5 +20,7 @@ pub mod hwtest;
 pub mod log_gate;
 #[cfg(fw_us_map_crud)]
 pub mod map_crud_op;
+#[cfg(fw_us_hot_load)]
+pub mod paper_timer;
 pub mod sta;
 pub mod wifi_zctx;

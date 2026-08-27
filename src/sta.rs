@@ -217,6 +217,8 @@ pub fn start_udp_tasks(spawner: Spawner, stack: Stack<'static>) {
     spawner.spawn(echo_udp_task(stack).unwrap());
     #[cfg(any(fw_us_hot_load, fw_us_map_crud))]
     spawner.spawn(ctrl_udp_task(stack).unwrap());
+    #[cfg(fw_us_hot_load)]
+    spawner.spawn(crate::paper_timer::paper_datapath_timer_task().unwrap());
 }
 
 #[embassy_executor::task]
@@ -413,6 +415,7 @@ fn intern_ctrl_map_name(name: &str) -> Option<&'static str> {
         "rate_state" => Some("rate_state"),
         "params" => Some("params"),
         "stats" => Some("stats"),
+        "rxcnt" => Some("rxcnt"),
         "decisions" => Some("decisions"),
         "decision_w" => Some("decision_w"),
         _ => None,
@@ -540,9 +543,10 @@ async fn apply_map_create<'a>(op: MapCrudOp<'a>) -> MapCrudAck<'a> {
                 dp::enable();
                 return map_crud_bad(op.kind, "");
             }
-            dp::enable();
+            // Leave datapath off so host can keep using :8081 (paper XDP
+            // TX/DROPs control). Callers that need RX call DATAPATH enable.
             trace_log!(
-                "[CTRL][MAP] CREATE map={} id={} aot=0x{:x}",
+                "[CTRL][MAP] CREATE map={} id={} aot=0x{:x} (dp left disabled)",
                 name,
                 id,
                 op.aot_addr
@@ -735,7 +739,7 @@ async fn read_storage(id: u32) -> Option<&'static [u8]> {
 
 #[cfg(fw_us_hot_load)]
 async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
-    use hot_load_op::{DATAPATH_DISABLE, DATAPATH_ENABLE};
+    use hot_load_op::{DATAPATH_DISABLE, DATAPATH_ENABLE, DATAPATH_ENABLE_FOR};
     use xdp_mcu::datapath as dp2;
     use xdp_mcu::mount::try_rx_slot;
     use xdp_mcu::program::ProgramError;
@@ -942,6 +946,14 @@ async fn apply_hot_load(op: HotLoadOp<'_>) -> HotLoadOpAck {
                 hot_ack(&op, hot_load_op::STATUS_OK, "", 0, 0, 0, 0)
             }
             DATAPATH_ENABLE => {
+                dp2::enable();
+                hot_ack(&op, hot_load_op::STATUS_OK, "", 0, 0, 0, 0)
+            }
+            DATAPATH_ENABLE_FOR => {
+                if op.dram_slot == 0 {
+                    return bad_hot_ack(&op, "EnableForMs");
+                }
+                crate::paper_timer::arm_disable_after_ms(op.dram_slot);
                 dp2::enable();
                 hot_ack(&op, hot_load_op::STATUS_OK, "", 0, 0, 0, 0)
             }

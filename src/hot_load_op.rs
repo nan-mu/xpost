@@ -16,7 +16,10 @@ pub const REGION_2: u32 = 3;
 pub const REGION_3: u32 = 4;
 
 pub const DATAPATH_DISABLE: u32 = 1;
+/// Enable datapath (no auto-disable).
 pub const DATAPATH_ENABLE: u32 = 2;
+/// Enable datapath and auto-disable after `dram_slot` milliseconds (paper blast).
+pub const DATAPATH_ENABLE_FOR: u32 = 3;
 
 pub const STORAGE_SRAM_A: u32 = 1;
 pub const STORAGE_SRAM_B: u32 = 2;
@@ -151,7 +154,7 @@ pub fn decode_op(buf: &[u8]) -> Result<HotLoadOp<'_>, DecodeError> {
     let mut i = 0usize;
     let mut kind: Option<u32> = None;
     let mut region: u32 = REGION_A;
-    let mut dram_slot: u32 = 1;
+    let mut dram_slot: u32 = 0;
     let mut payload: &[u8] = &[];
     let mut src: u32 = 0;
     let mut dst: u32 = 0;
