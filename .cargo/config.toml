@@ -1,32 +1,11 @@
-[target.riscv32imc-unknown-none-elf]
-# --no-addresses: do not addr2line-decode hex in UART log (avoids spam after DEBUG lines).
-runner = "espflash flash --monitor --no-addresses --chip esp32c3 --partition-table partitions.csv"
-rustflags = [
-  # Required to obtain backtraces (e.g. when using the "esp-backtrace" crate.)
-  # NOTE: May negatively impact performance of produced code
-  "-C", "force-frame-pointers",
-  # Steal RX `eb` on XDP_TX: PacketBuffer::drop calls this symbol.
-  "-C", "link-arg=--wrap=esp_wifi_internal_free_rx_buffer",
-]
-
 [env]
 ESP_LOG = "info"
-# embassy-net copies this into smoltcp DeviceCapabilities (TCP window / burst).
-# Default 3 is conservative; 16 matches the software RX queue we keep.
 ESP_RADIO_CONFIG_WIFI_MAX_BURST_SIZE = "16"
-
-[build]
-# Firmware default target. Host CLI uses alias `xtask` (explicit host --target).
-target = "riscv32imc-unknown-none-elf"
-
-[unstable]
-# Plain `cargo check` / `cargo build` for the firmware target (no alias / xtask).
-build-std = ["core", "alloc"]
+# Board dir for xpost build.rs (layout/mem/bpf.toml).
+XPOST_BOARD = { value = "examples/firmware", relative = true }
 
 [alias]
-# Host CLI with std. First token must stay the builtin `run` (do not also alias `run`
-# to inject build-std, or this would inherit it and break host builds).
-# Usage: cargo xtask doctor | map | gen
-xtask = "run -p xtask --features cli --target aarch64-apple-darwin --"
-# Flash+monitor: use this instead of bare `cargo run`.
-fwrun = "run --release"
+# Root dispatcher: cargo xtask firmware doctor | cargo xtask agent | …
+xtask = "run -p xtask --target aarch64-apple-darwin --"
+# Flash the firmware example (from workspace root)
+fwrun = "run -p firmware --release"

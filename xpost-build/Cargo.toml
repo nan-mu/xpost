@@ -1,0 +1,14 @@
+[package]
+name = "xpost-build"
+version = "0.1.1"
+edition = "2024"
+publish = false
+description = "Board codegen for xpost integrators (layout/mem/bpf.toml → Rust + IRAM linker script)"
+
+[lib]
+name = "xpost_build"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+toml = "1.1.3"

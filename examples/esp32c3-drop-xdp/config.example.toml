@@ -1,0 +1,18 @@
+# Listing 1 drop bench — drop-xdp profile only. See docs/fwtest-experiments.md §4.1.
+schema_version = 1
+
+[wifi]
+ssid = "your_wifi_ssid"
+password = "your_wifi_password"
+
+[probe]
+ip = "192.168.110.142"
+reply_port = 18080
+
+[dut]
+listen_port = 8080
+ctrl_port = 8081
+
+[[tests]]
+name = "drop_xdp"
+enabled = true

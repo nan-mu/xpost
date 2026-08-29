@@ -1,92 +1,100 @@
+//! xpost board codegen: reads `XPOST_BOARD` (dir with layout/mem/bpf.toml).
+//!
+//! Integrators (e.g. examples/firmware) set `XPOST_BOARD` via `.cargo/config.toml`.
+//! Emits IRAM linker script path as `cargo:custom-sections=` for the final binary link.
+
 use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    linker_be_nice();
+    let board = match env::var_os("XPOST_BOARD") {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+            write_stub_codegen(&out_dir);
+            println!(
+                "cargo:warning=XPOST_BOARD unset; using stub mem_map (set XPOST_BOARD to a board dir for real builds)"
+            );
+            println!(
+                "cargo:custom-sections={}",
+                out_dir.join("custom-sections.x").display()
+            );
+            return;
+        }
+    };
 
-    println!("cargo:rerun-if-changed=esp32c3.bin");
-    println!("cargo:rerun-if-changed=config.toml");
+    println!("cargo:rerun-if-env-changed=XPOST_BOARD");
+    println!("cargo:rerun-if-changed={}", board.join("layout.toml").display());
+    println!("cargo:rerun-if-changed={}", board.join("mem.toml").display());
+    println!("cargo:rerun-if-changed={}", board.join("bpf.toml").display());
 
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let result = xtask::generate_fw_cfg(&manifest_dir, &out_dir).expect("xtask generate_fw_cfg");
+    let result = xpost_build::generate_runtime(&board, &out_dir)
+        .unwrap_or_else(|e| panic!("xpost board codegen ({}): {e:#}", board.display()));
 
-    for name in xtask::US_CFGS {
-        println!("cargo:rustc-check-cfg=cfg(fw_us_{name})");
-    }
-    for name in &result.enabled_us_cfgs {
-        println!("cargo:rustc-cfg=fw_us_{name}");
-    }
     for w in &result.warnings {
         println!("cargo:warning={w}");
     }
 
-    println!("cargo:rustc-link-arg=-Tlinkall.x");
-    let sections = env::var("DEP_XDP_MCU_CUSTOM_SECTIONS")
-        .expect("xdp-mcu build.rs must emit cargo:custom-sections=");
-    println!("cargo:rustc-link-arg=-T{sections}");
+    println!(
+        "cargo:custom-sections={}",
+        result.custom_sections_path.display()
+    );
 }
 
-fn linker_be_nice() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
-        let kind = &args[1];
-        let what = &args[2];
-
-        match kind.as_str() {
-            "undefined-symbol" => match what.as_str() {
-                what if what.starts_with("_defmt_") => {
-                    eprintln!();
-                    eprintln!(
-                        "💡 `defmt` not found - make sure `defmt.x` is added as a linker script and you have included `use defmt_rtt as _;`"
-                    );
-                    eprintln!();
-                }
-                "_stack_start" => {
-                    eprintln!();
-                    eprintln!("💡 Is the linker script `linkall.x` missing?");
-                    eprintln!();
-                }
-                what if what.starts_with("esp_rtos_") => {
-                    eprintln!();
-                    eprintln!(
-                        "💡 `esp-radio` has no scheduler enabled. Make sure you have initialized `esp-rtos` or provided an external scheduler."
-                    );
-                    eprintln!();
-                }
-                "embedded_test_linker_file_not_added_to_rustflags" => {
-                    eprintln!();
-                    eprintln!(
-                        "💡 `embedded-test` not found - make sure `embedded-test.x` is added as a linker script for tests"
-                    );
-                    eprintln!();
-                }
-                "free"
-                | "malloc"
-                | "calloc"
-                | "get_free_internal_heap_size"
-                | "malloc_internal"
-                | "realloc_internal"
-                | "calloc_internal"
-                | "free_internal" => {
-                    eprintln!();
-                    eprintln!(
-                        "💡 Did you forget the `esp-alloc` dependency or didn't enable the `compat` feature on it?"
-                    );
-                    eprintln!();
-                }
-                _ => (),
-            },
-            _ => {
-                std::process::exit(1);
-            }
-        }
-
-        std::process::exit(0);
-    }
-
-    println!(
-        "cargo:rustc-link-arg=--error-handling-script={}",
-        std::env::current_exe().unwrap().display()
-    );
+fn write_stub_codegen(out_dir: &PathBuf) {
+    use std::fs;
+    fs::write(
+        out_dir.join("mem_map.rs"),
+        r#"// stub — set XPOST_BOARD for real layout
+pub const IRAM_BASE: usize = 0;
+pub const ARENA_END: usize = 0;
+pub const HELPER_DISPATCHER_BASE: usize = 0;
+pub const HELPER_WINDOW_LEN: usize = 0;
+pub const HOT_SLOT_COUNT: usize = 2;
+pub const HOT_SLOT_BASES: [usize; 2] = [0, 0];
+pub const HOT_SLOT_LENS: [usize; 2] = [0, 0];
+pub const HOT_SLOT_NAMES: [&str; 2] = ["a", "b"];
+pub const HOT_SLOT_MOUNTS: [&str; 2] = ["rx", "call"];
+pub const MOUNT_RX_SLOT: Option<usize> = Some(0);
+pub const HOT_SLOT_LEN_MAX: usize = 0;
+pub const HOT_A_BASE: usize = 0;
+pub const HOT_A_LEN: usize = 0;
+pub const HOT_REGION_BASE: usize = 0;
+pub const HOT_REGION_LEN: usize = 0;
+pub const HOT_B_BASE: usize = 0;
+pub const HOT_B_LEN: usize = 0;
+pub fn assert_linked_addresses(helper_addr: usize, slot_addrs: &[usize]) {
+    let _ = (helper_addr, slot_addrs);
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        out_dir.join("hot_slots.rs"),
+        r#"// stub hot slots
+pub fn slot_buf(_i: usize) -> (*mut u8, usize) {
+    (core::ptr::null_mut(), 0)
+}
+pub fn slot_link_addrs() -> [usize; 2] {
+    [0, 0]
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        out_dir.join("bpf_maps.rs"),
+        r#"pub async fn init_firmware_maps() -> Result<(), allocator_api2::alloc::AllocError> { Ok(()) }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        out_dir.join("aot_map_bind.rs"),
+        r#"pub fn bind_aot_map_addrs() {}
+pub const AOT_MAP_BIND_COUNT: usize = 0;
+pub const AOT_MAP_USER_NAMES: &[&str] = &[];
+"#,
+    )
+    .unwrap();
+    fs::write(out_dir.join("custom-sections.x"), "/* stub */\n").unwrap();
 }

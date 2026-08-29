@@ -1,0 +1,32 @@
+# Full XDP DUT — drop-xdp / echo / wl / rate / suite (test0). See docs/test0.md.
+schema_version = 1
+
+[wifi]
+ssid = "your_wifi_ssid"
+password = "your_wifi_password"
+
+[probe]
+ip = "192.168.110.142"
+reply_port = 18080
+
+[dut]
+listen_port = 8080
+ctrl_port = 8081
+
+[[tests]]
+name = "test0"
+enabled = true
+
+[[tests.seeds]]
+map = "firewall_array"
+index = 0
+ip = "10.0.0.1"
+
+[[tests.seeds]]
+map = "firewall_array"
+index = 1
+ip = "10.0.0.2"
+
+[[tests]]
+name = "drop_xdp"
+enabled = true

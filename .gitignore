@@ -25,4 +25,7 @@ target/
 # Ignore .DS_Store file in mac
 **/.DS_Store
 
-config.toml
+# Local DUT secrets (track config.example.toml instead)
+/config.toml
+examples/*/config.toml
+!**/.cargo/config.toml
