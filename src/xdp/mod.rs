@@ -4,24 +4,24 @@
 //! snapshot. No other module owns an XDP activity switch or executable entry.
 
 mod device;
+mod global;
+mod xdp_table;
 
 pub use device::{Device, ZcTx};
+pub use global::XDP_RT;
+pub use xdp_table::{XdpImage, XdpImageId, XdpTable, XdpTableError};
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::Ordering;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::{Mutex, MutexGuard};
-use embassy_sync::once_lock::OnceLock;
+use global::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY};
 
 /// Maximum slots represented by the first XdpRt implementation.
 const MAX_SLOTS: usize = 4;
 const MAX_MAP_REFS: usize = 16;
 const NO_SLOT: usize = usize::MAX;
-
-/// Library-owned XDP runtime. Its lock is intentionally the underlying
-/// `OnceLock<Mutex<_>>`, rather than a wrapper type.
-pub static XDP_RT: OnceLock<Mutex<CriticalSectionRawMutex, XdpRt>> = OnceLock::new();
 
 /// A statically allocated executable slot. This is the stable-Rust equivalent
 /// of the `SyncUnsafeCell<[u8; N]>` shown in the design document.
@@ -53,8 +53,16 @@ pub enum Error {
     AlreadyLeased,
     NotLeased,
     ImageTooLarge,
+    UnknownImage,
+    Table(XdpTableError),
     MapNotFound,
     MapRefLimit,
+}
+
+impl From<XdpTableError> for Error {
+    fn from(error: XdpTableError) -> Self {
+        Self::Table(error)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -68,15 +76,12 @@ unsafe impl Send for SlotMeta {}
 
 /// Manages registered executable slots and their lease state.
 pub struct XdpRt {
+    table: XdpTable,
     slots: heapless::Vec<SlotMeta, MAX_SLOTS>,
     primary: usize,
     leased: bool,
     map_refs: heapless::Vec<crate::map::MapIdx, MAX_MAP_REFS>,
 }
-
-static ACTIVE: AtomicBool = AtomicBool::new(false);
-static PRIMARY_ENTRY: AtomicUsize = AtomicUsize::new(0);
-static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 impl XdpRt {
     /// Register the first slot and publish the runtime singleton.
@@ -84,6 +89,7 @@ impl XdpRt {
         slot: &'static Slot<N>,
     ) -> Result<MutexGuard<'static, CriticalSectionRawMutex, XdpRt>, Error> {
         let mut rt = Self {
+            table: XdpTable::new(),
             slots: heapless::Vec::new(),
             primary: NO_SLOT,
             leased: false,
@@ -113,7 +119,9 @@ impl XdpRt {
         if (ptr as usize) & 0b11 != 0 || N & 0b11 != 0 {
             return Err(Error::UnalignedSlot);
         }
-        let end = (ptr as usize).checked_add(N).ok_or(Error::OverlappingSlot)?;
+        let end = (ptr as usize)
+            .checked_add(N)
+            .ok_or(Error::OverlappingSlot)?;
         if self.slots.iter().any(|existing| {
             let existing_start = existing.ptr as usize;
             let existing_end = existing_start.saturating_add(existing.len);
@@ -135,26 +143,44 @@ impl XdpRt {
         Ok(id)
     }
 
-    /// Copy a cold-boot image into the primary slot. Map binding and image
-    /// metadata validation intentionally remain TODO for the MapRt phase.
-    pub fn load_primary(&mut self, image: &[u8]) -> Result<(), Error> {
+    /// Register a board-owned XDP image in Flash.
+    pub fn register_image(
+        &mut self,
+        name: &'static str,
+        image: &'static [u8],
+    ) -> Result<XdpImageId, Error> {
         if self.leased {
             return Err(Error::Busy);
         }
-        if image.is_empty() {
-            return Err(Error::EmptySlot);
+        Ok(self.table.register(name, image)?)
+    }
+
+    /// Return the immutable Flash image catalogue.
+    pub fn table(&self) -> &XdpTable {
+        &self.table
+    }
+
+    /// Copy a registered Flash image into the primary executable slot.
+    pub fn load_primary(&mut self, image_id: XdpImageId) -> Result<(), Error> {
+        if self.leased {
+            return Err(Error::Busy);
         }
+        let image = self.table.get(image_id).ok_or(Error::UnknownImage)?;
         let slot = self.slots.get_mut(self.primary).ok_or(Error::NotLoaded)?;
-        if image.len() > slot.len {
+        if image.bytes().len() > slot.len {
             return Err(Error::ImageTooLarge);
         }
         unsafe {
-            core::ptr::copy_nonoverlapping(image.as_ptr(), slot.ptr, image.len());
-            core::ptr::write_bytes(slot.ptr.add(image.len()), 0, slot.len - image.len());
+            core::ptr::copy_nonoverlapping(image.bytes().as_ptr(), slot.ptr, image.bytes().len());
+            core::ptr::write_bytes(
+                slot.ptr.add(image.bytes().len()),
+                0,
+                slot.len - image.bytes().len(),
+            );
             #[cfg(target_arch = "riscv32")]
             core::arch::asm!("fence.i");
         }
-        slot.loaded_len = image.len();
+        slot.loaded_len = image.bytes().len();
         Ok(())
     }
 
