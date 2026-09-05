@@ -5,9 +5,7 @@ use alloc::vec::Vec;
 
 use allocator_api2::alloc::AllocError;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::rwlock::{RwLockReadGuard, RwLockWriteGuard};
-
-use crate::sync::RwCell;
+use embassy_sync::rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::array::{self, BpfArrayMap};
 use super::builder::{CompleteBuilder, MapType};
@@ -24,7 +22,9 @@ pub type MapIdx = usize;
 pub type ResourceId = MapIdx;
 
 /// Global map runtime singleton.
-pub static MAP_RT: RwCell<Option<MapRt>> = RwCell::new(None);
+/// Library-owned map runtime. The underlying lock stays visible instead of
+/// being hidden behind a second synchronization wrapper.
+pub static MAP_RT: RwLock<CriticalSectionRawMutex, Option<MapRt>> = RwLock::new(None);
 
 /// Whether talc heap was claimed via [`claim_heap`].
 static mut HEAP_CLAIMED: bool = false;
@@ -375,7 +375,9 @@ impl MapGuard<'_> {
             return Err(GuardError::TypeMismatch);
         }
         drop(self);
-        let mut guard = MAP_RT.try_write().ok_or(GuardError::TypeMismatch)?;
+        let mut guard = MAP_RT
+            .try_write()
+            .map_err(|_| GuardError::TypeMismatch)?;
         let rt = guard.as_mut().ok_or(GuardError::TypeMismatch)?;
         let meta = rt.meta.get_mut(idx).ok_or(GuardError::TypeMismatch)?;
         ringbuf::take_rx_consumer(meta.storage.as_ringbuf_map_mut()).ok_or(GuardError::TypeMismatch)
@@ -412,21 +414,21 @@ impl MapMutGuard<'_> {
 // —— crate-internal pool accessors (XDP helpers) ——
 
 pub(crate) fn try_read_storage<R>(idx: MapIdx, f: impl FnOnce(&RawResource) -> R) -> Option<R> {
-    let guard = MAP_RT.try_read()?;
+    let guard = MAP_RT.try_read().ok()?;
     let rt = guard.as_ref()?;
     let res = rt.meta.get(idx)?;
     Some(f(&res.storage))
 }
 
 pub(crate) fn try_write_storage<R>(idx: MapIdx, f: impl FnOnce(&mut RawResource) -> R) -> Option<R> {
-    let mut guard = MAP_RT.try_write()?;
+    let mut guard = MAP_RT.try_write().ok()?;
     let rt = guard.as_mut()?;
     let res = rt.meta.get_mut(idx)?;
     Some(f(&mut res.storage))
 }
 
 pub(crate) fn try_write_rt<R>(f: impl FnOnce(&mut MapRt) -> R) -> Option<R> {
-    let mut guard = MAP_RT.try_write()?;
+    let mut guard = MAP_RT.try_write().ok()?;
     let rt = guard.as_mut()?;
     Some(f(rt))
 }
@@ -434,6 +436,7 @@ pub(crate) fn try_write_rt<R>(f: impl FnOnce(&mut MapRt) -> R) -> Option<R> {
 pub(crate) fn contains(idx: MapIdx) -> bool {
     MAP_RT
         .try_read()
+        .ok()
         .and_then(|g| g.as_ref().map(|rt| idx < rt.meta.len()))
         .unwrap_or(false)
 }
@@ -458,7 +461,7 @@ pub(crate) async fn add_user(idx: MapIdx) -> bool {
 }
 
 pub(crate) fn add_user_sync(idx: MapIdx) -> bool {
-    let mut guard = match MAP_RT.try_write() {
+    let mut guard = match MAP_RT.try_write().ok() {
         Some(g) => g,
         None => return false,
     };
@@ -476,6 +479,24 @@ pub(crate) fn add_user_sync(idx: MapIdx) -> bool {
 
 pub(crate) async fn remove_user(idx: MapIdx) -> bool {
     let mut guard = MAP_RT.write().await;
+    let rt = match guard.as_mut() {
+        Some(r) => r,
+        None => return false,
+    };
+    let res = match rt.meta.get_mut(idx) {
+        Some(r) => r,
+        None => return false,
+    };
+    res.storage.users = res.storage.users.saturating_sub(1);
+    true
+}
+
+/// Drop an AOT image's map reference from synchronous XDP control-plane code.
+pub(crate) fn remove_user_sync(idx: MapIdx) -> bool {
+    let mut guard = match MAP_RT.try_write().ok() {
+        Some(g) => g,
+        None => return false,
+    };
     let rt = match guard.as_mut() {
         Some(r) => r,
         None => return false,

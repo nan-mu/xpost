@@ -1,9 +1,8 @@
 use embassy_net::driver::{Driver, RxToken, TxToken};
 use log::error;
 
-use crate::datapath;
 use crate::redirect::{
-    XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX, clear_pending, ifindex_supported,
+    XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX, clear_pending,
     queue_egress_frame, requeue_egress_front, take_egress_frame, take_pending,
 };
 use crate::rx_scratch;
@@ -17,19 +16,19 @@ pub struct ZcTx {
     pub copy_ok: fn(len: usize) -> bool,
 }
 
-pub struct FirewallDevice<D: Driver> {
+pub struct Device<D: Driver> {
     inner: D,
-    xdp_enable: bool,
-    zc: Option<ZcTx>,
+    zc: ZcTx,
     /// When true (default), pace XDP_TX egress on each `receive()` poll.
     flush_egress_on_rx: bool,
 }
 
-impl<D: Driver> FirewallDevice<D> {
-    pub fn new(device: D, xdp_enable: bool, zc: Option<ZcTx>) -> Self {
+impl<D: Driver> Device<D> {
+    /// Construct an XDP device with its required board-specific zero-copy TX
+    /// implementation. There is no copy-only constructor.
+    pub fn new(device: D, zc: ZcTx) -> Self {
         Self {
             inner: device,
-            xdp_enable,
             zc,
             flush_egress_on_rx: true,
         }
@@ -74,13 +73,13 @@ impl<D: Driver> FirewallDevice<D> {
 /// One XDP bounce per stack `transmit()` so echo can still get a TX token.
 const MAX_FLUSH_PER_POLL: usize = 1;
 
-impl<D: Driver> Driver for FirewallDevice<D> {
+impl<D: Driver> Driver for Device<D> {
     type RxToken<'a>
-        = FirewallRxToken<D::RxToken<'a>>
+        = DeviceRxToken<D::RxToken<'a>>
     where
         Self: 'a;
     type TxToken<'a>
-        = FirewallTxToken<D::TxToken<'a>>
+        = DeviceTxToken<D::TxToken<'a>>
     where
         Self: 'a;
 
@@ -99,12 +98,11 @@ impl<D: Driver> Driver for FirewallDevice<D> {
         }
         let (rx, tx) = self.inner.receive(cx)?;
         Some((
-            FirewallRxToken {
+            DeviceRxToken {
                 inner: rx,
-                xdp_enable: self.xdp_enable,
                 zc: self.zc,
             },
-            FirewallTxToken { inner: tx },
+            DeviceTxToken { inner: tx },
         ))
     }
 
@@ -114,7 +112,7 @@ impl<D: Driver> Driver for FirewallDevice<D> {
         self.flush_egress(cx, MAX_FLUSH_PER_POLL);
         self.inner
             .transmit(cx)
-            .map(|tx| FirewallTxToken { inner: tx })
+            .map(|tx| DeviceTxToken { inner: tx })
     }
 
     fn link_state(&mut self, cx: &mut core::task::Context) -> embassy_net::driver::LinkState {
@@ -130,24 +128,23 @@ impl<D: Driver> Driver for FirewallDevice<D> {
     }
 }
 
-pub struct FirewallRxToken<R: RxToken> {
+pub struct DeviceRxToken<R: RxToken> {
     inner: R,
-    xdp_enable: bool,
-    zc: Option<ZcTx>,
+    zc: ZcTx,
 }
 
-impl<R: RxToken> RxToken for FirewallRxToken<R> {
+impl<R: RxToken> RxToken for DeviceRxToken<R> {
     fn consume<Ret, F>(self, f: F) -> Ret
     where
         F: FnOnce(&mut [u8]) -> Ret,
     {
         let zc = self.zc;
         let ret = self.inner.consume(|buffer| {
-            if !self.xdp_enable || !datapath::is_active() {
+            if !crate::xdp::is_leased() {
                 return f(buffer);
             }
             clear_pending();
-            let action = crate::xdp(buffer);
+            let action = crate::xdp::execute(buffer);
             match action {
                 XDP_PASS => {
                     rx_scratch::end();
@@ -167,40 +164,15 @@ impl<R: RxToken> RxToken for FirewallRxToken<R> {
                     rx_scratch::end();
                     f(&mut [])
                 }
-                XDP_TX => {
+                XDP_TX | XDP_REDIRECT => {
                     rx_scratch::end();
+                    let _ = take_pending();
                     let frame = crate::ctx::clip_to_md_window(buffer);
-                    let armed = zc
-                        .map(|z| (z.arm)(frame.as_mut_ptr(), frame.len()))
-                        .unwrap_or(false);
+                    let armed = (zc.arm)(frame.as_mut_ptr(), frame.len());
                     if !armed {
                         // zc miss (outstanding/NO_MEM/too big): copy. Never drop
                         // here — skip-on-257 made 0µs echo Xloss 100%.
                         let _ = queue_egress_frame(frame);
-                    }
-                    f(&mut [])
-                }
-                XDP_REDIRECT => {
-                    rx_scratch::end();
-                    match take_pending() {
-                        Some(ifindex) if ifindex_supported(ifindex) => {
-                            let frame = crate::ctx::clip_to_md_window(buffer);
-                            let armed = zc
-                                .map(|z| (z.arm)(frame.as_mut_ptr(), frame.len()))
-                                .unwrap_or(false);
-                            if !armed {
-                                let copy = zc.map(|z| (z.copy_ok)(frame.len())).unwrap_or(true);
-                                if copy && !queue_egress_frame(frame) {
-                                    error!("[xdp] REDIRECT: frame too large or queue full");
-                                }
-                            }
-                        }
-                        Some(ifindex) => {
-                            error!("[xdp] redirect ifindex {} unsupported", ifindex);
-                        }
-                        None => {
-                            error!("[xdp] XDP_REDIRECT without pending ifindex");
-                        }
                     }
                     f(&mut [])
                 }
@@ -212,19 +184,17 @@ impl<R: RxToken> RxToken for FirewallRxToken<R> {
                 }
             }
         });
-        if let Some(zc) = zc {
-            (zc.finish)();
-        }
+        (zc.finish)();
         ret
     }
 }
 
 /// smoltcp TX token: DHCP/ARP/UDP go straight to the NIC (no TX XDP).
-pub struct FirewallTxToken<T: TxToken> {
+pub struct DeviceTxToken<T: TxToken> {
     inner: T,
 }
 
-impl<T: TxToken> TxToken for FirewallTxToken<T> {
+impl<T: TxToken> TxToken for DeviceTxToken<T> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,

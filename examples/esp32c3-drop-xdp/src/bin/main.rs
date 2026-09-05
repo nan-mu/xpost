@@ -30,9 +30,14 @@ extern crate alloc;
 esp_bootloader_esp_idf::esp_app_desc!();
 
 const MAP_HEAP_SIZE: usize = xpost::map::HEAP_SIZE;
+const XDP_SLOT_LEN: usize = xpost::mem_map::HOT_A_LEN;
 
 #[link_section = ".bss"]
 static mut MAP_HEAP: [u8; MAP_HEAP_SIZE] = [0; MAP_HEAP_SIZE];
+
+#[unsafe(no_mangle)]
+#[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".xdp.hotload_0"))]
+static XDP_SLOT: xpost::xdp::Slot<XDP_SLOT_LEN> = xpost::xdp::Slot::new([0; XDP_SLOT_LEN]);
 
 #[allow(
     clippy::large_stack_frames,
@@ -58,9 +63,6 @@ async fn main(spawner: Spawner) {
     }
     init().await.expect("[Init][MAP] map runtime init failed");
     init_log!("[Init][MAP] MAP resource pool initialized");
-    xpost::mount::init();
-    init_log!("[Init][Mount] boot mounts loaded");
-
     init_firmware_maps()
         .await
         .expect("[Init][MAP] talc pool OOM for bpf.toml maps");
@@ -86,11 +88,22 @@ async fn main(spawner: Spawner) {
         .spawn(evt_async::run(rx))
         .expect("dut_evt consumer");
 
-    init_log!("[Init][XDP] load AOT payload into mount slot");
-    xpost::load_boot_image(include_bytes!(concat!(
+    init_log!("[Init][XDP] register, load, and lease AOT slot");
+    let mut xdp_rt = xpost::xdp::XdpRt::init(&XDP_SLOT)
+        .await
+        .expect("[Init][XDP] runtime init failed");
+    xdp_rt.load_primary(include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/esp32c3.bin"
-    )));
+    )))
+    .expect("[Init][XDP] image too large");
+    let maps = map_rt().await.expect("[Init][MAP] map_rt lease");
+    xdp_rt
+        .lease(Some(&maps))
+        .await
+        .expect("[Init][XDP] map/image lease failed");
+    drop(maps);
+    drop(xdp_rt);
 
     let (controller, sta_stack, sta_runner) = sta::init_sta(peripherals.WIFI);
 

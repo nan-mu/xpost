@@ -2,7 +2,7 @@
 ESP_LOG = "info"
 ESP_RADIO_CONFIG_WIFI_MAX_BURST_SIZE = "16"
 # Board dir for xpost build.rs (layout/mem/bpf.toml).
-XPOST_BOARD = { value = "examples/firmware", relative = true }
+XPOST_BOARD = { value = "examples/esp32c3-firmware", relative = true }
 
 [alias]
 # Root dispatcher: cargo xtask firmware doctor | cargo xtask agent | …

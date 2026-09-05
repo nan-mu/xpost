@@ -79,7 +79,7 @@ static TABLE: Mutex<Cell<TableInner>> = Mutex::new(Cell::new(TableInner {
 
 static TAIL_DEPTH: AtomicU8 = AtomicU8::new(0);
 
-/// Saved by [`super::part::xdp`] before `jalr` into HOT slot 0 — used by successful tail_call.
+/// Saved by the XDP runtime before `jalr` into the leased entry — used by successful tail calls.
 ///
 /// Must include RV32 callee-saved regs (`s0`–`s11`): `bpf_tail_call` restores SP/RA and
 /// jumps to another program without running the helper/A epilogue, so those saves on the
@@ -243,7 +243,7 @@ pub fn bump_tail_depth() -> bool {
     true
 }
 
-/// Transfer to `entry` with `ctx` in `a0`, restoring the [`part::xdp`](super::part::xdp) frame.
+/// Transfer to `entry` with `ctx` in `a0`, restoring the XDP runtime frame.
 ///
 /// Restores SP, RA, and callee-saved `s0`–`s11` saved before the HOT_A `jalr`, then
 /// `jr entry`. The callee must return to that RA (same epilogue as slot-0 entry).

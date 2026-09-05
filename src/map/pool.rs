@@ -212,7 +212,7 @@ impl RawResource {
     }
 
     pub(crate) async fn destroy(id: ResourceId) -> bool {
-        let mut guard = match runtime::MAP_RT.try_write() {
+        let mut guard = match runtime::MAP_RT.try_write().ok() {
             Some(g) => g,
             None => return false,
         };
@@ -328,6 +328,7 @@ pub(crate) mod pool_access {
         pub fn iter_mut(&mut self) -> PoolIterMut {
             let len = runtime::MAP_RT
                 .try_read()
+                .ok()
                 .and_then(|g| g.as_ref().map(|rt| rt.meta.len()))
                 .unwrap_or(0);
             PoolIterMut { next: 0, len }
@@ -413,11 +414,11 @@ pub(crate) mod pool_access {
     }
 
     pub fn try_write() -> Option<PoolWriteGuard<'static>> {
-        runtime::MAP_RT.try_write().map(|guard| PoolWriteGuard { guard })
+        runtime::MAP_RT.try_write().ok().map(|guard| PoolWriteGuard { guard })
     }
 
     pub fn try_read() -> Option<PoolReadGuard<'static>> {
-        runtime::MAP_RT.try_read().map(|guard| PoolReadGuard { guard })
+        runtime::MAP_RT.try_read().ok().map(|guard| PoolReadGuard { guard })
     }
 }
 

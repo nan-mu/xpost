@@ -11,7 +11,7 @@ use esp_hal::{peripherals::WIFI, rng::Rng};
 use esp_radio::wifi::{self as wifi_radio, Config, ControllerConfig, sta::StationConfig};
 use log::error;
 use static_cell::StaticCell;
-use xpost::driver::FirewallDevice;
+use xpost::xdp::Device;
 
 static STACK: StaticCell<Stack<'static>> = StaticCell::new();
 static STACK_RESOURCES: StaticCell<StackResources<4>> = StaticCell::new();
@@ -28,7 +28,7 @@ pub fn init_sta(
 ) -> (
     wifi_radio::WifiController<'static>,
     Stack<'static>,
-    embassy_net::Runner<'static, FirewallDevice<wifi_radio::Interface<'static>>>,
+    embassy_net::Runner<'static, Device<wifi_radio::Interface<'static>>>,
 ) {
     crate::init_log!("[Init][STA] initializing (drop_xdp)");
     log_cfg();
@@ -60,7 +60,7 @@ pub fn init_sta(
     );
 
     crate::wifi_zctx::init();
-    let xdp_device = FirewallDevice::new(sta, XDP_ENABLE, Some(crate::wifi_zctx::HOOKS));
+    let xdp_device = Device::new(sta, crate::wifi_zctx::HOOKS);
 
     let sta_config = embassy_net::Config::dhcpv4(Default::default());
     let rng = Rng::new();

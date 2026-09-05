@@ -1,17 +1,14 @@
 //! Userspace access: write-lock then touch native containers.
 //!
-//! # Datapath contract
+//! # Runtime contract
 //!
 //! - **Hash / Array** ([`with_hash_map`] / [`with_array_map`]): only while the XDP
-//!   datapath is **stopped** ([`crate::datapath::require_stopped`]). Use
-//!   boot seed before [`crate::datapath::enable`], or
-//!   [`crate::datapath::disable`] before mutating rules.
+//!   XDP is not leased. Seed them before `XdpRt::lease`, or after
+//!   `XdpRt::release`.
 //! - **Ringbuf** ([`with_ringbuf_map`]): allowed while datapath is running.
 //!   Use [`BpfRingBuf::try_consume`] to drain.
 
 use log::error;
-
-use crate::datapath;
 
 use super::array::BpfArrayMap;
 use super::hash::BpfHashMap;
@@ -20,6 +17,15 @@ use super::ops::MapError;
 use super::pool::{MapKind, pool_try_read};
 use super::ringbuf::{BpfRingBuf, RingbufMap};
 use super::runtime::{self, MAP_RT};
+
+/// Hash and array mutation shares storage with AOT helpers.  The runtime
+/// lease is the only authority that grants those helpers access.
+fn require_unleased() -> Result<(), MapError> {
+    if crate::xdp::is_leased() {
+        return Err(MapError::Busy);
+    }
+    Ok(())
+}
 
 fn kind_label(kind: Option<MapKind>) -> &'static str {
     match kind {
@@ -48,7 +54,7 @@ pub async fn with_hash_map<R>(
     name: &str,
     f: impl FnOnce(&mut BpfHashMap) -> R,
 ) -> Result<R, MapError> {
-    datapath::require_stopped()?;
+    require_unleased()?;
     let id = resolve_named_id(name)?;
     let mut guard = MAP_RT.write().await;
     let rt = match guard.as_mut() {
@@ -109,7 +115,7 @@ pub async fn with_array_map<R>(
     name: &str,
     f: impl FnOnce(&mut BpfArrayMap) -> R,
 ) -> Result<R, MapError> {
-    datapath::require_stopped()?;
+    require_unleased()?;
     let id = resolve_named_id(name)?;
     let mut guard = MAP_RT.write().await;
     let rt = match guard.as_mut() {
