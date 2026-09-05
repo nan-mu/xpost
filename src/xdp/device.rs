@@ -2,8 +2,8 @@ use embassy_net::driver::{Driver, RxToken, TxToken};
 use log::error;
 
 use crate::redirect::{
-    XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX, clear_pending,
-    queue_egress_frame, requeue_egress_front, take_egress_frame, take_pending,
+    XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT, XDP_TX, queue_egress_frame,
+    requeue_egress_front, take_egress_frame, take_pending,
 };
 use crate::rx_scratch;
 
@@ -140,11 +140,9 @@ impl<R: RxToken> RxToken for DeviceRxToken<R> {
     {
         let zc = self.zc;
         let ret = self.inner.consume(|buffer| {
-            if !crate::xdp::is_leased() {
+            let Some(action) = crate::xdp::run_ingress(buffer) else {
                 return f(buffer);
-            }
-            clear_pending();
-            let action = crate::xdp::execute(buffer);
+            };
             match action {
                 XDP_PASS => {
                     rx_scratch::end();

@@ -251,7 +251,8 @@ pub(crate) fn primary_entry() -> Option<usize> {
         .filter(|entry| *entry != 0)
 }
 
-/// Whether a primary slot is currently leased for RX execution.
+/// Whether a primary slot is currently leased. Map control-plane code uses
+/// this to reject writes that would race an AOT helper.
 #[inline]
 pub(crate) fn is_leased() -> bool {
     ACTIVE.load(Ordering::Acquire)
@@ -273,10 +274,16 @@ pub(crate) fn with_primary<R>(f: impl FnOnce(usize) -> R) -> Option<R> {
 
 /// Invoke the currently leased primary image for one RX frame.
 ///
-/// This is intentionally crate-private: the public injection point is
+/// This is the synchronous ingress fast path. `None` means no complete lease
+/// was available, so its caller must pass the original frame through.
+///
+/// It is intentionally crate-private: the public injection point is
 /// [`Device`], so callers cannot bypass the token and DMA lifetime rules.
-pub(crate) fn execute(data: &mut [u8]) -> i32 {
-    with_primary(|entry| invoke_entry(entry, data)).unwrap_or(crate::redirect::XDP_PASS)
+pub(crate) fn run_ingress(data: &mut [u8]) -> Option<i32> {
+    with_primary(|entry| {
+        crate::redirect::clear_pending();
+        invoke_entry(entry, data)
+    })
 }
 
 #[cfg(not(target_arch = "riscv32"))]
