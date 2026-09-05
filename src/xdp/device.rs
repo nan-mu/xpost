@@ -141,14 +141,17 @@ impl<R: RxToken> RxToken for DeviceRxToken<R> {
         let zc = self.zc;
         let ret = self.inner.consume(|buffer| {
             let Some(action) = crate::xdp::run_ingress(buffer) else {
+                xdp_debug!("[xdp][device] pass: ingress snapshot unavailable bytes={}", buffer.len());
                 return f(buffer);
             };
             match action {
                 XDP_PASS => {
+                    xdp_debug!("[xdp][device] pass: AOT returned XDP_PASS bytes={}", buffer.len());
                     rx_scratch::end();
                     f(buffer)
                 }
                 XDP_DROP => {
+                    xdp_debug!("[xdp][device] drop: AOT returned XDP_DROP bytes={}", buffer.len());
                     rx_scratch::end();
                     // Must call `f`: RxToken::consume must return `Ret` from `f`, and
                     // smoltcp treats an empty frame as "dropped" (skips ingress).
@@ -157,6 +160,7 @@ impl<R: RxToken> RxToken for DeviceRxToken<R> {
                     f(&mut [])
                 }
                 XDP_ABORTED => {
+                    xdp_debug!("[xdp][device] drop: AOT aborted bytes={}", buffer.len());
                     error!("[xdp] aborted");
                     let _ = take_pending();
                     rx_scratch::end();
@@ -170,7 +174,16 @@ impl<R: RxToken> RxToken for DeviceRxToken<R> {
                     if !armed {
                         // zc miss (outstanding/NO_MEM/too big): copy. Never drop
                         // here — skip-on-257 made 0µs echo Xloss 100%.
-                        let _ = queue_egress_frame(frame);
+                        let queued = queue_egress_frame(frame);
+                        #[cfg(not(feature = "debug"))]
+                        let _ = queued;
+                        xdp_debug!(
+                            "[xdp][device] tx fallback: zero-copy hook rejected bytes={} queued={}",
+                            frame.len(),
+                            queued
+                        );
+                    } else {
+                        xdp_debug!("[xdp][device] tx: zero-copy armed bytes={}", frame.len());
                     }
                     f(&mut [])
                 }

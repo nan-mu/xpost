@@ -3,6 +3,18 @@
 //! This module is the only owner of XDP slot registration and the RX execution
 //! snapshot. No other module owns an XDP activity switch or executable entry.
 
+#[cfg(feature = "debug")]
+macro_rules! xdp_debug {
+    ($($arg:tt)*) => {
+        log::debug!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "debug"))]
+macro_rules! xdp_debug {
+    ($($arg:tt)*) => {};
+}
+
 mod device;
 mod global;
 mod xdp_table;
@@ -191,10 +203,18 @@ impl XdpRt {
     /// lease, not a second runtime or a public raw-resource API.
     pub async fn lease(&mut self, maps: Option<&crate::map::MapRt>) -> Result<(), Error> {
         if self.leased {
+            xdp_debug!("[xdp][lease] rejected: primary already leased");
             return Err(Error::AlreadyLeased);
         }
-        let slot = self.slots.get(self.primary).ok_or(Error::NotLoaded)?;
+        let slot = match self.slots.get(self.primary) {
+            Some(slot) => slot,
+            None => {
+                xdp_debug!("[xdp][lease] rejected: no primary slot registered");
+                return Err(Error::NotLoaded);
+            }
+        };
         if slot.loaded_len == 0 {
+            xdp_debug!("[xdp][lease] rejected: primary slot {} has no image", self.primary);
             return Err(Error::NotLoaded);
         }
         if maps.is_some() {
@@ -217,21 +237,31 @@ impl XdpRt {
         PRIMARY_ENTRY.store(slot.ptr as usize, Ordering::Release);
         ACTIVE.store(true, Ordering::Release);
         self.leased = true;
+        xdp_debug!(
+            "[xdp][lease] active: slot={} entry={} image_bytes={} maps={}",
+            self.primary,
+            slot.ptr as usize,
+            slot.loaded_len,
+            maps.is_some()
+        );
         Ok(())
     }
 
     /// Prevent new executions and wait for an in-progress RX invocation.
     pub async fn release(&mut self) -> Result<(), Error> {
         if !self.leased {
+            xdp_debug!("[xdp][release] rejected: runtime is not leased");
             return Err(Error::NotLeased);
         }
         ACTIVE.store(false, Ordering::Release);
+        xdp_debug!("[xdp][release] waiting for {} ingress calls", IN_FLIGHT.load(Ordering::Acquire));
         while IN_FLIGHT.load(Ordering::Acquire) != 0 {
             core::hint::spin_loop();
         }
         PRIMARY_ENTRY.store(0, Ordering::Release);
         self.release_map_refs();
         self.leased = false;
+        xdp_debug!("[xdp][release] complete");
         Ok(())
     }
 
@@ -245,10 +275,16 @@ impl XdpRt {
 /// Returns the leased primary entry for the RX hot path.
 #[inline]
 pub(crate) fn primary_entry() -> Option<usize> {
-    ACTIVE
-        .load(Ordering::Acquire)
-        .then(|| PRIMARY_ENTRY.load(Ordering::Acquire))
-        .filter(|entry| *entry != 0)
+    if !ACTIVE.load(Ordering::Acquire) {
+        xdp_debug!("[xdp][ingress] bypass: no active lease");
+        return None;
+    }
+    let entry = PRIMARY_ENTRY.load(Ordering::Acquire);
+    if entry == 0 {
+        xdp_debug!("[xdp][ingress] bypass: active lease has no published entry");
+        return None;
+    }
+    Some(entry)
 }
 
 /// Whether a primary slot is currently leased. Map control-plane code uses
@@ -265,6 +301,7 @@ pub(crate) fn with_primary<R>(f: impl FnOnce(usize) -> R) -> Option<R> {
     IN_FLIGHT.fetch_add(1, Ordering::Acquire);
     if !ACTIVE.load(Ordering::Acquire) || PRIMARY_ENTRY.load(Ordering::Acquire) != entry {
         IN_FLIGHT.fetch_sub(1, Ordering::Release);
+        xdp_debug!("[xdp][ingress] bypass: lease changed while acquiring snapshot");
         return None;
     }
     let result = f(entry);
@@ -282,7 +319,9 @@ pub(crate) fn with_primary<R>(f: impl FnOnce(usize) -> R) -> Option<R> {
 pub(crate) fn run_ingress(data: &mut [u8]) -> Option<i32> {
     with_primary(|entry| {
         crate::redirect::clear_pending();
-        invoke_entry(entry, data)
+        let action = invoke_entry(entry, data);
+        xdp_debug!("[xdp][ingress] executed: entry={} bytes={} action={}", entry, data.len(), action);
+        action
     })
 }
 

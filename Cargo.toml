@@ -18,6 +18,11 @@ exclude      = ["examples/*", "xtask", "xpost-build", "target"]
 test = false
 bench = false
 
+[features]
+# Compile detailed XDP ingress diagnostics. Kept out of normal firmware builds
+# because every message is on a packet-path or lifecycle boundary.
+debug = []
+
 [dependencies]
 log              = "0.4.27"
 critical-section = "1.2.0"
