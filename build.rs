@@ -24,9 +24,18 @@ fn main() {
     };
 
     println!("cargo:rerun-if-env-changed=XPOST_BOARD");
-    println!("cargo:rerun-if-changed={}", board.join("layout.toml").display());
-    println!("cargo:rerun-if-changed={}", board.join("mem.toml").display());
-    println!("cargo:rerun-if-changed={}", board.join("bpf.toml").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        board.join("layout.toml").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        board.join("mem.toml").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        board.join("bpf.toml").display()
+    );
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let result = xpost_build::generate_runtime(&board, &out_dir)
@@ -87,6 +96,11 @@ pub fn slot_link_addrs() -> [usize; 2] {
         r#"// stub — set XPOST_BOARD for real layout
 pub async fn init_firmware_maps_via_builder(_rt: &mut crate::map::MapRt) -> Result<(), crate::map::Error> { Ok(()) }
 "#,
+    )
+    .unwrap();
+    fs::write(
+        out_dir.join("xdp_bpf.rs"),
+        "pub(crate) static BOOT_IMAGES: &[super::BpfTomlImage] = &[];\n",
     )
     .unwrap();
     fs::write(

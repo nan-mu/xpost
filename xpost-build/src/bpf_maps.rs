@@ -191,7 +191,9 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<()> {
             "/// MapIdx for maps.{} from bpf.toml\n",
             spec.name
         ));
-        out.push_str(&format!("pub const {id_const}: crate::map::MapIdx = {idx};\n"));
+        out.push_str(&format!(
+            "pub const {id_const}: crate::map::MapIdx = {idx};\n"
+        ));
         out.push_str(&format!(
             "pub const {}_KEY_SIZE: usize = {key_size};\n",
             id_const
@@ -370,9 +372,15 @@ fn emit_struct(out: &mut String, name: &str, fields: &[(String, String)], is_key
         })
         .collect();
     if is_key {
-        out.push_str(&format!("crate::impl_map_key!({name}, {});\n\n", widths.join(", ")));
+        out.push_str(&format!(
+            "crate::impl_map_key!({name}, {});\n\n",
+            widths.join(", ")
+        ));
     } else {
-        out.push_str(&format!("crate::impl_map_value!({name}, {});\n\n", widths.join(", ")));
+        out.push_str(&format!(
+            "crate::impl_map_value!({name}, {});\n\n",
+            widths.join(", ")
+        ));
     }
 }
 

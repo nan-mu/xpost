@@ -138,7 +138,10 @@ fn fmt_ret(ret: usize) -> (&'static str, i32) {
 /// Keep this body a pure tail-call into flash so the IRAM window stays a thin
 /// trampoline (full match bodies belong in `dispatch_helper`).
 #[unsafe(no_mangle)]
-#[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".xdp.helper_dispatcher"))]
+#[cfg_attr(
+    target_arch = "riscv32",
+    unsafe(link_section = ".xdp.helper_dispatcher")
+)]
 #[inline(never)]
 #[allow(improper_ctypes_definitions)]
 pub extern "C" fn helper_dispatcher(

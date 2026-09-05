@@ -97,8 +97,8 @@ pub fn peek_array_u64(name: &str, index: u32) -> Result<u64, MapError> {
             return Err(MapError::Unsupported);
         }
     }
-    let ptr = runtime::try_read_storage(id, |r| r.ptr as *const BpfArrayMap)
-        .ok_or(MapError::Busy)?;
+    let ptr =
+        runtime::try_read_storage(id, |r| r.ptr as *const BpfArrayMap).ok_or(MapError::Busy)?;
     let map = unsafe { &*ptr };
     let ptr = map.elem_ptr(index as usize);
     if ptr.is_null() {

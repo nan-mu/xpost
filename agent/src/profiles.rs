@@ -31,8 +31,8 @@ pub struct Profile {
 }
 
 pub fn load_profiles(xpost_root: &Path) -> Result<Vec<Profile>> {
-    let raw = std::fs::read_to_string(xpost_root.join("profiles.toml"))
-        .context("read profiles.toml")?;
+    let raw =
+        std::fs::read_to_string(xpost_root.join("profiles.toml")).context("read profiles.toml")?;
     let file: ProfilesFile = toml::from_str(&raw).context("parse profiles.toml")?;
     let mut out = Vec::new();
     for p in file.profile {

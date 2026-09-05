@@ -141,17 +141,26 @@ impl<R: RxToken> RxToken for DeviceRxToken<R> {
         let zc = self.zc;
         let ret = self.inner.consume(|buffer| {
             let Some(action) = crate::xdp::run_ingress(buffer) else {
-                xdp_debug!("[xdp][device] pass: ingress snapshot unavailable bytes={}", buffer.len());
+                xdp_debug!(
+                    "[xdp][device] pass: ingress snapshot unavailable bytes={}",
+                    buffer.len()
+                );
                 return f(buffer);
             };
             match action {
                 XDP_PASS => {
-                    xdp_debug!("[xdp][device] pass: AOT returned XDP_PASS bytes={}", buffer.len());
+                    xdp_debug!(
+                        "[xdp][device] pass: AOT returned XDP_PASS bytes={}",
+                        buffer.len()
+                    );
                     rx_scratch::end();
                     f(buffer)
                 }
                 XDP_DROP => {
-                    xdp_debug!("[xdp][device] drop: AOT returned XDP_DROP bytes={}", buffer.len());
+                    xdp_debug!(
+                        "[xdp][device] drop: AOT returned XDP_DROP bytes={}",
+                        buffer.len()
+                    );
                     rx_scratch::end();
                     // Must call `f`: RxToken::consume must return `Ret` from `f`, and
                     // smoltcp treats an empty frame as "dropped" (skips ingress).

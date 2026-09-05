@@ -107,10 +107,7 @@ impl Drop for RawResource {
         let addr = ptr as usize;
         let align = self.layout.align();
         if addr % align != 0 {
-            error!(
-                "[pool] drop: ptr {:#x} misaligned; leaking",
-                addr
-            );
+            error!("[pool] drop: ptr {:#x} misaligned; leaking", addr);
             return;
         }
         unsafe { (self.drop_fn)(ptr) };
@@ -353,14 +350,12 @@ pub(crate) mod pool_access {
         }
 
         pub unsafe fn as_ref<T>(&self) -> &T {
-            let ptr = runtime::try_read_storage(self.id, |r| r.ptr as *const T)
-                .expect("storage");
+            let ptr = runtime::try_read_storage(self.id, |r| r.ptr as *const T).expect("storage");
             unsafe { &*ptr }
         }
 
         pub unsafe fn as_mut<T>(&mut self) -> &mut T {
-            let ptr = runtime::try_write_storage(self.id, |r| r.ptr as *mut T)
-                .expect("storage");
+            let ptr = runtime::try_write_storage(self.id, |r| r.ptr as *mut T).expect("storage");
             unsafe { &mut *ptr }
         }
     }
@@ -383,14 +378,12 @@ pub(crate) mod pool_access {
         }
 
         pub unsafe fn as_ref<T>(&self) -> &T {
-            let ptr = runtime::try_read_storage(self.id, |r| r.ptr as *const T)
-                .expect("storage");
+            let ptr = runtime::try_read_storage(self.id, |r| r.ptr as *const T).expect("storage");
             unsafe { &*ptr }
         }
 
         pub unsafe fn as_mut<T>(&mut self) -> &mut T {
-            let ptr = runtime::try_write_storage(self.id, |r| r.ptr as *mut T)
-                .expect("storage");
+            let ptr = runtime::try_write_storage(self.id, |r| r.ptr as *mut T).expect("storage");
             unsafe { &mut *ptr }
         }
     }
@@ -414,11 +407,17 @@ pub(crate) mod pool_access {
     }
 
     pub fn try_write() -> Option<PoolWriteGuard<'static>> {
-        runtime::MAP_RT.try_write().ok().map(|guard| PoolWriteGuard { guard })
+        runtime::MAP_RT
+            .try_write()
+            .ok()
+            .map(|guard| PoolWriteGuard { guard })
     }
 
     pub fn try_read() -> Option<PoolReadGuard<'static>> {
-        runtime::MAP_RT.try_read().ok().map(|guard| PoolReadGuard { guard })
+        runtime::MAP_RT
+            .try_read()
+            .ok()
+            .map(|guard| PoolReadGuard { guard })
     }
 }
 

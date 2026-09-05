@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::runtime::{Error, MapRt};
-use super::traits::{layout_vec, MapKey, MapValue};
+use super::traits::{MapKey, MapValue, layout_vec};
 
 /// BPF map kind stored in [`super::MapMeta`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

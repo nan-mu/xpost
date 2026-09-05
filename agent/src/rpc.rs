@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use test_common::fw_agent::{
-    self, AGENT_FLASH_PROFILE, AGENT_GET_STATUS, AGENT_LIST_PROFILES, AGENT_REBOOT, AGENT_ERROR,
-    AGENT_FLASHING, AGENT_IDLE, FlashProfileResp, GetStatusResp, ListProfilesResp, ProfileInfo,
-    RebootResp, STATUS_BAD, STATUS_OK,
+    self, AGENT_ERROR, AGENT_FLASH_PROFILE, AGENT_FLASHING, AGENT_GET_STATUS, AGENT_IDLE,
+    AGENT_LIST_PROFILES, AGENT_REBOOT, FlashProfileResp, GetStatusResp, ListProfilesResp,
+    ProfileInfo, RebootResp, STATUS_BAD, STATUS_OK,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -118,10 +118,7 @@ impl AgentState {
                 };
                 st.last_profile_id = id.to_string();
                 st.message = message.clone();
-                let resp = FlashProfileResp {
-                    status,
-                    message,
-                };
+                let resp = FlashProfileResp { status, message };
                 let mut buf = [0u8; 512];
                 let n = fw_agent::encode_flash_profile_resp(&resp, &mut buf)
                     .context("encode flash profile resp")?;
@@ -133,13 +130,10 @@ impl AgentState {
                     Ok(()) => (STATUS_OK, "rebooted; monitor resumed".to_string()),
                     Err(e) => (STATUS_BAD, format!("{e:#}")),
                 };
-                let resp = RebootResp {
-                    status,
-                    message,
-                };
+                let resp = RebootResp { status, message };
                 let mut buf = [0u8; 256];
-                let n = fw_agent::encode_reboot_resp(&resp, &mut buf)
-                    .context("encode reboot resp")?;
+                let n =
+                    fw_agent::encode_reboot_resp(&resp, &mut buf).context("encode reboot resp")?;
                 Ok((AGENT_REBOOT, buf[..n].to_vec()))
             }
             AGENT_GET_STATUS => {

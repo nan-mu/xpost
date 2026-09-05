@@ -46,6 +46,7 @@ impl MapBuilder {
 }
 
 pub use array::{BpfArrayMap, create_bpf_array, create_bpf_devmap, create_bpf_prog_array};
+pub use async_ringbuf;
 pub use ctrl::{
     MAX_MAP_IDS, MapCreateCmd, MapCtrlError, create_map, destroy_map, register_map,
     register_ringbuf,
@@ -55,20 +56,19 @@ pub use hash::{
 };
 pub use names::{register_map_name, resolve_map_name};
 pub use ops::{MapError, MapOps};
-pub use pool::{MapKind, RawResource, ResourceId, TalcAlloc, allocator, HEAP_SIZE};
+pub use pool::{HEAP_SIZE, MapKind, RawResource, ResourceId, TalcAlloc, allocator};
 pub use ringbuf::{
-    ringbuf_record_payload, BpfRingBuf, RingbufMap, RingbufRecord, RingbufRx, RINGBUF_SLOT_BYTES,
-    MAX_RECORD_BYTES as RINGBUF_MAX_RECORD_BYTES, create_bpf_ringbuf, helper_ringbuf_discard,
+    BpfRingBuf, MAX_RECORD_BYTES as RINGBUF_MAX_RECORD_BYTES, RINGBUF_SLOT_BYTES, RingbufMap,
+    RingbufRecord, RingbufRx, create_bpf_ringbuf, helper_ringbuf_discard,
     helper_ringbuf_discard_dynptr, helper_ringbuf_output, helper_ringbuf_query,
     helper_ringbuf_reserve, helper_ringbuf_reserve_dynptr, helper_ringbuf_submit,
-    helper_ringbuf_submit_dynptr,
+    helper_ringbuf_submit_dynptr, ringbuf_record_payload,
 };
 pub use runtime::{
-    claim_heap, init, map_rt, map_rt_read, Error, GuardError, MapGuard, MapIdx, MapIdxExt,
-    MapMeta, MapMutGuard, MapRt, MapRtReadGuard, MapRtWriteGuard, MAP_RT,
+    Error, GuardError, MAP_RT, MapGuard, MapIdx, MapIdxExt, MapMeta, MapMutGuard, MapRt,
+    MapRtReadGuard, MapRtWriteGuard, claim_heap, init, map_rt, map_rt_read,
 };
 pub use traits::{MapKey, MapValue};
-pub use async_ringbuf;
 pub use wdt_feed::{BpfWdtFeedMap, create_bpf_wdt_feed, helper_feed as helper_wdt_feed};
 
 include!(concat!(env!("OUT_DIR"), "/bpf_maps.rs"));

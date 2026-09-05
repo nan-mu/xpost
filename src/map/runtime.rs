@@ -69,9 +69,7 @@ pub fn claim_heap(heap: &'static mut [u8]) -> Result<(), Error> {
     }
     unsafe {
         let base = heap.as_mut_ptr();
-        allocator()
-            .claim(base, heap.len())
-            .ok_or(Error::Oom)?;
+        allocator().claim(base, heap.len()).ok_or(Error::Oom)?;
         HEAP_CLAIMED = true;
     }
     Ok(())
@@ -350,9 +348,7 @@ impl MapGuard<'_> {
             .ok_or(GuardError::TypeMismatch)
     }
 
-    pub fn as_hash(
-        &self,
-    ) -> Result<&BpfHashTable, GuardError> {
+    pub fn as_hash(&self) -> Result<&BpfHashTable, GuardError> {
         let meta = self.meta()?;
         if meta.map_type != MapType::Hash {
             return Err(GuardError::TypeMismatch);
@@ -375,9 +371,7 @@ impl MapGuard<'_> {
             return Err(GuardError::TypeMismatch);
         }
         drop(self);
-        let mut guard = MAP_RT
-            .try_write()
-            .map_err(|_| GuardError::TypeMismatch)?;
+        let mut guard = MAP_RT.try_write().map_err(|_| GuardError::TypeMismatch)?;
         let rt = guard.as_mut().ok_or(GuardError::TypeMismatch)?;
         let meta = rt.meta.get_mut(idx).ok_or(GuardError::TypeMismatch)?;
         ringbuf::take_rx_consumer(meta.storage.as_ringbuf_map_mut()).ok_or(GuardError::TypeMismatch)
@@ -392,9 +386,7 @@ impl MapMutGuard<'_> {
             .ok_or(GuardError::TypeMismatch)
     }
 
-    pub fn as_hash(
-        &mut self,
-    ) -> Result<&mut BpfHashTable, GuardError> {
+    pub fn as_hash(&mut self) -> Result<&mut BpfHashTable, GuardError> {
         let meta = self.meta_mut()?;
         if meta.map_type != MapType::Hash {
             return Err(GuardError::TypeMismatch);
@@ -420,7 +412,10 @@ pub(crate) fn try_read_storage<R>(idx: MapIdx, f: impl FnOnce(&RawResource) -> R
     Some(f(&res.storage))
 }
 
-pub(crate) fn try_write_storage<R>(idx: MapIdx, f: impl FnOnce(&mut RawResource) -> R) -> Option<R> {
+pub(crate) fn try_write_storage<R>(
+    idx: MapIdx,
+    f: impl FnOnce(&mut RawResource) -> R,
+) -> Option<R> {
     let mut guard = MAP_RT.try_write().ok()?;
     let rt = guard.as_mut()?;
     let res = rt.meta.get_mut(idx)?;
@@ -543,7 +538,11 @@ pub(crate) async fn push_wdt_feed_at(
 }
 
 /// Boot helper: create devmap / prog_array at idx.
-pub(crate) async fn push_devmap_at(idx: MapIdx, name: &str, max_entries: usize) -> Result<(), Error> {
+pub(crate) async fn push_devmap_at(
+    idx: MapIdx,
+    name: &str,
+    max_entries: usize,
+) -> Result<(), Error> {
     push_special_array_at(idx, name, max_entries, MapKind::Devmap).await
 }
 

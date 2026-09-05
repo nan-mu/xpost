@@ -83,9 +83,7 @@ fn alloc_wdt_feed(max_entries: usize) -> Result<(*mut u8, core::alloc::Layout), 
     if max_entries == 0 || max_entries > watchdog::MAX_CHANNELS {
         return Err(AllocError);
     }
-    let total = SLOT_SIZE
-        .checked_mul(max_entries)
-        .ok_or(AllocError)?;
+    let total = SLOT_SIZE.checked_mul(max_entries).ok_or(AllocError)?;
     if total > HEAP_SIZE {
         return Err(AllocError);
     }

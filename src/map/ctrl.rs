@@ -110,7 +110,10 @@ pub async fn create_map(cmd: MapCreateCmd) -> Result<ResourceId, MapCtrlError> {
 ///
 /// Embedders pass only the logical name and layout spec — no AOT VMA. Symbol
 /// aliases are published when an XDP image loads ([`super::abi::bind_map_symbols`]).
-pub async fn register_map(name: &'static str, cmd: MapCreateCmd) -> Result<ResourceId, MapCtrlError> {
+pub async fn register_map(
+    name: &'static str,
+    cmd: MapCreateCmd,
+) -> Result<ResourceId, MapCtrlError> {
     if name.is_empty() {
         return Err(MapCtrlError::BadSpec);
     }

@@ -50,7 +50,9 @@ fn main() -> Result<()> {
     }
     // Sync prep: keeps Ctrl+C on the shell process group (not blocked inside tokio).
     if !cli.skip_prep {
-        eprintln!("xpost-agent: building profiles (doctor/check for firmware, then release build)…");
+        eprintln!(
+            "xpost-agent: building profiles (doctor/check for firmware, then release build)…"
+        );
         prep::prepare_profiles(&root, &profiles).context("profile prep")?;
     }
 
@@ -75,7 +77,11 @@ async fn run_agent(cli: Cli, profiles: Vec<profiles::Profile>) -> Result<()> {
     eprintln!(
         "xpost-agent listening on {addr} (profiles from {}; monitor={}; deploy on FlashProfile)",
         xpost_root(&cli).display(),
-        if serial.monitor_enabled() { "on" } else { "off" }
+        if serial.monitor_enabled() {
+            "on"
+        } else {
+            "off"
+        }
     );
     eprintln!("xpost-agent: Ctrl+C stops agent and kills espflash children");
 

@@ -9,11 +9,11 @@ use core::ptr;
 use allocator_api2::alloc::AllocError;
 use allocator_api2::boxed::Box;
 use async_ringbuf::Arc;
+use async_ringbuf::AsyncRb;
 use async_ringbuf::traits::{Producer, Split};
 use async_ringbuf::wrap::{AsyncCons, AsyncProd};
-use async_ringbuf::AsyncRb;
-use ringbuf::storage::Ref;
 use ringbuf::SharedRb;
+use ringbuf::storage::Ref;
 
 use crate::helper::dynptr::BpfDynptr;
 
@@ -107,9 +107,10 @@ pub(crate) fn alloc_ringbuf_storage(byte_capacity: usize) -> Result<RawResource,
     let mut slot_box = slot_vec.into_boxed_slice();
     // SAFETY: `slots` field keeps this buffer alive for the `Ref` inside `Arc<AsyncRb<_>>`.
     let storage = Ref::from(unsafe {
-        core::mem::transmute::<&mut [MaybeUninit<RingbufRecord>], &'static mut [MaybeUninit<RingbufRecord>]>(
-            slot_box.as_mut(),
-        )
+        core::mem::transmute::<
+            &mut [MaybeUninit<RingbufRecord>],
+            &'static mut [MaybeUninit<RingbufRecord>],
+        >(slot_box.as_mut())
     });
     let shared = unsafe { SharedRb::from_raw_parts(storage, 0, 0) };
     let rb = AsyncRb::from(shared);
@@ -259,7 +260,10 @@ fn with_ring_map<R>(id: ResourceId, f: impl FnOnce(&mut RingbufMap) -> R) -> Opt
     .flatten()
 }
 
-fn with_ring_matching<R>(data: usize, f: impl FnOnce(&mut RingbufMap) -> R) -> Option<(ResourceId, R)> {
+fn with_ring_matching<R>(
+    data: usize,
+    f: impl FnOnce(&mut RingbufMap) -> R,
+) -> Option<(ResourceId, R)> {
     let mut guard = pool::pool_try_write()?;
     let mut table = guard.as_mut()?;
     for (id, mut res) in table.iter_mut() {
