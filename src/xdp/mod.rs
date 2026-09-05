@@ -21,7 +21,7 @@ mod xdp_table;
 
 pub use device::{Device, ZcTx};
 pub use global::XDP_RT;
-pub use xdp_table::{XdpImage, XdpImageId, XdpTable, XdpTableError};
+pub use xdp_table::{XdpTable, XdpTableError};
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::Ordering;
@@ -29,6 +29,7 @@ use core::sync::atomic::Ordering;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::{Mutex, MutexGuard};
 use global::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY};
+use xdp_table::XdpTableHandle;
 
 /// Maximum slots represented by the first XdpRt implementation.
 const MAX_SLOTS: usize = 4;
@@ -65,10 +66,10 @@ pub enum Error {
     AlreadyLeased,
     NotLeased,
     ImageTooLarge,
-    UnknownImage,
     Table(XdpTableError),
     MapNotFound,
     MapRefLimit,
+    NoInactiveSlot,
 }
 
 impl From<XdpTableError> for Error {
@@ -88,7 +89,7 @@ unsafe impl Send for SlotMeta {}
 
 /// Manages registered executable slots and their lease state.
 pub struct XdpRt {
-    table: XdpTable,
+    table: XdpTableHandle,
     slots: heapless::Vec<SlotMeta, MAX_SLOTS>,
     primary: usize,
     leased: bool,
@@ -97,11 +98,12 @@ pub struct XdpRt {
 
 impl XdpRt {
     /// Register the first slot and publish the runtime singleton.
-    pub async fn init<const N: usize>(
+    pub async fn init<const N: usize, const IMAGES: usize, const IMAGE_CAPACITY: usize>(
         slot: &'static Slot<N>,
+        table: &'static XdpTable<IMAGES, IMAGE_CAPACITY>,
     ) -> Result<MutexGuard<'static, CriticalSectionRawMutex, XdpRt>, Error> {
         let mut rt = Self {
-            table: XdpTable::new(),
+            table: table.handle(),
             slots: heapless::Vec::new(),
             primary: NO_SLOT,
             leased: false,
@@ -155,45 +157,88 @@ impl XdpRt {
         Ok(id)
     }
 
-    /// Register a board-owned XDP image in Flash.
-    pub fn register_image(
-        &mut self,
-        name: &'static str,
-        image: &'static [u8],
-    ) -> Result<XdpImageId, Error> {
+    /// Copy an image into one fixed table position.
+    pub fn write_table_image(&mut self, image: usize, bytes: &[u8]) -> Result<(), Error> {
         if self.leased {
+            xdp_debug!("[xdp][table] write rejected: runtime is leased image={}", image);
             return Err(Error::Busy);
         }
-        Ok(self.table.register(name, image)?)
+        self.table.copy_from_slot(image, bytes.as_ptr(), bytes.len())?;
+        xdp_debug!("[xdp][table] wrote image={} bytes={}", image, bytes.len());
+        Ok(())
     }
 
-    /// Return the immutable Flash image catalogue.
-    pub fn table(&self) -> &XdpTable {
-        &self.table
-    }
-
-    /// Copy a registered Flash image into the primary executable slot.
-    pub fn load_primary(&mut self, image_id: XdpImageId) -> Result<(), Error> {
+    /// Copy the stopped primary image into one table position.
+    pub fn save_primary_to_table(&mut self, image: usize) -> Result<(), Error> {
         if self.leased {
+            xdp_debug!("[xdp][table] save rejected: runtime is leased image={}", image);
             return Err(Error::Busy);
         }
-        let image = self.table.get(image_id).ok_or(Error::UnknownImage)?;
+        let slot = self.slots.get(self.primary).ok_or(Error::NotLoaded)?;
+        self.table
+            .copy_from_slot(image, slot.ptr.cast_const(), slot.loaded_len)?;
+        xdp_debug!("[xdp][table] saved primary slot={} to image={}", self.primary, image);
+        Ok(())
+    }
+
+    /// Copy a table image into the stopped primary executable slot.
+    pub fn load_primary_from_table(&mut self, image: usize) -> Result<(), Error> {
+        if self.leased {
+            xdp_debug!("[xdp][table] load rejected: runtime is leased image={}", image);
+            return Err(Error::Busy);
+        }
         let slot = self.slots.get_mut(self.primary).ok_or(Error::NotLoaded)?;
-        if image.bytes().len() > slot.len {
-            return Err(Error::ImageTooLarge);
+        slot.loaded_len = self.table.copy_to_slot(image, slot.ptr, slot.len)?;
+        Self::fence_instruction_cache();
+        xdp_debug!("[xdp][table] loaded image={} into primary slot={}", image, self.primary);
+        Ok(())
+    }
+
+    /// Exchange the stopped primary image with a table position.
+    pub fn switch_primary_with_table(&mut self, image: usize) -> Result<(), Error> {
+        if self.leased {
+            xdp_debug!("[xdp][switch] rejected: runtime is leased image={}", image);
+            return Err(Error::Busy);
         }
+        let slot = self.slots.get_mut(self.primary).ok_or(Error::NotLoaded)?;
+        slot.loaded_len = self
+            .table
+            .swap_with_slot(image, slot.ptr, slot.len, slot.loaded_len)?;
+        Self::fence_instruction_cache();
+        xdp_debug!("[xdp][switch] exchanged primary slot={} with image={}", self.primary, image);
+        Ok(())
+    }
+
+    /// Publish a table image through an unused registered slot while RX stays
+    /// leased. The old primary is never overwritten by this operation.
+    pub fn hot_swap_primary_from_table(&mut self, image: usize) -> Result<(), Error> {
+        if !self.leased {
+            return self.load_primary_from_table(image);
+        }
+        if IN_FLIGHT.load(Ordering::Acquire) != 0 {
+            xdp_debug!("[xdp][hot-swap] deferred: previous ingress call still active");
+            return Err(Error::Busy);
+        }
+        let target = self
+            .slots
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| (index != self.primary).then_some(index))
+            .ok_or(Error::NoInactiveSlot)?;
+        let slot = &mut self.slots[target];
+        slot.loaded_len = self.table.copy_to_slot(image, slot.ptr, slot.len)?;
+        Self::fence_instruction_cache();
+        PRIMARY_ENTRY.store(slot.ptr as usize, Ordering::Release);
+        self.primary = target;
+        xdp_debug!("[xdp][hot-swap] active slot={} image={}", target, image);
+        Ok(())
+    }
+
+    fn fence_instruction_cache() {
+        #[cfg(target_arch = "riscv32")]
         unsafe {
-            core::ptr::copy_nonoverlapping(image.bytes().as_ptr(), slot.ptr, image.bytes().len());
-            core::ptr::write_bytes(
-                slot.ptr.add(image.bytes().len()),
-                0,
-                slot.len - image.bytes().len(),
-            );
-            #[cfg(target_arch = "riscv32")]
             core::arch::asm!("fence.i");
         }
-        slot.loaded_len = image.bytes().len();
-        Ok(())
     }
 
     /// Enable the primary slot.
