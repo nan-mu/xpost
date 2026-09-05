@@ -52,3 +52,22 @@ pub fn resolve_map_name(name: &str) -> Option<ResourceId> {
         None
     })
 }
+
+/// Register name → idx (heap `String` names use leaked static for lookup table).
+pub(crate) fn register_map_name_idx(name: &str, id: ResourceId) -> bool {
+    let leaked: &'static str = alloc::borrow::ToOwned::to_owned(name).leak();
+    register_map_name(leaked, id)
+}
+
+pub(crate) fn unregister_map_name(name: &str) {
+    critical_section::with(|cs| {
+        let mut table = NAME_ALIASES.borrow_ref_mut(cs);
+        for slot in table.iter_mut() {
+            if let Some((n, _)) = *slot {
+                if n == name {
+                    *slot = None;
+                }
+            }
+        }
+    });
+}

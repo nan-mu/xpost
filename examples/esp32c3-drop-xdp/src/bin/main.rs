@@ -17,7 +17,7 @@ use esp32c3_drop_xdp::{
     log_gate::init_logger,
     sta,
 };
-use xpost::map::MapBuilder;
+use xpost::map::{MapBuilder, MapIdxExt, claim_heap, init, init_firmware_maps, map_rt};
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -28,6 +28,11 @@ fn panic(panic_info: &core::panic::PanicInfo) -> ! {
 extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+const MAP_HEAP_SIZE: usize = xpost::map::HEAP_SIZE;
+
+#[link_section = ".bss"]
+static mut MAP_HEAP: [u8; MAP_HEAP_SIZE] = [0; MAP_HEAP_SIZE];
 
 #[allow(
     clippy::large_stack_frames,
@@ -48,25 +53,37 @@ async fn main(spawner: Spawner) {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
     init_log!("[Init][Embassy] Embassy initialized!");
 
-    xpost::map::init();
+    unsafe {
+        claim_heap(&mut MAP_HEAP).expect("[Init][MAP] claim_heap failed");
+    }
+    init().await.expect("[Init][MAP] map runtime init failed");
     init_log!("[Init][MAP] MAP resource pool initialized");
     xpost::mount::init();
     init_log!("[Init][Mount] boot mounts loaded");
 
-    MapBuilder::register_boot_maps()
+    init_firmware_maps()
         .await
         .expect("[Init][MAP] talc pool OOM for bpf.toml maps");
     init_log!("[Init][MAP] firmware maps from bpf.toml initialized");
 
-    let rb = MapBuilder::new_ringbuf()
-        .name("dut_evt")
-        .byte_capacity(4096)
-        .register()
+    let mut rt = map_rt().await.expect("[Init][MAP] map_rt");
+    let dut_evt = rt
+        .push_builder(
+            MapBuilder::ringbuf()
+                .with_name("dut_evt")
+                .with_capacity(4096),
+        )
         .await
         .expect("[Init][MAP] dut_evt ringbuf OOM");
+    drop(rt);
+
     esp32c3_drop_xdp::drop_stats::install_evt_handlers();
+    let rx = dut_evt
+        .into_channel()
+        .await
+        .expect("[Init][MAP] dut_evt into_channel");
     spawner
-        .spawn(evt_async::run(rb.into_channel()))
+        .spawn(evt_async::run(rx))
         .expect("dut_evt consumer");
 
     init_log!("[Init][XDP] load AOT payload into mount slot");
@@ -79,8 +96,8 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(connection(controller).unwrap());
     spawner.spawn(net_task_xdp(sta_runner).unwrap());
-    sta::start_udp_tasks(spawner, sta_stack);
 
+    sta::start_udp_tasks(spawner, sta_stack);
     loop {
         embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
     }

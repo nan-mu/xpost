@@ -84,7 +84,8 @@ pub fn slot_link_addrs() -> [usize; 2] {
     .unwrap();
     fs::write(
         out_dir.join("bpf_maps.rs"),
-        r#"pub async fn init_firmware_maps() -> Result<(), allocator_api2::alloc::AllocError> { Ok(()) }
+        r#"// stub — set XPOST_BOARD for real layout
+pub async fn init_firmware_maps_via_builder(_rt: &mut crate::map::MapRt) -> Result<(), crate::map::Error> { Ok(()) }
 "#,
     )
     .unwrap();

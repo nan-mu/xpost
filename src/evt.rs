@@ -7,8 +7,8 @@ use core::cell::RefCell;
 
 use critical_section::Mutex;
 
-use crate::map::pool::{MapKind, POOL, ResourceId};
-use crate::map::ringbuf::BpfRingBuf;
+use crate::map::pool::{MapKind, ResourceId, pool_try_write};
+use crate::map::ringbuf::RingbufMap;
 use crate::watchdog::{self, FeedHandle};
 
 /// `struct xpost_evt_feed` in `xdp_drop.c`
@@ -122,28 +122,28 @@ pub fn drain_isr() -> usize {
 
 fn output_record(rec: &[u8]) -> Result<(), ()> {
     let ring_id = critical_section::with(|cs| STATE.borrow_ref(cs).ring_id).ok_or(())?;
-    let mut guard = POOL.try_write().ok_or(())?;
-    let table = guard.as_mut().ok_or(())?;
-    let res = table.get_mut(&ring_id).ok_or(())?;
-    if res.kind != Some(MapKind::Ringbuf) {
+    let mut guard = pool_try_write().ok_or(())?;
+    let mut table = guard.as_mut().ok_or(())?;
+    let mut res = table.get_mut(&ring_id).ok_or(())?;
+    if res.kind() != Some(MapKind::Ringbuf) {
         return Err(());
     }
-    let rb: &mut BpfRingBuf = unsafe { res.as_mut() };
-    if rb.output(rec.as_ptr(), rec.len()) != 0 {
+    let rb: &mut RingbufMap = unsafe { res.as_mut() };
+    if rb.bpf_mut().output(rec.as_ptr(), rec.len()) != 0 {
         return Err(());
     }
     Ok(())
 }
 
 fn try_pop_record(ring_id: ResourceId, out: &mut [u8]) -> Option<usize> {
-    let mut guard = POOL.try_write()?;
-    let table = guard.as_mut()?;
-    let res = table.get_mut(&ring_id)?;
-    if res.kind != Some(MapKind::Ringbuf) {
+    let mut guard = pool_try_write()?;
+    let mut table = guard.as_mut()?;
+    let mut res = table.get_mut(&ring_id)?;
+    if res.kind() != Some(MapKind::Ringbuf) {
         return None;
     }
-    let rb: &mut BpfRingBuf = unsafe { res.as_mut() };
-    rb.try_consume(out)
+    let rb: &mut RingbufMap = unsafe { res.as_mut() };
+    rb.bpf_mut().try_consume(out)
 }
 
 /// Decode one ringbuf record (feed / bench_done / idle hooks).

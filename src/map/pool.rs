@@ -1,8 +1,4 @@
-//! Talc-backed resource pool (Id → [`RawResource`]).
-//!
-//! Named **pool** (not “register”) to avoid clashing with MCU MMIO registers.
-//! Locking lives in [`crate::sync::RwCell`] (`patch-sync-embassy` /
-//! `patch-sync-st`).
+//! Talc allocator + [`RawResource`] storage shell.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::mem::align_of;
@@ -15,19 +11,10 @@ use log::error;
 use talc::TalcCell;
 use talc::source::Manual;
 
-use crate::sync::RwCell;
+use super::runtime::{self, MapIdx, MapRt};
 
-pub(crate) const HEAP_SIZE: usize = 65536;
+pub const HEAP_SIZE: usize = 65536;
 
-#[unsafe(link_section = ".bss")]
-#[unsafe(no_mangle)]
-static mut XDP_MAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-
-/// Wrapper that allows placing `TalcCell` in a `static`.
-///
-/// # Safety
-/// Safe on single-core MCUs (ESP32-C3) where all async tasks run on one
-/// executor and interrupt-level code never calls into the allocator.
 pub struct SyncTalc(TalcCell<Manual>);
 unsafe impl Sync for SyncTalc {}
 
@@ -57,8 +44,6 @@ impl SyncTalc {
 
 pub static ALLOCATOR: SyncTalc = SyncTalc(TalcCell::new(Manual));
 
-/// Bridge `hashbrown`'s allocator-api2 0.2 `Allocator` trait to talc via
-/// `GlobalAlloc`.
 #[derive(Clone, Copy)]
 pub struct TalcAlloc;
 
@@ -87,40 +72,26 @@ unsafe impl allocator_api2_v02::alloc::Allocator for TalcAlloc {
     }
 }
 
-/// Numeric handle for a pooled resource.
-pub type ResourceId = u32;
+pub type ResourceId = MapIdx;
 
-/// Concrete BPF map kind stored at insert time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapKind {
     Array,
     Hash,
     Ringbuf,
-    /// `BPF_MAP_TYPE_DEVMAP`: key `u32` → value `u32` ifindex (ARRAY layout).
     Devmap,
-    /// `BPF_MAP_TYPE_PROG_ARRAY`: key `u32` → value `u32` absolute XDP entry.
     ProgArray,
-    /// `BPF_MAP_TYPE_XPOST_WDT_FEED`: XDP idle feed channels (xpost watchdog).
     WdtFeed,
 }
 
-type PoolMap = HashMap<ResourceId, RawResource, hashbrown::DefaultHashBuilder, TalcAlloc>;
-
-/// Global Id → resource table. Lookup uses [`RwCell::try_read`]; mutate uses [`RwCell::try_write`].
-pub(crate) static POOL: RwCell<Option<PoolMap>> = RwCell::new(None);
-
-/// Type-erased pool entry. [`Drop`] returns storage to talc — no manual free at
-/// call sites.
 pub struct RawResource {
     pub ptr: *mut u8,
     pub layout: Layout,
     drop_fn: unsafe fn(*mut u8),
-    /// `None` = non-BPF pool object (hwtest probes, …).
     pub kind: Option<MapKind>,
     pub key_size: usize,
     pub value_size: usize,
     pub value_stride: usize,
-    /// XDP programs currently holding this map (blocks destroy while > 0).
     pub users: u32,
 }
 
@@ -137,38 +108,24 @@ impl Drop for RawResource {
         let align = self.layout.align();
         if addr % align != 0 {
             error!(
-                "[pool] drop: ptr {:#x} misaligned (layout align={}, size={}, kind={:?}); leaking",
-                addr,
-                align,
-                self.layout.size(),
-                self.kind
+                "[pool] drop: ptr {:#x} misaligned; leaking",
+                addr
             );
             return;
         }
-        // SAFETY: ptr + drop_fn paired at insert; align checked against stored layout.
         unsafe { (self.drop_fn)(ptr) };
     }
 }
 
-/// Drop a `Box<T, TalcAlloc>` previously produced by [`Box::into_raw`] + [`allocator`].
-///
-/// On null / misalignment: logs and **leaks** instead of calling `from_raw` (avoids UB).
-///
-/// # Safety
-/// When checks pass, `ptr` must be the unique live pointer from `Box::into_raw` for `T`
-/// allocated with [`allocator`].
 pub unsafe fn reclaim_talc_box<T>(ptr: *mut u8, tag: &'static str) {
     if ptr.is_null() {
-        error!("[pool] reclaim {}: null pointer; skip", tag);
+        error!("[pool] reclaim {}: null", tag);
         return;
     }
     let addr = ptr as usize;
     let align = align_of::<T>();
     if addr % align != 0 {
-        error!(
-            "[pool] reclaim {}: ptr {:#x} not aligned to {} (wrong type/drop_fn?); leaking",
-            tag, addr, align
-        );
+        error!("[pool] reclaim {}: misaligned; leaking", tag);
         return;
     }
     let _ = unsafe { Box::from_raw_in(ptr as *mut T, allocator()) };
@@ -185,7 +142,7 @@ impl RawResource {
         unsafe { &mut *(self.ptr as *mut T) }
     }
 
-    fn build(
+    pub(crate) fn build(
         ptr: *mut u8,
         layout: Layout,
         drop_fn: unsafe fn(*mut u8),
@@ -206,15 +163,10 @@ impl RawResource {
         }
     }
 
-    fn insert_into(table: &mut PoolMap, id: ResourceId, resource: Self) -> Result<(), AllocError> {
-        if table.contains_key(&id) {
-            return Err(AllocError);
-        }
-        table.insert(id, resource);
-        Ok(())
+    pub(crate) fn as_ringbuf_map_mut(&mut self) -> &mut super::ringbuf::RingbufMap {
+        unsafe { self.as_mut() }
     }
 
-    /// Insert into the pool. On Id collision the new entry is dropped (talc freed).
     pub(crate) async fn insert(
         id: ResourceId,
         ptr: *mut u8,
@@ -234,120 +186,255 @@ impl RawResource {
             value_size,
             value_stride,
         );
-        let mut guard = POOL.write().await;
-        let table = guard.as_mut().expect("pool not initialized");
-        Self::insert_into(table, id, resource)
+        let mut guard = runtime::MAP_RT.write().await;
+        let rt = guard.as_mut().ok_or(AllocError)?;
+        if rt.meta.len() != id {
+            return Err(AllocError);
+        }
+        rt.meta.push(super::runtime::MapMeta {
+            name: alloc::format!("map_{id}"),
+            map_type: super::builder::MapType::Hash,
+            key_layout: None,
+            value_layout: None,
+            len: 0,
+            size: 0,
+            storage: resource,
+        });
+        Ok(())
     }
 
-    /// Insert into the pool. On Id collision the new entry is dropped (talc freed).
-
-    /// Read a pooled resource under the read lock.
-    ///
-    /// # Safety contract
-    /// Caller must ensure `T` matches the type stored under `id`.
-    pub async fn read<T, R>(id: ResourceId, f: impl FnOnce(&T) -> R) -> Option<R> {
-        let guard = POOL.read().await;
-        let table = guard.as_ref()?;
-        let resource = table.get(&id)?;
-        Some(f(unsafe { resource.as_ref() }))
+    pub(crate) async fn read<T, R>(id: ResourceId, f: impl FnOnce(&T) -> R) -> Option<R> {
+        runtime::try_read_storage(id, |res| f(unsafe { res.as_ref() }))
     }
 
-    /// Mutably access a pooled resource under the write lock.
-    ///
-    /// # Safety contract
-    /// Caller must ensure `T` matches the type stored under `id`.
-    pub async fn with_mut<T, R>(id: ResourceId, f: impl FnOnce(&mut T) -> R) -> Option<R> {
-        let mut guard = POOL.write().await;
-        let table = guard.as_mut()?;
-        let resource = table.get_mut(&id)?;
-        Some(f(unsafe { resource.as_mut() }))
+    pub(crate) async fn with_mut<T, R>(id: ResourceId, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        runtime::try_write_storage(id, |res| f(unsafe { res.as_mut() }))
     }
 
-    /// Remove a resource; [`Drop`] returns memory to talc.
-    ///
-    /// Returns `false` if missing. Does **not** check [`Self::users`] — callers
-    /// that honor XDP refcounts must use [`crate::map::ctrl::destroy_map`].
-    pub async fn destroy(id: ResourceId) -> bool {
-        let mut guard = POOL.write().await;
-        let table = match guard.as_mut() {
-            Some(t) => t,
-            None => return false,
-        };
-        table.remove(&id).is_some()
-    }
-
-    /// Whether `id` is present in the pool.
-    pub async fn contains(id: ResourceId) -> bool {
-        let guard = POOL.read().await;
-        guard.as_ref().is_some_and(|t| t.contains_key(&id))
-    }
-
-    pub async fn users(id: ResourceId) -> Option<u32> {
-        let guard = POOL.read().await;
-        Some(guard.as_ref()?.get(&id)?.users)
-    }
-
-    /// Increment program refcount. Returns `false` if map missing.
-    pub async fn add_user(id: ResourceId) -> bool {
-        let mut guard = POOL.write().await;
-        Self::add_user_in(guard.as_mut(), id)
-    }
-
-    /// Boot path: same as [`Self::add_user`] without `.await` (pool is idle).
-    pub fn add_user_sync(id: ResourceId) -> bool {
-        let mut guard = match POOL.try_write() {
+    pub(crate) async fn destroy(id: ResourceId) -> bool {
+        let mut guard = match runtime::MAP_RT.try_write() {
             Some(g) => g,
             None => return false,
         };
-        Self::add_user_in(guard.as_mut(), id)
-    }
-
-    fn add_user_in(table: Option<&mut PoolMap>, id: ResourceId) -> bool {
-        let res = match table.and_then(|t| t.get_mut(&id)) {
+        let rt = match guard.as_mut() {
             Some(r) => r,
             None => return false,
         };
-        res.users = res.users.saturating_add(1);
+        if id >= rt.meta.len() {
+            return false;
+        }
+        rt.meta.remove(id);
         true
     }
 
-    /// Decrement program refcount. Returns `false` if map missing.
-    pub async fn remove_user(id: ResourceId) -> bool {
-        let mut guard = POOL.write().await;
-        let res = match guard.as_mut().and_then(|t| t.get_mut(&id)) {
-            Some(r) => r,
-            None => return false,
-        };
-        res.users = res.users.saturating_sub(1);
-        true
+    pub(crate) async fn contains(id: ResourceId) -> bool {
+        runtime::contains(id)
     }
 
-    /// Allocate the lowest free Id in `0..max_id`.
-    pub async fn alloc_id(max_id: ResourceId) -> Option<ResourceId> {
-        let guard = POOL.read().await;
-        let table = guard.as_ref()?;
-        (0..max_id).find(|id| !table.contains_key(id))
+    pub(crate) async fn users(id: ResourceId) -> Option<u32> {
+        runtime::users(id).await
+    }
+
+    pub(crate) async fn add_user(id: ResourceId) -> bool {
+        runtime::add_user(id).await
+    }
+
+    pub(crate) fn add_user_sync(id: ResourceId) -> bool {
+        runtime::add_user_sync(id)
+    }
+
+    pub(crate) async fn remove_user(id: ResourceId) -> bool {
+        runtime::remove_user(id).await
+    }
+
+    pub(crate) async fn alloc_id(max_id: ResourceId) -> Option<ResourceId> {
+        let guard = runtime::MAP_RT.read().await;
+        let rt = guard.as_ref()?;
+        if rt.meta.len() < max_id {
+            Some(rt.meta.len())
+        } else {
+            None
+        }
     }
 }
 
-/// Return a `&'static` reference to the talc allocator cell.
 #[inline]
 pub fn allocator() -> &'static TalcCell<Manual> {
     ALLOCATOR.cell()
 }
 
-/// Claim `XDP_MAP` and open an empty pool table.
+#[deprecated(note = "use claim_heap + init")]
 pub fn init() {
-    unsafe {
-        let base = (&raw mut XDP_MAP).cast::<u8>();
-        ALLOCATOR
-            .cell()
-            .claim(base, HEAP_SIZE)
-            .expect("[Init][MAP] talc: failed to claim XDP_MAP");
+    super::runtime::init_sync();
+}
+
+type PoolMap = HashMap<ResourceId, RawResource, hashbrown::DefaultHashBuilder, TalcAlloc>;
+
+pub(crate) mod pool_access {
+    use super::*;
+
+    pub struct PoolWriteGuard<'a> {
+        pub guard: embassy_sync::rwlock::RwLockWriteGuard<
+            'a,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            Option<MapRt>,
+        >,
     }
 
-    let map = HashMap::with_capacity_in(16, TalcAlloc);
-    POOL.try_write()
-        .expect("[Init][MAP] pool init before contention")
-        .replace(map);
+    #[derive(Clone, Copy)]
+    pub struct PoolMapShim;
+
+    impl PoolWriteGuard<'_> {
+        pub fn as_mut(&mut self) -> Option<PoolMapShim> {
+            self.guard.is_some().then_some(PoolMapShim)
+        }
+    }
+
+    pub struct PoolReadGuard<'a> {
+        pub guard: embassy_sync::rwlock::RwLockReadGuard<
+            'a,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            Option<MapRt>,
+        >,
+    }
+
+    impl PoolReadGuard<'_> {
+        pub fn as_ref(&self) -> Option<PoolMapShim> {
+            self.guard.is_some().then_some(PoolMapShim)
+        }
+    }
+
+    impl PoolMapShim {
+        pub fn get(&self, id: &ResourceId) -> Option<StorageRef> {
+            if runtime::contains(*id) {
+                Some(StorageRef { id: *id })
+            } else {
+                None
+            }
+        }
+
+        pub fn get_mut(&mut self, id: &ResourceId) -> Option<StorageMut> {
+            if runtime::contains(*id) {
+                Some(StorageMut { id: *id })
+            } else {
+                None
+            }
+        }
+
+        pub fn contains_key(&self, id: &ResourceId) -> bool {
+            runtime::contains(*id)
+        }
+
+        pub fn iter_mut(&mut self) -> PoolIterMut {
+            let len = runtime::MAP_RT
+                .try_read()
+                .and_then(|g| g.as_ref().map(|rt| rt.meta.len()))
+                .unwrap_or(0);
+            PoolIterMut { next: 0, len }
+        }
+    }
+
+    pub struct StorageRef {
+        pub id: ResourceId,
+    }
+
+    impl StorageRef {
+        pub fn kind(&self) -> Option<MapKind> {
+            runtime::try_read_storage(self.id, |r| r.kind).flatten()
+        }
+
+        pub fn value_size(&self) -> usize {
+            runtime::try_read_storage(self.id, |r| r.value_size).unwrap_or(0)
+        }
+
+        pub fn value_stride(&self) -> usize {
+            runtime::try_read_storage(self.id, |r| r.value_stride).unwrap_or(0)
+        }
+
+        pub unsafe fn as_ref<T>(&self) -> &T {
+            let ptr = runtime::try_read_storage(self.id, |r| r.ptr as *const T)
+                .expect("storage");
+            unsafe { &*ptr }
+        }
+
+        pub unsafe fn as_mut<T>(&mut self) -> &mut T {
+            let ptr = runtime::try_write_storage(self.id, |r| r.ptr as *mut T)
+                .expect("storage");
+            unsafe { &mut *ptr }
+        }
+    }
+
+    pub struct StorageMut {
+        pub id: ResourceId,
+    }
+
+    impl StorageMut {
+        pub fn kind(&self) -> Option<MapKind> {
+            runtime::try_read_storage(self.id, |r| r.kind).flatten()
+        }
+
+        pub fn value_size(&self) -> usize {
+            runtime::try_read_storage(self.id, |r| r.value_size).unwrap_or(0)
+        }
+
+        pub fn value_stride(&self) -> usize {
+            runtime::try_read_storage(self.id, |r| r.value_stride).unwrap_or(0)
+        }
+
+        pub unsafe fn as_ref<T>(&self) -> &T {
+            let ptr = runtime::try_read_storage(self.id, |r| r.ptr as *const T)
+                .expect("storage");
+            unsafe { &*ptr }
+        }
+
+        pub unsafe fn as_mut<T>(&mut self) -> &mut T {
+            let ptr = runtime::try_write_storage(self.id, |r| r.ptr as *mut T)
+                .expect("storage");
+            unsafe { &mut *ptr }
+        }
+    }
+
+    pub struct PoolIterMut {
+        next: usize,
+        len: usize,
+    }
+
+    impl Iterator for PoolIterMut {
+        type Item = (ResourceId, StorageMut);
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.next >= self.len {
+                return None;
+            }
+            let id = self.next;
+            self.next += 1;
+            Some((id, StorageMut { id }))
+        }
+    }
+
+    pub fn try_write() -> Option<PoolWriteGuard<'static>> {
+        runtime::MAP_RT.try_write().map(|guard| PoolWriteGuard { guard })
+    }
+
+    pub fn try_read() -> Option<PoolReadGuard<'static>> {
+        runtime::MAP_RT.try_read().map(|guard| PoolReadGuard { guard })
+    }
 }
+
+pub(crate) use pool_access::{try_read as pool_try_read, try_write as pool_try_write};
+
+pub(crate) static POOL: PoolShim = PoolShim;
+
+pub(crate) struct PoolShim;
+
+impl PoolShim {
+    pub fn try_read(&self) -> Option<pool_access::PoolReadGuard<'static>> {
+        pool_access::try_read()
+    }
+
+    pub fn try_write(&self) -> Option<pool_access::PoolWriteGuard<'static>> {
+        pool_access::try_write()
+    }
+}
+
+pub(crate) use runtime::MAP_RT;

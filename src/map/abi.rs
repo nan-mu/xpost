@@ -14,8 +14,9 @@ use critical_section::Mutex;
 use super::array::BpfArrayMap;
 use super::hash::BpfHashMap;
 use super::ops::{MapError, MapOps};
-use super::pool::{MapKind, POOL, ResourceId};
-use super::ringbuf::BpfRingBuf;
+use super::pool::{MapKind, ResourceId};
+use super::pool::{pool_try_read, pool_try_write};
+use super::ringbuf::{BpfRingBuf, RingbufMap};
 
 /// Linux `bpf_map_update_elem` flags (low bits).
 pub const BPF_ANY: u64 = 0;
@@ -171,27 +172,26 @@ pub fn resolve_map_id(map: usize) -> Option<ResourceId> {
 pub(crate) enum TypedMap<'a> {
     Array(&'a mut BpfArrayMap),
     Hash(&'a mut BpfHashMap),
-    Ringbuf(&'a mut BpfRingBuf),
+    Ringbuf(&'a mut RingbufMap),
     Devmap(&'a mut BpfArrayMap),
     ProgArray(&'a mut BpfArrayMap),
     WdtFeed(&'a mut super::wdt_feed::BpfWdtFeedMap),
 }
 
-/// Shared view for lookup (read lock; value bytes remain writable via returned ptr).
 pub(crate) enum TypedMapRef<'a> {
     Array(&'a BpfArrayMap),
     Hash(&'a BpfHashMap),
-    Ringbuf(&'a BpfRingBuf),
+    Ringbuf(&'a RingbufMap),
     Devmap(&'a BpfArrayMap),
     ProgArray(&'a BpfArrayMap),
     WdtFeed(&'a super::wdt_feed::BpfWdtFeedMap),
 }
 
 pub(crate) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> R) -> Option<R> {
-    let mut guard = POOL.try_write()?;
-    let table = guard.as_mut()?;
-    let res = table.get_mut(&id)?;
-    let typed = match res.kind? {
+    let mut guard = pool_try_write()?;
+    let mut table = guard.as_mut()?;
+    let mut res = table.get_mut(&id)?;
+    let typed = match res.kind()? {
         MapKind::Array => TypedMap::Array(unsafe { res.as_mut() }),
         MapKind::Hash => TypedMap::Hash(unsafe { res.as_mut() }),
         MapKind::Ringbuf => TypedMap::Ringbuf(unsafe { res.as_mut() }),
@@ -206,10 +206,10 @@ pub(crate) fn with_typed_map_ref<R>(
     id: ResourceId,
     f: impl FnOnce(TypedMapRef<'_>) -> R,
 ) -> Option<R> {
-    let guard = POOL.try_read()?;
+    let guard = pool_try_read()?;
     let table = guard.as_ref()?;
     let res = table.get(&id)?;
-    let typed = match res.kind? {
+    let typed = match res.kind()? {
         MapKind::Array => TypedMapRef::Array(unsafe { res.as_ref() }),
         MapKind::Hash => TypedMapRef::Hash(unsafe { res.as_ref() }),
         MapKind::Ringbuf => TypedMapRef::Ringbuf(unsafe { res.as_ref() }),
@@ -239,7 +239,7 @@ pub fn helper_lookup(map: usize, key: usize) -> usize {
         }
         TypedMapRef::WdtFeed(m) => MapOps::lookup(m, key),
         TypedMapRef::Hash(m) => MapOps::lookup(m, key),
-        TypedMapRef::Ringbuf(m) => MapOps::lookup(m, key),
+        TypedMapRef::Ringbuf(m) => MapOps::lookup(&m.bpf, key),
     }) {
         Some(Ok(p)) => p as usize,
         Some(Err(MapError::NotFound)) => 0,
@@ -263,7 +263,7 @@ pub fn helper_update(map: usize, key: usize, value: usize, flags: usize) -> usiz
         }
         TypedMap::WdtFeed(m) => MapOps::update(m, key, value, flags as u64),
         TypedMap::Hash(m) => MapOps::update(m, key, value, flags as u64),
-        TypedMap::Ringbuf(m) => MapOps::update(m, key, value, flags as u64),
+        TypedMap::Ringbuf(m) => MapOps::update(&mut m.bpf, key, value, flags as u64),
     }) {
         Some(Ok(())) => 0,
         Some(Err(e)) => e.errno() as usize,
@@ -283,7 +283,7 @@ pub fn helper_delete(map: usize, key: usize) -> usize {
         TypedMap::Array(m) | TypedMap::Devmap(m) | TypedMap::ProgArray(m) => MapOps::delete(m, key),
         TypedMap::WdtFeed(m) => MapOps::delete(m, key),
         TypedMap::Hash(m) => MapOps::delete(m, key),
-        TypedMap::Ringbuf(m) => MapOps::delete(m, key),
+        TypedMap::Ringbuf(m) => MapOps::delete(&mut m.bpf, key),
     }) {
         Some(Ok(())) => 0,
         Some(Err(e)) => e.errno() as usize,
@@ -311,19 +311,19 @@ pub fn helper_for_each_map_elem(
     };
     let cb = unsafe { core::mem::transmute::<usize, ForEachCb>(callback_fn) };
 
-    let mut guard = match POOL.try_write() {
+    let mut guard = match super::pool::pool_try_write() {
         Some(g) => g,
         None => return (-11i32) as usize, // EAGAIN
     };
-    let table = match guard.as_mut() {
+    let mut table = match guard.as_mut() {
         Some(t) => t,
         None => return (-22i32) as usize,
     };
-    let res = match table.get_mut(&id) {
+    let mut res = match table.get_mut(&id) {
         Some(r) => r,
         None => return (-2i32) as usize,
     };
-    match res.kind {
+    match res.kind() {
         Some(MapKind::Hash) => {
             let m: &mut BpfHashMap = unsafe { res.as_mut() };
             m.for_each_elems(map, cb, callback_ctx)

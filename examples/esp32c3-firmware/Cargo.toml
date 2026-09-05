@@ -70,7 +70,7 @@ xpost = { path = "../.." }
 allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.17", default-features = false, features = ["allocator-api2", "default-hasher"] }
 talc = { version = "5.0", features = ["counters"] }
-ringbuf = { version = "0.3.3", default-features = false }
+ringbuf = { version = "0.5.1", default-features = false, features = ["alloc", "portable-atomic"] }
 
 [build-dependencies]
 xpost-build = { path = "../../xpost-build" }

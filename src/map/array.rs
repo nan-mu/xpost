@@ -41,6 +41,12 @@ impl BpfArrayMap {
         unsafe { self.data.as_ptr().add(idx * self.value_stride) as *mut u8 }
     }
 
+    /// Userspace: contiguous storage (read).
+    #[inline]
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
     /// Userspace: contiguous storage (hold `POOL` write lock).
     #[inline]
     pub fn data_mut(&mut self) -> &mut [u8] {
@@ -207,34 +213,66 @@ pub async fn create_bpf_array(
 
 /// `BPF_MAP_TYPE_DEVMAP`: ARRAY of `u32` ifindex values, tagged [`MapKind::Devmap`].
 pub async fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
-    let (raw, layout, value_size, stride) = alloc_array(4, max_entries)?;
+    let storage = alloc_devmap_storage(max_entries, MapKind::Devmap)?;
     RawResource::insert(
         id,
-        raw,
-        layout,
+        storage.ptr,
+        storage.layout,
         drop_array,
         Some(MapKind::Devmap),
         4,
-        value_size,
-        stride,
+        4,
+        4,
     )
     .await
 }
 
 /// `BPF_MAP_TYPE_PROG_ARRAY`: ARRAY of `u32` absolute XDP entry addresses.
 pub async fn create_bpf_prog_array(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
-    let (raw, layout, value_size, stride) = alloc_array(4, max_entries)?;
+    let storage = alloc_devmap_storage(max_entries, MapKind::ProgArray)?;
     RawResource::insert(
         id,
-        raw,
-        layout,
+        storage.ptr,
+        storage.layout,
         drop_array,
         Some(MapKind::ProgArray),
         4,
-        value_size,
-        stride,
+        4,
+        4,
     )
     .await
+}
+
+pub(crate) fn alloc_array_storage(
+    value_size: usize,
+    max_entries: usize,
+) -> Result<RawResource, AllocError> {
+    let (raw, layout, value_size, stride) = alloc_array(value_size, max_entries)?;
+    Ok(RawResource::build(
+        raw,
+        layout,
+        drop_array,
+        Some(MapKind::Array),
+        4,
+        value_size,
+        stride,
+    ))
+}
+
+pub(crate) fn alloc_devmap_storage(
+    max_entries: usize,
+    kind: MapKind,
+) -> Result<RawResource, AllocError> {
+    let (raw, layout, value_size, stride) = alloc_array(4, max_entries)?;
+    Ok(RawResource::build(
+        raw,
+        layout,
+        drop_array,
+        Some(kind),
+        4,
+        value_size,
+        stride,
+    ))
 }
 
 fn check(name: &str, ok: bool, pass: &mut u32, fail: &mut u32) {
@@ -293,29 +331,29 @@ pub fn run_selftest(pass: &mut u32, fail: &mut u32) {
     // Stride addressing: index 0 and (if present) index 1 are stride apart.
     if SELFTEST_VALUE_SIZE > 0 {
         let stride = BpfArrayMap::value_stride(SELFTEST_VALUE_SIZE);
-        let mut guard = match POOL.try_write() {
+        let mut guard = match super::pool::pool_try_write() {
             Some(g) => g,
             None => {
                 check("array_stride", false, pass, fail);
                 return;
             }
         };
-        let table = match guard.as_mut() {
+        let mut table = match guard.as_mut() {
             Some(t) => t,
             None => {
                 check("array_stride", false, pass, fail);
                 return;
             }
         };
-        let res = match table.get_mut(&SELFTEST_MAP_ID) {
+        let mut res = match table.get_mut(&SELFTEST_MAP_ID) {
             Some(r) => r,
             None => {
                 check("array_stride", false, pass, fail);
                 return;
             }
         };
-        let ok_meta = res.value_size == SELFTEST_VALUE_SIZE && res.value_stride == stride;
-        let value_stride = res.value_stride;
+        let ok_meta = res.value_size() == SELFTEST_VALUE_SIZE && res.value_stride() == stride;
+        let value_stride = res.value_stride();
         let m: &mut BpfArrayMap = unsafe { res.as_mut() };
         let p0 = m.elem_ptr(0) as usize;
         let p1 = m.elem_ptr(1) as usize;

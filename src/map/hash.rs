@@ -116,6 +116,12 @@ impl BpfHashMap {
         BpfHashMapBuilder::default()
     }
 
+    /// Direct hashbrown table (read).
+    #[inline]
+    pub fn table(&self) -> &BpfHashTable {
+        &self.table
+    }
+
     /// Direct hashbrown table.
     #[inline]
     pub fn table_mut(&mut self) -> &mut BpfHashTable {
@@ -364,4 +370,21 @@ pub async fn create_bpf_hash(
                 AllocError
             }
         })
+}
+
+pub(crate) fn alloc_hash_storage(
+    key_size: usize,
+    value_size: usize,
+    max_entries: usize,
+) -> Result<RawResource, AllocError> {
+    let (raw, layout, key_size, value_size) = alloc_bpf_hash(key_size, value_size, max_entries)?;
+    Ok(RawResource::build(
+        raw,
+        layout,
+        drop_hash,
+        Some(MapKind::Hash),
+        key_size,
+        value_size,
+        value_size,
+    ))
 }

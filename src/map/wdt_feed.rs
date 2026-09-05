@@ -106,11 +106,11 @@ unsafe fn drop_wdt_feed(ptr: *mut u8) {
 
 /// Create `wdt_feed` map and bind it to [`watchdog::bind_feed_map`].
 pub async fn create_bpf_wdt_feed(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
-    let (raw, layout) = alloc_wdt_feed(max_entries)?;
+    let storage = alloc_wdt_feed_storage(max_entries)?;
     RawResource::insert(
         id,
-        raw,
-        layout,
+        storage.ptr,
+        storage.layout,
         drop_wdt_feed,
         Some(MapKind::WdtFeed),
         core::mem::size_of::<u32>(),
@@ -120,6 +120,19 @@ pub async fn create_bpf_wdt_feed(id: ResourceId, max_entries: usize) -> Result<(
     .await?;
     watchdog::bind_feed_map(id);
     Ok(())
+}
+
+pub(crate) fn alloc_wdt_feed_storage(max_entries: usize) -> Result<RawResource, AllocError> {
+    let (raw, layout) = alloc_wdt_feed(max_entries)?;
+    Ok(RawResource::build(
+        raw,
+        layout,
+        drop_wdt_feed,
+        Some(MapKind::WdtFeed),
+        core::mem::size_of::<u32>(),
+        SLOT_SIZE,
+        SLOT_SIZE,
+    ))
 }
 
 /// BPF helper `bpf_xpost_wdt_feed(handle)` entry.

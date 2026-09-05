@@ -17,8 +17,9 @@ use super::array::BpfArrayMap;
 use super::hash::BpfHashMap;
 use super::names::resolve_map_name;
 use super::ops::MapError;
-use super::pool::{MapKind, POOL};
-use super::ringbuf::BpfRingBuf;
+use super::pool::{MapKind, pool_try_read};
+use super::ringbuf::{BpfRingBuf, RingbufMap};
+use super::runtime::{self, MAP_RT};
 
 fn kind_label(kind: Option<MapKind>) -> &'static str {
     match kind {
@@ -49,16 +50,16 @@ pub async fn with_hash_map<R>(
 ) -> Result<R, MapError> {
     datapath::require_stopped()?;
     let id = resolve_named_id(name)?;
-    let mut guard = POOL.write().await;
-    let table = match guard.as_mut() {
+    let mut guard = MAP_RT.write().await;
+    let rt = match guard.as_mut() {
         Some(t) => t,
         None => {
             error!("[userspace] pool not initialized");
             return Err(MapError::InvalidArg);
         }
     };
-    let resource = match table.get_mut(&id) {
-        Some(r) => r,
+    let resource = match rt.meta.get_mut(id) {
+        Some(m) => &mut m.storage,
         None => {
             error!("[userspace] map id {} missing from pool", id);
             return Err(MapError::NotFound);
@@ -78,24 +79,8 @@ pub async fn with_hash_map<R>(
 /// Read-only ARRAY element as `u64` (key = index). Allowed while datapath runs.
 pub fn peek_array_u64(name: &str, index: u32) -> Result<u64, MapError> {
     let id = resolve_named_id(name)?;
-    let guard = POOL
-        .try_read()
-        .ok_or(MapError::Busy)?;
-    let table = match guard.as_ref() {
-        Some(t) => t,
-        None => {
-            error!("[userspace] pool not initialized");
-            return Err(MapError::InvalidArg);
-        }
-    };
-    let resource = match table.get(&id) {
-        Some(r) => r,
-        None => {
-            error!("[userspace] map id {} missing from pool", id);
-            return Err(MapError::NotFound);
-        }
-    };
-    match resource.kind {
+    let kind = runtime::try_read_storage(id, |r| r.kind).flatten();
+    match kind {
         Some(MapKind::Array) | Some(MapKind::Devmap) => {}
         got => {
             error!(
@@ -106,12 +91,13 @@ pub fn peek_array_u64(name: &str, index: u32) -> Result<u64, MapError> {
             return Err(MapError::Unsupported);
         }
     }
-    let map = unsafe { resource.as_ref::<BpfArrayMap>() };
+    let ptr = runtime::try_read_storage(id, |r| r.ptr as *const BpfArrayMap)
+        .ok_or(MapError::Busy)?;
+    let map = unsafe { &*ptr };
     let ptr = map.elem_ptr(index as usize);
     if ptr.is_null() {
         return Err(MapError::NotFound);
     }
-    // SAFETY: single-core MCU; BPF may increment concurrently — stats read is best-effort.
     let v = unsafe { core::ptr::read_volatile(ptr.cast::<u64>()) };
     Ok(v)
 }
@@ -125,16 +111,16 @@ pub async fn with_array_map<R>(
 ) -> Result<R, MapError> {
     datapath::require_stopped()?;
     let id = resolve_named_id(name)?;
-    let mut guard = POOL.write().await;
-    let table = match guard.as_mut() {
+    let mut guard = MAP_RT.write().await;
+    let rt = match guard.as_mut() {
         Some(t) => t,
         None => {
             error!("[userspace] pool not initialized");
             return Err(MapError::InvalidArg);
         }
     };
-    let resource = match table.get_mut(&id) {
-        Some(r) => r,
+    let resource = match rt.meta.get_mut(id) {
+        Some(m) => &mut m.storage,
         None => {
             error!("[userspace] map id {} missing from pool", id);
             return Err(MapError::NotFound);
@@ -162,16 +148,16 @@ pub async fn with_ringbuf_map<R>(
     f: impl FnOnce(&mut BpfRingBuf) -> R,
 ) -> Result<R, MapError> {
     let id = resolve_named_id(name)?;
-    let mut guard = POOL.write().await;
-    let table = match guard.as_mut() {
+    let mut guard = MAP_RT.write().await;
+    let rt = match guard.as_mut() {
         Some(t) => t,
         None => {
             error!("[userspace] pool not initialized");
             return Err(MapError::InvalidArg);
         }
     };
-    let resource = match table.get_mut(&id) {
-        Some(r) => r,
+    let resource = match rt.meta.get_mut(id) {
+        Some(m) => &mut m.storage,
         None => {
             error!("[userspace] map id {} missing from pool", id);
             return Err(MapError::NotFound);
@@ -185,5 +171,5 @@ pub async fn with_ringbuf_map<R>(
         );
         return Err(MapError::Unsupported);
     }
-    Ok(f(unsafe { resource.as_mut::<BpfRingBuf>() }))
+    Ok(f(unsafe { resource.as_mut::<RingbufMap>() }.bpf_mut()))
 }

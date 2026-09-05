@@ -1,80 +1,174 @@
-//! BPF_MAP_TYPE_RINGBUF — length-prefixed byte ring in the talc pool.
+//! BPF ringbuf TX + async-ringbuf RX.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use core::alloc::Layout;
+use core::mem::MaybeUninit;
 use core::ptr;
 
 use allocator_api2::alloc::AllocError;
 use allocator_api2::boxed::Box;
+use async_ringbuf::Arc;
+use async_ringbuf::traits::{Producer, Split};
+use async_ringbuf::wrap::{AsyncCons, AsyncProd};
+use async_ringbuf::AsyncRb;
+use ringbuf::storage::Ref;
+use ringbuf::SharedRb;
 
 use crate::helper::dynptr::BpfDynptr;
 
 use super::abi::{TypedMap, resolve_map_id, with_typed_map};
 use super::ops::{MapError, MapOps};
-use super::pool::{HEAP_SIZE, MapKind, POOL, RawResource, ResourceId, allocator};
+use super::pool::{self, MapKind, RawResource, ResourceId, allocator};
 
-const MAX_RECORD_BYTES: usize = 256;
+pub const MAX_RECORD_BYTES: usize = 256;
+pub const RINGBUF_SLOT_BYTES: usize = MAX_RECORD_BYTES + 4;
 
-/// Byte-capacity ring with length-prefixed records (BPF ringbuf).
+/// Fixed-size async ring element (LE u32 length prefix + payload).
+pub type RingbufRecord = [u8; RINGBUF_SLOT_BYTES];
+
+/// async-ringbuf consumer half (RX).
+pub type RingbufRx = AsyncCons<Arc<AsyncRb<Ref<'static, RingbufRecord>>>>;
+
+/// Parse payload from a [`RingbufRecord`].
+pub fn ringbuf_record_payload(record: &RingbufRecord) -> Option<&[u8]> {
+    let len = u32::from_le_bytes(record[0..4].try_into().ok()?) as usize;
+    if len == 0 || len > MAX_RECORD_BYTES {
+        return None;
+    }
+    Some(&record[4..4 + len])
+}
+
+pub fn ringbuf_slot_count(byte_capacity: usize) -> usize {
+    core::cmp::max(16, byte_capacity / RINGBUF_SLOT_BYTES)
+}
+
+/// Combined BPF TX byte ring + async RX slot ring.
+pub struct RingbufMap {
+    pub bpf: BpfRingBuf,
+    slots: Box<[MaybeUninit<RingbufRecord>], &'static talc::TalcCell<talc::source::Manual>>,
+    prod: AsyncProd<Arc<AsyncRb<Ref<'static, RingbufRecord>>>>,
+    cons_slot: Option<RingbufRx>,
+}
+
+impl RingbufMap {
+    pub fn bpf_mut(&mut self) -> &mut BpfRingBuf {
+        &mut self.bpf
+    }
+
+    pub fn bridge_bpf_to_async(&mut self) {
+        let mut scratch = [0u8; MAX_RECORD_BYTES];
+        while let Some(len) = self.bpf.try_consume(&mut scratch) {
+            let mut record = [0u8; RINGBUF_SLOT_BYTES];
+            record[0..4].copy_from_slice(&(len as u32).to_le_bytes());
+            record[4..4 + len].copy_from_slice(&scratch[..len]);
+            let _ = self.prod.try_push(record);
+        }
+    }
+}
+
+/// BPF byte ring (XDP TX only).
 pub struct BpfRingBuf {
     data: Box<[u8], &'static talc::TalcCell<talc::source::Manual>>,
     capacity: usize,
     prod: usize,
-    /// Consumer cursor (userspace drain).
     cons: usize,
-    /// Outstanding reserve: (header offset, payload size).
     reserved: Option<(usize, usize)>,
 }
 
-unsafe fn drop_ring(ptr: *mut u8) {
-    unsafe { super::pool::reclaim_talc_box::<BpfRingBuf>(ptr, "BpfRingBuf") };
+unsafe fn drop_ringbuf_map(ptr: *mut u8) {
+    unsafe { pool::reclaim_talc_box::<RingbufMap>(ptr, "RingbufMap") };
 }
 
-fn alloc_bpf_ringbuf(byte_capacity: usize) -> Result<*mut u8, AllocError> {
-    if byte_capacity < 16 || byte_capacity > HEAP_SIZE / 2 {
+pub(crate) fn alloc_ringbuf_storage(byte_capacity: usize) -> Result<RawResource, AllocError> {
+    if byte_capacity < 16 || byte_capacity > pool::HEAP_SIZE / 2 {
         return Err(AllocError);
     }
-    let mut vec = allocator_api2::vec::Vec::new_in(allocator());
-    vec.try_reserve_exact(byte_capacity)
+    let mut bpf_vec = allocator_api2::vec::Vec::new_in(allocator());
+    bpf_vec
+        .try_reserve_exact(byte_capacity)
         .map_err(|_| AllocError)?;
-    vec.resize(byte_capacity, 0);
-    let data = vec.into_boxed_slice();
-    let map = BpfRingBuf {
-        data,
+    bpf_vec.resize(byte_capacity, 0);
+    let bpf_data = bpf_vec.into_boxed_slice();
+    let bpf = BpfRingBuf {
+        data: bpf_data,
         capacity: byte_capacity,
         prod: 0,
         cons: 0,
         reserved: None,
     };
+
+    let slots = ringbuf_slot_count(byte_capacity);
+    let mut slot_vec = allocator_api2::vec::Vec::new_in(allocator());
+    slot_vec.try_reserve_exact(slots).map_err(|_| AllocError)?;
+    for _ in 0..slots {
+        slot_vec.push(MaybeUninit::new([0u8; RINGBUF_SLOT_BYTES]));
+    }
+    let mut slot_box = slot_vec.into_boxed_slice();
+    // SAFETY: `slots` field keeps this buffer alive for the `Ref` inside `Arc<AsyncRb<_>>`.
+    let storage = Ref::from(unsafe {
+        core::mem::transmute::<&mut [MaybeUninit<RingbufRecord>], &'static mut [MaybeUninit<RingbufRecord>]>(
+            slot_box.as_mut(),
+        )
+    });
+    let shared = unsafe { SharedRb::from_raw_parts(storage, 0, 0) };
+    let rb = AsyncRb::from(shared);
+    let (prod, cons) = rb.split();
+
+    let map = RingbufMap {
+        bpf,
+        slots: slot_box,
+        prod,
+        cons_slot: Some(cons),
+    };
     let boxed = Box::try_new_in(map, allocator())?;
-    Ok(Box::into_raw(boxed) as *mut u8)
+    let raw = Box::into_raw(boxed) as *mut u8;
+    let layout = Layout::new::<RingbufMap>();
+    Ok(RawResource::build(
+        raw,
+        layout,
+        drop_ringbuf_map,
+        Some(MapKind::Ringbuf),
+        0,
+        0,
+        0,
+    ))
 }
 
-/// Create a ringbuf with `byte_capacity` data area (Linux `max_entries`).
+pub(crate) fn take_rx_consumer(map: &mut RingbufMap) -> Option<RingbufRx> {
+    map.cons_slot.take()
+}
+
 pub async fn create_bpf_ringbuf(id: ResourceId, byte_capacity: usize) -> Result<(), AllocError> {
-    let raw = alloc_bpf_ringbuf(byte_capacity)?;
-    let layout = Layout::new::<BpfRingBuf>();
-    RawResource::insert(id, raw, layout, drop_ring, Some(MapKind::Ringbuf), 0, 0, 0).await
+    let resource = alloc_ringbuf_storage(byte_capacity)?;
+    let mut guard = super::runtime::MAP_RT.write().await;
+    let rt = guard.as_mut().ok_or(AllocError)?;
+    if rt.meta.len() != id {
+        return Err(AllocError);
+    }
+    rt.meta.push(super::runtime::MapMeta {
+        name: alloc::format!("ring_{id}"),
+        map_type: super::builder::MapType::Ringbuf,
+        key_layout: None,
+        value_layout: None,
+        len: byte_capacity,
+        size: byte_capacity,
+        storage: resource,
+    });
+    Ok(())
 }
 
 impl MapOps for BpfRingBuf {
     fn lookup(&self, _key: *const u8) -> Result<*mut u8, MapError> {
-        let e = MapError::Unsupported;
-        e.log_if_bug("ringbuf.lookup");
-        Err(e)
+        Err(MapError::Unsupported)
     }
 
     fn update(&mut self, _key: *const u8, _value: *const u8, _flags: u64) -> Result<(), MapError> {
-        let e = MapError::Unsupported;
-        e.log_if_bug("ringbuf.update");
-        Err(e)
+        Err(MapError::Unsupported)
     }
 
     fn delete(&mut self, _key: *const u8) -> Result<(), MapError> {
-        let e = MapError::Unsupported;
-        e.log_if_bug("ringbuf.delete");
-        Err(e)
+        Err(MapError::Unsupported)
     }
 }
 
@@ -82,11 +176,9 @@ impl BpfRingBuf {
     const HDR: usize = 4;
 
     fn free_bytes(&self) -> usize {
-        // Linear ring: reclaim only after full drain (try_consume resets).
         self.capacity.saturating_sub(self.prod)
     }
 
-    /// Reserve `size` payload bytes; returns pointer to payload or null.
     pub fn reserve(&mut self, size: usize) -> *mut u8 {
         if self.reserved.is_some() || size == 0 || size > MAX_RECORD_BYTES {
             return ptr::null_mut();
@@ -118,19 +210,17 @@ impl BpfRingBuf {
         }
         let dst = self.reserve(size);
         if dst.is_null() {
-            return -28; // ENOSPC
+            return -28;
         }
         unsafe { ptr::copy_nonoverlapping(src, dst, size) };
         self.submit();
         0
     }
 
-    /// Unconsumed produced bytes (prod − cons).
     pub fn query_avail(&self) -> usize {
         self.prod.saturating_sub(self.cons)
     }
 
-    /// Pop one length-prefixed record into `out`. Returns payload length, or `None` if empty.
     pub fn try_consume(&mut self, out: &mut [u8]) -> Option<usize> {
         if self.cons + Self::HDR > self.prod {
             return None;
@@ -148,7 +238,6 @@ impl BpfRingBuf {
         }
         out[..size].copy_from_slice(&self.data[payload_off..end]);
         self.cons = end;
-        // Compact when fully drained.
         if self.cons == self.prod {
             self.cons = 0;
             self.prod = 0;
@@ -162,7 +251,7 @@ impl BpfRingBuf {
     }
 }
 
-fn with_ring<R>(id: ResourceId, f: impl FnOnce(&mut BpfRingBuf) -> R) -> Option<R> {
+fn with_ring_map<R>(id: ResourceId, f: impl FnOnce(&mut RingbufMap) -> R) -> Option<R> {
     with_typed_map(id, |typed| match typed {
         TypedMap::Ringbuf(rb) => Some(f(rb)),
         _ => None,
@@ -170,36 +259,42 @@ fn with_ring<R>(id: ResourceId, f: impl FnOnce(&mut BpfRingBuf) -> R) -> Option<
     .flatten()
 }
 
-fn with_ring_matching<R>(data: usize, f: impl FnOnce(&mut BpfRingBuf) -> R) -> Option<(ResourceId, R)> {
-    let mut guard = POOL.try_write()?;
-    let table = guard.as_mut()?;
-    for (&id, res) in table.iter_mut() {
-        if res.kind != Some(MapKind::Ringbuf) {
+fn with_ring_matching<R>(data: usize, f: impl FnOnce(&mut RingbufMap) -> R) -> Option<(ResourceId, R)> {
+    let mut guard = pool::pool_try_write()?;
+    let mut table = guard.as_mut()?;
+    for (id, mut res) in table.iter_mut() {
+        if res.kind() != Some(MapKind::Ringbuf) {
             continue;
         }
-        let rb: &mut BpfRingBuf = unsafe { res.as_mut() };
-        if rb.reserved_payload_addr() == Some(data) {
+        let rb: &mut RingbufMap = unsafe { res.as_mut() };
+        if rb.bpf.reserved_payload_addr() == Some(data) {
             return Some((id, f(rb)));
         }
     }
     None
 }
 
-/// Ringbuf helpers (map must be a ringbuf resource).
 pub fn helper_ringbuf_reserve(map: usize, size: usize, _flags: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
         return 0;
     };
-    with_ring(id, |rb| rb.reserve(size) as usize).unwrap_or(0)
+    with_ring_map(id, |rb| rb.bpf.reserve(size) as usize).unwrap_or(0)
 }
 
 pub fn helper_ringbuf_submit(data: usize) -> usize {
     with_ring_matching(data, |rb| {
-        rb.submit();
+        rb.bpf.submit();
         0
     })
     .map(|(id, r)| {
-        super::channel::notify_produced(id);
+        if let Some(mut guard) = pool::pool_try_write() {
+            if let Some(mut table) = guard.as_mut() {
+                if let Some(mut res) = table.get_mut(&id) {
+                    let rb: &mut RingbufMap = unsafe { res.as_mut() };
+                    rb.bridge_bpf_to_async();
+                }
+            }
+        }
         r
     })
     .unwrap_or((-22i32) as usize)
@@ -207,7 +302,7 @@ pub fn helper_ringbuf_submit(data: usize) -> usize {
 
 pub fn helper_ringbuf_discard(data: usize) -> usize {
     with_ring_matching(data, |rb| {
-        rb.discard();
+        rb.bpf.discard();
         0
     })
     .map(|(_, r)| r)
@@ -218,9 +313,13 @@ pub fn helper_ringbuf_output(map: usize, data: usize, size: usize, _flags: usize
     let Some(id) = resolve_map_id(map) else {
         return (-22i32) as usize;
     };
-    let rc = with_ring(id, |rb| rb.output(data as *const u8, size) as usize).unwrap_or((-22i32) as usize);
+    let rc = with_ring_map(id, |rb| rb.bpf.output(data as *const u8, size) as usize)
+        .unwrap_or((-22i32) as usize);
     if rc == 0 {
-        super::channel::notify_produced(id);
+        with_ring_map(id, |rb| {
+            rb.bridge_bpf_to_async();
+            0
+        });
     }
     rc
 }
@@ -229,10 +328,9 @@ pub fn helper_ringbuf_query(map: usize, _flags: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
         return 0;
     };
-    with_ring(id, |rb| rb.query_avail()).unwrap_or(0)
+    with_ring_map(id, |rb| rb.bpf.query_avail()).unwrap_or(0)
 }
 
-/// `bpf_ringbuf_reserve_dynptr(map, size, flags, ptr)` → 0 / negated errno.
 pub fn helper_ringbuf_reserve_dynptr(map: usize, size: usize, _flags: usize, ptr: usize) -> usize {
     if ptr == 0 || size == 0 {
         return (-22i32) as usize;
@@ -241,16 +339,15 @@ pub fn helper_ringbuf_reserve_dynptr(map: usize, size: usize, _flags: usize, ptr
         BpfDynptr::clear(ptr);
         return (-22i32) as usize;
     };
-    let sample = with_ring(id, |rb| rb.reserve(size) as usize).unwrap_or(0);
+    let sample = with_ring_map(id, |rb| rb.bpf.reserve(size) as usize).unwrap_or(0);
     if sample == 0 {
         BpfDynptr::clear(ptr);
-        return (-12i32) as usize; // ENOMEM
+        return (-12i32) as usize;
     }
     BpfDynptr::set_ringbuf(ptr, sample, size);
     0
 }
 
-/// `bpf_ringbuf_submit_dynptr(ptr, flags)`.
 pub fn helper_ringbuf_submit_dynptr(ptr: usize, _flags: usize) -> usize {
     if let Some(data) = BpfDynptr::ringbuf_payload(ptr) {
         let _ = helper_ringbuf_submit(data);
@@ -259,7 +356,6 @@ pub fn helper_ringbuf_submit_dynptr(ptr: usize, _flags: usize) -> usize {
     0
 }
 
-/// `bpf_ringbuf_discard_dynptr(ptr, flags)`.
 pub fn helper_ringbuf_discard_dynptr(ptr: usize, _flags: usize) -> usize {
     if let Some(data) = BpfDynptr::ringbuf_payload(ptr) {
         let _ = helper_ringbuf_discard(data);

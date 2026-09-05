@@ -32,6 +32,11 @@ extern crate alloc;
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
+const MAP_HEAP_SIZE: usize = xpost::map::HEAP_SIZE;
+
+#[unsafe(link_section = ".bss")]
+static mut MAP_HEAP: [u8; MAP_HEAP_SIZE] = [0; MAP_HEAP_SIZE];
+
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
@@ -51,7 +56,16 @@ async fn main(spawner: Spawner) {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
     init_log!("[Init][Embassy] Embassy initialized!");
 
-    xpost::map::init();
+    unsafe {
+        let heap = core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(MAP_HEAP).cast::<u8>(),
+            MAP_HEAP_SIZE,
+        );
+        xpost::map::claim_heap(heap).expect("[Init][MAP] claim_heap failed");
+    }
+    xpost::map::init()
+        .await
+        .expect("[Init][MAP] map runtime init failed");
     init_log!("[Init][MAP] MAP resource pool initialized");
     xpost::mount::init();
     init_log!("[Init][Mount] boot mounts loaded");

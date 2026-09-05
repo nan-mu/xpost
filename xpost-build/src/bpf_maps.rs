@@ -37,7 +37,7 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<()> {
                  pub const FIRMWARE_HAS_DEVMAP: bool = false;\n\
                  pub const FIRMWARE_HAS_PROG_ARRAY: bool = false;\n\
                  pub const FIRMWARE_HAS_RINGBUF: bool = false;\n\
-                 pub const SELFTEST_MAP_ID: ResourceId = 0;\n\
+                 pub const SELFTEST_MAP_ID: crate::map::MapIdx = 0;\n\
                  pub const SELFTEST_MAP_TYPE: &str = \"\";\n\
                  pub const SELFTEST_KEY_SIZE: usize = 0;\n\
                  pub const SELFTEST_VALUE_SIZE: usize = 0;\n\
@@ -164,7 +164,7 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<()> {
         let key_size = c_layout_size(&first.key_fields);
         let value_size = c_layout_size(&first.value_fields);
         out.push_str("/// First map in bpf.toml (BTree order) — used by hw-selftest.\n");
-        out.push_str("pub const SELFTEST_MAP_ID: ResourceId = 0;\n");
+        out.push_str("pub const SELFTEST_MAP_ID: crate::map::MapIdx = 0;\n");
         out.push_str(&format!(
             "pub const SELFTEST_MAP_TYPE: &str = \"{}\";\n",
             first.map_type
@@ -188,10 +188,10 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<()> {
         let value_size = c_layout_size(&spec.value_fields);
 
         out.push_str(&format!(
-            "/// ResourceId for maps.{} from bpf.toml\n",
+            "/// MapIdx for maps.{} from bpf.toml\n",
             spec.name
         ));
-        out.push_str(&format!("pub const {id_const}: ResourceId = {idx};\n"));
+        out.push_str(&format!("pub const {id_const}: crate::map::MapIdx = {idx};\n"));
         out.push_str(&format!(
             "pub const {}_KEY_SIZE: usize = {key_size};\n",
             id_const
@@ -237,107 +237,87 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<()> {
 }
 
 const EMPTY_INIT: &str = "\
-pub async fn init_firmware_maps() -> Result<(), allocator_api2::alloc::AllocError> { Ok(()) }\n";
+pub async fn init_firmware_maps_via_builder(_rt: &mut crate::map::MapRt) -> Result<(), crate::map::Error> { Ok(()) }\n";
 
 fn emit_init_fn(out: &mut String, map_specs: &[MapSpec]) -> Result<()> {
     out.push_str(
-        "pub async fn init_firmware_maps() -> Result<(), allocator_api2::alloc::AllocError> {\n",
+        "pub async fn init_firmware_maps_via_builder(rt: &mut MapRt) -> Result<(), Error> {\n",
     );
-
-    let needs_hash = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_HASH");
-    let needs_array = map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_ARRAY");
-    let needs_devmap = map_specs
-        .iter()
-        .any(|s| s.map_type == "BPF_MAP_TYPE_DEVMAP");
-    let needs_prog_array = map_specs
-        .iter()
-        .any(|s| s.map_type == "BPF_MAP_TYPE_PROG_ARRAY");
-    let needs_ring = map_specs
-        .iter()
-        .any(|s| s.map_type == "BPF_MAP_TYPE_RINGBUF");
-    let needs_wdt = map_specs
-        .iter()
-        .any(|s| s.map_type == "BPF_MAP_TYPE_XPOST_WDT_FEED");
-    if needs_hash || needs_array || needs_devmap || needs_prog_array || needs_ring || needs_wdt {
-        out.push_str("    use crate::map::{");
-        let mut parts = Vec::new();
-        if needs_array {
-            parts.push("create_bpf_array");
-        }
-        if needs_devmap {
-            parts.push("create_bpf_devmap");
-        }
-        if needs_prog_array {
-            parts.push("create_bpf_prog_array");
-        }
-        if needs_hash {
-            parts.push("create_bpf_hash");
-        }
-        if needs_ring {
-            parts.push("create_bpf_ringbuf");
-        }
-        if needs_wdt {
-            parts.push("create_bpf_wdt_feed");
-        }
-        parts.push("register_map_name");
-        out.push_str(&parts.join(", "));
-        out.push_str("};\n");
-    }
 
     for spec in map_specs {
         if spec.runtime {
             continue;
         }
+        let type_stem = snake_to_pascal(&spec.name);
+        let key_ty = format!("{type_stem}Key");
+        let val_ty = format!("{type_stem}Value");
+        let name = escape_rust_str(&spec.name);
         let id_const = format!("MAP_ID_{}", spec.name.to_ascii_uppercase());
-        let key_size = c_layout_size(&spec.key_fields);
-        let value_size = c_layout_size(&spec.value_fields);
+
         match spec.map_type.as_str() {
             "BPF_MAP_TYPE_HASH" => {
                 out.push_str(&format!(
-                    "    create_bpf_hash({id_const}, {key_size}, {value_size}, {}).await?;\n",
+                    "    let _ = rt.push_builder(\n\
+                            MapBuilder::hash()\n\
+                            .with_name(\"{name}\")\n\
+                            .with_key::<{key_ty}>()\n\
+                            .with_value::<{val_ty}>()\n\
+                            .with_capacity({})\n\
+                    ).await?;\n",
                     spec.max_entries
                 ));
             }
             "BPF_MAP_TYPE_ARRAY" => {
                 out.push_str(&format!(
-                    "    create_bpf_array({id_const}, {value_size}, {}).await?;\n",
+                    "    let _ = rt.push_builder(\n\
+                            MapBuilder::array()\n\
+                            .with_name(\"{name}\")\n\
+                            .with_value::<{val_ty}>()\n\
+                            .with_capacity({})\n\
+                    ).await?;\n",
                     spec.max_entries
                 ));
             }
             "BPF_MAP_TYPE_DEVMAP" => {
                 out.push_str(&format!(
-                    "    create_bpf_devmap({id_const}, {}).await?;\n",
+                    "    use crate::map::{{create_bpf_devmap, register_map_name, MapIdx}};\n\
+                     create_bpf_devmap({id_const}, {}).await.map_err(|_| Error::Oom)?;\n\
+                     let _ = register_map_name(\"{name}\", {id_const} as MapIdx);\n",
                     spec.max_entries
                 ));
             }
             "BPF_MAP_TYPE_PROG_ARRAY" => {
                 out.push_str(&format!(
-                    "    create_bpf_prog_array({id_const}, {}).await?;\n",
+                    "    use crate::map::{{create_bpf_prog_array, register_map_name, MapIdx}};\n\
+                     create_bpf_prog_array({id_const}, {}).await.map_err(|_| Error::Oom)?;\n\
+                     let _ = register_map_name(\"{name}\", {id_const} as MapIdx);\n",
                     spec.max_entries
                 ));
             }
             "BPF_MAP_TYPE_RINGBUF" => {
-                // Linux: max_entries is the ring data area in bytes.
                 out.push_str(&format!(
-                    "    create_bpf_ringbuf({id_const}, {}).await?;\n",
+                    "    let _ = rt.push_builder(\n\
+                            MapBuilder::ringbuf()\n\
+                            .with_name(\"{name}\")\n\
+                            .with_capacity({})\n\
+                    ).await?;\n",
                     spec.max_entries
                 ));
             }
             "BPF_MAP_TYPE_XPOST_WDT_FEED" => {
                 out.push_str(&format!(
-                    "    create_bpf_wdt_feed({id_const}, {}).await?;\n",
+                    "    use crate::map::{{create_bpf_wdt_feed, register_map_name, MapIdx}};\n\
+                     create_bpf_wdt_feed({id_const}, {}).await.map_err(|_| Error::Oom)?;\n\
+                     let _ = register_map_name(\"{name}\", {id_const} as MapIdx);\n",
                     spec.max_entries
                 ));
             }
             other => bail!("[maps.{}] unsupported map_type `{other}`", spec.name),
         }
-        out.push_str(&format!(
-            "    let _ = register_map_name(\"{}\", {id_const});\n",
-            escape_rust_str(&spec.name)
-        ));
+        let _ = id_const;
     }
 
-    out.push_str("    Ok(())\n}\n\n");
+    out.push_str("    Ok(())\n}\n");
     Ok(())
 }
 
@@ -381,7 +361,19 @@ fn emit_struct(out: &mut String, name: &str, fields: &[(String, String)], is_key
     for (ty, field) in fields {
         out.push_str(&format!("    pub {field}: {ty},\n"));
     }
-    out.push_str("}\n\n");
+    out.push_str("}\n");
+    let widths: Vec<String> = fields
+        .iter()
+        .map(|(ty, _)| {
+            let (sz, _) = type_size_align(ty);
+            sz.to_string()
+        })
+        .collect();
+    if is_key {
+        out.push_str(&format!("crate::impl_map_key!({name}, {});\n\n", widths.join(", ")));
+    } else {
+        out.push_str(&format!("crate::impl_map_value!({name}, {});\n\n", widths.join(", ")));
+    }
 }
 
 fn type_size_align(ty: &str) -> (usize, usize) {

@@ -1,307 +1,284 @@
-//! Map factory — unify registration styles; ringbufs expose [`RingbufMap::into_channel`].
-//!
-//! # MCU
-//!
-//! ```ignore
-//! let rb = MapBuilder::new_ringbuf()
-//!     .name("dut_evt")
-//!     .byte_capacity(4096)
-//!     .register()
-//!     .await?;
-//! let mut rx = rb.into_channel();
-//! ```
-//!
-//! # `bpf.toml` manifest
-//!
-//! Parse with [`MapBuilder::from_toml`], then [`MapManifest::register_runtime`].
-//! Map names must be resolved through an embedder [`NameIntern`] — parsed TOML
-//! strings are not `'static` on their own.
+//! Type-state [`MapBuilder`] and boot `from_bpf_toml`.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::channel::RingbufReceiver;
-use super::ctrl::{MapCreateCmd, MapCtrlError, MapKind, register_map, register_ringbuf};
-use super::pool::ResourceId;
+use super::runtime::{Error, MapRt};
+use super::traits::{layout_vec, MapKey, MapValue};
 
-/// Embedder hook: map parsed / dynamic names to firmware `&'static str` literals.
-pub trait NameIntern {
-    fn intern(&self, name: &str) -> Option<&'static str>;
+/// BPF map kind stored in [`super::MapMeta`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapType {
+    Array,
+    Hash,
+    Ringbuf,
 }
 
-/// Factory entry — pick a map kind or load a manifest.
-pub struct MapBuilder;
+// —— type-state markers ——
 
-impl MapBuilder {
-    pub fn new_ringbuf() -> RingbufBuilder {
-        RingbufBuilder::default()
-    }
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Incomplete;
+pub struct HashView;
+pub struct ArrayView;
+pub struct RingbufView;
 
-    /// Register maps declared in `bpf.toml` via build-time [`super::init_firmware_maps`].
-    pub async fn register_boot_maps() -> Result<(), MapCtrlError> {
-        super::init_firmware_maps().await
-    }
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HasKey;
+pub struct HasValue;
+pub struct HasName;
+pub struct HasCapacity;
 
-    /// Parse `[maps.*]` from a `bpf.toml` fragment (no I/O; use `include_str!` on MCU).
-    pub fn from_toml(toml: &str) -> Result<MapManifest, BuilderError> {
-        MapManifest::parse(toml)
-    }
+/// Map instance spec builder (type-state).
+pub struct MapBuilder<V, S = Incomplete> {
+    pub(crate) name: Option<String>,
+    pub(crate) map_type: MapType,
+    pub(crate) key_layout: Option<Vec<u8>>,
+    pub(crate) value_layout: Option<Vec<u8>>,
+    pub(crate) len: usize,
+    _view: core::marker::PhantomData<(V, S)>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BuilderError {
-    MissingName,
-    MissingCapacity,
-    Toml(String),
-    Map(MapCtrlError),
+/// Consumable builder passed to [`MapRt::push`].
+pub struct CompleteBuilder {
+    pub(crate) name: String,
+    pub(crate) map_type: MapType,
+    pub(crate) key_layout: Option<Vec<u8>>,
+    pub(crate) value_layout: Option<Vec<u8>>,
+    pub(crate) len: usize,
 }
 
-impl From<MapCtrlError> for BuilderError {
-    fn from(e: MapCtrlError) -> Self {
-        Self::Map(e)
-    }
-}
-
-/// Parsed `bpf.toml` map section (runtime entries only for now).
-#[derive(Clone, Debug, Default)]
-pub struct MapManifest {
-    pub runtime_ringbufs: Vec<RuntimeRingbufSpec>,
-}
-
-#[derive(Clone, Debug)]
-pub struct RuntimeRingbufSpec {
-    pub name: String,
-    pub byte_capacity: usize,
-}
-
-impl MapManifest {
-    /// Scan `bpf.toml` for `[maps.*]` with `runtime = true` and `BPF_MAP_TYPE_RINGBUF`.
-    pub fn parse(toml: &str) -> Result<Self, BuilderError> {
-        let mut out = Self::default();
-        let mut current: Option<String> = None;
-        let mut runtime = false;
-        let mut map_type: Option<String> = None;
-        let mut max_entries = 0usize;
-
-        let flush = |out: &mut Self,
-                     name: Option<String>,
-                     runtime: bool,
-                     map_type: &Option<String>,
-                     max_entries: usize| {
-            if !runtime {
-                return;
-            }
-            if map_type.as_deref() != Some("BPF_MAP_TYPE_RINGBUF") {
-                return;
-            }
-            let Some(name) = name else {
-                return;
-            };
-            if max_entries == 0 {
-                return;
-            }
-            out.runtime_ringbufs.push(RuntimeRingbufSpec {
-                name,
-                byte_capacity: max_entries,
-            });
-        };
-
-        for line in toml.lines() {
-            let line = line.split('#').next().unwrap_or(line).trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("[maps.") {
-                flush(
-                    &mut out,
-                    current.take(),
-                    runtime,
-                    &map_type,
-                    max_entries,
-                );
-                runtime = false;
-                map_type = None;
-                max_entries = 0;
-                let name = rest.trim_end_matches(']').trim();
-                if !name.is_empty() {
-                    current = Some(name.to_string());
-                }
-                continue;
-            }
-            if current.is_none() {
-                continue;
-            }
-            if let Some((_, v)) = line.split_once('=') {
-                let v = v.trim().trim_matches('"');
-                if line.starts_with("runtime") {
-                    runtime = v == "true";
-                } else if line.starts_with("map_type") {
-                    map_type = Some(v.to_string());
-                } else if line.starts_with("max_entries") {
-                    max_entries = v.parse().unwrap_or(0);
-                }
-            }
-        }
-        flush(
-            &mut out,
-            current,
-            runtime,
-            &map_type,
-            max_entries,
-        );
-        Ok(out)
-    }
-
-    /// Register every `runtime = true` ringbuf via [`register_ringbuf`].
-    pub async fn register_runtime<I: NameIntern>(
-        &self,
-        intern: &I,
-    ) -> Result<Vec<RingbufMap>, BuilderError> {
-        let mut maps = Vec::new();
-        for spec in &self.runtime_ringbufs {
-            let Some(name) = intern.intern(&spec.name) else {
-                return Err(BuilderError::Toml(format!(
-                    "unknown runtime map name {:?}",
-                    spec.name
-                )));
-            };
-            let rb = MapBuilder::new_ringbuf()
-                .name(name)
-                .byte_capacity(spec.byte_capacity)
-                .register()
-                .await?;
-            maps.push(rb);
-        }
-        Ok(maps)
-    }
-}
-
-/// Fluent builder for `BPF_MAP_TYPE_RINGBUF`.
-#[derive(Clone, Debug)]
-pub struct RingbufBuilder {
-    name: Option<&'static str>,
-    byte_capacity: Option<usize>,
-}
-
-impl Default for RingbufBuilder {
-    fn default() -> Self {
+impl MapBuilder<HashView, Incomplete> {
+    pub fn hash() -> Self {
         Self {
             name: None,
-            byte_capacity: Some(4096),
+            map_type: MapType::Hash,
+            key_layout: None,
+            value_layout: None,
+            len: 0,
+            _view: core::marker::PhantomData,
         }
     }
 }
 
-impl RingbufBuilder {
-    pub fn name(mut self, name: &'static str) -> Self {
-        self.name = Some(name);
-        self
-    }
-
-    pub fn byte_capacity(mut self, bytes: usize) -> Self {
-        self.byte_capacity = Some(bytes);
-        self
-    }
-
-    /// Register in the pool (`name` + capacity). No VMA.
-    pub async fn register(self) -> Result<RingbufMap, BuilderError> {
-        let name = self.name.ok_or(BuilderError::MissingName)?;
-        let cap = self.byte_capacity.ok_or(BuilderError::MissingCapacity)?;
-        let id = register_ringbuf(name, cap).await?;
-        Ok(RingbufMap { name, id })
-    }
-}
-
-/// Registered ringbuf — convert to async RX with [`into_channel`](Self::into_channel).
-pub struct RingbufMap {
-    name: &'static str,
-    id: ResourceId,
-}
-
-impl RingbufMap {
-    pub fn name(&self) -> &'static str {
-        self.name
-    }
-
-    pub fn id(&self) -> ResourceId {
-        self.id
-    }
-
-    /// Embassy-async reader for `select!` / `.await`.
-    pub fn into_channel(self) -> RingbufReceiver {
-        super::channel::attach_rx(self.id)
-    }
-}
-
-/// Fluent builder for HASH (extensible; same factory module).
-pub struct HashBuilder {
-    name: Option<&'static str>,
-    key_size: usize,
-    value_size: usize,
-    max_entries: usize,
-}
-
-impl MapBuilder {
-    pub fn new_hash() -> HashBuilder {
-        HashBuilder {
+impl MapBuilder<ArrayView, Incomplete> {
+    pub fn array() -> Self {
+        Self {
             name: None,
-            key_size: 0,
-            value_size: 0,
-            max_entries: 0,
+            map_type: MapType::Array,
+            key_layout: None,
+            value_layout: None,
+            len: 0,
+            _view: core::marker::PhantomData,
         }
     }
 }
 
-impl HashBuilder {
-    pub fn name(mut self, name: &'static str) -> Self {
-        self.name = Some(name);
-        self
-    }
-
-    pub fn key_size(mut self, bytes: usize) -> Self {
-        self.key_size = bytes;
-        self
-    }
-
-    pub fn value_size(mut self, bytes: usize) -> Self {
-        self.value_size = bytes;
-        self
-    }
-
-    pub fn max_entries(mut self, n: usize) -> Self {
-        self.max_entries = n;
-        self
-    }
-
-    pub async fn register(self) -> Result<HashMap, BuilderError> {
-        let name = self.name.ok_or(BuilderError::MissingName)?;
-        let id = register_map(
-            name,
-            MapCreateCmd {
-                kind: MapKind::Hash,
-                key_size: self.key_size,
-                value_size: self.value_size,
-                max_entries: self.max_entries,
-                id: None,
-            },
-        )
-        .await?;
-        Ok(HashMap { name, id })
+impl MapBuilder<RingbufView, Incomplete> {
+    pub fn ringbuf() -> Self {
+        Self {
+            name: None,
+            map_type: MapType::Ringbuf,
+            key_layout: None,
+            value_layout: None,
+            len: 0,
+            _view: core::marker::PhantomData,
+        }
     }
 }
 
-/// Registered HASH map (no async channel — use [`super::with_hash_map`]).
-pub struct HashMap {
-    name: &'static str,
-    id: ResourceId,
+macro_rules! impl_with_name {
+    ($view:ty, $state:ty) => {
+        impl MapBuilder<$view, $state> {
+            pub fn with_name(mut self, name: impl Into<String>) -> MapBuilder<$view, HasName> {
+                self.name = Some(name.into());
+                MapBuilder {
+                    name: self.name,
+                    map_type: self.map_type,
+                    key_layout: self.key_layout,
+                    value_layout: self.value_layout,
+                    len: self.len,
+                    _view: core::marker::PhantomData,
+                }
+            }
+        }
+    };
 }
 
-impl HashMap {
-    pub fn name(&self) -> &'static str {
-        self.name
+impl_with_name!(HashView, Incomplete);
+impl_with_name!(HashView, HasKey);
+impl_with_name!(HashView, HasValue);
+impl_with_name!(ArrayView, Incomplete);
+impl_with_name!(ArrayView, HasValue);
+impl_with_name!(RingbufView, Incomplete);
+
+impl MapBuilder<HashView, Incomplete> {
+    pub fn with_key<K: MapKey>(mut self) -> MapBuilder<HashView, HasKey> {
+        self.key_layout = Some(layout_vec(K::FIELD_LENS));
+        MapBuilder {
+            name: self.name,
+            map_type: self.map_type,
+            key_layout: self.key_layout,
+            value_layout: self.value_layout,
+            len: self.len,
+            _view: core::marker::PhantomData,
+        }
+    }
+}
+
+impl MapBuilder<HashView, HasKey> {
+    pub fn with_value<V: MapValue>(mut self) -> MapBuilder<HashView, HasValue> {
+        self.value_layout = Some(layout_vec(V::FIELD_LENS));
+        MapBuilder {
+            name: self.name,
+            map_type: self.map_type,
+            key_layout: self.key_layout,
+            value_layout: self.value_layout,
+            len: self.len,
+            _view: core::marker::PhantomData,
+        }
+    }
+}
+
+impl MapBuilder<ArrayView, Incomplete> {
+    pub fn with_value<V: MapValue>(mut self) -> MapBuilder<ArrayView, HasValue> {
+        self.value_layout = Some(layout_vec(V::FIELD_LENS));
+        MapBuilder {
+            name: self.name,
+            map_type: self.map_type,
+            key_layout: self.key_layout,
+            value_layout: self.value_layout,
+            len: self.len,
+            _view: core::marker::PhantomData,
+        }
+    }
+}
+
+impl MapBuilder<HashView, HasName> {
+    pub fn with_key<K: MapKey>(mut self) -> MapBuilder<HashView, HasKey> {
+        self.key_layout = Some(layout_vec(K::FIELD_LENS));
+        MapBuilder {
+            name: self.name,
+            map_type: self.map_type,
+            key_layout: self.key_layout,
+            value_layout: self.value_layout,
+            len: self.len,
+            _view: core::marker::PhantomData,
+        }
+    }
+}
+
+impl MapBuilder<ArrayView, HasName> {
+    pub fn with_value<V: MapValue>(mut self) -> MapBuilder<ArrayView, HasValue> {
+        self.value_layout = Some(layout_vec(V::FIELD_LENS));
+        MapBuilder {
+            name: self.name,
+            map_type: self.map_type,
+            key_layout: self.key_layout,
+            value_layout: self.value_layout,
+            len: self.len,
+            _view: core::marker::PhantomData,
+        }
+    }
+}
+
+macro_rules! impl_with_capacity {
+    ($view:ty, $state:ty) => {
+        impl MapBuilder<$view, $state> {
+            pub fn with_capacity(mut self, n: usize) -> MapBuilder<$view, HasCapacity> {
+                self.len = n;
+                MapBuilder {
+                    name: self.name,
+                    map_type: self.map_type,
+                    key_layout: self.key_layout,
+                    value_layout: self.value_layout,
+                    len: self.len,
+                    _view: core::marker::PhantomData,
+                }
+            }
+        }
+    };
+}
+
+impl_with_capacity!(HashView, HasValue);
+impl_with_capacity!(ArrayView, HasValue);
+impl_with_capacity!(RingbufView, Incomplete);
+impl_with_capacity!(RingbufView, HasName);
+
+macro_rules! impl_into_complete {
+    ($view:ty) => {
+        impl From<MapBuilder<$view, HasCapacity>> for CompleteBuilder {
+            fn from(b: MapBuilder<$view, HasCapacity>) -> Self {
+                CompleteBuilder {
+                    name: b.name.expect("with_name required"),
+                    map_type: b.map_type,
+                    key_layout: b.key_layout,
+                    value_layout: b.value_layout,
+                    len: b.len,
+                }
+            }
+        }
+    };
+}
+
+impl_into_complete!(HashView);
+impl_into_complete!(ArrayView);
+impl_into_complete!(RingbufView);
+
+impl MapBuilder<HashView, HasCapacity> {
+    pub fn into_complete(self) -> CompleteBuilder {
+        self.into()
+    }
+}
+
+impl MapBuilder<ArrayView, HasCapacity> {
+    pub fn into_complete(self) -> CompleteBuilder {
+        self.into()
+    }
+}
+
+impl MapBuilder<RingbufView, HasCapacity> {
+    pub fn into_complete(self) -> CompleteBuilder {
+        self.into()
+    }
+}
+
+impl MapRt {
+    pub async fn push_builder<B>(&mut self, builder: B) -> Result<super::MapIdx, Error>
+    where
+        B: Into<CompleteBuilder>,
+    {
+        self.push(builder.into()).await
+    }
+}
+
+impl CompleteBuilder {
+    /// Boot path: create every non-`runtime` map from bpf.toml codegen.
+    pub async fn from_bpf_toml(rt: &mut MapRt) -> Result<(), Error> {
+        super::boot::boot_maps_from_codegen(rt).await
+    }
+}
+
+// Flat entry points matching user docs (return incomplete builders).
+impl MapBuilder<HashView, Incomplete> {
+    /// Alias for [`Self::hash`].
+    pub fn hash_flat() -> Self {
+        Self::hash()
+    }
+}
+
+/// Legacy factory — prefer [`MapBuilder::hash`] / [`array`] / [`ringbuf`].
+pub struct MapBuilderLegacy;
+
+impl MapBuilderLegacy {
+    pub fn hash() -> MapBuilder<HashView, Incomplete> {
+        MapBuilder::hash()
     }
 
-    pub fn id(&self) -> ResourceId {
-        self.id
+    pub fn array() -> MapBuilder<ArrayView, Incomplete> {
+        MapBuilder::array()
+    }
+
+    pub fn ringbuf() -> MapBuilder<RingbufView, Incomplete> {
+        MapBuilder::ringbuf()
     }
 }

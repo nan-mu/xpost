@@ -49,15 +49,15 @@ pub(super) mod redirect_map {
             Some(g) => g,
             None => return fallback,
         };
-        let table = match guard.as_mut() {
+        let mut table = match guard.as_mut() {
             Some(t) => t,
             None => return fallback,
         };
-        let res = match table.get_mut(&id) {
+        let mut res = match table.get_mut(&id) {
             Some(r) => r,
             None => return fallback,
         };
-        if res.kind != Some(MapKind::Devmap) {
+        if res.kind() != Some(MapKind::Devmap) {
             error!("[helper]bpf_redirect_map: map id {} is not DEVMAP", id);
             return fallback;
         }
