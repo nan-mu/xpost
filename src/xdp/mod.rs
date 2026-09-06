@@ -1,4 +1,5 @@
-//! XDP runtime ownership, image movement, and RX execution state.
+//! XDP execution runtime. Control-plane mutation is serialized by `XDP_RT`;
+//! RX sees only the atomically published entry in `state`.
 
 #[cfg(feature = "debug")]
 macro_rules! xdp_debug { ($($arg:tt)*) => { log::debug!($($arg)*); }; }
@@ -7,54 +8,62 @@ macro_rules! xdp_debug {
     ($($arg:tt)*) => {};
 }
 
+mod boot;
 mod device;
-mod global;
+mod slot;
+mod state;
 mod xdp_table;
 
 pub use device::{Device, ZcTx};
-pub use global::XDP_RT;
-pub use xdp_table::{XdpTable, XdpTableError, XdpTableId};
+pub use slot::Slot;
+pub use state::XDP_RT;
 
-use core::cell::UnsafeCell;
+use anyhow::{Result, bail};
 use core::sync::atomic::Ordering;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::{Mutex, MutexGuard};
-use global::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY};
-use xdp_table::XdpTableHandle;
+use state::{ACTIVE, IN_FLIGHT, MAX_MAP_REFS, MAX_SLOTS, PRIMARY_ENTRY};
+use xdp_table::XdpTable;
 
-const MAX_SLOTS: usize = 4;
-const MAX_MAP_REFS: usize = 16;
-const NO_SLOT: usize = usize::MAX;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct XdpTableId(usize);
+impl XdpTableId {
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XdpLocation {
     Table(XdpTableId),
     Slot(usize),
 }
-
-/// Destination selected for [`XdpRt::move_image`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XdpMoveTarget {
     Table,
     Slot(usize),
 }
 
-/// Static metadata for one XDP image. The table id never changes; location
-/// changes only through the globally serialized XDP runtime.
+/// Metadata is externally owned and mutably borrowed for every state change.
+/// It has no interior mutability and needs no `Sync` implementation.
+#[derive(Clone, Copy)]
 pub struct XdpMeta {
     table_id: XdpTableId,
     link_addr: usize,
     image_len: usize,
-    location: UnsafeCell<XdpLocation>,
+    location: XdpLocation,
 }
-unsafe impl Sync for XdpMeta {}
 impl XdpMeta {
     pub const fn in_table(table_id: XdpTableId, link_addr: usize, image_len: usize) -> Self {
         Self {
             table_id,
             link_addr,
             image_len,
-            location: UnsafeCell::new(XdpLocation::Table(table_id)),
+            location: XdpLocation::Table(table_id),
         }
     }
     pub const fn table_id(&self) -> XdpTableId {
@@ -66,75 +75,20 @@ impl XdpMeta {
     pub const fn image_len(&self) -> usize {
         self.image_len
     }
-    pub fn locate(&self) -> XdpLocation {
-        unsafe { *self.location.get() }
-    }
-    fn relocate(&self, location: XdpLocation) {
-        unsafe {
-            *self.location.get() = location;
-        }
-    }
-}
-
-/// Generated bpf.toml entry. Its static byte slice is materialized into the
-/// cold-table item denoted by `meta.table_id()` during boot.
-#[doc(hidden)]
-pub struct BpfTomlImage {
-    pub meta: &'static XdpMeta,
-    pub bytes: &'static [u8],
-}
-mod generated {
-    include!(concat!(env!("OUT_DIR"), "/xdp_bpf.rs"));
-}
-
-#[repr(align(4))]
-pub struct Slot<const N: usize>(UnsafeCell<[u8; N]>);
-unsafe impl<const N: usize> Sync for Slot<N> {}
-impl<const N: usize> Slot<N> {
-    pub const fn new(bytes: [u8; N]) -> Self {
-        Self(UnsafeCell::new(bytes))
-    }
-    fn as_ptr(&self) -> *mut u8 {
-        self.0.get().cast()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Error {
-    AlreadyInitialized,
-    EmptySlot,
-    UnalignedSlot,
-    OverlappingSlot,
-    SlotLimit,
-    Busy,
-    NotLoaded,
-    AlreadyLeased,
-    NotLeased,
-    ImageTooLarge,
-    Table(XdpTableError),
-    MapNotFound,
-    MapRefLimit,
-    NoInactiveSlot,
-    AddressMismatch,
-    SlotOccupied,
-}
-impl From<XdpTableError> for Error {
-    fn from(value: XdpTableError) -> Self {
-        Self::Table(value)
+    pub const fn locate(&self) -> XdpLocation {
+        self.location
     }
 }
 
 #[derive(Clone, Copy)]
 struct SlotMeta {
-    ptr: *mut u8,
-    len: usize,
+    slot: Slot,
     loaded_len: usize,
     image: Option<XdpTableId>,
 }
-unsafe impl Send for SlotMeta {}
 
 pub struct XdpRt {
-    table: XdpTableHandle,
+    table: XdpTable,
     slots: heapless::Vec<SlotMeta, MAX_SLOTS>,
     primary: usize,
     leased: bool,
@@ -142,212 +96,207 @@ pub struct XdpRt {
 }
 
 impl XdpRt {
-    pub async fn init<const N: usize, const IMAGES: usize, const IMAGE_CAPACITY: usize>(
-        slot: &'static Slot<N>,
-        table: &'static XdpTable<IMAGES, IMAGE_CAPACITY>,
-    ) -> Result<MutexGuard<'static, CriticalSectionRawMutex, XdpRt>, Error> {
+    /// Register every linker-defined slot once at boot. There is deliberately
+    /// no post-boot slot-registration API.
+    pub async fn init(
+        slots: &'static [Slot],
+        table: &'static mut [u8],
+        image_capacity: usize,
+    ) -> Result<MutexGuard<'static, CriticalSectionRawMutex, XdpRt>> {
         let mut rt = Self {
-            table: table.handle(),
+            table: XdpTable::new(table, image_capacity)?,
             slots: heapless::Vec::new(),
-            primary: NO_SLOT,
+            primary: usize::MAX,
             leased: false,
             map_refs: heapless::Vec::new(),
         };
-        rt.push_slot(slot, true)?;
+        for slot in slots {
+            rt.register_slot(*slot)?;
+        }
+        if rt.primary == usize::MAX {
+            bail!("XDP slot registration has no primary slot");
+        }
         XDP_RT
             .init(Mutex::new(rt))
-            .map_err(|_| Error::AlreadyInitialized)?;
+            .map_err(|_| anyhow::anyhow!("XDP runtime already initialized"))?;
         Ok(XDP_RT.get().await.lock().await)
     }
-
-    pub fn push_slot<const N: usize>(
-        &mut self,
-        slot: &'static Slot<N>,
-        primary: bool,
-    ) -> Result<usize, Error> {
-        if self.leased {
-            return Err(Error::Busy);
-        }
-        if N == 0 {
-            return Err(Error::EmptySlot);
-        }
-        let ptr = slot.as_ptr();
-        if (ptr as usize) & 3 != 0 || N & 3 != 0 {
-            return Err(Error::UnalignedSlot);
-        }
-        let end = (ptr as usize)
-            .checked_add(N)
-            .ok_or(Error::OverlappingSlot)?;
+    fn register_slot(&mut self, slot: Slot) -> Result<()> {
+        slot.validate()?;
+        let end = slot
+            .base()
+            .checked_add(slot.len())
+            .ok_or_else(|| anyhow::anyhow!("XDP slot range overflows"))?;
         if self.slots.iter().any(|old| {
-            (ptr as usize) < (old.ptr as usize).saturating_add(old.len) && (old.ptr as usize) < end
+            slot.base() < old.slot.base().saturating_add(old.slot.len()) && old.slot.base() < end
         }) {
-            return Err(Error::OverlappingSlot);
+            bail!("XDP slots overlap");
         }
-        let id = self.slots.len();
+        if slot.is_primary() {
+            if self.primary != usize::MAX {
+                bail!("XDP has more than one primary slot");
+            }
+            self.primary = self.slots.len();
+        }
         self.slots
             .push(SlotMeta {
-                ptr,
-                len: N,
+                slot,
                 loaded_len: 0,
                 image: None,
             })
-            .map_err(|_| Error::SlotLimit)?;
-        if primary {
-            self.primary = id;
-        }
-        Ok(id)
-    }
-
-    /// Install generated static images in their table entries, then move them
-    /// to the slot whose real base equals each image's link address.
-    pub fn from_bpf_toml(&mut self) -> Result<(), Error> {
-        if self.leased {
-            return Err(Error::Busy);
-        }
-        for image in generated::BOOT_IMAGES {
-            if image.bytes.len() != image.meta.image_len() {
-                return Err(Error::ImageTooLarge);
-            }
-            self.table.copy_in(
-                image.meta.table_id(),
-                image.bytes.as_ptr(),
-                image.bytes.len(),
-            )?;
-            image
-                .meta
-                .relocate(XdpLocation::Table(image.meta.table_id()));
-            self.move_image(
-                image.meta,
-                XdpMoveTarget::Slot(self.slot_for(image.meta.link_addr())?),
-            )?;
-        }
+            .map_err(|_| anyhow::anyhow!("too many XDP slots"))?;
         Ok(())
     }
-
-    /// Move `meta` between its designated cold-table position and a slot.
-    pub fn move_image(&mut self, meta: &XdpMeta, target: XdpMoveTarget) -> Result<(), Error> {
+    pub fn from_bpf_toml(&mut self) -> Result<()> {
         if self.leased {
-            return Err(Error::Busy);
+            bail!("XDP runtime is leased");
+        }
+        boot::load(self)
+    }
+
+    /// Save external bytes (for example a completed network download) into
+    /// the table item declared by `meta`.
+    pub fn save(&mut self, meta: &mut XdpMeta, bytes: &[u8]) -> Result<()> {
+        if self.leased {
+            bail!("XDP runtime is leased");
+        }
+        if bytes.len() != meta.image_len {
+            bail!("XDP image length differs from its metadata");
+        }
+        self.table
+            .save(meta.table_id, bytes.as_ptr(), bytes.len())?;
+        meta.location = XdpLocation::Table(meta.table_id);
+        Ok(())
+    }
+    /// Load an image from its table item into one registered slot.
+    pub fn load(&mut self, meta: &mut XdpMeta, target: usize) -> Result<()> {
+        self.move_image(meta, XdpMoveTarget::Slot(target))
+    }
+    pub fn move_image(&mut self, meta: &mut XdpMeta, target: XdpMoveTarget) -> Result<()> {
+        if self.leased {
+            bail!("XDP runtime is leased");
         }
         match target {
             XdpMoveTarget::Table => self.move_to_table(meta),
             XdpMoveTarget::Slot(slot) => self.move_to_slot(meta, slot),
         }
     }
-
-    fn move_to_slot(&mut self, meta: &XdpMeta, target: usize) -> Result<(), Error> {
-        let slot = self.slots.get(target).ok_or(Error::NotLoaded)?;
-        if slot.ptr as usize != meta.link_addr() {
-            return Err(Error::AddressMismatch);
+    fn move_to_slot(&mut self, meta: &mut XdpMeta, target: usize) -> Result<()> {
+        let slot = self
+            .slots
+            .get(target)
+            .ok_or_else(|| anyhow::anyhow!("unknown XDP slot"))?;
+        if slot.slot.base() != meta.link_addr {
+            bail!("XDP image link address does not match target slot");
         }
-        if let XdpLocation::Slot(current) = meta.locate() {
-            return if current == target {
-                Ok(())
-            } else {
-                Err(Error::SlotOccupied)
-            };
+        if meta.location == XdpLocation::Slot(target) {
+            return Ok(());
         }
         if slot.image.is_some() {
-            return Err(Error::SlotOccupied);
+            bail!("target XDP slot is occupied");
         }
-        let len = self.table.copy_out(meta.table_id(), slot.ptr, slot.len)?;
-        let slot = self.slots.get_mut(target).ok_or(Error::NotLoaded)?;
-        slot.loaded_len = len;
-        slot.image = Some(meta.table_id());
+        self.table.load(
+            meta.table_id,
+            slot.slot.base() as *mut u8,
+            meta.image_len,
+            slot.slot.len(),
+        )?;
+        let slot = self.slots.get_mut(target).unwrap();
+        slot.loaded_len = meta.image_len;
+        slot.image = Some(meta.table_id);
         Self::fence_instruction_cache();
-        meta.relocate(XdpLocation::Slot(target));
+        meta.location = XdpLocation::Slot(target);
         xdp_debug!(
-            "[xdp][move] table={} -> slot={} bytes={}",
-            meta.table_id().index(),
-            target,
-            len
+            "[xdp][load] table={} slot={}",
+            meta.table_id.index(),
+            target
         );
         Ok(())
     }
-
-    fn move_to_table(&mut self, meta: &XdpMeta) -> Result<(), Error> {
-        let XdpLocation::Slot(source) = meta.locate() else {
+    fn move_to_table(&mut self, meta: &mut XdpMeta) -> Result<()> {
+        let XdpLocation::Slot(source) = meta.location else {
             return Ok(());
         };
         if source == self.primary {
-            return Err(Error::Busy);
+            bail!("cannot move primary image while it is selected");
         }
-        let slot = self.slots.get(source).ok_or(Error::NotLoaded)?;
-        if slot.image != Some(meta.table_id()) || slot.loaded_len != meta.image_len() {
-            return Err(Error::NotLoaded);
+        let slot = self
+            .slots
+            .get(source)
+            .ok_or_else(|| anyhow::anyhow!("unknown XDP slot"))?;
+        if slot.image != Some(meta.table_id) || slot.loaded_len != meta.image_len {
+            bail!("XDP metadata and slot disagree");
         }
-        self.table
-            .copy_in(meta.table_id(), slot.ptr, slot.loaded_len)?;
-        let slot = self.slots.get_mut(source).ok_or(Error::NotLoaded)?;
+        self.table.save(
+            meta.table_id,
+            slot.slot.base() as *const u8,
+            slot.loaded_len,
+        )?;
+        let slot = self.slots.get_mut(source).unwrap();
         slot.loaded_len = 0;
         slot.image = None;
-        meta.relocate(XdpLocation::Table(meta.table_id()));
-        xdp_debug!(
-            "[xdp][move] slot={} -> table={}",
-            source,
-            meta.table_id().index()
-        );
+        meta.location = XdpLocation::Table(meta.table_id);
         Ok(())
     }
-
-    /// Set a stopped candidate as primary. A cold candidate is moved to its
-    /// linked slot automatically; call `lease` afterward to resume RX.
-    pub fn switch(&mut self, meta: &XdpMeta) -> Result<(), Error> {
+    /// Select a stopped candidate; the caller leases it afterwards.
+    pub fn switch(&mut self, meta: &mut XdpMeta) -> Result<()> {
         if self.leased {
-            return Err(Error::Busy);
+            bail!("release XDP before switching");
         }
-        let target = self.slot_for(meta.link_addr())?;
-        self.move_image(meta, XdpMoveTarget::Slot(target))?;
+        let target = self.slot_for(meta.link_addr)?;
+        self.load(meta, target)?;
         self.primary = target;
-        xdp_debug!("[xdp][switch] primary slot={}", target);
         Ok(())
     }
-
-    /// Atomically publish an inactive candidate while RX remains leased.
-    pub fn hot_switch(&mut self, meta: &XdpMeta) -> Result<(), Error> {
+    /// Publish a candidate in an inactive slot without stopping RX.
+    pub fn hot_switch(&mut self, meta: &mut XdpMeta) -> Result<()> {
         if !self.leased {
-            return Err(Error::NotLeased);
+            bail!("XDP is not leased");
         }
         if IN_FLIGHT.load(Ordering::Acquire) != 0 {
-            return Err(Error::Busy);
+            bail!("an XDP invocation is still in flight");
         }
-        let target = self.slot_for(meta.link_addr())?;
+        let target = self.slot_for(meta.link_addr)?;
         if target == self.primary {
-            return Err(Error::NoInactiveSlot);
+            bail!("hot switch requires an inactive slot");
         }
-        match meta.locate() {
-            XdpLocation::Table(_) => self.move_to_slot_while_leased(meta, target)?,
-            XdpLocation::Slot(slot) if slot == target => {}
-            XdpLocation::Slot(_) => return Err(Error::SlotOccupied),
+        if meta.location == XdpLocation::Table(meta.table_id) {
+            self.load_while_leased(meta, target)?;
         }
-        let slot = self.slots.get(target).ok_or(Error::NotLoaded)?;
-        PRIMARY_ENTRY.store(slot.ptr as usize, Ordering::Release);
+        if meta.location != XdpLocation::Slot(target) {
+            bail!("candidate is not in its linked slot");
+        }
+        let slot = self.slots.get(target).unwrap();
+        PRIMARY_ENTRY.store(slot.slot.base(), Ordering::Release);
         self.primary = target;
-        xdp_debug!("[xdp][hot-switch] primary slot={}", target);
         Ok(())
     }
-
-    fn move_to_slot_while_leased(&mut self, meta: &XdpMeta, target: usize) -> Result<(), Error> {
-        let slot = self.slots.get(target).ok_or(Error::NotLoaded)?;
-        if slot.ptr as usize != meta.link_addr() {
-            return Err(Error::AddressMismatch);
+    fn load_while_leased(&mut self, meta: &mut XdpMeta, target: usize) -> Result<()> {
+        let slot = self
+            .slots
+            .get(target)
+            .ok_or_else(|| anyhow::anyhow!("unknown XDP slot"))?;
+        if slot.slot.base() != meta.link_addr || slot.image.is_some() {
+            bail!("hot-switch target is unavailable");
         }
-        if slot.image.is_some() {
-            return Err(Error::SlotOccupied);
-        }
-        let len = self.table.copy_out(meta.table_id(), slot.ptr, slot.len)?;
-        let slot = self.slots.get_mut(target).ok_or(Error::NotLoaded)?;
-        slot.loaded_len = len;
-        slot.image = Some(meta.table_id());
+        self.table.load(
+            meta.table_id,
+            slot.slot.base() as *mut u8,
+            meta.image_len,
+            slot.slot.len(),
+        )?;
+        let slot = self.slots.get_mut(target).unwrap();
+        slot.loaded_len = meta.image_len;
+        slot.image = Some(meta.table_id);
         Self::fence_instruction_cache();
-        meta.relocate(XdpLocation::Slot(target));
+        meta.location = XdpLocation::Slot(target);
         Ok(())
     }
-    fn slot_for(&self, link_addr: usize) -> Result<usize, Error> {
+    pub(super) fn slot_for(&self, address: usize) -> Result<usize> {
         self.slots
             .iter()
-            .position(|slot| slot.ptr as usize == link_addr)
-            .ok_or(Error::AddressMismatch)
+            .position(|slot| slot.slot.base() == address)
+            .ok_or_else(|| anyhow::anyhow!("no XDP slot matches image link address"))
     }
     fn fence_instruction_cache() {
         #[cfg(target_arch = "riscv32")]
@@ -355,43 +304,37 @@ impl XdpRt {
             core::arch::asm!("fence.i");
         }
     }
-
-    pub async fn lease(&mut self, maps: Option<&crate::map::MapRt>) -> Result<(), Error> {
+    pub async fn lease(&mut self, maps: Option<&crate::map::MapRt>) -> Result<()> {
         if self.leased {
-            return Err(Error::AlreadyLeased);
+            bail!("XDP is already leased");
         }
-        let slot = self.slots.get(self.primary).ok_or(Error::NotLoaded)?;
+        let slot = self
+            .slots
+            .get(self.primary)
+            .ok_or_else(|| anyhow::anyhow!("no primary XDP slot"))?;
         if slot.loaded_len == 0 {
-            return Err(Error::NotLoaded);
+            bail!("primary XDP slot has no image");
         }
         if maps.is_some() {
             crate::map::bind_aot_map_addrs();
             for name in crate::map::AOT_MAP_USER_NAMES {
-                let id = crate::map::resolve_map_name(name).ok_or(Error::MapNotFound)?;
-                if self.map_refs.is_full() {
+                let id = crate::map::resolve_map_name(name)
+                    .ok_or_else(|| anyhow::anyhow!("required XDP map is absent"))?;
+                if self.map_refs.is_full() || !crate::map::pool::RawResource::add_user_sync(id) {
                     self.release_map_refs();
-                    return Err(Error::MapRefLimit);
-                }
-                if !crate::map::pool::RawResource::add_user_sync(id) {
-                    self.release_map_refs();
-                    return Err(Error::MapNotFound);
+                    bail!("cannot lease required XDP map");
                 }
                 let _ = self.map_refs.push(id);
             }
         }
-        PRIMARY_ENTRY.store(slot.ptr as usize, Ordering::Release);
+        PRIMARY_ENTRY.store(slot.slot.base(), Ordering::Release);
         ACTIVE.store(true, Ordering::Release);
         self.leased = true;
-        xdp_debug!(
-            "[xdp][lease] active slot={} entry={}",
-            self.primary,
-            slot.ptr as usize
-        );
         Ok(())
     }
-    pub async fn release(&mut self) -> Result<(), Error> {
+    pub async fn release(&mut self) -> Result<()> {
         if !self.leased {
-            return Err(Error::NotLeased);
+            bail!("XDP is not leased");
         }
         ACTIVE.store(false, Ordering::Release);
         while IN_FLIGHT.load(Ordering::Acquire) != 0 {
@@ -400,7 +343,6 @@ impl XdpRt {
         PRIMARY_ENTRY.store(0, Ordering::Release);
         self.release_map_refs();
         self.leased = false;
-        xdp_debug!("[xdp][release] complete");
         Ok(())
     }
     fn release_map_refs(&mut self) {
@@ -430,25 +372,18 @@ pub(crate) fn with_primary<R>(f: impl FnOnce(usize) -> R) -> Option<R> {
         IN_FLIGHT.fetch_sub(1, Ordering::Release);
         return None;
     }
-    let result = f(entry);
+    let r = f(entry);
     IN_FLIGHT.fetch_sub(1, Ordering::Release);
-    Some(result)
+    Some(r)
 }
 pub(crate) fn run_ingress(data: &mut [u8]) -> Option<i32> {
     with_primary(|entry| {
         crate::redirect::clear_pending();
-        let action = invoke_entry(entry, data);
-        xdp_debug!(
-            "[xdp][ingress] entry={} bytes={} action={}",
-            entry,
-            data.len(),
-            action
-        );
-        action
+        invoke_entry(entry, data)
     })
 }
 #[cfg(not(target_arch = "riscv32"))]
-fn invoke_entry(_entry: usize, _data: &mut [u8]) -> i32 {
+fn invoke_entry(_: usize, _: &mut [u8]) -> i32 {
     crate::redirect::XDP_PASS
 }
 #[cfg(target_arch = "riscv32")]

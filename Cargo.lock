@@ -824,6 +824,7 @@ version = "0.1.1"
 dependencies = [
  "allocator-api2 0.2.21",
  "allocator-api2 0.4.0",
+ "anyhow",
  "async-ringbuf",
  "critical-section",
  "embassy-net",

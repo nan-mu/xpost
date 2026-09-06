@@ -100,7 +100,7 @@ pub async fn init_firmware_maps_via_builder(_rt: &mut crate::map::MapRt) -> Resu
     .unwrap();
     fs::write(
         out_dir.join("xdp_bpf.rs"),
-        "pub(crate) static BOOT_IMAGES: &[super::BpfTomlImage] = &[];\n",
+        "pub(crate) static BOOT_IMAGES: &[BpfTomlImage] = &[];\n",
     )
     .unwrap();
     fs::write(

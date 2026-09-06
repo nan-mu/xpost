@@ -1,134 +1,65 @@
-//! Cold, mutable storage for XDP images.
-//!
-//! A board owns the static `XdpTable` declaration and therefore its linker
-//! placement. `XdpRt` owns all access after initialization; callers move an
-//! image through its [`super::XdpMeta`] rather than indexing this container.
+//! Private cold-image storage owned exclusively by `XdpRt`.
 
-use core::cell::UnsafeCell;
+use super::XdpTableId;
+use anyhow::{Result, bail};
 
-/// Compile-time identity of an image's cold-table position.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct XdpTableId(pub(crate) usize);
-
-impl XdpTableId {
-    pub const fn new(index: usize) -> Self {
-        Self(index)
-    }
-    pub const fn index(self) -> usize {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum XdpTableError {
-    InvalidImage,
-    EmptyImage,
-    ImageTooLarge,
-}
-
-/// Fixed-capacity backing store for cold images.
-///
-/// The dimensions and placement are compile-time board choices. Each entry is
-/// mutable so a program can be moved back from an executable slot.
-#[repr(align(4))]
-pub struct XdpTable<const IMAGES: usize, const IMAGE_CAPACITY: usize> {
-    bytes: UnsafeCell<[[u8; IMAGE_CAPACITY]; IMAGES]>,
-    lengths: UnsafeCell<[usize; IMAGES]>,
-}
-
-unsafe impl<const IMAGES: usize, const IMAGE_CAPACITY: usize> Sync
-    for XdpTable<IMAGES, IMAGE_CAPACITY>
-{
-}
-
-impl<const IMAGES: usize, const IMAGE_CAPACITY: usize> XdpTable<IMAGES, IMAGE_CAPACITY> {
-    pub const fn new() -> Self {
-        Self {
-            bytes: UnsafeCell::new([[0; IMAGE_CAPACITY]; IMAGES]),
-            lengths: UnsafeCell::new([0; IMAGES]),
-        }
-    }
-    pub const fn image_count(&self) -> usize {
-        IMAGES
-    }
-    pub const fn image_capacity(&self) -> usize {
-        IMAGE_CAPACITY
-    }
-    pub(crate) fn handle(&'static self) -> XdpTableHandle {
-        XdpTableHandle {
-            bytes: self.bytes.get().cast(),
-            lengths: self.lengths.get().cast(),
-            image_count: IMAGES,
-            image_capacity: IMAGE_CAPACITY,
-        }
-    }
-}
-impl<const IMAGES: usize, const IMAGE_CAPACITY: usize> Default
-    for XdpTable<IMAGES, IMAGE_CAPACITY>
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct XdpTableHandle {
-    bytes: *mut u8,
-    lengths: *mut usize,
-    image_count: usize,
+pub(super) struct XdpTable {
+    bytes: &'static mut [u8],
     image_capacity: usize,
 }
-unsafe impl Send for XdpTableHandle {}
 
-impl XdpTableHandle {
-    fn range(self, id: XdpTableId) -> Result<(*mut u8, usize), XdpTableError> {
-        if id.index() >= self.image_count {
-            return Err(XdpTableError::InvalidImage);
+impl XdpTable {
+    pub(super) fn new(bytes: &'static mut [u8], image_capacity: usize) -> Result<Self> {
+        if image_capacity == 0 || bytes.is_empty() || bytes.len() % image_capacity != 0 {
+            bail!("XDP table must contain a whole number of non-empty image entries");
         }
-        let offset = id
+        Ok(Self {
+            bytes,
+            image_capacity,
+        })
+    }
+    fn range(&self, id: XdpTableId) -> Result<core::ops::Range<usize>> {
+        let start = id
             .index()
             .checked_mul(self.image_capacity)
-            .ok_or(XdpTableError::InvalidImage)?;
-        Ok((unsafe { self.bytes.add(offset) }, self.image_capacity))
+            .ok_or_else(|| anyhow::anyhow!("XDP table id overflow"))?;
+        let end = start
+            .checked_add(self.image_capacity)
+            .ok_or_else(|| anyhow::anyhow!("XDP table id overflow"))?;
+        if end > self.bytes.len() {
+            bail!("XDP table id {} is outside the table", id.index());
+        }
+        Ok(start..end)
     }
-    pub(crate) fn copy_out(
-        self,
+    pub(super) fn load(
+        &self,
         id: XdpTableId,
         dst: *mut u8,
-        dst_capacity: usize,
-    ) -> Result<usize, XdpTableError> {
-        let (src, _) = self.range(id)?;
-        let len = unsafe { *self.lengths.add(id.index()) };
-        if len == 0 {
-            return Err(XdpTableError::EmptyImage);
-        }
-        if len > dst_capacity {
-            return Err(XdpTableError::ImageTooLarge);
-        }
-        unsafe {
-            core::ptr::copy_nonoverlapping(src, dst, len);
-            core::ptr::write_bytes(dst.add(len), 0, dst_capacity - len);
-        }
-        Ok(len)
-    }
-    pub(crate) fn copy_in(
-        self,
-        id: XdpTableId,
-        src: *const u8,
         len: usize,
-    ) -> Result<(), XdpTableError> {
-        let (dst, capacity) = self.range(id)?;
-        if len == 0 {
-            return Err(XdpTableError::EmptyImage);
+        capacity: usize,
+    ) -> Result<()> {
+        if len == 0 || len > capacity || len > self.image_capacity {
+            bail!("XDP image does not fit its target slot");
         }
-        if len > capacity {
-            return Err(XdpTableError::ImageTooLarge);
-        }
+        let range = self.range(id)?;
         unsafe {
-            core::ptr::copy_nonoverlapping(src, dst, len);
+            core::ptr::copy_nonoverlapping(self.bytes[range].as_ptr(), dst, len);
             core::ptr::write_bytes(dst.add(len), 0, capacity - len);
-            *self.lengths.add(id.index()) = len;
+        }
+        Ok(())
+    }
+    pub(super) fn save(&mut self, id: XdpTableId, src: *const u8, len: usize) -> Result<()> {
+        if len == 0 || len > self.image_capacity {
+            bail!("XDP image does not fit its table entry");
+        }
+        let range = self.range(id)?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, self.bytes[range.clone()].as_mut_ptr(), len);
+            core::ptr::write_bytes(
+                self.bytes.as_mut_ptr().add(range.start + len),
+                0,
+                self.image_capacity - len,
+            );
         }
         Ok(())
     }
