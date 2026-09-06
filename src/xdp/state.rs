@@ -8,6 +8,8 @@ use embassy_sync::once_lock::OnceLock;
 
 pub(super) const MAX_SLOTS: usize = 4;
 pub(super) const MAX_MAP_REFS: usize = 16;
+/// Maximum generated or control-plane image metadata rows.
+pub(super) const MAX_IMAGES: usize = 8;
 pub static XDP_RT: OnceLock<Mutex<CriticalSectionRawMutex, XdpRt>> = OnceLock::new();
 pub(super) static ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(super) static PRIMARY_ENTRY: AtomicUsize = AtomicUsize::new(0);

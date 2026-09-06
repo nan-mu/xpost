@@ -22,20 +22,11 @@ use anyhow::{Result, bail};
 use core::sync::atomic::Ordering;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::{Mutex, MutexGuard};
-use state::{ACTIVE, IN_FLIGHT, MAX_MAP_REFS, MAX_SLOTS, PRIMARY_ENTRY};
+use state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_MAP_REFS, MAX_SLOTS, PRIMARY_ENTRY};
 use xdp_table::XdpTable;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct XdpTableId(usize);
-impl XdpTableId {
-    pub const fn new(index: usize) -> Self {
-        Self(index)
-    }
-    pub const fn index(self) -> usize {
-        self.0
-    }
-}
+/// Index of an image's fixed cold-table entry.
+pub type XdpTableId = usize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XdpLocation {
@@ -151,6 +142,9 @@ impl XdpRt {
         if self.leased {
             bail!("XDP runtime is leased");
         }
+        if boot::BOOT_IMAGES.len() > MAX_IMAGES {
+            bail!("bpf.toml declares more XDP images than the runtime supports");
+        }
         boot::load(self)
     }
 
@@ -206,11 +200,7 @@ impl XdpRt {
         slot.image = Some(meta.table_id);
         Self::fence_instruction_cache();
         meta.location = XdpLocation::Slot(target);
-        xdp_debug!(
-            "[xdp][load] table={} slot={}",
-            meta.table_id.index(),
-            target
-        );
+        xdp_debug!("[xdp][load] table={} slot={}", meta.table_id, target);
         Ok(())
     }
     fn move_to_table(&mut self, meta: &mut XdpMeta) -> Result<()> {

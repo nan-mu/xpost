@@ -14,13 +14,13 @@ impl Slot {
     pub const unsafe fn at(base: usize, len: usize, primary: bool) -> Self {
         Self { base, len, primary }
     }
-    pub const fn base(self) -> usize {
+    pub(crate) const fn base(self) -> usize {
         self.base
     }
-    pub const fn len(self) -> usize {
+    pub(crate) const fn len(self) -> usize {
         self.len
     }
-    pub const fn is_primary(self) -> bool {
+    pub(crate) const fn is_primary(self) -> bool {
         self.primary
     }
     pub(super) fn validate(self) -> Result<()> {

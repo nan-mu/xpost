@@ -4,7 +4,7 @@ pub mod abi;
 pub mod array;
 pub mod boot;
 pub mod builder;
-pub mod ctrl;
+mod ctrl;
 pub mod hash;
 pub mod names;
 pub mod ops;
@@ -47,10 +47,6 @@ impl MapBuilder {
 
 pub use array::{BpfArrayMap, create_bpf_array, create_bpf_devmap, create_bpf_prog_array};
 pub use async_ringbuf;
-pub use ctrl::{
-    MAX_MAP_IDS, MapCreateCmd, MapCtrlError, create_map, destroy_map, register_map,
-    register_ringbuf,
-};
 pub use hash::{
     BpfHashMap, BpfHashMapBuilder, BpfHashTable, HashBuildError, KeyBlob, ValSlot, create_bpf_hash,
 };
@@ -74,8 +70,22 @@ pub use wdt_feed::{BpfWdtFeedMap, create_bpf_wdt_feed, helper_feed as helper_wdt
 include!(concat!(env!("OUT_DIR"), "/bpf_maps.rs"));
 include!(concat!(env!("OUT_DIR"), "/aot_map_bind.rs"));
 
-pub mod userspace;
-pub use userspace::{peek_array_u64, with_array_map, with_hash_map, with_ringbuf_map};
+mod userspace;
+
+/// Control-plane map creation, destruction, and userspace access.
+pub mod control {
+    pub use super::ctrl::{
+        MAX_MAP_IDS, MapCreateCmd, MapCtrlError, create_map, destroy_map, register_map,
+        register_ringbuf,
+    };
+
+    /// Typed access to allocated map contents.
+    pub mod userspace {
+        pub use super::super::userspace::{
+            peek_array_u64, with_array_map, with_hash_map, with_ringbuf_map,
+        };
+    }
+}
 
 #[deprecated(note = "use claim_heap")]
 pub use pool::init as init_pool_legacy;

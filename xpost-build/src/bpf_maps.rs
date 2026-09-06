@@ -282,17 +282,13 @@ fn emit_init_fn(out: &mut String, map_specs: &[MapSpec]) -> Result<()> {
             }
             "BPF_MAP_TYPE_DEVMAP" => {
                 out.push_str(&format!(
-                    "    use crate::map::{{create_bpf_devmap, register_map_name, MapIdx}};\n\
-                     create_bpf_devmap({id_const}, {}).await.map_err(|_| Error::Oom)?;\n\
-                     let _ = register_map_name(\"{name}\", {id_const} as MapIdx);\n",
+                    "    rt.push_special_map(\"{name}\", crate::map::MapKind::Devmap, {})?;\n",
                     spec.max_entries
                 ));
             }
             "BPF_MAP_TYPE_PROG_ARRAY" => {
                 out.push_str(&format!(
-                    "    use crate::map::{{create_bpf_prog_array, register_map_name, MapIdx}};\n\
-                     create_bpf_prog_array({id_const}, {}).await.map_err(|_| Error::Oom)?;\n\
-                     let _ = register_map_name(\"{name}\", {id_const} as MapIdx);\n",
+                    "    rt.push_special_map(\"{name}\", crate::map::MapKind::ProgArray, {})?;\n",
                     spec.max_entries
                 ));
             }
@@ -308,9 +304,7 @@ fn emit_init_fn(out: &mut String, map_specs: &[MapSpec]) -> Result<()> {
             }
             "BPF_MAP_TYPE_XPOST_WDT_FEED" => {
                 out.push_str(&format!(
-                    "    use crate::map::{{create_bpf_wdt_feed, register_map_name, MapIdx}};\n\
-                     create_bpf_wdt_feed({id_const}, {}).await.map_err(|_| Error::Oom)?;\n\
-                     let _ = register_map_name(\"{name}\", {id_const} as MapIdx);\n",
+                    "    rt.push_special_map(\"{name}\", crate::map::MapKind::WdtFeed, {})?;\n",
                     spec.max_entries
                 ));
             }
@@ -350,6 +344,34 @@ fn parse_fields(block: &str, map_name: &str, kind: &str) -> Result<Vec<(String, 
         bail!("[maps.{map_name}] {kind}: empty field list");
     }
     Ok(fields)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn fixture() -> PathBuf {
+        let path = std::env::temp_dir().join(format!("xpost-bpf-maps-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn special_maps_are_registered_through_map_runtime() {
+        let board = fixture();
+        fs::write(board.join("bpf.toml"), "[maps.calls]\nmap_type = \"BPF_MAP_TYPE_PROG_ARRAY\"\nmax_entries = 4\nestimated_bytes = 16\nkey = \"u32 key\"\nvalue = \"u32 value\"\n").unwrap();
+        generate(&board, &board).unwrap();
+        let generated = fs::read_to_string(board.join("bpf_maps.rs")).unwrap();
+        assert!(
+            generated
+                .contains("rt.push_special_map(\"calls\", crate::map::MapKind::ProgArray, 4)?")
+        );
+        assert!(!generated.contains("create_bpf_prog_array"));
+        fs::remove_dir_all(board).unwrap();
+    }
 }
 
 fn emit_struct(out: &mut String, name: &str, fields: &[(String, String)], is_key: bool) {

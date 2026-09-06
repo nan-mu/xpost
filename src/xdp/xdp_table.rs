@@ -20,14 +20,13 @@ impl XdpTable {
     }
     fn range(&self, id: XdpTableId) -> Result<core::ops::Range<usize>> {
         let start = id
-            .index()
             .checked_mul(self.image_capacity)
             .ok_or_else(|| anyhow::anyhow!("XDP table id overflow"))?;
         let end = start
             .checked_add(self.image_capacity)
             .ok_or_else(|| anyhow::anyhow!("XDP table id overflow"))?;
         if end > self.bytes.len() {
-            bail!("XDP table id {} is outside the table", id.index());
+            bail!("XDP table id {id} is outside the table");
         }
         Ok(start..end)
     }

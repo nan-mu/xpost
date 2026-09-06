@@ -12,6 +12,9 @@ pub enum MapType {
     Array,
     Hash,
     Ringbuf,
+    Devmap,
+    ProgArray,
+    WdtFeed,
 }
 
 // —— type-state markers ——

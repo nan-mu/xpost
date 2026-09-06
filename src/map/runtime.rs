@@ -196,6 +196,8 @@ impl MapRt {
                 let slots = ringbuf::ringbuf_slot_count(len);
                 len + slots * ringbuf::RINGBUF_SLOT_BYTES + 512
             }
+            MapType::Devmap | MapType::ProgArray => len.saturating_mul(4) + 128,
+            MapType::WdtFeed => len.saturating_mul(8) + 128,
         }
     }
 
@@ -225,6 +227,9 @@ impl MapRt {
                 array::alloc_array_storage(value_size, builder.len)?
             }
             MapType::Ringbuf => ringbuf::alloc_ringbuf_storage(builder.len)?,
+            MapType::Devmap | MapType::ProgArray | MapType::WdtFeed => {
+                return Err(Error::TypeMismatch);
+            }
         };
         let idx = self.meta.len();
         self.meta.push(MapMeta {
@@ -267,6 +272,53 @@ impl MapRt {
 
     pub async fn find(&self, name: &str) -> Result<MapIdx, Error> {
         self.find_name(name).ok_or(Error::NotFound)
+    }
+
+    /// Register a generated special map in the same metadata table as normal
+    /// maps, so name lookup, leases, and deletion see one coherent runtime.
+    pub(crate) fn push_special_map(
+        &mut self,
+        name: &str,
+        kind: MapKind,
+        max_entries: usize,
+    ) -> Result<MapIdx, Error> {
+        Self::validate_name(name)?;
+        if max_entries == 0 || self.find_name(name).is_some() {
+            return Err(Error::AlreadyExists);
+        }
+        let (map_type, storage, value_layout, size) = match kind {
+            MapKind::Devmap => (
+                MapType::Devmap,
+                array::alloc_devmap_storage(max_entries, kind)?,
+                Some(alloc::vec![4]),
+                max_entries * 4,
+            ),
+            MapKind::ProgArray => (
+                MapType::ProgArray,
+                array::alloc_devmap_storage(max_entries, kind)?,
+                Some(alloc::vec![4]),
+                max_entries * 4,
+            ),
+            MapKind::WdtFeed => (
+                MapType::WdtFeed,
+                wdt_feed::alloc_wdt_feed_storage(max_entries)?,
+                None,
+                max_entries * 8,
+            ),
+            _ => return Err(Error::TypeMismatch),
+        };
+        let idx = self.meta.len();
+        self.meta.push(MapMeta {
+            name: String::from(name),
+            map_type,
+            key_layout: None,
+            value_layout,
+            len: max_entries,
+            size,
+            storage,
+        });
+        let _ = super::names::register_map_name_idx(name, idx);
+        Ok(idx)
     }
 
     pub async fn delete(&mut self, idx: MapIdx) -> Result<(), Error> {
@@ -526,7 +578,7 @@ pub(crate) async fn push_wdt_feed_at(
     let storage = wdt_feed::alloc_wdt_feed_storage(max_entries)?;
     rt.meta.push(MapMeta {
         name: String::from(name),
-        map_type: MapType::Array, // placeholder — kind in storage
+        map_type: MapType::WdtFeed,
         key_layout: None,
         value_layout: None,
         len: max_entries,
@@ -572,7 +624,11 @@ async fn push_special_array_at(
     let storage = array::alloc_devmap_storage(max_entries, kind)?;
     rt.meta.push(MapMeta {
         name: String::from(name),
-        map_type: MapType::Array,
+        map_type: match kind {
+            MapKind::Devmap => MapType::Devmap,
+            MapKind::ProgArray => MapType::ProgArray,
+            _ => return Err(Error::TypeMismatch),
+        },
         key_layout: None,
         value_layout: Some(alloc::vec![4]),
         len: max_entries,
