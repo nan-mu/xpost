@@ -12,12 +12,10 @@ use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp32c3_drop_xdp::{
     connection::{connection, net_task_xdp},
-    evt_async,
     init_log,
     log_gate::init_logger,
     sta,
 };
-use xpost::map::{MapBuilder, MapIdxExt, claim_heap, init, init_firmware_maps, map_rt};
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -58,52 +56,34 @@ async fn main(spawner: Spawner) {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
     init_log!("[Init][Embassy] Embassy initialized!");
 
-    unsafe {
-        claim_heap(&mut MAP_HEAP).expect("[Init][MAP] claim_heap failed");
-    }
-    init().await.expect("[Init][MAP] map runtime init failed");
+    let heap = unsafe { &mut *core::ptr::addr_of_mut!(MAP_HEAP) };
+    let mut maps = xpost::map::MapRt::init(heap)
+        .await
+        .expect("[Init][MAP] map runtime init failed");
     init_log!("[Init][MAP] MAP resource pool initialized");
-    init_firmware_maps()
+    maps.from_bpf_toml()
         .await
         .expect("[Init][MAP] talc pool OOM for bpf.toml maps");
     init_log!("[Init][MAP] firmware maps from bpf.toml initialized");
-
-    let mut rt = map_rt().await.expect("[Init][MAP] map_rt");
-    let dut_evt = rt
-        .push_builder(
-            MapBuilder::ringbuf()
-                .with_name("dut_evt")
-                .with_capacity(4096),
-        )
-        .await
-        .expect("[Init][MAP] dut_evt ringbuf OOM");
-    drop(rt);
-
-    esp32c3_drop_xdp::drop_stats::install_evt_handlers();
-    let rx = dut_evt
-        .into_channel()
-        .await
-        .expect("[Init][MAP] dut_evt into_channel");
-    spawner
-        .spawn(evt_async::run(rx))
-        .expect("dut_evt consumer");
 
     init_log!("[Init][XDP] register, load, and lease AOT slot");
     let mut xdp_rt = xpost::xdp::XdpRt::init(&XDP_SLOT)
         .await
         .expect("[Init][XDP] runtime init failed");
-    xdp_rt.load_primary(include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/esp32c3.bin"
-    )))
-    .expect("[Init][XDP] image too large");
-    let maps = map_rt().await.expect("[Init][MAP] map_rt lease");
+    let id = xdp_rt
+        .push(
+            "drop",
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/esp32c3.bin")),
+        )
+        .expect("[Init][XDP] image too large");
     xdp_rt
-        .lease(Some(&maps))
-        .await
+        .r#move(id, xpost::xdp::XdpLocation::Slot { index: 0 })
+        .expect("[Init][XDP] move");
+    xdp_rt
+        .lease(Some(&mut maps))
         .expect("[Init][XDP] map/image lease failed");
-    drop(maps);
     drop(xdp_rt);
+    drop(maps);
 
     let (controller, sta_stack, sta_runner) = sta::init_sta(peripherals.WIFI);
 

@@ -36,7 +36,7 @@ fn smoke_ipv4_frame(saddr: [u8; 4], daddr: [u8; 4]) -> [u8; 34] {
 
 #[cfg(fw_us_vip_seed)]
 fn smoke_vip_xdp(vip: [u8; 4]) {
-    use xpost::redirect::{XDP_PASS, XDP_TX, xdp_action_name};
+    use xpost::action::{XDP_PASS, XDP_TX, xdp_action_name};
 
     let mut vip_frame = smoke_ipv4_frame([192, 168, 110, 96], vip);
     let vip_rc = xpost::xdp(&mut vip_frame);
@@ -66,7 +66,7 @@ fn smoke_vip_xdp(vip: [u8; 4]) {
 
 #[cfg(fw_us_fw_rules_seed)]
 fn smoke_fw_rules_xdp(hit_src: [u8; 4]) {
-    use xpost::redirect::{XDP_PASS, XDP_TX, xdp_action_name};
+    use xpost::action::{XDP_PASS, XDP_TX, xdp_action_name};
 
     let mut hit = smoke_ipv4_frame(hit_src, [192, 168, 110, 103]);
     let hit_rc = xpost::xdp(&mut hit);

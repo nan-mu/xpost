@@ -14,7 +14,7 @@ const BPF_FUNC_DYNPTR_WRITE: usize = 202;
 const BPF_FUNC_DYNPTR_READ: usize = 201;
 const BPF_FUNC_DYNPTR_DATA: usize = 203;
 
-use xpost::redirect::XDP_PASS;
+use xpost::action::XDP_PASS;
 
 /// Payload markers beyond eth header (survive maps_helpers eth14 roundtrip).
 const MARK_S1: u32 = 0x51_51_51_51;

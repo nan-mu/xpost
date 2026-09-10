@@ -1,21 +1,20 @@
-//! XDP → firmware events via `BPF_MAP_TYPE_RINGBUF` (no hash/array userspace lock).
+//! Firmware event ring (feature `event-ringbuf`).
 //!
-//! XDP `ringbuf_output` records; optional [`set_wake_hook`] pends a board IRQ.
-//! [`drain_isr`] dispatches feed / bench_done / idle handlers under CS.
+//! Consumes `BPF_MAP_TYPE_RINGBUF` records for DUT events. BPF `bpf_ringbuf_*`
+//! helpers stay deferred.
 
 use core::cell::RefCell;
 
 use critical_section::Mutex;
 
-use crate::map::pool::{MapKind, ResourceId, pool_try_write};
-use crate::map::ringbuf::RingbufMap;
-use crate::watchdog::{self, FeedHandle};
+use crate::map::kinds::ringbuf::RingbufMap;
+use crate::map::runtime::pool::{MapKind, ResourceId, pool_try_write};
 
 /// `struct xpost_evt_feed` in `xdp_drop.c`
 pub const EVT_FEED: u32 = 1;
 /// `struct xpost_evt_bench` — cap reached; host should stop blast.
 pub const EVT_BENCH_DONE: u32 = 2;
-/// Watchdog idle (fallback when bench did not cap).
+/// Idle notification (board-defined).
 pub const EVT_IDLE: u32 = 3;
 
 pub const FEED_REC_LEN: usize = 8;
@@ -24,12 +23,14 @@ pub const BENCH_REC_LEN: usize = 32;
 type WakeHook = fn();
 type BenchHook = fn(u64, u64, u64);
 type IdleHook = fn();
+type FeedHook = fn(u64);
 
 struct State {
     ring_id: Option<ResourceId>,
     wake: Option<WakeHook>,
     on_bench_done: Option<BenchHook>,
     on_idle: Option<IdleHook>,
+    on_feed: Option<FeedHook>,
 }
 
 static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
@@ -37,6 +38,7 @@ static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
     wake: None,
     on_bench_done: None,
     on_idle: None,
+    on_feed: None,
 }));
 
 /// Bind the DUT event ring by registered map name.
@@ -72,27 +74,19 @@ pub fn set_idle_hook(hook: IdleHook) {
     });
 }
 
-/// Called from [`crate::map::ringbuf`] after a record is committed.
-pub fn on_ring_produced() {
-    // Coalesce: TIMG1 tick also drains feeds; wake only for slow-path dispatch.
+pub fn set_feed_hook(hook: FeedHook) {
+    critical_section::with(|cs| {
+        STATE.borrow_ref_mut(cs).on_feed = Some(hook);
+    });
 }
 
-/// BPF helper `bpf_xpost_evt_wake()` — pend IRQ after bench_done record.
+/// Called from [`crate::map::kinds::ringbuf`] after a record is committed.
+pub fn on_ring_produced() {}
+
+/// Unsupported BPF helper leftover: `bpf_xpost_evt_wake` is not dispatched.
+#[allow(dead_code)]
 pub fn helper_wake() -> usize {
-    fire_wake();
-    0
-}
-
-/// BPF helper `bpf_xpost_wdt_feed` — feed via ringbuf (compat name).
-pub fn helper_feed_ring(_handle: usize) -> usize {
-    let us = watchdog::now_us() as u32;
-    let mut rec = [0u8; FEED_REC_LEN];
-    rec[0..4].copy_from_slice(&EVT_FEED.to_le_bytes());
-    rec[4..8].copy_from_slice(&us.to_le_bytes());
-    if output_record(&rec).is_err() {
-        watchdog::feed(FeedHandle(0));
-    }
-    0
+    usize::MAX
 }
 
 pub fn emit_idle() {
@@ -160,7 +154,10 @@ fn dispatch(buf: &[u8]) {
         EVT_FEED => {
             if buf.len() >= FEED_REC_LEN {
                 let us = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as u64;
-                watchdog::feed_at(FeedHandle(0), us);
+                let hook = critical_section::with(|cs| STATE.borrow_ref(cs).on_feed);
+                if let Some(h) = hook {
+                    h(us);
+                }
             }
         }
         EVT_BENCH_DONE => {

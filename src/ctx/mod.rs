@@ -3,16 +3,18 @@
 //!
 //! Layout matches Linux `struct xdp_md` field offsets on RV32 (`ilp32`):
 //! `data`/`data_end` at 0/4, `data_meta` at 8, `ingress_ifindex` at 0xc.
+//!
+//! First-case programs mutate the packet via direct pointer access.
+//! `bpf_xdp_adjust_tail` (shrink-only) may move `data_end`; load_bytes /
+//! store_bytes / adjust_head remain unsupported.
 
 use core::cell::RefCell;
-use core::ptr;
 
 use critical_section::Mutex;
 
 /// Compile-time logical port table (stable across SoCs; not Linux ifindex).
-/// WiFi egress / ingress.
 pub const IFINDEX_WIFI: u32 = 0;
-/// Wired NIC — stub on ESP32-C3 (`bpf_redirect` returns `-ENOTSUP`).
+/// Wired NIC — reserved stub on ESP32-C3.
 pub const IFINDEX_WIRED: u32 = 1;
 
 #[repr(C)]
@@ -25,7 +27,7 @@ pub struct XdpMd {
     pub egress_ifindex: u32,
 }
 
-/// Alias used by AOT load path (`part`).
+/// Alias used by AOT load path.
 pub type XdpContext = XdpMd;
 
 impl XdpMd {
@@ -40,92 +42,6 @@ impl XdpMd {
             rx_queue_index: 0,
             egress_ifindex: 0,
         }
-    }
-
-    #[inline]
-    pub unsafe fn from_raw(xdp_md: usize) -> Option<&'static mut Self> {
-        if xdp_md == 0 {
-            return None;
-        }
-        Some(&mut *(xdp_md as *mut Self))
-    }
-
-    /// `bpf_xdp_adjust_head`: positive delta shrinks from the front.
-    pub unsafe fn adjust_head(&mut self, delta: usize) -> i32 {
-        let delta = delta as i32;
-        if delta < 0 {
-            return -22;
-        }
-        let d = delta as usize;
-        let new_data = match (self.data as usize).checked_add(d) {
-            Some(v) => v,
-            None => return -22,
-        };
-        if new_data > self.data_end as usize {
-            return -22;
-        }
-        self.data = new_data as *mut u8;
-        0
-    }
-
-    /// `bpf_xdp_adjust_tail`: negative shrinks; positive grow only inside RX scratch.
-    pub unsafe fn adjust_tail(&mut self, delta: usize) -> i32 {
-        let delta = delta as i32;
-        if delta > 0 {
-            let new_end = match (self.data_end as usize).checked_add(delta as usize) {
-                Some(v) => v,
-                None => return -22,
-            };
-            if !crate::rx_scratch::ptr_in_window(new_end) {
-                return -22;
-            }
-            self.data_end = new_end as *mut u8;
-            return 0;
-        }
-        let new_end = (self.data_end as isize).wrapping_add(delta as isize);
-        if new_end < self.data as isize {
-            return -22;
-        }
-        self.data_end = new_end as *mut u8;
-        0
-    }
-
-    pub unsafe fn load_bytes(&self, offset: usize, buf: usize, len: usize) -> i32 {
-        if buf == 0 || len == 0 {
-            return -22;
-        }
-        let start = match (self.data as usize).checked_add(offset) {
-            Some(v) => v,
-            None => return -22,
-        };
-        let end = match start.checked_add(len) {
-            Some(v) => v,
-            None => return -22,
-        };
-        if end > self.data_end as usize {
-            return -22;
-        }
-        ptr::copy_nonoverlapping(start as *const u8, buf as *mut u8, len);
-        0
-    }
-
-    pub unsafe fn store_bytes(&self, offset: usize, buf: usize, len: usize) -> i32 {
-        if buf == 0 || len == 0 {
-            return -22;
-        }
-        let start = match (self.data as usize).checked_add(offset) {
-            Some(v) => v,
-            None => return -22,
-        };
-        let end = match start.checked_add(len) {
-            Some(v) => v,
-            None => return -22,
-        };
-        if end > self.data_end as usize {
-            return -22;
-        }
-        ptr::copy_nonoverlapping(buf as *const u8, start as *mut u8, len);
-        0
     }
 }
 

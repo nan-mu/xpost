@@ -13,8 +13,8 @@ use core::ptr;
 use allocator_api2::alloc::AllocError;
 use allocator_api2::boxed::Box;
 
-use super::ops::{MapError, MapOps};
-use super::pool::{HEAP_SIZE, MapKind, POOL, RawResource, ResourceId, allocator};
+use crate::map::helper::ops::{MapError, MapOps};
+use crate::map::runtime::pool::{HEAP_SIZE, MapKind, RawResource, ResourceId, allocator};
 
 /// Max single-element size (same bound as other BPF maps).
 pub const MAX_ELEM_BYTES: usize = 256;
@@ -53,7 +53,8 @@ impl BpfArrayMap {
         &mut self.data
     }
 
-    /// `bpf_for_each_map_elem` walk.
+    /// `bpf_for_each_map_elem` walk (retained; helper currently unsupported).
+    #[allow(dead_code)]
     pub(super) fn for_each_elems(
         &mut self,
         map_arg: usize,
@@ -175,7 +176,7 @@ fn alloc_array(
 }
 
 unsafe fn drop_array(ptr: *mut u8) {
-    unsafe { super::pool::reclaim_talc_box::<BpfArrayMap>(ptr, "BpfArrayMap") };
+    unsafe { crate::map::runtime::pool::reclaim_talc_box::<BpfArrayMap>(ptr, "BpfArrayMap") };
 }
 
 /// Create a zero-filled ARRAY map and register it under `id`.
@@ -211,38 +212,6 @@ pub async fn create_bpf_array(
     create_array(id, value_size, max_entries).await
 }
 
-/// `BPF_MAP_TYPE_DEVMAP`: ARRAY of `u32` ifindex values, tagged [`MapKind::Devmap`].
-pub async fn create_bpf_devmap(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
-    let storage = alloc_devmap_storage(max_entries, MapKind::Devmap)?;
-    RawResource::insert(
-        id,
-        storage.ptr,
-        storage.layout,
-        drop_array,
-        Some(MapKind::Devmap),
-        4,
-        4,
-        4,
-    )
-    .await
-}
-
-/// `BPF_MAP_TYPE_PROG_ARRAY`: ARRAY of `u32` absolute XDP entry addresses.
-pub async fn create_bpf_prog_array(id: ResourceId, max_entries: usize) -> Result<(), AllocError> {
-    let storage = alloc_devmap_storage(max_entries, MapKind::ProgArray)?;
-    RawResource::insert(
-        id,
-        storage.ptr,
-        storage.layout,
-        drop_array,
-        Some(MapKind::ProgArray),
-        4,
-        4,
-        4,
-    )
-    .await
-}
-
 pub(crate) fn alloc_array_storage(
     value_size: usize,
     max_entries: usize,
@@ -253,22 +222,6 @@ pub(crate) fn alloc_array_storage(
         layout,
         drop_array,
         Some(MapKind::Array),
-        4,
-        value_size,
-        stride,
-    ))
-}
-
-pub(crate) fn alloc_devmap_storage(
-    max_entries: usize,
-    kind: MapKind,
-) -> Result<RawResource, AllocError> {
-    let (raw, layout, value_size, stride) = alloc_array(4, max_entries)?;
-    Ok(RawResource::build(
-        raw,
-        layout,
-        drop_array,
-        Some(kind),
         4,
         value_size,
         stride,
@@ -331,7 +284,7 @@ pub fn run_selftest(pass: &mut u32, fail: &mut u32) {
     // Stride addressing: index 0 and (if present) index 1 are stride apart.
     if SELFTEST_VALUE_SIZE > 0 {
         let stride = BpfArrayMap::value_stride(SELFTEST_VALUE_SIZE);
-        let mut guard = match super::pool::pool_try_write() {
+        let mut guard = match crate::map::runtime::pool::pool_try_write() {
             Some(g) => g,
             None => {
                 check("array_stride", false, pass, fail);
@@ -363,12 +316,10 @@ pub fn run_selftest(pass: &mut u32, fail: &mut u32) {
         check("array_stride", ok_meta && ok_addr, pass, fail);
     }
 
-    static mut FOREACH_HITS: u32 = 0;
+    // for_each is unsupported: dispatcher fail-closed (usize::MAX), callback unused.
     extern "C" fn foreach_cb(_map: usize, _key: usize, _val: usize, _ctx: usize) -> i32 {
-        unsafe { FOREACH_HITS += 1 };
         0
     }
-    unsafe { FOREACH_HITS = 0 };
     let frc = helper_dispatcher(
         BPF_FUNC_FOR_EACH_MAP_ELEM,
         map,
@@ -378,11 +329,26 @@ pub fn run_selftest(pass: &mut u32, fail: &mut u32) {
         0,
     );
     check(
-        "for_each_map_elem",
-        frc == 0 && unsafe { FOREACH_HITS } >= 1,
+        "for_each_map_elem_unsupported",
+        frc == usize::MAX,
         pass,
         fail,
     );
 
-    info!("[HWTEST] HELPER map_delete_elem=SKIP array");
+    use crate::map::helper_delete;
+    let del = helper_delete(map, key_ptr);
+    check(
+        "map_delete_elem_array_unsupported",
+        del == crate::map::MapError::Unsupported.errno() as usize,
+        pass,
+        fail,
+    );
+
+    // Negative: unresolved map alias must miss (null), not panic.
+    check(
+        "map_lookup_bad_alias",
+        helper_lookup(0xdead_beef, key_ptr) == 0,
+        pass,
+        fail,
+    );
 }

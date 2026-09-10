@@ -1,5 +1,18 @@
 //! Sync BPF map helper ABI (AOT `map` arg → pool Id → concrete ops).
 //!
+//! # Safety subset (ARRAY / HASH)
+//!
+//! BPF helpers [`helper_lookup`] / [`helper_update`] / [`helper_delete`] accept
+//! only [`MapKind::Array`] and [`MapKind::Hash`]. Other kinds return
+//! [`MapError::Unsupported`].
+//!
+//! - **ARRAY**: lookup / update; delete → Unsupported (Linux-aligned).
+//! - **HASH**: lookup / update / delete; flags `BPF_ANY|NOEXIST|EXIST`.
+//! - **lookup null**: miss and pool Busy both return `0` (indistinguishable).
+//! - **value pointer**: valid for the rest of the current flight while the map
+//!   remains leased; delete (HASH) invalidates prior lookup pointers.
+//! - **for_each_map_elem**: unsupported (see [`helper_for_each_map_elem`]).
+//!
 //! # Alias table (weak sync)
 //!
 //! Writers update [`MAP_ALIASES`] under `critical_section` then bump
@@ -11,12 +24,14 @@ use core::cell::RefCell;
 
 use critical_section::Mutex;
 
-use super::array::BpfArrayMap;
-use super::hash::BpfHashMap;
-use super::ops::{MapError, MapOps};
-use super::pool::{MapKind, ResourceId};
-use super::pool::{pool_try_read, pool_try_write};
-use super::ringbuf::{BpfRingBuf, RingbufMap};
+pub mod ops;
+
+use crate::map::kinds::array::BpfArrayMap;
+use crate::map::kinds::hash::BpfHashMap;
+#[cfg(feature = "event-ringbuf")]
+use crate::map::kinds::ringbuf::RingbufMap;
+use crate::map::runtime::pool::{MapKind, ResourceId, pool_try_read, pool_try_write};
+pub use ops::{MapError, MapOps};
 
 /// Linux `bpf_map_update_elem` flags (low bits).
 pub const BPF_ANY: u64 = 0;
@@ -49,7 +64,7 @@ pub fn bind_map_symbols(binds: &[(&str, usize)]) -> usize {
         if addr == 0 {
             continue;
         }
-        let Some(id) = super::names::resolve_map_name(name) else {
+        let Some(id) = crate::map::runtime::names::resolve_map_name(name) else {
             log::warn!("[MAP] bind_map_symbols: unknown name {name}");
             continue;
         };
@@ -151,8 +166,14 @@ pub enum AliasError {
     Full,
 }
 
-/// Resolve helper `map` arg: AOT pointer alias or bare ResourceId.
+/// Resolve helper `map` arg: AOT pointer alias only (fail-closed).
+///
+/// Unresolved VMAs return `None` — callers must not treat a bare integer as a
+/// [`ResourceId`] fallback (that masked binding bugs on the hot path).
 pub fn resolve_map_id(map: usize) -> Option<ResourceId> {
+    if map == 0 {
+        return None;
+    }
     critical_section::with(|cs| {
         // Touch epoch so reads are sequenced after the last publish (weak sync).
         let _epoch = *ALIAS_EPOCH.borrow_ref(cs);
@@ -164,7 +185,7 @@ pub fn resolve_map_id(map: usize) -> Option<ResourceId> {
                 }
             }
         }
-        Some(map as ResourceId)
+        None
     })
 }
 
@@ -172,19 +193,15 @@ pub fn resolve_map_id(map: usize) -> Option<ResourceId> {
 pub(crate) enum TypedMap<'a> {
     Array(&'a mut BpfArrayMap),
     Hash(&'a mut BpfHashMap),
+    #[cfg(feature = "event-ringbuf")]
     Ringbuf(&'a mut RingbufMap),
-    Devmap(&'a mut BpfArrayMap),
-    ProgArray(&'a mut BpfArrayMap),
-    WdtFeed(&'a mut super::wdt_feed::BpfWdtFeedMap),
 }
 
 pub(crate) enum TypedMapRef<'a> {
     Array(&'a BpfArrayMap),
     Hash(&'a BpfHashMap),
+    #[cfg(feature = "event-ringbuf")]
     Ringbuf(&'a RingbufMap),
-    Devmap(&'a BpfArrayMap),
-    ProgArray(&'a BpfArrayMap),
-    WdtFeed(&'a super::wdt_feed::BpfWdtFeedMap),
 }
 
 pub(crate) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> R) -> Option<R> {
@@ -194,10 +211,8 @@ pub(crate) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> 
     let typed = match res.kind()? {
         MapKind::Array => TypedMap::Array(unsafe { res.as_mut() }),
         MapKind::Hash => TypedMap::Hash(unsafe { res.as_mut() }),
+        #[cfg(feature = "event-ringbuf")]
         MapKind::Ringbuf => TypedMap::Ringbuf(unsafe { res.as_mut() }),
-        MapKind::Devmap => TypedMap::Devmap(unsafe { res.as_mut() }),
-        MapKind::ProgArray => TypedMap::ProgArray(unsafe { res.as_mut() }),
-        MapKind::WdtFeed => TypedMap::WdtFeed(unsafe { res.as_mut() }),
     };
     Some(f(typed))
 }
@@ -212,37 +227,34 @@ pub(crate) fn with_typed_map_ref<R>(
     let typed = match res.kind()? {
         MapKind::Array => TypedMapRef::Array(unsafe { res.as_ref() }),
         MapKind::Hash => TypedMapRef::Hash(unsafe { res.as_ref() }),
+        #[cfg(feature = "event-ringbuf")]
         MapKind::Ringbuf => TypedMapRef::Ringbuf(unsafe { res.as_ref() }),
-        MapKind::Devmap => TypedMapRef::Devmap(unsafe { res.as_ref() }),
-        MapKind::ProgArray => TypedMapRef::ProgArray(unsafe { res.as_ref() }),
-        MapKind::WdtFeed => TypedMapRef::WdtFeed(unsafe { res.as_ref() }),
     };
     Some(f(typed))
 }
 
-/// Sync BPF helper entry: resolve `map` as AOT pointer or [`ResourceId`].
+/// Sync BPF helper entry: resolve `map` as AOT VMA alias only (fail-closed).
 ///
-/// Uses a pool **read** lock so lookups do not exclusive-contend with each other.
-/// `Busy` (writer held) still returns null — same ABI as a key miss; BPF programs
-/// that fail-open on null cannot distinguish the two. Prefer completing userspace
-/// map writes before enabling RX (see `fw_seed::seed_vip_redirect`).
+/// ARRAY/HASH only. Uses a pool **read** lock so lookups do not exclusive-contend.
+/// `Busy` (writer held) still returns null — same ABI as a key miss.
 pub fn helper_lookup(map: usize, key: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
-        // Distinct from Busy/miss: hot-loaded AOT used a `.maps` VMA that was never aliased.
         log::error!("[Helper][MAP][helper_lookup]: unresolved map ptr {}", map);
         return 0;
     };
     let key = key as *const u8;
     match with_typed_map_ref(id, |typed| match typed {
-        TypedMapRef::Array(m) | TypedMapRef::Devmap(m) | TypedMapRef::ProgArray(m) => {
-            MapOps::lookup(m, key)
-        }
-        TypedMapRef::WdtFeed(m) => MapOps::lookup(m, key),
+        TypedMapRef::Array(m) => MapOps::lookup(m, key),
         TypedMapRef::Hash(m) => MapOps::lookup(m, key),
-        TypedMapRef::Ringbuf(m) => MapOps::lookup(&m.bpf, key),
+        #[cfg(feature = "event-ringbuf")]
+        TypedMapRef::Ringbuf(_) => Err(MapError::Unsupported),
     }) {
         Some(Ok(p)) => p as usize,
         Some(Err(MapError::NotFound)) => 0,
+        Some(Err(MapError::Unsupported)) => {
+            MapError::Unsupported.log_if_bug("helper_lookup");
+            0
+        }
         Some(Err(_)) => 0,
         None => {
             MapError::Busy.log_if_bug("helper_lookup");
@@ -258,15 +270,16 @@ pub fn helper_update(map: usize, key: usize, value: usize, flags: usize) -> usiz
     let key = key as *const u8;
     let value = value as *const u8;
     match with_typed_map(id, |typed| match typed {
-        TypedMap::Array(m) | TypedMap::Devmap(m) | TypedMap::ProgArray(m) => {
-            MapOps::update(m, key, value, flags as u64)
-        }
-        TypedMap::WdtFeed(m) => MapOps::update(m, key, value, flags as u64),
+        TypedMap::Array(m) => MapOps::update(m, key, value, flags as u64),
         TypedMap::Hash(m) => MapOps::update(m, key, value, flags as u64),
-        TypedMap::Ringbuf(m) => MapOps::update(&mut m.bpf, key, value, flags as u64),
+        #[cfg(feature = "event-ringbuf")]
+        TypedMap::Ringbuf(_) => Err(MapError::Unsupported),
     }) {
         Some(Ok(())) => 0,
-        Some(Err(e)) => e.errno() as usize,
+        Some(Err(e)) => {
+            e.log_if_bug("helper_update");
+            e.errno() as usize
+        }
         None => {
             MapError::Busy.log_if_bug("helper_update");
             MapError::Busy.errno() as usize
@@ -280,13 +293,16 @@ pub fn helper_delete(map: usize, key: usize) -> usize {
     };
     let key = key as *const u8;
     match with_typed_map(id, |typed| match typed {
-        TypedMap::Array(m) | TypedMap::Devmap(m) | TypedMap::ProgArray(m) => MapOps::delete(m, key),
-        TypedMap::WdtFeed(m) => MapOps::delete(m, key),
+        TypedMap::Array(m) => MapOps::delete(m, key),
         TypedMap::Hash(m) => MapOps::delete(m, key),
-        TypedMap::Ringbuf(m) => MapOps::delete(&mut m.bpf, key),
+        #[cfg(feature = "event-ringbuf")]
+        TypedMap::Ringbuf(_) => Err(MapError::Unsupported),
     }) {
         Some(Ok(())) => 0,
-        Some(Err(e)) => e.errno() as usize,
+        Some(Err(e)) => {
+            e.log_if_bug("helper_delete");
+            e.errno() as usize
+        }
         None => {
             MapError::Busy.log_if_bug("helper_delete");
             MapError::Busy.errno() as usize
@@ -296,42 +312,24 @@ pub fn helper_delete(map: usize, key: usize) -> usize {
 
 type ForEachCb = extern "C" fn(usize, usize, usize, usize) -> i32;
 
-/// Linux callback: `long (*cb)(struct bpf_map *, void *key, void *value, void *ctx)`.
+/// `bpf_for_each_map_elem` is **unsupported** in the safety-trimmed runtime.
+///
+/// Blocking reasons (N1 / N2):
+/// - callback is an unchecked function pointer (`transmute`);
+/// - PREVAIL does not analyze callback bodies;
+/// - HASH snapshot may silently truncate;
+/// - nested helper reentrancy / stack peak are unbudgeted.
+///
+/// Returns `-ENOTSUP`. Implementation retained under `allow(dead_code)` for a
+/// future constrained restore — do not re-enable without closing SC-10.
+#[allow(dead_code)]
 pub fn helper_for_each_map_elem(
     map: usize,
     callback_fn: usize,
     callback_ctx: usize,
     _flags: usize,
 ) -> usize {
-    if callback_fn == 0 {
-        return (-22i32) as usize;
-    }
-    let Some(id) = resolve_map_id(map) else {
-        return (-2i32) as usize;
-    };
-    let cb = unsafe { core::mem::transmute::<usize, ForEachCb>(callback_fn) };
-
-    let mut guard = match super::pool::pool_try_write() {
-        Some(g) => g,
-        None => return (-11i32) as usize, // EAGAIN
-    };
-    let mut table = match guard.as_mut() {
-        Some(t) => t,
-        None => return (-22i32) as usize,
-    };
-    let mut res = match table.get_mut(&id) {
-        Some(r) => r,
-        None => return (-2i32) as usize,
-    };
-    match res.kind() {
-        Some(MapKind::Hash) => {
-            let m: &mut BpfHashMap = unsafe { res.as_mut() };
-            m.for_each_elems(map, cb, callback_ctx)
-        }
-        Some(MapKind::Array) | Some(MapKind::Devmap) | Some(MapKind::ProgArray) => {
-            let m: &mut BpfArrayMap = unsafe { res.as_mut() };
-            m.for_each_elems(map, cb, callback_ctx)
-        }
-        _ => (-22i32) as usize,
-    }
+    let _ = (map, callback_fn, callback_ctx);
+    let _cb: Option<ForEachCb> = None;
+    (-95i32) as usize
 }

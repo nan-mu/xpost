@@ -21,15 +21,12 @@ use esp32c3_firmware::{
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
-    // `log` may heap-allocate; UART then ROM reset so overnight can recover.
     esp_println::println!("PANIC {panic_info}");
     esp_hal::system::software_reset();
 }
 
 extern crate alloc;
 
-// This creates a default app-descriptor required by the esp-idf bootloader.
-// For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
 const MAP_HEAP_SIZE: usize = xpost::map::HEAP_SIZE;
@@ -61,20 +58,16 @@ async fn main(spawner: Spawner) {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
     init_log!("[Init][Embassy] Embassy initialized!");
 
-    unsafe {
-        let heap = core::slice::from_raw_parts_mut(
+    let heap = unsafe {
+        core::slice::from_raw_parts_mut(
             core::ptr::addr_of_mut!(MAP_HEAP).cast::<u8>(),
             MAP_HEAP_SIZE,
-        );
-        xpost::map::claim_heap(heap).expect("[Init][MAP] claim_heap failed");
-    }
-    xpost::map::init()
+        )
+    };
+    let mut maps = xpost::map::MapRt::init(heap)
         .await
         .expect("[Init][MAP] map runtime init failed");
     init_log!("[Init][MAP] MAP resource pool initialized");
-    let mut xdp_rt = xpost::xdp::XdpRt::init(&XDP_SLOT)
-        .await
-        .expect("[Init][XDP] runtime init failed");
 
     #[cfg(fw_us_hw_selftest)]
     match esp32c3_firmware::hwtest::verify_pool().await {
@@ -84,39 +77,43 @@ async fn main(spawner: Spawner) {
 
     #[cfg(not(fw_us_cold_boot))]
     {
-        xpost::map::init_firmware_maps()
+        maps.from_bpf_toml()
             .await
             .expect("[Init][MAP] talc pool OOM for bpf.toml maps");
         init_log!("[Init][MAP] firmware maps from bpf.toml initialized");
 
         init_log!("[Init][XDP] load AOT payload into leased slot");
-        xdp_rt.load_primary(include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/esp32c3.bin"
-        )))
-        .expect("[Init][XDP] image too large");
-        let maps = xpost::map::map_rt()
+        let mut xdp = xpost::xdp::XdpRt::init(&XDP_SLOT)
             .await
-            .expect("[Init][MAP] map_rt lease");
-        xdp_rt
-            .lease(Some(&maps))
-            .await
+            .expect("[Init][XDP] runtime init failed");
+        let id = xdp
+            .push(
+                "primary",
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/esp32c3.bin")),
+            )
+            .expect("[Init][XDP] image too large");
+        xdp.r#move(id, xpost::xdp::XdpLocation::Slot { index: 0 })
+            .expect("[Init][XDP] move to primary");
+        xdp.lease(Some(&mut maps))
             .expect("[Init][XDP] map/image lease failed");
+        drop(xdp);
         drop(maps);
     }
     #[cfg(fw_us_cold_boot)]
     {
         init_log!("[Init][MAP] cold_boot: skip bpf.toml maps (CREATE via control plane)");
         init_log!("[Init][XDP] cold_boot: no leased image; RX remains XDP_PASS");
+        let _ = xpost::xdp::XdpRt::init(&XDP_SLOT)
+            .await
+            .expect("[Init][XDP] runtime init failed");
+        drop(maps);
         let _ = peripherals.FLASH;
     }
-    drop(xdp_rt);
 
     #[cfg(fw_us_hw_selftest)]
     {
         let _ = spawner;
         esp32c3_firmware::hwtest::run();
-        // Dedicated harness owns XDP; do not bring up WiFi / RX path.
         init_log!("[HWTEST] idle (WiFi skipped)");
         loop {
             embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
@@ -143,6 +140,4 @@ async fn main(spawner: Spawner) {
             embassy_time::Timer::after(embassy_time::Duration::from_secs(60)).await;
         }
     }
-
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples
 }

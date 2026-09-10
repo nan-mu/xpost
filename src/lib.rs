@@ -12,18 +12,22 @@
 #![no_std]
 
 extern crate alloc;
+extern crate self as xpost;
 
+pub mod action;
 pub mod ctx;
 pub mod helper;
 mod log_gate;
 pub mod map;
 pub mod mem_map;
 pub mod prog_table;
-pub mod redirect;
-pub(crate) mod rx_scratch;
-
-pub mod evt;
-pub mod watchdog;
 pub mod xdp;
 
+pub use map::MapRtGuard;
+pub use xdp::{RtMutex, RtMutexGuard, XdpRtGuard};
+
+#[cfg(feature = "event-ringbuf")]
+pub use map::ringbuf::evt;
+
 pub use helper::helper_dispatcher;
+pub use prog_table::SlotId;

@@ -7,7 +7,6 @@ use xpost::datapath;
 use xpost::evt;
 use xpost::map::ops::MapOps;
 use xpost::map::{peek_array_u64, with_array_map};
-use xpost::watchdog::{self, FeedHandle};
 
 pub const REQ_LEN: usize = 1;
 pub const REPLY_LEN: usize = 24;
@@ -24,10 +23,8 @@ const RXCNT_UDP_INDEX: u32 = 17;
 const BENCH_TS_FIRST: u32 = 0;
 const BENCH_TS_LAST: u32 = 1;
 const CAP_PKTS: u64 = 100_000;
-/// Idle watchdog (µs); keep in sync with `test_common::drop_stats::IDLE_WATCHDOG_US`.
+/// Idle notification window (µs); keep in sync with `test_common::drop_stats::IDLE_WATCHDOG_US`.
 pub const IDLE_US: u64 = 5_000_000;
-
-pub const DROP_WDT: FeedHandle = FeedHandle(0);
 
 static PENDING_BENCH_DONE: Mutex<RefCell<Option<BenchDone>>> = Mutex::new(RefCell::new(None));
 
@@ -41,12 +38,10 @@ pub struct BenchDone {
 pub fn install_evt_handlers() {
     evt::set_bench_done_hook(on_bench_done_evt);
     evt::set_idle_hook(on_idle_evt);
-    watchdog::set_expire_hook(DROP_WDT, |_| evt::emit_idle());
 }
 
 fn on_bench_done_evt(count: u64, t_first: u64, t_last: u64) {
     datapath::disable();
-    watchdog::disarm(DROP_WDT);
     critical_section::with(|cs| {
         *PENDING_BENCH_DONE.borrow_ref_mut(cs) = Some(BenchDone {
             count,
@@ -64,8 +59,7 @@ fn on_bench_done_evt(count: u64, t_first: u64, t_last: u64) {
 
 fn on_idle_evt() {
     datapath::disable();
-    watchdog::disarm(DROP_WDT);
-    crate::init_log!("[drop_xdp] idle watchdog expire");
+    crate::init_log!("[drop_xdp] idle expire");
 }
 
 /// Async ctrl task: send `OP_BENCH_DONE` notify to probe if XDP posted bench_done.
@@ -96,7 +90,7 @@ fn reported_count(raw: u64) -> u64 {
     raw.min(CAP_PKTS)
 }
 
-/// Clear BPF maps + arm watchdog; re-enable datapath.
+/// Clear BPF maps; re-enable datapath.
 pub async fn reset_and_enable() {
     datapath::disable();
     critical_section::with(|cs| {
@@ -115,8 +109,7 @@ pub async fn reset_and_enable() {
         })
         .await;
     }
-    let _ = watchdog::configure_channel(DROP_WDT, IDLE_US);
-    watchdog::arm(DROP_WDT);
+    let _ = IDLE_US;
     datapath::enable();
 }
 

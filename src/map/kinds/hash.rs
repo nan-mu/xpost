@@ -11,10 +11,10 @@ use allocator_api2::boxed::Box;
 use hashbrown::HashMap;
 use log::error;
 
-use super::abi::{BPF_EXIST, BPF_NOEXIST};
-use super::names::register_map_name;
-use super::ops::{MapError, MapOps};
-use super::pool::{MapKind, RawResource, ResourceId, TalcAlloc, allocator};
+use crate::map::helper::ops::{MapError, MapOps};
+use crate::map::helper::{BPF_EXIST, BPF_NOEXIST};
+use crate::map::runtime::names::register_map_name;
+use crate::map::runtime::pool::{MapKind, RawResource, ResourceId, TalcAlloc, allocator};
 
 const MAX_KEY_BYTES: usize = 64;
 const MAX_VAL_BYTES: usize = 256;
@@ -129,8 +129,9 @@ impl BpfHashMap {
     }
 }
 
-/// Helper / AOT path only (`bpf_for_each_map_elem`).
+/// Helper / AOT path only (`bpf_for_each_map_elem`; currently unsupported).
 impl BpfHashMap {
+    #[allow(dead_code)]
     pub(super) fn for_each_elems(
         &mut self,
         map_arg: usize,
@@ -321,7 +322,7 @@ impl BpfHashMapBuilder {
 
 unsafe fn drop_hash(ptr: *mut u8) {
     // SAFETY: paired with alloc_bpf_hash `Box::into_raw`; preflight in reclaim_talc_box.
-    unsafe { super::pool::reclaim_talc_box::<BpfHashMap>(ptr, "BpfHashMap") };
+    unsafe { crate::map::runtime::pool::reclaim_talc_box::<BpfHashMap>(ptr, "BpfHashMap") };
 }
 
 fn alloc_bpf_hash(

@@ -34,8 +34,6 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<()> {
                  pub const FIRMWARE_MAP_COUNT: usize = 0;\n\
                  pub const FIRMWARE_HAS_ARRAY: bool = false;\n\
                  pub const FIRMWARE_HAS_HASH: bool = false;\n\
-                 pub const FIRMWARE_HAS_DEVMAP: bool = false;\n\
-                 pub const FIRMWARE_HAS_PROG_ARRAY: bool = false;\n\
                  pub const FIRMWARE_HAS_RINGBUF: bool = false;\n\
                  pub const SELFTEST_MAP_ID: crate::map::MapIdx = 0;\n\
                  pub const SELFTEST_MAP_TYPE: &str = \"\";\n\
@@ -136,28 +134,10 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<()> {
         map_specs.iter().any(|s| s.map_type == "BPF_MAP_TYPE_HASH")
     ));
     out.push_str(&format!(
-        "pub const FIRMWARE_HAS_DEVMAP: bool = {};\n",
-        map_specs
-            .iter()
-            .any(|s| s.map_type == "BPF_MAP_TYPE_DEVMAP")
-    ));
-    out.push_str(&format!(
-        "pub const FIRMWARE_HAS_PROG_ARRAY: bool = {};\n",
-        map_specs
-            .iter()
-            .any(|s| s.map_type == "BPF_MAP_TYPE_PROG_ARRAY")
-    ));
-    out.push_str(&format!(
-        "pub const FIRMWARE_HAS_RINGBUF: bool = {};\n",
+        "pub const FIRMWARE_HAS_RINGBUF: bool = {};\n\n",
         map_specs
             .iter()
             .any(|s| s.map_type == "BPF_MAP_TYPE_RINGBUF")
-    ));
-    out.push_str(&format!(
-        "pub const FIRMWARE_HAS_WDT_FEED: bool = {};\n\n",
-        map_specs
-            .iter()
-            .any(|s| s.map_type == "BPF_MAP_TYPE_XPOST_WDT_FEED")
     ));
 
     if let Some(first) = map_specs.first() {
@@ -211,14 +191,18 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<()> {
             "BPF_MAP_TYPE_RINGBUF" => {
                 emit_struct(&mut out, &val_ty, &spec.value_fields, false);
             }
-            "BPF_MAP_TYPE_HASH"
-            | "BPF_MAP_TYPE_ARRAY"
-            | "BPF_MAP_TYPE_DEVMAP"
-            | "BPF_MAP_TYPE_PROG_ARRAY"
-            | "BPF_MAP_TYPE_XPOST_WDT_FEED" => {
+            "BPF_MAP_TYPE_HASH" | "BPF_MAP_TYPE_ARRAY" => {
                 let key_ty = format!("{type_stem}Key");
                 emit_struct(&mut out, &key_ty, &spec.key_fields, true);
                 emit_struct(&mut out, &val_ty, &spec.value_fields, false);
+            }
+            "BPF_MAP_TYPE_PERCPU_ARRAY" | "BPF_MAP_TYPE_PERCPU_HASH" => {
+                bail!(
+                    "[maps.{}] `{}` requires Cargo feature `multicore` \
+                     (first-case ESP32-C3 contract uses ARRAY only)",
+                    spec.name,
+                    spec.map_type
+                );
             }
             other => bail!("[maps.{}] unsupported map_type `{other}`", spec.name),
         }
@@ -259,52 +243,33 @@ fn emit_init_fn(out: &mut String, map_specs: &[MapSpec]) -> Result<()> {
         match spec.map_type.as_str() {
             "BPF_MAP_TYPE_HASH" => {
                 out.push_str(&format!(
-                    "    let _ = rt.push_builder(\n\
+                    "    let _ = rt.create(\n\
                             MapBuilder::hash()\n\
                             .with_name(\"{name}\")\n\
                             .with_key::<{key_ty}>()\n\
                             .with_value::<{val_ty}>()\n\
                             .with_capacity({})\n\
-                    ).await?;\n",
+                            .into_complete()\n\
+                    )?;\n",
                     spec.max_entries
                 ));
             }
             "BPF_MAP_TYPE_ARRAY" => {
                 out.push_str(&format!(
-                    "    let _ = rt.push_builder(\n\
+                    "    let _ = rt.create(\n\
                             MapBuilder::array()\n\
                             .with_name(\"{name}\")\n\
                             .with_value::<{val_ty}>()\n\
                             .with_capacity({})\n\
-                    ).await?;\n",
-                    spec.max_entries
-                ));
-            }
-            "BPF_MAP_TYPE_DEVMAP" => {
-                out.push_str(&format!(
-                    "    rt.push_special_map(\"{name}\", crate::map::MapKind::Devmap, {})?;\n",
-                    spec.max_entries
-                ));
-            }
-            "BPF_MAP_TYPE_PROG_ARRAY" => {
-                out.push_str(&format!(
-                    "    rt.push_special_map(\"{name}\", crate::map::MapKind::ProgArray, {})?;\n",
+                            .into_complete()\n\
+                    )?;\n",
                     spec.max_entries
                 ));
             }
             "BPF_MAP_TYPE_RINGBUF" => {
                 out.push_str(&format!(
-                    "    let _ = rt.push_builder(\n\
-                            MapBuilder::ringbuf()\n\
-                            .with_name(\"{name}\")\n\
-                            .with_capacity({})\n\
-                    ).await?;\n",
-                    spec.max_entries
-                ));
-            }
-            "BPF_MAP_TYPE_XPOST_WDT_FEED" => {
-                out.push_str(&format!(
-                    "    rt.push_special_map(\"{name}\", crate::map::MapKind::WdtFeed, {})?;\n",
+                    "    let _ = (\"{name}\", {}usize);\n\
+                     return Err(crate::map::Error::Unsupported);\n",
                     spec.max_entries
                 ));
             }
@@ -360,50 +325,30 @@ mod tests {
     }
 
     #[test]
-    fn special_maps_are_registered_through_map_runtime() {
+    fn unsupported_map_type_is_rejected() {
         let board = fixture();
         fs::write(board.join("bpf.toml"), "[maps.calls]\nmap_type = \"BPF_MAP_TYPE_PROG_ARRAY\"\nmax_entries = 4\nestimated_bytes = 16\nkey = \"u32 key\"\nvalue = \"u32 value\"\n").unwrap();
-        generate(&board, &board).unwrap();
-        let generated = fs::read_to_string(board.join("bpf_maps.rs")).unwrap();
+        let err = generate(&board, &board).unwrap_err();
         assert!(
-            generated
-                .contains("rt.push_special_map(\"calls\", crate::map::MapKind::ProgArray, 4)?")
+            err.to_string().contains("unsupported map_type"),
+            "unexpected err: {err}"
         );
-        assert!(!generated.contains("create_bpf_prog_array"));
         fs::remove_dir_all(board).unwrap();
     }
 }
 
 fn emit_struct(out: &mut String, name: &str, fields: &[(String, String)], is_key: bool) {
     out.push_str("#[repr(C)]\n");
-    out.push_str("#[derive(Clone, Copy, Debug");
     if is_key {
-        out.push_str(", PartialEq, Eq, Hash");
+        out.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, MapKey)]\n");
+    } else {
+        out.push_str("#[derive(Clone, Copy, Debug, MapValue)]\n");
     }
-    out.push_str(")]\n");
     out.push_str(&format!("pub struct {name} {{\n"));
     for (ty, field) in fields {
         out.push_str(&format!("    pub {field}: {ty},\n"));
     }
-    out.push_str("}\n");
-    let widths: Vec<String> = fields
-        .iter()
-        .map(|(ty, _)| {
-            let (sz, _) = type_size_align(ty);
-            sz.to_string()
-        })
-        .collect();
-    if is_key {
-        out.push_str(&format!(
-            "crate::impl_map_key!({name}, {});\n\n",
-            widths.join(", ")
-        ));
-    } else {
-        out.push_str(&format!(
-            "crate::impl_map_value!({name}, {});\n\n",
-            widths.join(", ")
-        ));
-    }
+    out.push_str("}\n\n");
 }
 
 fn type_size_align(ty: &str) -> (usize, usize) {

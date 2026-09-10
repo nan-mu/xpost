@@ -6,12 +6,12 @@ use core::ptr::NonNull;
 
 use allocator_api2::alloc::AllocError;
 use allocator_api2::boxed::Box;
-use hashbrown::HashMap;
 use log::error;
 use talc::TalcCell;
 use talc::source::Manual;
 
-use super::runtime::{self, MapIdx, MapRt};
+use super::rt as runtime;
+use super::rt::MapIdx;
 
 pub const HEAP_SIZE: usize = 65536;
 
@@ -78,10 +78,8 @@ pub type ResourceId = MapIdx;
 pub enum MapKind {
     Array,
     Hash,
+    #[cfg(feature = "event-ringbuf")]
     Ringbuf,
-    Devmap,
-    ProgArray,
-    WdtFeed,
 }
 
 pub struct RawResource {
@@ -160,7 +158,8 @@ impl RawResource {
         }
     }
 
-    pub(crate) fn as_ringbuf_map_mut(&mut self) -> &mut super::ringbuf::RingbufMap {
+    #[cfg(feature = "event-ringbuf")]
+    pub(crate) fn as_ringbuf_map_mut(&mut self) -> &mut crate::map::kinds::ringbuf::RingbufMap {
         unsafe { self.as_mut() }
     }
 
@@ -183,14 +182,13 @@ impl RawResource {
             value_size,
             value_stride,
         );
-        let mut guard = runtime::MAP_RT.write().await;
-        let rt = guard.as_mut().ok_or(AllocError)?;
-        if rt.meta.len() != id {
+        let mut guard = runtime::MAP_RT.get().await.lock().await;
+        if guard.meta.len() != id {
             return Err(AllocError);
         }
-        rt.meta.push(super::runtime::MapMeta {
+        guard.meta.push(runtime::MapMeta {
             name: alloc::format!("map_{id}"),
-            map_type: super::builder::MapType::Hash,
+            map_type: crate::map::builder::MapType::Hash,
             key_layout: None,
             value_layout: None,
             len: 0,
@@ -200,58 +198,20 @@ impl RawResource {
         Ok(())
     }
 
-    pub(crate) async fn read<T, R>(id: ResourceId, f: impl FnOnce(&T) -> R) -> Option<R> {
-        runtime::try_read_storage(id, |res| f(unsafe { res.as_ref() }))
-    }
-
-    pub(crate) async fn with_mut<T, R>(id: ResourceId, f: impl FnOnce(&mut T) -> R) -> Option<R> {
-        runtime::try_write_storage(id, |res| f(unsafe { res.as_mut() }))
-    }
-
     pub(crate) async fn destroy(id: ResourceId) -> bool {
-        let mut guard = match runtime::MAP_RT.try_write().ok() {
+        let lock = match runtime::MAP_RT.try_get() {
+            Some(l) => l,
+            None => return false,
+        };
+        let mut guard = match lock.try_lock().ok() {
             Some(g) => g,
             None => return false,
         };
-        let rt = match guard.as_mut() {
-            Some(r) => r,
-            None => return false,
-        };
-        if id >= rt.meta.len() {
+        if id >= guard.meta.len() {
             return false;
         }
-        rt.meta.remove(id);
+        guard.meta.remove(id);
         true
-    }
-
-    pub(crate) async fn contains(id: ResourceId) -> bool {
-        runtime::contains(id)
-    }
-
-    pub(crate) async fn users(id: ResourceId) -> Option<u32> {
-        runtime::users(id).await
-    }
-
-    pub(crate) async fn add_user(id: ResourceId) -> bool {
-        runtime::add_user(id).await
-    }
-
-    pub(crate) fn add_user_sync(id: ResourceId) -> bool {
-        runtime::add_user_sync(id)
-    }
-
-    pub(crate) async fn remove_user(id: ResourceId) -> bool {
-        runtime::remove_user(id).await
-    }
-
-    pub(crate) async fn alloc_id(max_id: ResourceId) -> Option<ResourceId> {
-        let guard = runtime::MAP_RT.read().await;
-        let rt = guard.as_ref()?;
-        if rt.meta.len() < max_id {
-            Some(rt.meta.len())
-        } else {
-            None
-        }
     }
 }
 
@@ -260,22 +220,14 @@ pub fn allocator() -> &'static TalcCell<Manual> {
     ALLOCATOR.cell()
 }
 
-#[deprecated(note = "use claim_heap + init")]
-pub fn init() {
-    super::runtime::init_sync();
-}
-
-type PoolMap = HashMap<ResourceId, RawResource, hashbrown::DefaultHashBuilder, TalcAlloc>;
-
 pub(crate) mod pool_access {
     use super::*;
+    use crate::map::MapRtGuard;
 
     pub struct PoolWriteGuard<'a> {
-        pub guard: embassy_sync::rwlock::RwLockWriteGuard<
-            'a,
-            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-            Option<MapRt>,
-        >,
+        /// Held for the duration of helper access (lock token).
+        #[allow(dead_code)]
+        pub guard: MapRtGuard<'a>,
     }
 
     #[derive(Clone, Copy)]
@@ -283,23 +235,16 @@ pub(crate) mod pool_access {
 
     impl PoolWriteGuard<'_> {
         pub fn as_mut(&mut self) -> Option<PoolMapShim> {
-            self.guard.is_some().then_some(PoolMapShim)
+            Some(PoolMapShim)
         }
-    }
 
-    pub struct PoolReadGuard<'a> {
-        pub guard: embassy_sync::rwlock::RwLockReadGuard<
-            'a,
-            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-            Option<MapRt>,
-        >,
-    }
-
-    impl PoolReadGuard<'_> {
         pub fn as_ref(&self) -> Option<PoolMapShim> {
-            self.guard.is_some().then_some(PoolMapShim)
+            Some(PoolMapShim)
         }
     }
+
+    /// Shared with write path — Mutex has a single guard type.
+    pub type PoolReadGuard<'a> = PoolWriteGuard<'a>;
 
     impl PoolMapShim {
         pub fn get(&self, id: &ResourceId) -> Option<StorageRef> {
@@ -317,19 +262,6 @@ pub(crate) mod pool_access {
                 None
             }
         }
-
-        pub fn contains_key(&self, id: &ResourceId) -> bool {
-            runtime::contains(*id)
-        }
-
-        pub fn iter_mut(&mut self) -> PoolIterMut {
-            let len = runtime::MAP_RT
-                .try_read()
-                .ok()
-                .and_then(|g| g.as_ref().map(|rt| rt.meta.len()))
-                .unwrap_or(0);
-            PoolIterMut { next: 0, len }
-        }
     }
 
     pub struct StorageRef {
@@ -341,22 +273,9 @@ pub(crate) mod pool_access {
             runtime::try_read_storage(self.id, |r| r.kind).flatten()
         }
 
-        pub fn value_size(&self) -> usize {
-            runtime::try_read_storage(self.id, |r| r.value_size).unwrap_or(0)
-        }
-
-        pub fn value_stride(&self) -> usize {
-            runtime::try_read_storage(self.id, |r| r.value_stride).unwrap_or(0)
-        }
-
         pub unsafe fn as_ref<T>(&self) -> &T {
             let ptr = runtime::try_read_storage(self.id, |r| r.ptr as *const T).expect("storage");
             unsafe { &*ptr }
-        }
-
-        pub unsafe fn as_mut<T>(&mut self) -> &mut T {
-            let ptr = runtime::try_write_storage(self.id, |r| r.ptr as *mut T).expect("storage");
-            unsafe { &mut *ptr }
         }
     }
 
@@ -377,64 +296,22 @@ pub(crate) mod pool_access {
             runtime::try_read_storage(self.id, |r| r.value_stride).unwrap_or(0)
         }
 
-        pub unsafe fn as_ref<T>(&self) -> &T {
-            let ptr = runtime::try_read_storage(self.id, |r| r.ptr as *const T).expect("storage");
-            unsafe { &*ptr }
-        }
-
         pub unsafe fn as_mut<T>(&mut self) -> &mut T {
             let ptr = runtime::try_write_storage(self.id, |r| r.ptr as *mut T).expect("storage");
             unsafe { &mut *ptr }
         }
     }
 
-    pub struct PoolIterMut {
-        next: usize,
-        len: usize,
-    }
-
-    impl Iterator for PoolIterMut {
-        type Item = (ResourceId, StorageMut);
-
-        fn next(&mut self) -> Option<Self::Item> {
-            if self.next >= self.len {
-                return None;
-            }
-            let id = self.next;
-            self.next += 1;
-            Some((id, StorageMut { id }))
-        }
-    }
-
     pub fn try_write() -> Option<PoolWriteGuard<'static>> {
         runtime::MAP_RT
-            .try_write()
-            .ok()
+            .try_get()
+            .and_then(|lock| lock.try_lock().ok())
             .map(|guard| PoolWriteGuard { guard })
     }
 
     pub fn try_read() -> Option<PoolReadGuard<'static>> {
-        runtime::MAP_RT
-            .try_read()
-            .ok()
-            .map(|guard| PoolReadGuard { guard })
+        try_write()
     }
 }
 
 pub(crate) use pool_access::{try_read as pool_try_read, try_write as pool_try_write};
-
-pub(crate) static POOL: PoolShim = PoolShim;
-
-pub(crate) struct PoolShim;
-
-impl PoolShim {
-    pub fn try_read(&self) -> Option<pool_access::PoolReadGuard<'static>> {
-        pool_access::try_read()
-    }
-
-    pub fn try_write(&self) -> Option<pool_access::PoolWriteGuard<'static>> {
-        pool_access::try_write()
-    }
-}
-
-pub(crate) use runtime::MAP_RT;

@@ -9,3 +9,5 @@ XPOST_BOARD = { value = "examples/esp32c3-firmware", relative = true }
 xtask = "run -p xtask --target aarch64-apple-darwin --"
 # Flash the firmware example (from workspace root)
 fwrun = "run -p firmware --release"
+# Typecheck lib + ESP32-C3 features on the MCU target (ingress asm included).
+check-c3 = "check -p xpost --target riscv32imc-unknown-none-elf --features dev-c3"

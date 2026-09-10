@@ -72,6 +72,11 @@ hashbrown = { version = "0.17", default-features = false, features = ["allocator
 talc = { version = "5.0", features = ["counters"] }
 ringbuf = { version = "0.5.1", default-features = false, features = ["alloc", "portable-atomic"] }
 
+[features]
+default = []
+# Opt-in multi-image hot switch (not part of first-case H′).
+hot-switch = ["xpost/hot-switch"]
+
 [build-dependencies]
 xpost-build = { path = "../../xpost-build" }
 

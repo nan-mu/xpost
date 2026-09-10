@@ -448,7 +448,7 @@ fn wire_map_kind(t: u32) -> Option<MapKind> {
     match t {
         MAP_TYPE_HASH => Some(MapKind::Hash),
         MAP_TYPE_ARRAY => Some(MapKind::Array),
-        MAP_TYPE_PROG_ARRAY => Some(MapKind::ProgArray),
+        MAP_TYPE_PROG_ARRAY => None, // PROG_ARRAY / tail_call removed
         MAP_TYPE_RINGBUF => Some(MapKind::Ringbuf),
         _ => None,
     }

@@ -1,10 +1,14 @@
-//! Type-state [`MapBuilder`] and boot `from_bpf_toml`.
+//! Type-state [`MapBuilder`] and map K/V traits.
+
+pub mod traits;
+
+pub use traits::{MapKey, MapValue};
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::runtime::{Error, MapRt};
-use super::traits::{MapKey, MapValue, layout_vec};
+use crate::map::runtime::MapRt;
+use traits::layout_vec;
 
 /// BPF map kind stored in [`super::MapMeta`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,9 +16,6 @@ pub enum MapType {
     Array,
     Hash,
     Ringbuf,
-    Devmap,
-    ProgArray,
-    WdtFeed,
 }
 
 // —— type-state markers ——
@@ -23,6 +24,7 @@ pub enum MapType {
 pub struct Incomplete;
 pub struct HashView;
 pub struct ArrayView;
+#[cfg(feature = "event-ringbuf")]
 pub struct RingbufView;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -76,6 +78,7 @@ impl MapBuilder<ArrayView, Incomplete> {
     }
 }
 
+#[cfg(feature = "event-ringbuf")]
 impl MapBuilder<RingbufView, Incomplete> {
     pub fn ringbuf() -> Self {
         Self {
@@ -112,6 +115,7 @@ impl_with_name!(HashView, HasKey);
 impl_with_name!(HashView, HasValue);
 impl_with_name!(ArrayView, Incomplete);
 impl_with_name!(ArrayView, HasValue);
+#[cfg(feature = "event-ringbuf")]
 impl_with_name!(RingbufView, Incomplete);
 
 impl MapBuilder<HashView, Incomplete> {
@@ -204,7 +208,9 @@ macro_rules! impl_with_capacity {
 
 impl_with_capacity!(HashView, HasValue);
 impl_with_capacity!(ArrayView, HasValue);
+#[cfg(feature = "event-ringbuf")]
 impl_with_capacity!(RingbufView, Incomplete);
+#[cfg(feature = "event-ringbuf")]
 impl_with_capacity!(RingbufView, HasName);
 
 macro_rules! impl_into_complete {
@@ -225,6 +231,7 @@ macro_rules! impl_into_complete {
 
 impl_into_complete!(HashView);
 impl_into_complete!(ArrayView);
+#[cfg(feature = "event-ringbuf")]
 impl_into_complete!(RingbufView);
 
 impl MapBuilder<HashView, HasCapacity> {
@@ -239,6 +246,7 @@ impl MapBuilder<ArrayView, HasCapacity> {
     }
 }
 
+#[cfg(feature = "event-ringbuf")]
 impl MapBuilder<RingbufView, HasCapacity> {
     pub fn into_complete(self) -> CompleteBuilder {
         self.into()
@@ -246,42 +254,20 @@ impl MapBuilder<RingbufView, HasCapacity> {
 }
 
 impl MapRt {
-    pub async fn push_builder<B>(&mut self, builder: B) -> Result<super::MapIdx, Error>
+    pub fn create_builder<B>(
+        &mut self,
+        builder: B,
+    ) -> Result<crate::map::runtime::MapId, crate::map::runtime::Error>
     where
         B: Into<CompleteBuilder>,
     {
-        self.push(builder.into()).await
+        self.create(builder.into())
     }
 }
 
 impl CompleteBuilder {
     /// Boot path: create every non-`runtime` map from bpf.toml codegen.
-    pub async fn from_bpf_toml(rt: &mut MapRt) -> Result<(), Error> {
-        super::boot::boot_maps_from_codegen(rt).await
-    }
-}
-
-// Flat entry points matching user docs (return incomplete builders).
-impl MapBuilder<HashView, Incomplete> {
-    /// Alias for [`Self::hash`].
-    pub fn hash_flat() -> Self {
-        Self::hash()
-    }
-}
-
-/// Legacy factory — prefer [`MapBuilder::hash`] / [`array`] / [`ringbuf`].
-pub struct MapBuilderLegacy;
-
-impl MapBuilderLegacy {
-    pub fn hash() -> MapBuilder<HashView, Incomplete> {
-        MapBuilder::hash()
-    }
-
-    pub fn array() -> MapBuilder<ArrayView, Incomplete> {
-        MapBuilder::array()
-    }
-
-    pub fn ringbuf() -> MapBuilder<RingbufView, Incomplete> {
-        MapBuilder::ringbuf()
+    pub async fn from_bpf_toml(rt: &mut MapRt) -> Result<(), crate::map::runtime::Error> {
+        rt.from_bpf_toml().await
     }
 }

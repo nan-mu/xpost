@@ -19,6 +19,7 @@ fn main() {
                 "cargo:custom-sections={}",
                 out_dir.join("custom-sections.x").display()
             );
+            emit_radio_wrap();
             return;
         }
     };
@@ -49,6 +50,14 @@ fn main() {
         "cargo:custom-sections={}",
         result.custom_sections_path.display()
     );
+    emit_radio_wrap();
+}
+
+fn emit_radio_wrap() {
+    // Capture STA/AP RX registration so XDP runs before esp-radio's private queue.
+    if env::var_os("CARGO_FEATURE_ESP32C3_RADIO").is_some() {
+        println!("cargo:rustc-link-arg=--wrap=esp_wifi_internal_reg_rxcb");
+    }
 }
 
 fn write_stub_codegen(out_dir: &PathBuf) {
@@ -76,6 +85,12 @@ pub const HOT_B_LEN: usize = 0;
 pub fn assert_linked_addresses(helper_addr: usize, slot_addrs: &[usize]) {
     let _ = (helper_addr, slot_addrs);
 }
+pub const unsafe fn firmware_xdp_slots() -> [crate::xdp::XdpSlot; HOT_SLOT_COUNT] {
+    [
+        unsafe { crate::xdp::XdpSlot::from_raw_parts(HOT_SLOT_BASES[0], HOT_SLOT_LENS[0], true) },
+        unsafe { crate::xdp::XdpSlot::from_raw_parts(HOT_SLOT_BASES[1], HOT_SLOT_LENS[1], false) },
+    ]
+}
 "#,
     )
     .unwrap();
@@ -94,6 +109,14 @@ pub fn slot_link_addrs() -> [usize; 2] {
     fs::write(
         out_dir.join("bpf_maps.rs"),
         r#"// stub — set XPOST_BOARD for real layout
+pub const FIRMWARE_MAP_COUNT: usize = 0;
+pub const FIRMWARE_HAS_ARRAY: bool = false;
+pub const FIRMWARE_HAS_HASH: bool = false;
+pub const FIRMWARE_HAS_RINGBUF: bool = false;
+pub const SELFTEST_MAP_ID: crate::map::MapIdx = 0;
+pub const SELFTEST_MAP_TYPE: &str = "stub";
+pub const SELFTEST_KEY_SIZE: usize = 4;
+pub const SELFTEST_VALUE_SIZE: usize = 8;
 pub async fn init_firmware_maps_via_builder(_rt: &mut crate::map::MapRt) -> Result<(), crate::map::Error> { Ok(()) }
 "#,
     )
@@ -107,6 +130,7 @@ pub async fn init_firmware_maps_via_builder(_rt: &mut crate::map::MapRt) -> Resu
         out_dir.join("aot_map_bind.rs"),
         r#"pub fn bind_aot_map_addrs() {}
 pub const AOT_MAP_BIND_COUNT: usize = 0;
+pub const AOT_MAP_BINDS: &[(&str, usize)] = &[];
 pub const AOT_MAP_USER_NAMES: &[&str] = &[];
 "#,
     )

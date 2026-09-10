@@ -15,7 +15,7 @@ use core::ptr;
 use critical_section::Mutex;
 use log::{error, info, warn};
 use xpost::xdp::ZcTx;
-use xpost::redirect::queue_egress_frame;
+use xpost::action::queue_egress_frame;
 
 const WIFI_IF_STA: u32 = 0;
 const ESP_OK: i32 = 0;

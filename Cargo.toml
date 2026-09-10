@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [".", "xpost-build", "xtask", "agent"]
+members = [".", "xpost-build", "xpost-macros", "xtask", "agent"]
 default-members = ["."]
 
 [package]
@@ -23,8 +23,33 @@ bench = false
 # because every message is on a packet-path or lifecycle boundary.
 debug = []
 esp32c3-storage = ["dep:embedded-storage", "dep:esp-storage", "esp-storage/esp32c3"]
+esp32c3-radio = ["dep:esp-hal", "dep:esp-radio"]
+# Host-safe development: typecheck ingress flight scaffolding (asm stubbed).
+# Does NOT enable esp-hal — that forces `portable-atomic/unsafe-assume-single-core`,
+# which fails on aarch64/x86_64 hosts.
+dev = ["debug"]
+# MCU development: radio + storage + ingress. Use with riscv32 target only
+# (`cargo check-c3`). Not for host `cargo check --features dev-c3`.
+dev-c3 = ["dev", "esp32c3-radio", "esp32c3-storage"]
+# Multicore / PERCPU_ARRAY extension stubs. Not part of the first-case ESP32-C3
+# safety contract (single-core ARRAY). Enabling this only exposes placeholder
+# APIs; no runtime PERCPU backend is implemented yet.
+multicore = []
+# Multi-image hot switch / save / switch. Default off. Flight-period image
+# invariance remains an open constraint when enabled (SC-09).
+hot-switch = []
+# Firmware event ringbuf (map/kinds/ringbuf/evt.rs).
+# Default off: BPF ringbuf helpers stay deferred; this feature is firmware-side
+# only and does not re-enable bpf_ringbuf_* or xpost_evt_wake.
+event-ringbuf = []
+
+[package.metadata.rust-analyzer]
+# Prefer `rust-analyzer.toml` in this crate.
+features = ["dev"]
+
 
 [dependencies]
+xpost-macros     = { path = "xpost-macros" }
 log              = "0.4.27"
 anyhow           = { version = "1.0.104", default-features = false }
 critical-section = "1.2.0"
@@ -34,17 +59,22 @@ talc             = { version = "5.0", features = ["counters"] }
 allocator-api2   = { version = "0.4", default-features = false, features = ["alloc"] }
 allocator-api2-v02 = { version = "0.2", package = "allocator-api2", default-features = false, features = ["alloc"] }
 hashbrown        = { version = "0.17", default-features = false, features = ["allocator-api2", "default-hasher"] }
+portable-atomic  = { version = "1", default-features = false }
 ringbuf          = { version = "0.5.1", default-features = false, features = ["alloc", "portable-atomic"] }
 async-ringbuf    = { version = "0.3.8", default-features = false, features = ["alloc", "portable-atomic"] }
 embassy-time     = { version = "0.5.0", default-features = false, features = ["log"] }
 embassy-sync     = { version = "0.8.0", default-features = false, features = ["log"] }
-embassy-net      = { version = "0.9.1", default-features = false, features = [
-  "medium-ethernet",
-  "proto-ipv4",
-  "udp",
-] }
 embedded-storage = { version = "0.3.1", optional = true }
 esp-storage      = { version = "0.9.0", default-features = false, optional = true }
+esp-hal = { version = "~1.1.0", default-features = false, optional = true, features = [
+  "esp32c3",
+  "unstable",
+] }
+esp-radio = { version = "0.18.0", default-features = false, optional = true, features = [
+  "esp32c3",
+  "unstable",
+  "wifi",
+] }
 
 [build-dependencies]
 xpost-build = { path = "xpost-build" }

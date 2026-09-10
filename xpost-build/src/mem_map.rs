@@ -276,6 +276,33 @@ fn write_mem_map_rs(
                      \"HOT_SLOT[{{i}}] linked at {{addr:#x}}, expected {{expected:#x}}\"\n\
                  );\n\
              }}\n\
+         }}\n\
+         \n\
+         /// Build immutable [`crate::xdp::XdpSlot`] descriptors for `XdpRt::init`.\n\
+         ///\n\
+         /// # Safety\n\
+         /// Caller must only use these with the matching IRAM regions for the\n\
+         /// firmware lifetime; primary is the unique `rx` mount (else slot 0).\n\
+         pub const unsafe fn firmware_xdp_slots() -> [crate::xdp::XdpSlot; HOT_SLOT_COUNT] {{\n\
+             ["
+    )
+    .unwrap();
+    for i in 0..n {
+        let primary = match &rx_slot {
+            s if s == &format!("Some({i})") => "true",
+            _ if i == 0 && rx_slot == "None" => "true",
+            _ => "false",
+        };
+        writeln!(
+            rs,
+            "                 // SAFETY: bases/lens come from validated mem.toml.\n\
+                     unsafe {{ crate::xdp::XdpSlot::from_raw_parts(HOT_SLOT_BASES[{i}], HOT_SLOT_LENS[{i}], {primary}) }},"
+        )
+        .unwrap();
+    }
+    writeln!(
+        rs,
+        "             ]\n\
          }}\n"
     )
     .unwrap();

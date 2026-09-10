@@ -4,7 +4,6 @@ use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
 use xpost::evt;
 use xpost::map::{async_ringbuf::traits::AsyncConsumer, ringbuf_record_payload, RingbufRx};
-use xpost::watchdog;
 
 const TICK_MS: u64 = 100;
 
@@ -18,7 +17,9 @@ pub async fn run(mut rx: RingbufRx) {
                 }
             }
             Either::First(None) => break,
-            Either::Second(_) => watchdog::tick_isr(),
+            Either::Second(_) => {
+                let _ = evt::drain_isr();
+            }
         }
     }
 }

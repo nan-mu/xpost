@@ -1,6 +1,12 @@
 //! BPF ringbuf TX + async-ringbuf RX.
+//!
+//! BPF helpers (`bpf_ringbuf_*`) remain deferred / not dispatched.
+//! Firmware event ring lives in [`evt`] (Cargo feature `event-ringbuf`).
 
 #![allow(unsafe_op_in_unsafe_fn)]
+
+#[cfg(feature = "event-ringbuf")]
+pub mod evt;
 
 use core::alloc::Layout;
 use core::mem::MaybeUninit;
@@ -15,11 +21,9 @@ use async_ringbuf::wrap::{AsyncCons, AsyncProd};
 use ringbuf::SharedRb;
 use ringbuf::storage::Ref;
 
-use crate::helper::dynptr::BpfDynptr;
-
-use super::abi::{TypedMap, resolve_map_id, with_typed_map};
-use super::ops::{MapError, MapOps};
-use super::pool::{self, MapKind, RawResource, ResourceId, allocator};
+use crate::map::helper::ops::{MapError, MapOps};
+use crate::map::helper::{TypedMap, with_typed_map};
+use crate::map::runtime::pool::{self, MapKind, RawResource, ResourceId, allocator};
 
 pub const MAX_RECORD_BYTES: usize = 256;
 pub const RINGBUF_SLOT_BYTES: usize = MAX_RECORD_BYTES + 4;
@@ -141,22 +145,8 @@ pub(crate) fn take_rx_consumer(map: &mut RingbufMap) -> Option<RingbufRx> {
 }
 
 pub async fn create_bpf_ringbuf(id: ResourceId, byte_capacity: usize) -> Result<(), AllocError> {
-    let resource = alloc_ringbuf_storage(byte_capacity)?;
-    let mut guard = super::runtime::MAP_RT.write().await;
-    let rt = guard.as_mut().ok_or(AllocError)?;
-    if rt.meta.len() != id {
-        return Err(AllocError);
-    }
-    rt.meta.push(super::runtime::MapMeta {
-        name: alloc::format!("ring_{id}"),
-        map_type: super::builder::MapType::Ringbuf,
-        key_layout: None,
-        value_layout: None,
-        len: byte_capacity,
-        size: byte_capacity,
-        storage: resource,
-    });
-    Ok(())
+    let _ = (id, byte_capacity);
+    unimplemented!("RINGBUF is deferred");
 }
 
 impl MapOps for BpfRingBuf {
@@ -278,92 +268,34 @@ fn with_ring_matching<R>(
     None
 }
 
+/// BPF ringbuf helpers are deferred: not dispatched from `helper_dispatcher`.
+/// Kept for file structure / future restore; return `-ENOTSUP` if called.
+#[allow(dead_code)]
 pub fn helper_ringbuf_reserve(map: usize, size: usize, _flags: usize) -> usize {
-    let Some(id) = resolve_map_id(map) else {
-        return 0;
-    };
-    with_ring_map(id, |rb| rb.bpf.reserve(size) as usize).unwrap_or(0)
+    let _ = (map, size);
+    (-95i32) as usize
 }
 
+#[allow(dead_code)]
 pub fn helper_ringbuf_submit(data: usize) -> usize {
-    with_ring_matching(data, |rb| {
-        rb.bpf.submit();
-        0
-    })
-    .map(|(id, r)| {
-        if let Some(mut guard) = pool::pool_try_write() {
-            if let Some(mut table) = guard.as_mut() {
-                if let Some(mut res) = table.get_mut(&id) {
-                    let rb: &mut RingbufMap = unsafe { res.as_mut() };
-                    rb.bridge_bpf_to_async();
-                }
-            }
-        }
-        r
-    })
-    .unwrap_or((-22i32) as usize)
+    let _ = data;
+    (-95i32) as usize
 }
 
+#[allow(dead_code)]
 pub fn helper_ringbuf_discard(data: usize) -> usize {
-    with_ring_matching(data, |rb| {
-        rb.bpf.discard();
-        0
-    })
-    .map(|(_, r)| r)
-    .unwrap_or((-22i32) as usize)
+    let _ = data;
+    (-95i32) as usize
 }
 
+#[allow(dead_code)]
 pub fn helper_ringbuf_output(map: usize, data: usize, size: usize, _flags: usize) -> usize {
-    let Some(id) = resolve_map_id(map) else {
-        return (-22i32) as usize;
-    };
-    let rc = with_ring_map(id, |rb| rb.bpf.output(data as *const u8, size) as usize)
-        .unwrap_or((-22i32) as usize);
-    if rc == 0 {
-        with_ring_map(id, |rb| {
-            rb.bridge_bpf_to_async();
-            0
-        });
-    }
-    rc
+    let _ = (map, data, size);
+    (-95i32) as usize
 }
 
+#[allow(dead_code)]
 pub fn helper_ringbuf_query(map: usize, _flags: usize) -> usize {
-    let Some(id) = resolve_map_id(map) else {
-        return 0;
-    };
-    with_ring_map(id, |rb| rb.bpf.query_avail()).unwrap_or(0)
-}
-
-pub fn helper_ringbuf_reserve_dynptr(map: usize, size: usize, _flags: usize, ptr: usize) -> usize {
-    if ptr == 0 || size == 0 {
-        return (-22i32) as usize;
-    }
-    let Some(id) = resolve_map_id(map) else {
-        BpfDynptr::clear(ptr);
-        return (-22i32) as usize;
-    };
-    let sample = with_ring_map(id, |rb| rb.bpf.reserve(size) as usize).unwrap_or(0);
-    if sample == 0 {
-        BpfDynptr::clear(ptr);
-        return (-12i32) as usize;
-    }
-    BpfDynptr::set_ringbuf(ptr, sample, size);
-    0
-}
-
-pub fn helper_ringbuf_submit_dynptr(ptr: usize, _flags: usize) -> usize {
-    if let Some(data) = BpfDynptr::ringbuf_payload(ptr) {
-        let _ = helper_ringbuf_submit(data);
-    }
-    BpfDynptr::clear(ptr);
-    0
-}
-
-pub fn helper_ringbuf_discard_dynptr(ptr: usize, _flags: usize) -> usize {
-    if let Some(data) = BpfDynptr::ringbuf_payload(ptr) {
-        let _ = helper_ringbuf_discard(data);
-    }
-    BpfDynptr::clear(ptr);
-    0
+    let _ = map;
+    (-95i32) as usize
 }

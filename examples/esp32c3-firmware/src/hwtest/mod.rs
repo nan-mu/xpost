@@ -12,7 +12,7 @@ use xpost::map::{BPF_ANY, helper_delete, helper_lookup, helper_update};
 use xpost::map::{
     FIRMWARE_HAS_DEVMAP, FIRMWARE_HAS_RINGBUF, FIRMWARE_MAP_COUNT, SELFTEST_MAP_ID,
 };
-use xpost::redirect::{XDP_PASS, XDP_REDIRECT};
+use xpost::action::{XDP_PASS, XDP_REDIRECT};
 
 const BPF_FUNC_TRACE_PRINTK: usize = 6;
 const BPF_FUNC_KTIME_GET_NS: usize = 5;

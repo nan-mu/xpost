@@ -1,0 +1,13 @@
+# rust-analyzer for the xpost workspace.
+#
+# Host analysis uses `dev` (ingress scaffolding, no esp-hal).
+# Full radio/storage + RV32 asm: `cargo check-c3` (or enable the override below
+# after confirming only `-p xpost` is checked).
+
+[cargo]
+features = ["dev"]
+allFeatures = false
+
+[check]
+allTargets = false
+workspace = false

@@ -1,4 +1,10 @@
-//! Consolidated BPF helper implementations (formerly one-file-per-ID).
+//! Consolidated BPF helper implementations (this version's dispatched set).
+//!
+//! Deleted: redirect, redirect_map, tail_call, adjust_head, load/store_bytes,
+//! dynptr, xpost_evt_wake. Deferred BPF ringbuf helpers live in
+//! `map/kinds/ringbuf/` (not dispatched).
+//!
+//! `xdp_adjust_tail` is supported **shrink-only** (positive delta rejected).
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
@@ -7,126 +13,6 @@ pub(super) mod ktime_get_ns {
         use embassy_time::Instant;
         // RV32 BPF u64 return is low 32 bits only — publish monotonic µs (wrap ≈4294s).
         Instant::now().as_micros() as usize
-    }
-}
-
-pub(super) mod redirect {
-    use crate::redirect::{self as xdp_redir, XDP_REDIRECT};
-    use log::error;
-
-    /// `bpf_redirect(ifindex, flags)` — [`IFINDEX_WIFI`] only on C3; wired stub `-ENOTSUP`.
-    pub(crate) fn inner(ifindex: usize, _flags: usize) -> usize {
-        use crate::ctx::IFINDEX_WIFI;
-        let ifindex = ifindex as u32;
-        if !xdp_redir::ifindex_supported(ifindex) {
-            error!(
-                "[helper]bpf_redirect: ifindex {} unsupported (only {}=wifi)",
-                ifindex, IFINDEX_WIFI
-            );
-            return (-95i32) as usize; // -ENOTSUP
-        }
-        xdp_redir::set_pending(ifindex);
-        XDP_REDIRECT as usize
-    }
-}
-
-pub(super) mod redirect_map {
-    use crate::map::pool::POOL;
-    use crate::map::{MapKind, resolve_map_id};
-    use crate::redirect::{self as xdp_redir, XDP_REDIRECT};
-    use log::error;
-
-    /// `bpf_redirect_map(map, key, flags)` — `key` is the u32 index value (not a pointer).
-    ///
-    /// On miss / wrong kind: return `flags & 0xf` (Linux fallback action bits).
-    pub(crate) fn inner(map: usize, key: usize, flags: usize) -> usize {
-        let fallback = flags & 0xf;
-        let Some(id) = resolve_map_id(map) else {
-            return fallback;
-        };
-
-        let mut guard = match POOL.try_write() {
-            Some(g) => g,
-            None => return fallback,
-        };
-        let mut table = match guard.as_mut() {
-            Some(t) => t,
-            None => return fallback,
-        };
-        let mut res = match table.get_mut(&id) {
-            Some(r) => r,
-            None => return fallback,
-        };
-        if res.kind() != Some(MapKind::Devmap) {
-            error!("[helper]bpf_redirect_map: map id {} is not DEVMAP", id);
-            return fallback;
-        }
-
-        let key_u32 = key as u32;
-        let key_bytes = key_u32.to_ne_bytes();
-        let m: &mut crate::map::BpfArrayMap = unsafe { res.as_mut() };
-        use crate::map::ops::MapOps;
-        let val_ptr = match MapOps::lookup(m, key_bytes.as_ptr()) {
-            Ok(p) => p,
-            Err(_) => return fallback,
-        };
-        // Unpopulated slot stays 0 — treat as wifi ifindex only when explicitly written;
-        // Linux DEVMAP miss returns fallback; zero value is a valid ifindex (wifi).
-        // Distinguish empty: ARRAY is zero-filled; userspace must write before redirect.
-        // Value 0 is wifi — that is intentional for this MCU port table.
-        let ifindex = unsafe { core::ptr::read_unaligned(val_ptr as *const u32) };
-
-        if !xdp_redir::ifindex_supported(ifindex) {
-            use crate::ctx::IFINDEX_WIFI;
-            error!(
-                "[helper]bpf_redirect_map: ifindex {} unsupported (only {}=wifi)",
-                ifindex, IFINDEX_WIFI
-            );
-            return (-95i32) as usize;
-        }
-        xdp_redir::set_pending(ifindex);
-        XDP_REDIRECT as usize
-    }
-}
-
-pub(super) mod tail_call {
-    use crate::map::abi::{TypedMapRef, with_typed_map_ref};
-    use crate::map::ops::MapOps;
-    use crate::map::resolve_map_id;
-    use crate::prog_table;
-
-    /// `bpf_tail_call(ctx, map, index)`.
-    ///
-    /// Resolves the target from the firmware prog table first, then from a
-    /// `BPF_MAP_TYPE_PROG_ARRAY` (value = absolute entry `u32`). On success
-    /// transfers and does not return; on failure returns `-ENOENT` (-2).
-    pub(crate) fn inner(ctx: usize, map: usize, index: usize) -> usize {
-        let entry = prog_table::get(index).or_else(|| prog_array_entry(map, index));
-        let Some(entry) = entry.filter(|&e| e != 0) else {
-            return (-2i32) as usize;
-        };
-        if !prog_table::bump_tail_depth() {
-            return (-2i32) as usize;
-        }
-        unsafe { prog_table::transfer_to_entry(ctx, entry) }
-    }
-
-    fn prog_array_entry(map: usize, index: usize) -> Option<usize> {
-        let id = resolve_map_id(map)?;
-        with_typed_map_ref(id, |typed| match typed {
-            TypedMapRef::ProgArray(m) => {
-                let key = (index as u32).to_ne_bytes();
-                match MapOps::lookup(m, key.as_ptr()) {
-                    Ok(p) if !p.is_null() => {
-                        let v = unsafe { core::ptr::read_unaligned(p as *const u32) };
-                        if v == 0 { None } else { Some(v as usize) }
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        })
-        .flatten()
     }
 }
 
@@ -148,141 +34,13 @@ pub(super) mod map_delete_elem {
     }
 }
 
-pub(super) mod for_each_map_elem {
-    pub(crate) fn inner(
-        map: usize,
-        callback_fn: usize,
-        callback_ctx: usize,
-        flags: usize,
-    ) -> usize {
-        crate::map::helper_for_each_map_elem(map, callback_fn, callback_ctx, flags)
-    }
-}
-
-pub(super) mod ringbuf_output {
-    pub(crate) fn inner(map: usize, data: usize, size: usize, flags: usize) -> usize {
-        crate::map::helper_ringbuf_output(map, data, size, flags)
-    }
-}
-
-pub(super) mod ringbuf_reserve {
-    pub(crate) fn inner(map: usize, size: usize, flags: usize) -> usize {
-        crate::map::helper_ringbuf_reserve(map, size, flags)
-    }
-}
-
-pub(super) mod ringbuf_submit {
-    pub(crate) fn inner(data: usize, flags: usize) -> usize {
-        let _ = flags;
-        crate::map::helper_ringbuf_submit(data)
-    }
-}
-
-pub(super) mod ringbuf_discard {
-    pub(crate) fn inner(data: usize, flags: usize) -> usize {
-        let _ = flags;
-        crate::map::helper_ringbuf_discard(data)
-    }
-}
-
-pub(super) mod ringbuf_query {
-    pub(crate) fn inner(map: usize, flags: usize) -> usize {
-        crate::map::helper_ringbuf_query(map, flags)
-    }
-}
-
-pub(super) mod ringbuf_reserve_dynptr {
-    pub(crate) fn inner(map: usize, size: usize, flags: usize, ptr: usize) -> usize {
-        crate::map::helper_ringbuf_reserve_dynptr(map, size, flags, ptr)
-    }
-}
-
-pub(super) mod ringbuf_submit_dynptr {
-    pub(crate) fn inner(ptr: usize, flags: usize) -> usize {
-        crate::map::helper_ringbuf_submit_dynptr(ptr, flags)
-    }
-}
-
-pub(super) mod ringbuf_discard_dynptr {
-    pub(crate) fn inner(ptr: usize, flags: usize) -> usize {
-        crate::map::helper_ringbuf_discard_dynptr(ptr, flags)
-    }
-}
-
-pub(super) mod xdp_adjust_head {
-    pub(crate) fn inner(xdp_md: usize, delta: usize) -> usize {
-        unsafe {
-            match crate::ctx::XdpMd::from_raw(xdp_md) {
-                Some(ctx) => ctx.adjust_head(delta) as usize,
-                None => (-22i32) as usize,
-            }
-        }
-    }
-}
-
-pub(super) mod xdp_adjust_tail {
-    pub(crate) fn inner(xdp_md: usize, delta: usize) -> usize {
-        unsafe {
-            match crate::ctx::XdpMd::from_raw(xdp_md) {
-                Some(ctx) => ctx.adjust_tail(delta) as usize,
-                None => (-22i32) as usize,
-            }
-        }
-    }
-}
-
-pub(super) mod xdp_load_bytes {
-    pub(crate) fn inner(xdp_md: usize, offset: usize, buf: usize, len: usize) -> usize {
-        unsafe {
-            match crate::ctx::XdpMd::from_raw(xdp_md) {
-                Some(ctx) => ctx.load_bytes(offset, buf, len) as usize,
-                None => (-22i32) as usize,
-            }
-        }
-    }
-}
-
-pub(super) mod xdp_store_bytes {
-    pub(crate) fn inner(xdp_md: usize, offset: usize, buf: usize, len: usize) -> usize {
-        unsafe {
-            match crate::ctx::XdpMd::from_raw(xdp_md) {
-                Some(ctx) => ctx.store_bytes(offset, buf, len) as usize,
-                None => (-22i32) as usize,
-            }
-        }
-    }
-}
-
-pub(super) mod dynptr_from_mem {
-    pub(crate) fn inner(data: usize, size: usize, flags: usize, ptr: usize) -> usize {
-        crate::helper::dynptr::BpfDynptr::from_mem(data, size, flags, ptr)
-    }
-}
-
-pub(super) mod dynptr_read {
-    pub(crate) fn inner(dst: usize, len: usize, src: usize, offset: usize, flags: usize) -> usize {
-        crate::helper::dynptr::BpfDynptr::read(dst, len, src, offset, flags)
-    }
-}
-
-pub(super) mod dynptr_write {
-    pub(crate) fn inner(dst: usize, offset: usize, src: usize, len: usize, flags: usize) -> usize {
-        crate::helper::dynptr::BpfDynptr::write(dst, offset, src, len, flags)
-    }
-}
-
-pub(super) mod dynptr_data {
-    pub(crate) fn inner(ptr: usize, offset: usize, len: usize) -> usize {
-        crate::helper::dynptr::BpfDynptr::data(ptr, offset, len)
-    }
-}
-
 pub(super) mod csum_diff {
-
     /// Incremental checksum diff (Linux `bpf_csum_diff` subset).
     ///
     /// `from`/`to` are treated as byte buffers of the given sizes; seed is the
     /// running `__wsum`. Returns the folded 16-bit checksum as `usize`.
+    ///
+    /// N1 gap: buffer bounds are trusted from the verifier/loader contract.
     pub(crate) fn inner(
         from: usize,
         from_size: usize,
@@ -306,7 +64,6 @@ pub(super) mod csum_diff {
         let mut p = data;
         while size > 1 {
             let word = unsafe { u16::from_be_bytes([*p, *p.add(1)]) } as u64;
-            // One's-complement: invert only the 16-bit word, not the whole u64.
             let term = if subtract { (!word) & 0xffff } else { word };
             sum = sum.wrapping_add(term);
             p = unsafe { p.add(2) };
@@ -395,7 +152,6 @@ pub(super) mod printk {
         map(tag(b"%" as &[u8]), |_| Token::Text(b"%")).parse(input)
     }
 
-    /// Returns `None` on parse failure or rejected `%s`.
     fn parse_bpf_format<'a>(input: &'a [u8]) -> Option<Vec<Token<'a>, 16>> {
         let mut results = Vec::<Token, 16>::new();
         let mut curr_input = input;
@@ -461,12 +217,11 @@ pub(super) mod printk {
                         SpecType::Unsigned => write!(buf, "{}", val),
                         SpecType::Hex => write!(buf, "{:#x}", val),
                         SpecType::Octal => write!(buf, "{:#o}", val),
-                        // Linux `%pI4`: argument is a pointer to `__be32` (wire octets),
-                        // not a host `u32` IP value.
                         SpecType::Dot => {
                             if val == 0 {
                                 write!(buf, "0.0.0.0")
                             } else {
+                                // N1 gap: `%pI4` arg readability trusted from verifier.
                                 let o = unsafe { core::ptr::read_unaligned(val as *const [u8; 4]) };
                                 write!(buf, "{}.{}.{}.{}", o[0], o[1], o[2], o[3])
                             }
@@ -502,7 +257,6 @@ pub(super) mod printk {
         Ok(())
     }
 
-    /// `bpf_trace_printk`: unpack packed `fmt_len`, validate, format, emit.
     #[inline(always)]
     pub(crate) fn inner(
         fmt_ptr: usize,
@@ -522,8 +276,6 @@ pub(super) mod printk {
             return usize::MAX;
         }
 
-        // SAFETY: fmt_ptr/fmt_size validated coarsely above; full readability
-        // is assumed from the verifier/loader ABI contract.
         let fmt = unsafe { core::slice::from_raw_parts(fmt_ptr as *const u8, fmt_size) };
 
         let result = match nargs {
@@ -538,5 +290,42 @@ pub(super) mod printk {
             Ok(()) => 0,
             Err(()) => usize::MAX,
         }
+    }
+}
+
+pub(super) mod xdp_adjust_tail {
+    //! `bpf_xdp_adjust_tail` — **shrink only** (negative / zero delta).
+    //!
+    //! Positive delta (grow into headroom) is rejected. Frame storage is the
+    //! in-place RX buffer; there is no scratch grow path.
+
+    use crate::ctx::XdpMd;
+
+    const EINVAL: usize = (-22isize) as usize;
+
+    pub(crate) fn inner(ctx: usize, delta: usize) -> usize {
+        if ctx == 0 {
+            return EINVAL;
+        }
+        let delta = delta as i32;
+        if delta > 0 {
+            return EINVAL;
+        }
+        if delta == 0 {
+            return 0;
+        }
+        let md = unsafe { &mut *(ctx as *mut XdpMd) };
+        let data = md.data as usize;
+        let end = md.data_end as usize;
+        if end < data {
+            return EINVAL;
+        }
+        let shrink = (-delta) as usize;
+        let len = end - data;
+        if shrink > len {
+            return EINVAL;
+        }
+        md.data_end = (end - shrink) as *mut u8;
+        0
     }
 }
