@@ -42,6 +42,8 @@ pub enum XdpError {
     InvalidName,
     DuplicateName,
     NotImplemented,
+    /// `from-bpf-toml` feature: [`crate::xdp::XdpRt::lease`] before [`crate::xdp::XdpRt::from_bpf_toml`].
+    BpfTomlNotLoaded,
 }
 
 impl XdpError {
@@ -87,6 +89,7 @@ impl XdpError {
             Self::InvalidName => "invalid name",
             Self::DuplicateName => "duplicate name",
             Self::NotImplemented => "not implemented",
+            Self::BpfTomlNotLoaded => "bpf.toml boot not loaded",
         }
     }
 }

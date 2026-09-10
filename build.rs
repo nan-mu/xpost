@@ -17,8 +17,13 @@ fn main() {
     let board = match env::var_os("XPOST_BOARD") {
         Some(p) => PathBuf::from(p),
         None => {
+            if from_bpf_toml {
+                panic!(
+                    "from-bpf-toml requires XPOST_BOARD (board dir with bpf.toml); unset board is only allowed without that feature"
+                );
+            }
             let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-            write_stub_codegen(&out_dir, from_bpf_toml);
+            write_stub_codegen(&out_dir);
             println!(
                 "cargo:warning=XPOST_BOARD unset; using stub mem_map (set XPOST_BOARD to a board dir for real builds)"
             );
@@ -41,10 +46,14 @@ fn main() {
         board.join("mem.toml").display()
     );
     if from_bpf_toml {
-        println!(
-            "cargo:rerun-if-changed={}",
-            board.join("bpf.toml").display()
-        );
+        let bpf = board.join("bpf.toml");
+        println!("cargo:rerun-if-changed={}", bpf.display());
+        if !bpf.is_file() {
+            panic!(
+                "from-bpf-toml requires {}: file not found",
+                bpf.display()
+            );
+        }
     }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -107,7 +116,7 @@ pub const AOT_MAP_USER_NAMES: &[&str] = &[];
     .unwrap();
 }
 
-fn write_stub_codegen(out_dir: &PathBuf, from_bpf_toml: bool) {
+fn write_stub_codegen(out_dir: &PathBuf) {
     fs::write(
         out_dir.join("mem_map.rs"),
         r#"// stub — set XPOST_BOARD for real layout
@@ -152,27 +161,7 @@ pub fn slot_link_addrs() -> [usize; 2] {
 "#,
     )
     .unwrap();
-    if from_bpf_toml {
-        // Feature on but no board: empty boot tables that still expose the boot entry
-        // expected by `map/runtime/boot.rs`.
-        fs::write(
-            out_dir.join("bpf_maps.rs"),
-            r#"// stub — set XPOST_BOARD for real layout
-pub const FIRMWARE_MAP_COUNT: usize = 0;
-pub const FIRMWARE_HAS_ARRAY: bool = false;
-pub const FIRMWARE_HAS_HASH: bool = false;
-pub const FIRMWARE_HAS_RINGBUF: bool = false;
-pub const SELFTEST_MAP_ID: crate::map::MapIdx = 0;
-pub const SELFTEST_MAP_TYPE: &str = "stub";
-pub const SELFTEST_KEY_SIZE: usize = 4;
-pub const SELFTEST_VALUE_SIZE: usize = 8;
-pub async fn init_firmware_maps_via_builder(_rt: &mut crate::map::MapRt) -> Result<(), crate::map::Error> { Ok(()) }
-"#,
-        )
-        .unwrap();
-    } else {
-        write_empty_bpf_boot_stubs(out_dir);
-    }
+    write_empty_bpf_boot_stubs(out_dir);
     fs::write(
         out_dir.join("xdp_bpf.rs"),
         "pub(crate) static BOOT_IMAGES: &[BpfTomlImage] = &[];\n",

@@ -74,6 +74,8 @@ pub struct XdpRt {
     pub(crate) images: heapless::Vec<ImageRecord, MAX_IMAGES>,
     pub(crate) primary: usize,
     pub(crate) leased: bool,
+    #[cfg(feature = "from-bpf-toml")]
+    bpf_toml_loaded: bool,
     map_refs: heapless::Vec<crate::map::MapIdx, MAX_MAP_REFS>,
     /// VMR (AOT `.maps` symbol) → RMA bindings owned by this runtime while leased.
     vmr_binds: heapless::Vec<VmrBind, MAX_VMR_BINDS>,
@@ -115,6 +117,8 @@ impl XdpRt {
             images: heapless::Vec::new(),
             primary: usize::MAX,
             leased: false,
+            #[cfg(feature = "from-bpf-toml")]
+            bpf_toml_loaded: false,
             map_refs: heapless::Vec::new(),
             vmr_binds: heapless::Vec::new(),
         };
@@ -191,7 +195,9 @@ impl XdpRt {
         if table::boot::BOOT_IMAGES.len() > MAX_IMAGES {
             return Err(XdpError::TooManyImages);
         }
-        table::boot::load(self)
+        table::boot::load(self)?;
+        self.bpf_toml_loaded = true;
+        Ok(())
     }
 
     pub(crate) fn find_name(&self, name: &str) -> Option<XdpId> {
@@ -436,6 +442,9 @@ impl XdpRt {
     ///
     /// Sets `loaded_len` without cold-table copy; leaves `image` as `None` (no
     /// [`XdpMeta`]). Call before [`Self::lease`]`(None)` (or with hand-built maps).
+    ///
+    /// Unavailable when the `from-bpf-toml` feature is enabled.
+    #[cfg(not(feature = "from-bpf-toml"))]
     pub fn assume_injected(&mut self) -> Result<(), XdpError> {
         if self.leased {
             return Err(XdpError::Leased);
@@ -453,6 +462,10 @@ impl XdpRt {
     }
 
     pub fn pre_lease(&self, maps: Option<&MapRtGuard<'_>>) -> Result<(), XdpError> {
+        #[cfg(feature = "from-bpf-toml")]
+        if !self.bpf_toml_loaded {
+            return Err(XdpError::BpfTomlNotLoaded);
+        }
         let (image_id, loaded_len) = {
             let slot = self
                 .slots
