@@ -432,6 +432,26 @@ impl XdpRt {
         Ok(())
     }
 
+    /// Direct-start: treat primary slot bytes as already loaded (post-link inject).
+    ///
+    /// Sets `loaded_len` without cold-table copy; leaves `image` as `None` (no
+    /// [`XdpMeta`]). Call before [`Self::lease`]`(None)` (or with hand-built maps).
+    pub fn assume_injected(&mut self) -> Result<(), XdpError> {
+        if self.leased {
+            return Err(XdpError::Leased);
+        }
+        if self.primary == usize::MAX {
+            return Err(XdpError::NoPrimarySlot);
+        }
+        let slot_state = self
+            .slots
+            .get_mut(self.primary)
+            .ok_or(XdpError::NoPrimarySlot)?;
+        slot_state.loaded_len = slot_state.slot.len();
+        slot_state.image = None;
+        Ok(())
+    }
+
     pub fn pre_lease(&self, maps: Option<&MapRtGuard<'_>>) -> Result<(), XdpError> {
         let (image_id, loaded_len) = {
             let slot = self
