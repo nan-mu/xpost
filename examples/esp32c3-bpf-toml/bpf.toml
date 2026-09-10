@@ -1,0 +1,29 @@
+[maps.rxcnt]
+map_type = "BPF_MAP_TYPE_ARRAY"
+max_entries = 256
+estimated_bytes = 2048
+aot_addr = 0x403802e0
+key = """
+    u32 v
+"""
+value = """
+    u64 v
+"""
+
+[maps.firewall_array]
+map_type = "BPF_MAP_TYPE_ARRAY"
+max_entries = 8
+estimated_bytes = 32
+aot_addr = 0x4038049c
+key = """
+    u32 v
+"""
+value = """
+    u32 v
+"""
+
+[[xdp.images]]
+name = "primary"
+path = "esp32c3.bin"
+link_addr = 0x40380200
+required_maps = ["rxcnt", "firewall_array"]

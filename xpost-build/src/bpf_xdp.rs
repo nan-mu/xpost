@@ -81,7 +81,7 @@ pub fn generate(board: &Path, out_dir: &Path) -> Result<()> {
         )
         .unwrap();
         entries.push(format!(
-            "    BpfTomlImage {{ name: \"{}\", table_id: {id}, link_addr: {link_addr:#x}, helper_address: crate::helper::helper_dispatcher as *const () as usize, abi_version: 1, required_maps: REQUIRED_MAPS_{id}, bytes: IMAGE_{id} }},",
+            "    BpfTomlImage {{ name: \"{}\", table_id: {id}, link_addr: {link_addr:#x}, helper_address: 0, abi_version: 1, required_maps: REQUIRED_MAPS_{id}, bytes: IMAGE_{id} }},",
             escape_rust_str(&name)
         ));
     }

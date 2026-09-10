@@ -453,46 +453,20 @@ impl XdpRt {
         Ok(())
     }
 
-    pub fn lease(&mut self, maps: Option<&MapRtGuard<'_>>) -> Result<(), XdpError> {
-        if self.leased {
-            return Err(XdpError::Leased);
-        }
-        self.pre_lease(maps)?;
-        let entry = {
-            let slot = self
-                .slots
-                .get(self.primary)
-                .ok_or(XdpError::NoPrimarySlot)?;
-            slot.slot.base()
-        };
-        self.vmr_binds.clear();
-        self.map_refs.clear();
-        if let Some(maps) = maps {
-            // Build VMR→RMA from AOT bind table + MapRt.
-            for &(name, vma) in crate::map::AOT_MAP_BINDS {
-                if vma == 0 {
-                    continue;
-                }
-                let map_id = maps.find(name).map_err(|_| XdpError::RequiredMapAbsent)?;
-                let rma = maps.storage_ptr(map_id).map_err(|_| XdpError::MapLease)?;
-                // Hold lease refcount through the caller's MapRt guard.
-                // SAFETY: maps is &MapRtGuard — we need &mut for add_user. Re-borrow via
-                // interior: MapRtGuard is MutexGuard; we cannot mutably borrow while
-                // shared. Use sync path on MAP_RT only when we already hold the guard —
-                // the same lock. Instead bump via pointer cast is UB. So require that
-                // lease takes &mut MapRtGuard.
-                let _ = (map_id, rma, vma);
-            }
-        }
-        // Prefer mutating through maps when provided as exclusive.
-        PRIMARY_ENTRY.store(entry, Ordering::Release);
-        ACTIVE.store(true, Ordering::Release);
-        self.leased = true;
-        Ok(())
+    /// Enable the datapath: publish primary entry and install VMR→RMA aliases.
+    ///
+    /// Requires `&mut MapRtGuard` so map refcounts and the helper alias table can
+    /// be updated. Pass `None` only when the leased image has no `required_maps`.
+    pub fn lease(&mut self, maps: Option<&mut MapRtGuard<'_>>) -> Result<(), XdpError> {
+        self.lease_inner(maps)
     }
 
-    /// Lease with exclusive map guard so refcounts and VMR table can be written.
+    /// Same as [`Self::lease`] (kept for call sites that already use this name).
     pub fn lease_mut(&mut self, maps: Option<&mut MapRtGuard<'_>>) -> Result<(), XdpError> {
+        self.lease_inner(maps)
+    }
+
+    fn lease_inner(&mut self, maps: Option<&mut MapRtGuard<'_>>) -> Result<(), XdpError> {
         if self.leased {
             return Err(XdpError::Leased);
         }
@@ -566,7 +540,7 @@ impl XdpRt {
     }
 
     pub async fn lease_async(&mut self, maps: Option<&mut MapRtGuard<'_>>) -> Result<(), XdpError> {
-        self.lease_mut(maps)
+        self.lease(maps)
     }
 
     pub fn release(&mut self) -> Result<(), XdpError> {
