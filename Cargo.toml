@@ -42,6 +42,9 @@ hot-switch = []
 # Default off: BPF ringbuf helpers stay deferred; this feature is firmware-side
 # only and does not re-enable bpf_ringbuf_* or xpost_evt_wake.
 event-ringbuf = []
+# Boot maps/XDP images from board bpf.toml codegen (`from_bpf_toml` APIs).
+# Default off = direct-start path (empty bpf boot stubs; no toml boot APIs).
+from-bpf-toml = []
 
 [package.metadata.rust-analyzer]
 # Prefer `rust-analyzer.toml` in this crate.

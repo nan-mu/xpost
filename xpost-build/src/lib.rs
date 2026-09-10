@@ -95,17 +95,31 @@ pub struct GenResult {
 /// Generate runtime artifacts (`mem_map.rs`, `hot_slots.rs`, IRAM linker script,
 /// `bpf_maps.rs`, `xdp_bpf.rs`, `aot_map_bind.rs`) from tomls in `board_dir`.
 pub fn generate_runtime(board_dir: &Path, out_dir: &Path) -> Result<RuntimeGen> {
+    let mem = generate_layout_runtime(board_dir, out_dir)?;
+    bpf_maps::generate(board_dir, out_dir)?;
+    bpf_xdp::generate(board_dir, out_dir)?;
+    let aot = aot_bind::generate(board_dir, out_dir)?;
+    let mut warnings = mem.warnings;
+    warnings.extend(aot.warnings);
+    Ok(RuntimeGen {
+        custom_sections_path: mem.custom_sections_path,
+        warnings,
+    })
+}
+
+/// Generate layout/mem artifacts only (`mem_map.rs`, `hot_slots.rs`, linker fragment).
+///
+/// Skips bpf.toml boot tables (`bpf_maps` / `xdp_bpf` / `aot_map_bind`). Callers that
+/// need the direct-start path should write empty stubs for those files themselves.
+pub fn generate_layout_runtime(board_dir: &Path, out_dir: &Path) -> Result<RuntimeGen> {
     layout::assert_mem_matches_layout(board_dir)?;
     if std::env::var_os("XTASK_PRINT_MAP").is_some() {
         let _ = map_view::run_map(board_dir);
     }
     let mem = mem_map::generate(board_dir, out_dir)?;
-    bpf_maps::generate(board_dir, out_dir)?;
-    bpf_xdp::generate(board_dir, out_dir)?;
-    let aot = aot_bind::generate(board_dir, out_dir)?;
     Ok(RuntimeGen {
         custom_sections_path: mem.custom_sections_path,
-        warnings: aot.warnings,
+        warnings: Vec::new(),
     })
 }
 

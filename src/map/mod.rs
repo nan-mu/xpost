@@ -30,6 +30,7 @@ pub use kinds::ringbuf::{
 
 #[cfg(feature = "event-ringbuf")]
 pub use runtime::MapIdxExt;
+#[cfg(feature = "from-bpf-toml")]
 pub use runtime::boot::init_firmware_maps;
 pub use runtime::names::{register_map_name, resolve_map_name};
 pub use runtime::pool::HEAP_SIZE;
@@ -55,6 +56,7 @@ impl MapBuilder {
         TypedMapBuilder::ringbuf()
     }
 
+    #[cfg(feature = "from-bpf-toml")]
     pub async fn from_bpf_toml(rt: &mut MapRt) -> Result<(), Error> {
         rt.from_bpf_toml().await
     }

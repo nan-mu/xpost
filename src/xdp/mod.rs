@@ -183,6 +183,7 @@ impl XdpRt {
         Ok(())
     }
 
+    #[cfg(feature = "from-bpf-toml")]
     pub fn from_bpf_toml(&mut self) -> Result<(), XdpError> {
         if self.leased {
             return Err(XdpError::Leased);

@@ -2,16 +2,23 @@
 //!
 //! Integrators (e.g. examples/firmware) set `XPOST_BOARD` via `.cargo/config.toml`.
 //! Emits IRAM linker script path as `cargo:custom-sections=` for the final binary link.
+//!
+//! Feature `from-bpf-toml`: full bpf boot codegen. Without it, layout/mem/slots are
+//! still generated when `XPOST_BOARD` is set, but bpf boot tables are empty stubs.
 
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 
 fn main() {
+    let from_bpf_toml = env::var_os("CARGO_FEATURE_FROM_BPF_TOML").is_some();
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FROM_BPF_TOML");
+
     let board = match env::var_os("XPOST_BOARD") {
         Some(p) => PathBuf::from(p),
         None => {
             let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-            write_stub_codegen(&out_dir);
+            write_stub_codegen(&out_dir, from_bpf_toml);
             println!(
                 "cargo:warning=XPOST_BOARD unset; using stub mem_map (set XPOST_BOARD to a board dir for real builds)"
             );
@@ -33,14 +40,23 @@ fn main() {
         "cargo:rerun-if-changed={}",
         board.join("mem.toml").display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        board.join("bpf.toml").display()
-    );
+    if from_bpf_toml {
+        println!(
+            "cargo:rerun-if-changed={}",
+            board.join("bpf.toml").display()
+        );
+    }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let result = xpost_build::generate_runtime(&board, &out_dir)
-        .unwrap_or_else(|e| panic!("xpost board codegen ({}): {e:#}", board.display()));
+    let result = if from_bpf_toml {
+        xpost_build::generate_runtime(&board, &out_dir)
+            .unwrap_or_else(|e| panic!("xpost board codegen ({}): {e:#}", board.display()))
+    } else {
+        let layout = xpost_build::generate_layout_runtime(&board, &out_dir)
+            .unwrap_or_else(|e| panic!("xpost layout codegen ({}): {e:#}", board.display()));
+        write_empty_bpf_boot_stubs(&out_dir);
+        layout
+    };
 
     for w in &result.warnings {
         println!("cargo:warning={w}");
@@ -60,8 +76,38 @@ fn emit_radio_wrap() {
     }
 }
 
-fn write_stub_codegen(out_dir: &PathBuf) {
-    use std::fs;
+fn write_empty_bpf_boot_stubs(out_dir: &PathBuf) {
+    fs::write(
+        out_dir.join("bpf_maps.rs"),
+        r#"// empty bpf boot stubs (from-bpf-toml feature off)
+pub const FIRMWARE_MAP_COUNT: usize = 0;
+pub const FIRMWARE_HAS_ARRAY: bool = false;
+pub const FIRMWARE_HAS_HASH: bool = false;
+pub const FIRMWARE_HAS_RINGBUF: bool = false;
+pub const SELFTEST_MAP_ID: crate::map::MapIdx = 0;
+pub const SELFTEST_MAP_TYPE: &str = "stub";
+pub const SELFTEST_KEY_SIZE: usize = 4;
+pub const SELFTEST_VALUE_SIZE: usize = 8;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        out_dir.join("xdp_bpf.rs"),
+        "pub(crate) static BOOT_IMAGES: &[BpfTomlImage] = &[];\n",
+    )
+    .unwrap();
+    fs::write(
+        out_dir.join("aot_map_bind.rs"),
+        r#"pub fn bind_aot_map_addrs() {}
+pub const AOT_MAP_BIND_COUNT: usize = 0;
+pub const AOT_MAP_BINDS: &[(&str, usize)] = &[];
+pub const AOT_MAP_USER_NAMES: &[&str] = &[];
+"#,
+    )
+    .unwrap();
+}
+
+fn write_stub_codegen(out_dir: &PathBuf, from_bpf_toml: bool) {
     fs::write(
         out_dir.join("mem_map.rs"),
         r#"// stub — set XPOST_BOARD for real layout
@@ -106,9 +152,12 @@ pub fn slot_link_addrs() -> [usize; 2] {
 "#,
     )
     .unwrap();
-    fs::write(
-        out_dir.join("bpf_maps.rs"),
-        r#"// stub — set XPOST_BOARD for real layout
+    if from_bpf_toml {
+        // Feature on but no board: empty boot tables that still expose the boot entry
+        // expected by `map/runtime/boot.rs`.
+        fs::write(
+            out_dir.join("bpf_maps.rs"),
+            r#"// stub — set XPOST_BOARD for real layout
 pub const FIRMWARE_MAP_COUNT: usize = 0;
 pub const FIRMWARE_HAS_ARRAY: bool = false;
 pub const FIRMWARE_HAS_HASH: bool = false;
@@ -119,8 +168,11 @@ pub const SELFTEST_KEY_SIZE: usize = 4;
 pub const SELFTEST_VALUE_SIZE: usize = 8;
 pub async fn init_firmware_maps_via_builder(_rt: &mut crate::map::MapRt) -> Result<(), crate::map::Error> { Ok(()) }
 "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
+    } else {
+        write_empty_bpf_boot_stubs(out_dir);
+    }
     fs::write(
         out_dir.join("xdp_bpf.rs"),
         "pub(crate) static BOOT_IMAGES: &[BpfTomlImage] = &[];\n",

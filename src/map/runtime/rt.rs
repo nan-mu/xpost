@@ -194,6 +194,7 @@ impl MapRt {
     }
 
     /// Create every non-`runtime` map from bpf.toml codegen.
+    #[cfg(feature = "from-bpf-toml")]
     pub async fn from_bpf_toml(&mut self) -> Result<(), Error> {
         super::boot::boot_maps_from_codegen(self).await
     }

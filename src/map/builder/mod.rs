@@ -265,6 +265,7 @@ impl MapRt {
     }
 }
 
+#[cfg(feature = "from-bpf-toml")]
 impl CompleteBuilder {
     /// Boot path: create every non-`runtime` map from bpf.toml codegen.
     pub async fn from_bpf_toml(rt: &mut MapRt) -> Result<(), crate::map::runtime::Error> {
