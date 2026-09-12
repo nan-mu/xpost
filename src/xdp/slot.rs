@@ -17,7 +17,7 @@ impl XdpSlot {
     }
 
     /// Placeholder used only until overwritten during `init_primary`.
-    pub(crate) const fn dangling_primary() -> Self {
+    pub const fn dangling_primary() -> Self {
         Self {
             base: 1,
             len: 4,

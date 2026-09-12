@@ -1,8 +1,11 @@
-//! Board codegen library — layout/mem/bpf.toml → Rust + IRAM linker script.
+//! Board codegen library — layout/metadata/bpf.toml → Rust + IRAM linker script.
 //!
-//! Board directory = directory containing `layout.toml`, `mem.toml`, `bpf.toml`
-//! (and optionally `config.toml` for DUT cfgs). Used by example `build.rs` / xtask
-//! and by the `xpost` crate `build.rs` via `XPOST_BOARD`.
+//! Prefer [`sync`] as the unified entry (`validate` / `codegen` / `export` /
+//! `patch_elf` / `write_bin`). Board directory may still supply intent
+//! `layout.toml` and optional `bpf.toml`. Crate sizes come from
+//! `[package.metadata.xpost]`.
+//!
+//! `mem.toml` is obsolete; codegen consumes in-memory [`Layout`].
 
 mod aot_bind;
 mod bpf_maps;
@@ -10,15 +13,34 @@ mod bpf_xdp;
 mod config;
 mod layout;
 mod map_view;
+pub mod metadata;
 mod mem_map;
+pub mod partitions;
+pub mod sync;
 mod util;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-pub use layout::{Layout, LayoutReport, MAX_SLOT_COUNT, MIN_SLOT_COUNT, MountKind};
+pub use layout::{
+    CONTRACT_ABI, CONTRACT_ARCH, ColdTable, Layout, LayoutReport, MAX_SLOT_COUNT, MIN_SLOT_COUNT,
+    MountKind, elf_symbol_addr, export_contract, map_names_from_bpf_toml, patch_contract_from_elf,
+    report_lines, resolve_maps_names, write_bin_report_lines, write_contract_layout_toml,
+    write_write_bin_addrs,
+};
 pub use map_view::{BusType, RenderRow, Section};
+pub use metadata::{
+    METADATA_SCHEMA_VERSION, SlotEntry, TargetMeta, XdpTableMeta, XpostMetadata,
+    load_from_cargo_toml, resolve_layout,
+};
+pub use partitions::{
+    PartitionRow, parse_partitions_csv, validate_xdp_table_against_partitions,
+};
+pub use sync::{
+    SyncMode, SyncReport, SyncRequest, codegen, doctor_with_metadata, export, patch_elf,
+    sync_default, sync_from_bpf_toml, validate, write_bin,
+};
 
 /// Resolve board dir: `XPOST_BOARD` env, else `manifest_dir` (example package root).
 pub fn board_dir(manifest_or_hint: &Path) -> PathBuf {
@@ -28,7 +50,8 @@ pub fn board_dir(manifest_or_hint: &Path) -> PathBuf {
     manifest_or_hint.to_path_buf()
 }
 
-/// Validate `layout.toml` and write `mem.toml` in `board_dir`.
+/// Validate intent `layout.toml` and export the §3.2 contract under
+/// `board_dir/target/layout-export/layout.toml`.
 pub fn doctor(board_dir: &Path) -> Result<LayoutReport> {
     layout::doctor(board_dir)
 }
@@ -38,12 +61,12 @@ pub fn layout_apply(board_dir: &Path) -> Result<LayoutReport> {
     layout::doctor(board_dir)
 }
 
-/// Print IBUS/DBUS dual-map SRAM diagram from `mem.toml`.
+/// Print IBUS/DBUS dual-map SRAM diagram from intent `layout.toml`.
 pub fn map_print(board_dir: &Path) -> Result<()> {
     map_view::run_map(board_dir)
 }
 
-/// Must match `HEAP_SIZE` in `xpost` map pool.
+/// Must match `HEAP_SIZE` in `xpost` map pool / `[package.metadata.xpost.map].heap_size`.
 pub const HEAP_SIZE: usize = 65536;
 /// Reserved for talc metadata + registry HashMap overhead inside the pool.
 pub const POOL_RESERVED: usize = 2048;
@@ -107,16 +130,17 @@ pub fn generate_runtime(board_dir: &Path, out_dir: &Path) -> Result<RuntimeGen> 
     })
 }
 
-/// Generate layout/mem artifacts only (`mem_map.rs`, `hot_slots.rs`, linker fragment).
+/// Generate layout artifacts only (`mem_map.rs`, `hot_slots.rs`, linker fragment).
 ///
 /// Skips bpf.toml boot tables (`bpf_maps` / `xdp_bpf` / `aot_map_bind`). Callers that
 /// need the direct-start path should write empty stubs for those files themselves.
 pub fn generate_layout_runtime(board_dir: &Path, out_dir: &Path) -> Result<RuntimeGen> {
-    layout::assert_mem_matches_layout(board_dir)?;
+    let layout = layout::compute_from_file(&board_dir.join("layout.toml"))?;
+    layout::cross_check_firmware_config(board_dir, board_dir)?;
     if std::env::var_os("XTASK_PRINT_MAP").is_some() {
         let _ = map_view::run_map(board_dir);
     }
-    let mem = mem_map::generate(board_dir, out_dir)?;
+    let mem = mem_map::generate(&layout, out_dir)?;
     Ok(RuntimeGen {
         custom_sections_path: mem.custom_sections_path,
         warnings: Vec::new(),

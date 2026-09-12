@@ -4,5 +4,5 @@ pub mod array;
 pub mod hash;
 #[cfg(feature = "multicore")]
 pub mod percpu;
-#[cfg(feature = "event-ringbuf")]
+#[cfg(feature = "ringbuf")]
 pub mod ringbuf;

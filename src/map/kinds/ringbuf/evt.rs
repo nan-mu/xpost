@@ -1,4 +1,6 @@
-//! Firmware event ring (feature `event-ringbuf`).
+//! Firmware event ring (feature `ringbuf`).
+//!
+//! Incomplete while `ringbuf` feature is gated by `compile_error!` in the parent module.
 //!
 //! Consumes `BPF_MAP_TYPE_RINGBUF` records for DUT events. BPF `bpf_ringbuf_*`
 //! helpers stay deferred.

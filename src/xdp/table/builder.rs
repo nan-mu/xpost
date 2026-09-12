@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::xdp::error::XdpError;
-use crate::xdp::meta::{XdpArch, XdpLocation, XdpMeta};
+use crate::xdp::meta::{RequiredMap, XdpArch, XdpLocation, XdpMeta};
 use crate::xdp::{XdpId, XdpRt, XdpTableId};
 
 /// Incomplete builder marker.
@@ -17,14 +17,31 @@ pub struct Complete;
 
 /// Factory for XDP metadata. The unique parse/register path for firmware images.
 ///
-/// Assumes cold-table bytes already exist at [`Self::table_index`] (or will be
-/// written by [`XdpRt::push`] before [`Self::build`]).
+/// **Hand / Flash path (inplace):** bytes already live in the cold table (e.g.
+/// programmed with `espflash write-bin` at
+/// [`crate::xdp::XdpRt::cold_table_image_abs`]). Typical sequence:
+///
+/// ```ignore
+/// let id = XdpBuilder::for_existing(0, image_len)
+///     .with_name("primary")
+///     .with_primary_link_addr()
+///     .with_required_maps(maps)
+///     .complete()?
+///     .build(&mut xdp)?;
+/// xdp.r#move(id, XdpLocation::Slot { index: primary })?;
+/// xdp.lease(Some(&mut maps))?;
+/// ```
+///
+/// Or the thin wrapper [`crate::xdp::XdpRt::register_inplace`].
+///
+/// **Push path:** [`crate::xdp::XdpRt::push`] / [`crate::xdp::XdpRt::push_with`]
+/// write bytes into the cold table before [`Self::build`].
 pub struct XdpBuilder<S = Incomplete> {
     name: Option<String>,
     link_addr: usize,
     abi_version: u32,
     helper_address: usize,
-    required_maps: Vec<String>,
+    required_maps: Vec<RequiredMap>,
     image_digest: [u8; 32],
     table_index: Option<XdpTableId>,
     image_len: usize,
@@ -46,6 +63,58 @@ impl XdpBuilder<Incomplete> {
         }
     }
 
+    /// Start a register-inplace builder for cold-table cell `table_index`.
+    ///
+    /// Does not touch storage; Flash/SRAM must already hold `image_len` bytes at
+    /// that cell (see [`crate::xdp::XdpRt::cold_table_image_abs`]).
+    pub fn for_existing(table_index: XdpTableId, image_len: usize) -> Self {
+        Self::new()
+            .with_table_index(table_index)
+            .with_image_len(image_len)
+    }
+
+    /// Default-path entity: firmware image that may already exist on the XdpTable.
+    ///
+    /// Typical sequence: `complete()?.build(rt)?` → `rt.move(…, Slot{primary})` → `lease`.
+    pub fn for_firmware_image(table_index: XdpTableId, image_len: usize) -> Self {
+        Self::for_existing(table_index, image_len)
+            .with_name("primary")
+            .with_primary_link_addr()
+            .with_layout_helper_address()
+    }
+
+    /// Boot path B: push each `BOOT_XDPS` image into the table and move to its slot.
+    pub fn from_bpf_toml(
+        descs: &[crate::xdp::BootXdpDesc],
+        rt: &mut XdpRt,
+    ) -> Result<(), XdpError> {
+        if descs.len() > 8 {
+            return Err(XdpError::TooManyImages);
+        }
+        let helper_address = crate::helper::helper_dispatcher as *const () as usize;
+        for image in descs {
+            let helper = if image.helper_address != 0 {
+                image.helper_address
+            } else {
+                helper_address
+            };
+            let required: alloc::vec::Vec<_> =
+                image.required_maps.iter().map(|m| m.to_required()).collect();
+            let id = rt.push_at_table(
+                image.name,
+                image.bytes,
+                image.table_id,
+                image.link_addr,
+                helper,
+                image.abi_version,
+                &required,
+            )?;
+            let slot = rt.slot_for(image.link_addr)?;
+            rt.r#move(id, XdpLocation::Slot { index: slot })?;
+        }
+        Ok(())
+    }
+
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
@@ -53,6 +122,13 @@ impl XdpBuilder<Incomplete> {
 
     pub fn with_link_addr(mut self, addr: usize) -> Self {
         self.link_addr = addr;
+        self
+    }
+
+    /// Set `link_addr` to the board primary (`rx`) hot-slot base from layout codegen.
+    pub fn with_primary_link_addr(mut self) -> Self {
+        let idx = crate::xdp::mem_map::MOUNT_RX_SLOT.unwrap_or(0);
+        self.link_addr = crate::xdp::mem_map::HOT_SLOT_BASES[idx];
         self
     }
 
@@ -66,12 +142,20 @@ impl XdpBuilder<Incomplete> {
         self
     }
 
-    pub fn with_required_maps<I, S>(mut self, maps: I) -> Self
+    /// Set helper address from layout codegen (`HELPER_DISPATCHER_BASE`) when non-zero.
+    pub fn with_layout_helper_address(mut self) -> Self {
+        let base = crate::xdp::mem_map::HELPER_DISPATCHER_BASE;
+        if base != 0 {
+            self.helper_address = base;
+        }
+        self
+    }
+
+    pub fn with_required_maps<I>(mut self, maps: I) -> Self
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = RequiredMap>,
     {
-        self.required_maps = maps.into_iter().map(Into::into).collect();
+        self.required_maps = maps.into_iter().collect();
         self
     }
 
@@ -101,6 +185,13 @@ impl XdpBuilder<Incomplete> {
         if self.image_len == 0 {
             return Err(XdpError::ImageEmpty);
         }
+        if self.helper_address == 0 {
+            return Err(XdpError::HelperAddress);
+        }
+        let expected = crate::xdp::mem_map::HELPER_DISPATCHER_BASE;
+        if expected != 0 && self.helper_address != expected {
+            return Err(XdpError::HelperAddressMismatch);
+        }
         Ok(XdpBuilder {
             name: self.name,
             link_addr: self.link_addr,
@@ -123,11 +214,24 @@ impl Default for XdpBuilder<Incomplete> {
 
 impl XdpBuilder<Complete> {
     /// Register metadata for an image already present in the cold table.
+    ///
+    /// Does not read or write storage; the cold-table cell at `table_index` must
+    /// already contain `image_len` valid bytes (Flash write-bin or prior `push`).
     pub fn build(self, rt: &mut XdpRt) -> Result<XdpId, XdpError> {
         let table_id = self.table_index.ok_or(XdpError::TableIdOverflow)?;
         let name = self.name.ok_or(XdpError::InvalidName)?;
         if rt.find_name(&name).is_some() {
             return Err(XdpError::DuplicateName);
+        }
+        let cap = rt.table.image_capacity();
+        if self.image_len == 0 || self.image_len > cap {
+            return Err(XdpError::ImageTooLarge);
+        }
+        let offset = table_id
+            .checked_mul(cap)
+            .ok_or(XdpError::TableIdOverflow)?;
+        if offset.saturating_add(cap) > rt.table.capacity() {
+            return Err(XdpError::TableFull);
         }
         let meta = XdpMeta {
             name,

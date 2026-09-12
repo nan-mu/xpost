@@ -1,7 +1,8 @@
-//! Compile IRAM layout from board `layout.toml` `[arena]`/`[helper]`/`[slots]` → `mem.toml`.
+//! Compile IRAM layout from board intent `layout.toml` (`[arena]`/`[helper]`/`[slots]`).
 //!
-//! Intent lives in `layout.toml`. [`doctor`](doctor) validates and writes the generated
-//! `mem.toml`. [`crate::mem_map`] only consumes that file.
+//! Intent lives in board `layout.toml`. [`doctor`](doctor) validates and may export the
+//! libbpf-mcu contract schema (artifact `layout.toml`, not overwriting intent).
+//! [`crate::mem_map`] consumes the in-memory [`Layout`].
 
 use std::fmt::Write as _;
 use std::fs;
@@ -15,9 +16,13 @@ use crate::util::parse_addr_value;
 pub const MIN_SLOT_COUNT: usize = 2;
 pub const MAX_SLOT_COUNT: usize = 4;
 
-/// Known mount roles (`mount` string in config / mem.toml).
+/// Known mount roles (`mount` string in config / layout).
 pub const MOUNT_CALL: &str = "call";
 pub const MOUNT_RX: &str = "rx";
+
+/// Default MCU target fields for the libbpf-mcu contract.
+pub const CONTRACT_ARCH: &str = "riscv32";
+pub const CONTRACT_ABI: &str = "ilp32";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MountKind {
@@ -56,12 +61,46 @@ pub struct HotRegion {
     pub mount: MountKind,
 }
 
+/// Flash (or host write-bin) cold XDP image table from intent `[cold_table]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColdTable {
+    /// Absolute flash address for `espflash write-bin` / runtime Flash backend.
+    pub base: usize,
+    pub length: usize,
+    /// Bytes per image cell (stride).
+    pub image_capacity: usize,
+    /// Optional partition label (informational only).
+    pub partition: Option<String>,
+}
+
+impl ColdTable {
+    pub fn image_count(&self) -> usize {
+        if self.image_capacity == 0 {
+            return 0;
+        }
+        self.length / self.image_capacity
+    }
+
+    /// Absolute flash address of cell `index`.
+    pub fn image_abs(&self, index: usize) -> Option<usize> {
+        let off = index.checked_mul(self.image_capacity)?;
+        if off.saturating_add(self.image_capacity) > self.length {
+            return None;
+        }
+        self.base.checked_add(off)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
     pub iram_base: usize,
     pub arena_end: usize,
     pub helper: Region,
     pub hot_regions: Vec<HotRegion>,
+    /// Optional Flash cold table (hand-path / write-bin).
+    pub cold_table: Option<ColdTable>,
+    /// Map names from intent `[maps].names` (may be empty).
+    pub maps_names: Vec<String>,
 }
 
 impl Layout {
@@ -76,26 +115,284 @@ impl Layout {
     pub fn remaining(&self) -> usize {
         self.arena_len().saturating_sub(self.used_len())
     }
+
+    /// Index of the unique `rx` mount, else `0`.
+    pub fn primary_slot_index(&self) -> usize {
+        self.hot_regions
+            .iter()
+            .position(|r| r.mount == MountKind::Rx)
+            .unwrap_or(0)
+    }
+
+    pub fn primary_slot(&self) -> Option<&HotRegion> {
+        let i = self.primary_slot_index();
+        self.hot_regions.get(i)
+    }
 }
 
 pub struct LayoutReport {
     pub layout: Layout,
-    pub mem_path: PathBuf,
+    /// Path of the exported contract `layout.toml`, if written.
+    pub contract_path: Option<PathBuf>,
     pub lines: Vec<String>,
 }
 
-/// Validate board `layout.toml` and write `mem.toml` (doctor / layout CLI).
+/// Validate board intent `layout.toml` and export the §3.2 contract beside the board
+/// under `target/layout-export/layout.toml` (does not overwrite intent).
 pub fn doctor(board_dir: &Path) -> Result<LayoutReport> {
     let layout = compute_from_file(&board_dir.join("layout.toml"))?;
     cross_check_firmware_config(board_dir, board_dir)?;
-    let mem_path = board_dir.join("mem.toml");
-    write_mem_toml(&mem_path, &layout)?;
-    let lines = report_lines(&layout);
+    let maps = resolve_maps_names(board_dir, &layout)?;
+    let contract_dir = board_dir.join("target/layout-export");
+    fs::create_dir_all(&contract_dir)
+        .with_context(|| format!("mkdir {}", contract_dir.display()))?;
+    let contract_path = contract_dir.join("layout.toml");
+    write_contract_layout_toml(&contract_path, &layout, &maps, CONTRACT_ARCH, CONTRACT_ABI)?;
+    let write_bin_path = contract_dir.join("write-bin-addrs.toml");
+    write_write_bin_addrs(&write_bin_path, &layout)?;
+    let mut lines = report_lines(&layout);
+    lines.extend(write_bin_report_lines(&layout));
     Ok(LayoutReport {
         layout,
-        mem_path,
+        contract_path: Some(contract_path),
         lines,
     })
+}
+
+/// Export libbpf-mcu contract `layout.toml` to `out_path` from board intent.
+pub fn export_contract(board_dir: &Path, out_path: &Path) -> Result<Layout> {
+    let layout = compute_from_file(&board_dir.join("layout.toml"))?;
+    let maps = resolve_maps_names(board_dir, &layout)?;
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    write_contract_layout_toml(out_path, &layout, &maps, CONTRACT_ARCH, CONTRACT_ABI)?;
+    if let Some(parent) = out_path.parent() {
+        write_write_bin_addrs(&parent.join("write-bin-addrs.toml"), &layout)?;
+    }
+    Ok(layout)
+}
+
+/// Intent `[maps].names` if non-empty; else scrape `bpf.toml` keys.
+pub fn resolve_maps_names(board_dir: &Path, layout: &Layout) -> Result<Vec<String>> {
+    if !layout.maps_names.is_empty() {
+        return Ok(layout.maps_names.clone());
+    }
+    map_names_from_bpf_toml(&board_dir.join("bpf.toml"))
+}
+
+/// Write §3.2 contract schema (plus `[helper]`, optional `[cold_table]`).
+pub fn write_contract_layout_toml(
+    path: &Path,
+    layout: &Layout,
+    maps_names: &[String],
+    arch: &str,
+    abi: &str,
+) -> Result<()> {
+    let primary = layout.primary_slot_index();
+    let mut out = String::new();
+    writeln!(
+        out,
+        "# @generated by xpost-build from board layout.toml intent — do not edit.\n\
+         # libbpf-mcu layout contract (docs/book/xdp-runtime-plan.md §3.2).\n"
+    )
+    .unwrap();
+
+    writeln!(out, "[target]").unwrap();
+    writeln!(out, "arch = \"{}\"", escape_toml_str(arch)).unwrap();
+    writeln!(out, "abi = \"{}\"", escape_toml_str(abi)).unwrap();
+    writeln!(out).unwrap();
+
+    // Helper absolute address for AOT `helper_dispatcher` (not in minimal §3.2, but
+    // required by libbpf-mcu slot linker scripts).
+    writeln!(out, "[helper]").unwrap();
+    writeln!(out, "base = {:#x}", layout.helper.base).unwrap();
+    writeln!(out, "length = {:#x}", layout.helper.length).unwrap();
+    writeln!(out).unwrap();
+
+    for (i, r) in layout.hot_regions.iter().enumerate() {
+        writeln!(out, "[[xdp_slots]]").unwrap();
+        writeln!(out, "name = \"{}\"", escape_toml_str(&r.name)).unwrap();
+        writeln!(out, "base = {:#x}", r.base).unwrap();
+        writeln!(out, "length = {:#x}", r.length).unwrap();
+        writeln!(out, "primary = {}", i == primary).unwrap();
+        if i + 1 < layout.hot_regions.len() {
+            writeln!(out).unwrap();
+        }
+    }
+    writeln!(out).unwrap();
+
+    if let Some(c) = &layout.cold_table {
+        // Dual-write: legacy [cold_table] + plan [xdp_table].
+        writeln!(out, "[cold_table]").unwrap();
+        writeln!(out, "base = {:#x}", c.base).unwrap();
+        writeln!(out, "length = {:#x}", c.length).unwrap();
+        writeln!(out, "image_capacity = {:#x}", c.image_capacity).unwrap();
+        if let Some(p) = &c.partition {
+            writeln!(out, "partition = \"{}\"", escape_toml_str(p)).unwrap();
+        }
+        writeln!(out).unwrap();
+
+        writeln!(out, "[xdp_table]").unwrap();
+        writeln!(out, "base = {:#x}", c.base).unwrap();
+        writeln!(out, "len = {:#x}", c.length).unwrap();
+        writeln!(out, "image_capacity = {:#x}", c.image_capacity).unwrap();
+        writeln!(out, "image_count = {}", c.image_count()).unwrap();
+        if let Some(p) = &c.partition {
+            writeln!(out, "partition = \"{}\"", escape_toml_str(p)).unwrap();
+        }
+        writeln!(out).unwrap();
+
+        // Default-path entity: primary image lives in table cell 0 (inject target).
+        writeln!(out, "[[xdp_images]]").unwrap();
+        writeln!(out, "name = \"primary\"").unwrap();
+        writeln!(out, "table_index = 0").unwrap();
+        if let Some(s) = layout.primary_slot() {
+            writeln!(out, "link_addr = {:#x}", s.base).unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+
+    writeln!(out, "[maps]").unwrap();
+    write!(out, "names = [").unwrap();
+    for (i, name) in maps_names.iter().enumerate() {
+        if i > 0 {
+            write!(out, ", ").unwrap();
+        }
+        write!(out, "\"{}\"", escape_toml_str(name)).unwrap();
+    }
+    writeln!(out, "]").unwrap();
+
+    fs::write(path, out).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+/// Machine-readable Flash write-bin addresses for cold-table cells.
+pub fn write_write_bin_addrs(path: &Path, layout: &Layout) -> Result<()> {
+    let mut out = String::new();
+    writeln!(
+        out,
+        "# @generated — absolute flash addresses for `espflash write-bin <addr> <image.bin>`\n"
+    )
+    .unwrap();
+    match &layout.cold_table {
+        None => {
+            writeln!(out, "# [cold_table] absent in intent layout.toml — no write-bin targets.")
+                .unwrap();
+        }
+        Some(c) => {
+            writeln!(out, "cold_table_flash_base = {:#x}", c.base).unwrap();
+            writeln!(out, "cold_table_flash_len = {:#x}", c.length).unwrap();
+            writeln!(out, "image_capacity = {:#x}", c.image_capacity).unwrap();
+            writeln!(out, "image_count = {}", c.image_count()).unwrap();
+            writeln!(out).unwrap();
+            for i in 0..c.image_count() {
+                if let Some(abs) = c.image_abs(i) {
+                    writeln!(out, "image{i}_abs = {abs:#x}").unwrap();
+                }
+            }
+            writeln!(out).unwrap();
+            writeln!(out, "helper_dispatcher = {:#x}", layout.helper.base).unwrap();
+            if let Some(s) = layout.primary_slot() {
+                writeln!(out, "primary_slot = {:#x}", s.base).unwrap();
+                writeln!(out, "primary_slot_len = {:#x}", s.length).unwrap();
+            }
+        }
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    fs::write(path, out).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+pub fn write_bin_report_lines(layout: &Layout) -> Vec<String> {
+    let mut lines = Vec::new();
+    match &layout.cold_table {
+        None => lines.push("cold_table: (none)".into()),
+        Some(c) => {
+            lines.push(format!(
+                "cold_table base={:#x} len={:#x} stride={:#x} cells={}",
+                c.base,
+                c.length,
+                c.image_capacity,
+                c.image_count()
+            ));
+            if let Some(abs0) = c.image_abs(0) {
+                lines.push(format!(
+                    "write-bin example: espflash write-bin {abs0:#x} <xdp.bin>"
+                ));
+            }
+        }
+    }
+    lines
+}
+
+/// Patch contract + write-bin addrs using linked ELF symbol addresses.
+///
+/// Updates `helper.base` from `helper_dispatcher` and primary slot `base` from
+/// `HOT_SLOT_<primary_index>` when present. Intent `layout.toml` is not modified.
+pub fn patch_contract_from_elf(
+    board_dir: &Path,
+    contract_path: &Path,
+    elf_path: &Path,
+) -> Result<()> {
+    let mut layout = compute_from_file(&board_dir.join("layout.toml"))?;
+    layout.helper.base = elf_symbol_addr(elf_path, "helper_dispatcher")?;
+    let primary = layout.primary_slot_index();
+    let slot_sym = format!("HOT_SLOT_{primary}");
+    if let Ok(slot_addr) = elf_symbol_addr(elf_path, &slot_sym) {
+        if let Some(r) = layout.hot_regions.get_mut(primary) {
+            r.base = slot_addr;
+        }
+    }
+    let maps = resolve_maps_names(board_dir, &layout)?;
+    write_contract_layout_toml(contract_path, &layout, &maps, CONTRACT_ARCH, CONTRACT_ABI)?;
+    if let Some(parent) = contract_path.parent() {
+        write_write_bin_addrs(&parent.join("write-bin-addrs.toml"), &layout)?;
+    }
+    Ok(())
+}
+
+/// Read a global symbol address from an ELF.
+pub fn elf_symbol_addr(elf_path: &Path, name: &str) -> Result<usize> {
+    use object::{Object, ObjectSymbol};
+
+    let data = fs::read(elf_path).with_context(|| format!("read ELF {}", elf_path.display()))?;
+    let file = object::File::parse(&*data).context("parse ELF")?;
+    for sym in file.symbols() {
+        if sym.name().ok() == Some(name) {
+            return Ok(sym.address() as usize);
+        }
+    }
+    for sym in file.dynamic_symbols() {
+        if sym.name().ok() == Some(name) {
+            return Ok(sym.address() as usize);
+        }
+    }
+    bail!("ELF {}: symbol `{name}` not found", elf_path.display())
+}
+
+/// Map section names from `bpf.toml` `[maps.*]` keys (empty if missing).
+pub fn map_names_from_bpf_toml(path: &Path) -> Result<Vec<String>> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let root: toml::Table = text
+        .parse()
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let Some(maps) = root.get("maps").and_then(|v| v.as_table()) else {
+        return Ok(Vec::new());
+    };
+    let mut names: Vec<String> = maps.keys().map(|k| k.to_string()).collect();
+    names.sort();
+    Ok(names)
+}
+
+fn escape_toml_str(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Compute layout from a TOML file (`layout.toml` or leftover `config.toml` sections).
@@ -249,9 +546,76 @@ pub fn compute_from_root(root: &toml::Table) -> Result<Layout> {
         arena_end,
         helper,
         hot_regions,
+        cold_table: parse_cold_table(root)?,
+        maps_names: parse_maps_names(root)?,
     };
     validate_abut(&layout)?;
     Ok(layout)
+}
+
+fn parse_cold_table(root: &toml::Table) -> Result<Option<ColdTable>> {
+    let Some(t) = root.get("cold_table").and_then(|v| v.as_table()) else {
+        return Ok(None);
+    };
+    for (key, _) in t {
+        if !matches!(
+            key.as_str(),
+            "base" | "length" | "image_capacity" | "partition"
+        ) {
+            bail!("layout: [cold_table] unknown key `{key}`");
+        }
+    }
+    let base = parse_usize_field(t, "base", "cold_table")?;
+    let length = parse_usize_field(t, "length", "cold_table")?;
+    let image_capacity = parse_usize_field(t, "image_capacity", "cold_table")?;
+    if length == 0 || image_capacity == 0 {
+        bail!("[cold_table] length and image_capacity must be > 0");
+    }
+    if !base.is_multiple_of(4) || !length.is_multiple_of(4) || !image_capacity.is_multiple_of(4) {
+        bail!("[cold_table] base/length/image_capacity must be 4-byte aligned");
+    }
+    if length % image_capacity != 0 {
+        bail!(
+            "[cold_table] length {length:#x} must be a multiple of image_capacity {image_capacity:#x}"
+        );
+    }
+    let partition = match t.get("partition") {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| anyhow::anyhow!("layout: [cold_table].partition must be a string"))?
+                .to_string(),
+        ),
+    };
+    Ok(Some(ColdTable {
+        base,
+        length,
+        image_capacity,
+        partition,
+    }))
+}
+
+fn parse_maps_names(root: &toml::Table) -> Result<Vec<String>> {
+    let Some(maps) = root.get("maps").and_then(|v| v.as_table()) else {
+        return Ok(Vec::new());
+    };
+    let Some(names_v) = maps.get("names") else {
+        return Ok(Vec::new());
+    };
+    let arr = names_v
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("layout: [maps].names must be an array of strings"))?;
+    let mut names = Vec::with_capacity(arr.len());
+    for (i, v) in arr.iter().enumerate() {
+        let s = v
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("layout: [maps].names[{i}] must be a string"))?;
+        if s.is_empty() {
+            bail!("layout: [maps].names[{i}] must be non-empty");
+        }
+        names.push(s.to_string());
+    }
+    Ok(names)
 }
 
 fn validate_mounts(mounts: &[MountKind]) -> Result<()> {
@@ -317,169 +681,13 @@ fn validate_abut(layout: &Layout) -> Result<()> {
     Ok(())
 }
 
-pub fn write_mem_toml(path: &Path, layout: &Layout) -> Result<()> {
-    let mut out = String::new();
-    writeln!(
-        out,
-        "# @generated by xtask doctor from layout.toml — do not edit by hand.\n\
-         # AOT linker scripts / xpost board codegen consume this file.\n\
-         # Arena [{base:#x}, {end:#x}); do not extend past arena_end (.trap).\n",
-        base = layout.iram_base,
-        end = layout.arena_end
-    )
-    .unwrap();
-
-    writeln!(out, "[arena]").unwrap();
-    writeln!(out, "iram_base = {:#x}", layout.iram_base).unwrap();
-    writeln!(out, "arena_end = {:#x}", layout.arena_end).unwrap();
-    writeln!(out).unwrap();
-
-    writeln!(out, "[helper]").unwrap();
-    writeln!(out, "base = {:#x}", layout.helper.base).unwrap();
-    writeln!(out, "length = {:#x}", layout.helper.length).unwrap();
-    writeln!(out).unwrap();
-
-    for (i, r) in layout.hot_regions.iter().enumerate() {
-        writeln!(out, "[[hot_regions]]").unwrap();
-        writeln!(out, "index = {i}").unwrap();
-        writeln!(out, "name = \"{}\"", r.name).unwrap();
-        writeln!(out, "base = {:#x}", r.base).unwrap();
-        writeln!(out, "length = {:#x}", r.length).unwrap();
-        writeln!(out, "mount = \"{}\"", r.mount.as_str()).unwrap();
-        if i + 1 < layout.hot_regions.len() {
-            writeln!(out).unwrap();
-        }
-    }
-
-    fs::write(path, out).with_context(|| format!("write {}", path.display()))?;
-    Ok(())
-}
-
-/// Parse an existing `mem.toml` into [`Layout`] (for consistency checks).
-pub fn parse_mem_toml(path: &Path) -> Result<Layout> {
-    let text =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let root: toml::Table = text.parse().with_context(|| "failed to parse mem.toml")?;
-
-    let arena = root
-        .get("arena")
-        .and_then(|v| v.as_table())
-        .ok_or_else(|| anyhow::anyhow!("mem.toml: missing [arena]"))?;
-    let helper_t = root
-        .get("helper")
-        .and_then(|v| v.as_table())
-        .ok_or_else(|| anyhow::anyhow!("mem.toml: missing [helper]"))?;
-
-    let iram_base = parse_addr_value(
-        arena
-            .get("iram_base")
-            .ok_or_else(|| anyhow::anyhow!("mem.toml: [arena] missing iram_base"))?,
-        "iram_base",
-        "arena",
-    );
-    let arena_end = parse_addr_value(
-        arena
-            .get("arena_end")
-            .ok_or_else(|| anyhow::anyhow!("mem.toml: [arena] missing arena_end"))?,
-        "arena_end",
-        "arena",
-    );
-    let helper = Region {
-        base: parse_addr_value(
-            helper_t
-                .get("base")
-                .ok_or_else(|| anyhow::anyhow!("mem.toml: [helper] missing base"))?,
-            "base",
-            "helper",
-        ),
-        length: parse_addr_value(
-            helper_t
-                .get("length")
-                .ok_or_else(|| anyhow::anyhow!("mem.toml: [helper] missing length"))?,
-            "length",
-            "helper",
-        ),
-    };
-
-    let arr = root
-        .get("hot_regions")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| anyhow::anyhow!("mem.toml: missing [[hot_regions]]"))?;
-    let mut hot_regions = Vec::with_capacity(arr.len());
-    for (i, entry) in arr.iter().enumerate() {
-        let table = entry
-            .as_table()
-            .ok_or_else(|| anyhow::anyhow!("mem.toml: hot_regions[{i}] must be a table"))?;
-        let name = table
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("mem.toml: hot_regions[{i}].name required"))?
-            .to_string();
-        let base = parse_addr_value(
-            table
-                .get("base")
-                .ok_or_else(|| anyhow::anyhow!("mem.toml: hot_regions[{i}] missing base"))?,
-            "base",
-            "hot_regions",
-        );
-        let length = parse_addr_value(
-            table
-                .get("length")
-                .ok_or_else(|| anyhow::anyhow!("mem.toml: hot_regions[{i}] missing length"))?,
-            "length",
-            "hot_regions",
-        );
-        let mount_s = table
-            .get("mount")
-            .and_then(|v| v.as_str())
-            .unwrap_or(MOUNT_CALL);
-        let mount = MountKind::parse(mount_s)?;
-        hot_regions.push(HotRegion {
-            name,
-            base,
-            length,
-            mount,
-        });
-    }
-
-    let layout = Layout {
-        iram_base,
-        arena_end,
-        helper,
-        hot_regions,
-    };
-    validate_abut(&layout)?;
-    validate_mounts(
-        &layout
-            .hot_regions
-            .iter()
-            .map(|r| r.mount)
-            .collect::<Vec<_>>(),
-    )?;
-    Ok(layout)
-}
-
-/// Ensure on-disk `mem.toml` matches `layout.toml` in the runtime crate dir.
-pub fn assert_mem_matches_layout(runtime_dir: &Path) -> Result<()> {
-    let expected = compute_from_file(&runtime_dir.join("layout.toml"))?;
-    let mem_path = runtime_dir.join("mem.toml");
-    if !mem_path.exists() {
-        bail!("mem.toml missing — run `cargo xtask doctor` to generate it from layout.toml");
-    }
-    let actual = parse_mem_toml(&mem_path)?;
-    if actual != expected {
-        bail!(
-            "mem.toml is out of sync with layout.toml [arena]/[helper]/[slots]\n\
-             run: cargo xtask doctor"
-        );
-    }
-    Ok(())
-}
-
 /// If board `config.toml` still has `[arena]`/`[helper]`/`[slots]`, they must
 /// match `layout.toml`.
 pub fn cross_check_firmware_config(board_dir: &Path, layout_dir: &Path) -> Result<()> {
     let path = board_dir.join("config.toml");
+    if !path.is_file() {
+        return Ok(());
+    }
     let text =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let root: toml::Table = text
@@ -492,7 +700,11 @@ pub fn cross_check_firmware_config(board_dir: &Path, layout_dir: &Path) -> Resul
     }
     let from_cfg = compute_from_root(&root)?;
     let from_layout = compute_from_file(&layout_dir.join("layout.toml"))?;
-    if from_cfg != from_layout {
+    let iram_eq = from_cfg.iram_base == from_layout.iram_base
+        && from_cfg.arena_end == from_layout.arena_end
+        && from_cfg.helper == from_layout.helper
+        && from_cfg.hot_regions == from_layout.hot_regions;
+    if !iram_eq {
         bail!(
             "config.toml [arena]/[helper]/[slots] disagrees with layout.toml\n\
              layout lives beside the example; remove the config.toml copy or make them match"
@@ -501,7 +713,7 @@ pub fn cross_check_firmware_config(board_dir: &Path, layout_dir: &Path) -> Resul
     Ok(())
 }
 
-fn report_lines(layout: &Layout) -> Vec<String> {
+pub fn report_lines(layout: &Layout) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!(
         "arena [{:#x}, {:#x}) len={:#x}",
@@ -521,6 +733,9 @@ fn report_lines(layout: &Layout) -> Vec<String> {
             r.base,
             r.length
         ));
+    }
+    if !layout.maps_names.is_empty() {
+        lines.push(format!("maps names={:?}", layout.maps_names));
     }
     lines.push(format!(
         "used={:#x} remaining={:#x}",

@@ -211,76 +211,93 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<()> {
     out.push_str(
         "/// Create every map declared in bpf.toml into the talc resource pool.\n\
          ///\n\
-         /// Call after [`init`] and before network-stack bring-up.\n\
-         /// Create maps keyed by [`ResourceId`] (`MAP_ID_*`).\n\
-         /// AOT helpers resolve `&map` pointers via [`bind_aot_map_addrs`].\n",
+         /// Prefer [`::xpost::map::MapBuilder::from_bpf_toml`] with [`BOOT_MAPS`].\n",
     );
 
-    emit_init_fn(&mut out, &map_specs)?;
+    // Emit static layout byte arrays + BOOT_MAPS descriptors (no boot function).
+    for (idx, spec) in map_specs.iter().enumerate() {
+        if spec.runtime {
+            continue;
+        }
+        let key_bytes: Vec<u8> = spec
+            .key_fields
+            .iter()
+            .map(|(ty, _)| c_type_width(ty))
+            .collect();
+        let val_bytes: Vec<u8> = spec
+            .value_fields
+            .iter()
+            .map(|(ty, _)| c_type_width(ty))
+            .collect();
+        if !key_bytes.is_empty() {
+            out.push_str(&format!(
+                "static BOOT_MAP_{idx}_KEY: &[u8] = &[{}];\n",
+                key_bytes
+                    .iter()
+                    .map(|b| b.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !val_bytes.is_empty() {
+            out.push_str(&format!(
+                "static BOOT_MAP_{idx}_VAL: &[u8] = &[{}];\n",
+                val_bytes
+                    .iter()
+                    .map(|b| b.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
+    out.push_str("pub static BOOT_MAPS: &[::xpost::map::BootMapDesc] = &[\n");
+    for (idx, spec) in map_specs.iter().enumerate() {
+        if spec.runtime {
+            continue;
+        }
+        let map_type = match spec.map_type.as_str() {
+            "BPF_MAP_TYPE_HASH" => "::xpost::map::MapType::Hash",
+            "BPF_MAP_TYPE_ARRAY" => "::xpost::map::MapType::Array",
+            "BPF_MAP_TYPE_RINGBUF" => "::xpost::map::MapType::Ringbuf",
+            other => bail!("[maps.{}] unsupported map_type `{other}`", spec.name),
+        };
+        let key_expr = if spec.key_fields.is_empty() {
+            "None".into()
+        } else {
+            format!("Some(BOOT_MAP_{idx}_KEY)")
+        };
+        let val_expr = if spec.value_fields.is_empty() {
+            "None".into()
+        } else {
+            format!("Some(BOOT_MAP_{idx}_VAL)")
+        };
+        out.push_str(&format!(
+            "    ::xpost::map::BootMapDesc {{ name: \"{}\", map_type: {map_type}, key_layout: {key_expr}, value_layout: {val_expr}, len: {}, runtime: {} }},\n",
+            escape_rust_str(&spec.name),
+            spec.max_entries,
+            spec.runtime,
+        ));
+    }
+    out.push_str("];\n");
 
     fs::write(out_dir.join("bpf_maps.rs"), out).context("write bpf_maps.rs")?;
     Ok(())
 }
 
-const EMPTY_INIT: &str = "\
-pub async fn init_firmware_maps_via_builder(_rt: &mut crate::map::MapRt) -> Result<(), crate::map::Error> { Ok(()) }\n";
-
-fn emit_init_fn(out: &mut String, map_specs: &[MapSpec]) -> Result<()> {
-    out.push_str(
-        "pub async fn init_firmware_maps_via_builder(rt: &mut MapRt) -> Result<(), Error> {\n",
-    );
-
-    for spec in map_specs {
-        if spec.runtime {
-            continue;
-        }
-        let type_stem = snake_to_pascal(&spec.name);
-        let key_ty = format!("{type_stem}Key");
-        let val_ty = format!("{type_stem}Value");
-        let name = escape_rust_str(&spec.name);
-        let id_const = format!("MAP_ID_{}", spec.name.to_ascii_uppercase());
-
-        match spec.map_type.as_str() {
-            "BPF_MAP_TYPE_HASH" => {
-                out.push_str(&format!(
-                    "    let _ = rt.create(\n\
-                            MapBuilder::hash()\n\
-                            .with_name(\"{name}\")\n\
-                            .with_key::<{key_ty}>()\n\
-                            .with_value::<{val_ty}>()\n\
-                            .with_capacity({})\n\
-                            .into_complete()\n\
-                    )?;\n",
-                    spec.max_entries
-                ));
-            }
-            "BPF_MAP_TYPE_ARRAY" => {
-                out.push_str(&format!(
-                    "    let _ = rt.create(\n\
-                            MapBuilder::array()\n\
-                            .with_name(\"{name}\")\n\
-                            .with_value::<{val_ty}>()\n\
-                            .with_capacity({})\n\
-                            .into_complete()\n\
-                    )?;\n",
-                    spec.max_entries
-                ));
-            }
-            "BPF_MAP_TYPE_RINGBUF" => {
-                out.push_str(&format!(
-                    "    let _ = (\"{name}\", {}usize);\n\
-                     return Err(crate::map::Error::Unsupported);\n",
-                    spec.max_entries
-                ));
-            }
-            other => bail!("[maps.{}] unsupported map_type `{other}`", spec.name),
-        }
-        let _ = id_const;
+fn c_type_width(ty: &str) -> u8 {
+    match ty {
+        "u8" | "i8" => 1,
+        "u16" | "i16" => 2,
+        "u32" | "i32" => 4,
+        "u64" | "i64" => 8,
+        _ => 4,
     }
-
-    out.push_str("    Ok(())\n}\n");
-    Ok(())
 }
+
+const EMPTY_INIT: &str = "\
+pub const FIRMWARE_MAP_COUNT: usize = 0;\n\
+pub static BOOT_MAPS: &[::xpost::map::BootMapDesc] = &[];\n";
 
 fn parse_fields(block: &str, map_name: &str, kind: &str) -> Result<Vec<(String, String)>> {
     let mut fields = Vec::new();

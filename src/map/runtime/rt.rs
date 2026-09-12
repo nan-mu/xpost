@@ -11,7 +11,7 @@ use crate::map::builder::traits::layout_size;
 use crate::map::builder::{CompleteBuilder, MapType};
 use crate::map::kinds::array::{self, BpfArrayMap};
 use crate::map::kinds::hash::{self, BpfHashMap, BpfHashTable};
-#[cfg(feature = "event-ringbuf")]
+#[cfg(feature = "ringbuf")]
 use crate::map::kinds::ringbuf::{self, RingbufRx};
 use crate::map::{MapRtGuard, RtMutex};
 
@@ -119,7 +119,8 @@ impl MapRt {
         meta.key_layout.as_deref() == key && meta.value_layout.as_deref() == value
     }
 
-    fn estimate_size(
+    /// Heap budget for a map spec — shared by [`Self::create`] and [`Self::check`].
+    pub(crate) fn estimate_map_heap_size(
         map_type: MapType,
         key_layout: Option<&[u8]>,
         value_layout: Option<&[u8]>,
@@ -136,14 +137,60 @@ impl MapRt {
                 let stride = array::BpfArrayMap::value_stride(vs.max(1));
                 stride * len + 128
             }
-            #[cfg(feature = "event-ringbuf")]
+            #[cfg(feature = "ringbuf")]
             MapType::Ringbuf => {
                 let slots = ringbuf::ringbuf_slot_count(len);
                 len + slots * ringbuf::RINGBUF_SLOT_BYTES + 512
             }
-            #[cfg(not(feature = "event-ringbuf"))]
+            #[cfg(not(feature = "ringbuf"))]
             MapType::Ringbuf => 0,
         }
+    }
+
+    /// Element byte size used in [`crate::xdp::RequiredMap::elem_size`].
+    pub(crate) fn map_elem_size(
+        map_type: MapType,
+        key_layout: Option<&[u8]>,
+        value_layout: Option<&[u8]>,
+        len: usize,
+    ) -> usize {
+        match map_type {
+            MapType::Hash => {
+                key_layout.map(|l| layout_size(l)).unwrap_or(0)
+                    + value_layout.map(|l| layout_size(l)).unwrap_or(0)
+            }
+            MapType::Array => value_layout.map(|l| layout_size(l)).unwrap_or(0),
+            MapType::Ringbuf => len,
+        }
+    }
+
+    /// Assert heap already has a matching, usable map instance for `spec`.
+    pub fn check(&self, spec: &CompleteBuilder) -> Result<MapId, Error> {
+        let idx = self.find_name(&spec.name).ok_or(Error::NotFound)?;
+        let meta = &self.meta[idx];
+        if meta.map_type != spec.map_type
+            || meta.len != spec.len
+            || !Self::layouts_match(
+                meta,
+                spec.key_layout.as_deref(),
+                spec.value_layout.as_deref(),
+            )
+        {
+            return Err(Error::TypeMismatch);
+        }
+        let expected = Self::estimate_map_heap_size(
+            spec.map_type,
+            spec.key_layout.as_deref(),
+            spec.value_layout.as_deref(),
+            spec.len,
+        );
+        if meta.size != expected {
+            return Err(Error::TypeMismatch);
+        }
+        if meta.storage.ptr.is_null() {
+            return Err(Error::TypeMismatch);
+        }
+        Ok(idx)
     }
 
     /// Allocate storage and register a new map row.
@@ -152,7 +199,7 @@ impl MapRt {
         if self.find_name(&builder.name).is_some() {
             return Err(Error::AlreadyExists);
         }
-        let size = Self::estimate_size(
+        let size = Self::estimate_map_heap_size(
             builder.map_type,
             builder.key_layout.as_deref(),
             builder.value_layout.as_deref(),
@@ -169,11 +216,11 @@ impl MapRt {
                 array::alloc_array_storage(layout_size(vl), builder.len)?
             }
             MapType::Ringbuf => {
-                #[cfg(feature = "event-ringbuf")]
+                #[cfg(feature = "ringbuf")]
                 {
                     ringbuf::alloc_ringbuf_storage(builder.len)?
                 }
-                #[cfg(not(feature = "event-ringbuf"))]
+                #[cfg(not(feature = "ringbuf"))]
                 {
                     return Err(Error::Unsupported);
                 }
@@ -193,10 +240,18 @@ impl MapRt {
         Ok(idx)
     }
 
-    /// Create every non-`runtime` map from bpf.toml codegen.
-    #[cfg(feature = "from-bpf-toml")]
-    pub async fn from_bpf_toml(&mut self) -> Result<(), Error> {
-        super::boot::boot_maps_from_codegen(self).await
+    /// Create every non-`runtime` map from a bpf.toml boot descriptor table.
+    pub fn create_from_boot_descs(
+        &mut self,
+        descs: &[crate::map::BootMapDesc],
+    ) -> Result<(), Error> {
+        for d in descs {
+            if d.runtime {
+                continue;
+            }
+            let _ = self.create(CompleteBuilder::from_boot_desc(d))?;
+        }
+        Ok(())
     }
 
     pub fn lookup(
@@ -283,12 +338,12 @@ impl MapRt {
 }
 
 /// [`MapIdx`] extension — ringbuf RX sugar.
-#[cfg(feature = "event-ringbuf")]
+#[cfg(feature = "ringbuf")]
 pub trait MapIdxExt: Copy {
     fn into_channel(self) -> impl core::future::Future<Output = Result<RingbufRx, Error>>;
 }
 
-#[cfg(feature = "event-ringbuf")]
+#[cfg(feature = "ringbuf")]
 impl MapIdxExt for MapIdx {
     async fn into_channel(self) -> Result<RingbufRx, Error> {
         let _ = self;
@@ -321,7 +376,7 @@ impl MapGuard<'_> {
         Ok(unsafe { self.meta.storage.as_ref::<BpfArrayMap>() }.data())
     }
 
-    #[cfg(feature = "event-ringbuf")]
+    #[cfg(feature = "ringbuf")]
     pub fn into_channel(self) -> Result<RingbufRx, GuardError> {
         let _ = self;
         Err(GuardError::TypeMismatch)

@@ -53,26 +53,6 @@ pub fn parse_dotted_ipv4(s: &str, ctx: &str) -> [u8; 4] {
     out
 }
 
-pub fn parse_addr(table: &toml::Table, key: &str, section: &str) -> usize {
-    let v = table
-        .get(key)
-        .unwrap_or_else(|| panic!("mem.toml: [{section}] missing {key}"));
-    if let Some(i) = v.as_integer() {
-        assert!(i > 0, "mem.toml: [{section}].{key} must be positive");
-        return i as usize;
-    }
-    if let Some(s) = v.as_str() {
-        let s = s.trim();
-        let n = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-            usize::from_str_radix(hex, 16)
-        } else {
-            s.parse::<usize>()
-        };
-        return n.unwrap_or_else(|e| panic!("mem.toml: [{section}].{key} parse: {e}"));
-    }
-    panic!("mem.toml: [{section}].{key} must be integer or hex string");
-}
-
 pub fn parse_optional_addr(table: &toml::Table, key: &str, map_name: &str) -> Option<usize> {
     let v = table.get(key)?;
     Some(parse_addr_value(v, key, map_name))

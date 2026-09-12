@@ -11,4 +11,5 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
+object = { version = "0.36", default-features = false, features = ["read", "elf"] }
 toml = "1.1.3"

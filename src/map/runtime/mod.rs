@@ -1,7 +1,5 @@
-//! Map runtime singleton, talc pool, name table, and bpf.toml boot.
+//! Map runtime singleton, talc pool, and name table.
 
-#[cfg(feature = "from-bpf-toml")]
-pub mod boot;
 pub mod lock;
 pub mod names;
 pub mod pool;

@@ -1,4 +1,4 @@
-//! Parse generated `mem.toml` → `mem_map.rs` + `hot_slots.rs` + `custom-sections.x`.
+//! Emit `mem_map.rs` + `hot_slots.rs` + `custom-sections.x` from in-memory [`Layout`].
 
 use std::fmt::Write as _;
 use std::fs;
@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::layout::{MOUNT_CALL, MountKind};
-use crate::util::{escape_rust_str, parse_addr};
+use crate::layout::{ColdTable, Layout, MountKind};
+use crate::util::escape_rust_str;
 
 pub struct MemMapGen {
     pub custom_sections_path: PathBuf,
@@ -23,42 +23,34 @@ struct Region {
     mount: MountKind,
 }
 
-pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<MemMapGen> {
-    let map_path = manifest_dir.join("mem.toml");
-    let text = fs::read_to_string(&map_path)
-        .with_context(|| format!("failed to read {}", map_path.display()))?;
-    let root: toml::Table = text.parse().with_context(|| "failed to parse mem.toml")?;
+/// Generate IRAM codegen artifacts from a computed [`Layout`].
+pub fn generate(layout: &Layout, out_dir: &Path) -> Result<MemMapGen> {
+    let hot_regions: Vec<Region> = layout
+        .hot_regions
+        .iter()
+        .map(|r| Region {
+            name: r.name.clone(),
+            base: r.base,
+            length: r.length,
+            mount: r.mount,
+        })
+        .collect();
 
-    let arena = root.get("arena").and_then(|v| v.as_table());
-    let helper_t = root
-        .get("helper")
-        .and_then(|v| v.as_table())
-        .ok_or_else(|| anyhow::anyhow!("mem.toml: missing [helper]"))?;
-
-    let helper_base = parse_addr(helper_t, "base", "helper");
-    let helper_len = parse_addr(helper_t, "length", "helper");
-
-    let hot_regions = parse_hot_regions(&root)?;
     if hot_regions.is_empty() {
-        bail!("mem.toml: need at least one [[hot_regions]]");
+        bail!("layout: need at least one hot slot");
     }
     if hot_regions.len() > crate::MAX_SLOT_COUNT {
         bail!(
-            "mem.toml: {} hot_regions exceeds MAX_SLOT_COUNT {}",
+            "layout: {} hot slots exceeds MAX_SLOT_COUNT {}",
             hot_regions.len(),
             crate::MAX_SLOT_COUNT
         );
     }
 
-    let iram_base = arena
-        .map(|t| parse_addr(t, "iram_base", "arena"))
-        .unwrap_or(helper_base);
-    let arena_end = arena
-        .map(|t| parse_addr(t, "arena_end", "arena"))
-        .unwrap_or_else(|| {
-            let last = hot_regions.last().unwrap();
-            last.base + last.length
-        });
+    let helper_base = layout.helper.base;
+    let helper_len = layout.helper.length;
+    let iram_base = layout.iram_base;
+    let arena_end = layout.arena_end;
 
     validate_layout(iram_base, arena_end, helper_base, helper_len, &hot_regions)?;
 
@@ -69,6 +61,8 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<MemMapGen> {
         &hot_regions,
         iram_base,
         arena_end,
+        layout.cold_table.as_ref(),
+        &layout.maps_names,
     )?;
     write_hot_slots_rs(out_dir, &hot_regions)?;
     let sections_path = write_custom_sections(out_dir, helper_base, helper_len, &hot_regions)?;
@@ -77,55 +71,6 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<MemMapGen> {
         custom_sections_path: sections_path,
         slot_count: hot_regions.len(),
     })
-}
-
-fn parse_hot_regions(root: &toml::Table) -> Result<Vec<Region>> {
-    if let Some(arr) = root.get("hot_regions").and_then(|v| v.as_array()) {
-        let mut regions = Vec::with_capacity(arr.len());
-        for (i, entry) in arr.iter().enumerate() {
-            let table = entry
-                .as_table()
-                .ok_or_else(|| anyhow::anyhow!("mem.toml: hot_regions[{i}] must be a table"))?;
-            let base = parse_addr(table, "base", "hot_regions");
-            let length = parse_addr(table, "length", "hot_regions");
-            let name = table
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("slot{i}"));
-            let mount_s = table
-                .get("mount")
-                .and_then(|v| v.as_str())
-                .unwrap_or(MOUNT_CALL);
-            let mount = MountKind::parse(mount_s)?;
-            regions.push(Region {
-                name,
-                base,
-                length,
-                mount,
-            });
-        }
-        return Ok(regions);
-    }
-
-    let mut regions = Vec::new();
-    if let Some(a) = root.get("hot_region_a").and_then(|v| v.as_table()) {
-        regions.push(Region {
-            name: "a".into(),
-            base: parse_addr(a, "base", "hot_region_a"),
-            length: parse_addr(a, "length", "hot_region_a"),
-            mount: MountKind::Call,
-        });
-    }
-    if let Some(b) = root.get("hot_region_b").and_then(|v| v.as_table()) {
-        regions.push(Region {
-            name: "b".into(),
-            base: parse_addr(b, "base", "hot_region_b"),
-            length: parse_addr(b, "length", "hot_region_b"),
-            mount: MountKind::Call,
-        });
-    }
-    Ok(regions)
 }
 
 fn validate_layout(
@@ -178,6 +123,8 @@ fn write_mem_map_rs(
     hot: &[Region],
     iram_base: usize,
     arena_end: usize,
+    cold: Option<&ColdTable>,
+    maps_names: &[String],
 ) -> Result<()> {
     let n = hot.len();
     let mut bases = String::new();
@@ -205,8 +152,27 @@ fn write_mem_map_rs(
         }
     }
 
+    let (cold_base, cold_len, cold_cap, cold_count, cold_present) = match cold {
+        Some(c) => (
+            c.base,
+            c.length,
+            c.image_capacity,
+            c.image_count(),
+            true,
+        ),
+        None => (0, 0, 0, 0, false),
+    };
+
+    let mut map_names_rs = String::new();
+    for (i, name) in maps_names.iter().enumerate() {
+        if i > 0 {
+            map_names_rs.push_str(", ");
+        }
+        write!(map_names_rs, "\"{}\"", escape_rust_str(name)).unwrap();
+    }
+
     let mut rs = String::new();
-    writeln!(rs, "// @generated by xtask from mem.toml — do not edit.\n").unwrap();
+    writeln!(rs, "// @generated by xtask from layout.toml — do not edit.\n").unwrap();
     writeln!(
         rs,
         "/// Patch arena IRAM base (helper window start).\n\
@@ -230,7 +196,29 @@ fn write_mem_map_rs(
          /// Index of the unique `rx` mount, if any.\n\
          pub const MOUNT_RX_SLOT: Option<usize> = {rx_slot};\n\
          /// Largest hot-slot capacity (DRAM staging sized to this).\n\
-         pub const HOT_SLOT_LEN_MAX: usize = {len_max};",
+         pub const HOT_SLOT_LEN_MAX: usize = {len_max};\n\
+         /// Whether intent declared `[cold_table]` (Flash write-bin path).\n\
+         pub const COLD_TABLE_PRESENT: bool = {cold_present};\n\
+         /// Absolute flash address for cold-table cell 0 (`espflash write-bin`).\n\
+         pub const COLD_TABLE_FLASH_BASE: usize = {cold_base:#x};\n\
+         /// Cold-table total length in bytes.\n\
+         pub const COLD_TABLE_FLASH_LEN: usize = {cold_len:#x};\n\
+         /// Bytes per cold-table image cell.\n\
+         pub const COLD_TABLE_IMAGE_CAPACITY: usize = {cold_cap:#x};\n\
+         /// Number of cold-table cells (`FLASH_LEN / IMAGE_CAPACITY`).\n\
+         pub const COLD_TABLE_IMAGE_COUNT: usize = {cold_count};\n\
+         /// Map names from intent `[maps].names` (may be empty).\n\
+         pub const LAYOUT_MAP_NAMES: &[&str] = &[{map_names_rs}];\n\
+         /// Absolute flash address of cold-table cell `index`, if in range.\n\
+         pub const fn cold_table_image_abs(index: usize) -> Option<usize> {{\n\
+             if !COLD_TABLE_PRESENT || COLD_TABLE_IMAGE_CAPACITY == 0 {{\n\
+                 return None;\n\
+             }}\n\
+             if index >= COLD_TABLE_IMAGE_COUNT {{\n\
+                 return None;\n\
+             }}\n\
+             Some(COLD_TABLE_FLASH_BASE + index * COLD_TABLE_IMAGE_CAPACITY)\n\
+         }}",
         len_max = hot.iter().map(|r| r.length).max().unwrap_or(0),
     )
     .unwrap();
@@ -295,7 +283,7 @@ fn write_mem_map_rs(
         };
         writeln!(
             rs,
-            "                 // SAFETY: bases/lens come from validated mem.toml.\n\
+            "                 // SAFETY: bases/lens come from validated layout.toml intent.\n\
                      unsafe {{ crate::xdp::XdpSlot::from_raw_parts(HOT_SLOT_BASES[{i}], HOT_SLOT_LENS[{i}], {primary}) }},"
         )
         .unwrap();
@@ -316,7 +304,7 @@ fn write_hot_slots_rs(out_dir: &Path, hot: &[Region]) -> Result<()> {
     let mut rs = String::new();
     writeln!(
         rs,
-        "// @generated by xtask from mem.toml — do not edit.\n\
+        "// @generated by xtask from layout.toml — do not edit.\n\
          // Included from patch::part for IRAM hot-slot buffers.\n"
     )
     .unwrap();
@@ -386,7 +374,7 @@ fn write_custom_sections(
     let mut sections = String::new();
     writeln!(
         sections,
-        "/* @generated by xtask from mem.toml — do not edit. */\n\
+        "/* @generated by xtask from layout.toml — do not edit. */\n\
          SECTIONS\n\
          {{\n\
              .xdp.helper_dispatcher {helper_base:#x} : ALIGN(4)\n\

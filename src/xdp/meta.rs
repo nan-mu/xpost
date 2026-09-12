@@ -5,7 +5,8 @@ use alloc::vec::Vec;
 
 use super::error::XdpError;
 use super::slot::XdpSlot;
-use crate::map::MapRtGuard;
+use crate::map::builder::{CompleteBuilder, MapType};
+use crate::map::runtime::MapRt;
 use crate::xdp::{XdpSlotId, XdpTableId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +23,83 @@ pub enum XdpLocation {
     Slot { index: XdpSlotId },
 }
 
+/// Rich map dependency row carried on [`XdpMeta`].
+#[derive(Clone, Debug)]
+pub struct RequiredMap {
+    pub name: String,
+    pub map_type: MapType,
+    pub key_layout: Option<Vec<u8>>,
+    pub value_layout: Option<Vec<u8>>,
+    /// Single-element byte size (HASH=key+value, ARRAY=value, RINGBUF=len).
+    pub elem_size: usize,
+    /// Talc heap budget (aligned with [`MapRt::estimate_map_heap_size`]).
+    pub heap_size: usize,
+    /// `max_entries` / ringbuf byte capacity ([`CompleteBuilder::len`]).
+    pub len: usize,
+}
+
+impl RequiredMap {
+    /// Build from layouts; `heap_size` / `elem_size` use the same helpers as map create.
+    pub fn from_layouts(
+        name: String,
+        map_type: MapType,
+        key_layout: Option<Vec<u8>>,
+        value_layout: Option<Vec<u8>>,
+        len: usize,
+    ) -> Self {
+        let heap_size = MapRt::estimate_map_heap_size(
+            map_type,
+            key_layout.as_deref(),
+            value_layout.as_deref(),
+            len,
+        );
+        let elem_size =
+            MapRt::map_elem_size(map_type, key_layout.as_deref(), value_layout.as_deref(), len);
+        Self {
+            name,
+            map_type,
+            key_layout,
+            value_layout,
+            elem_size,
+            heap_size,
+            len,
+        }
+    }
+
+    /// Convert to a [`CompleteBuilder`] for [`MapRt::check`].
+    pub fn to_complete(&self) -> CompleteBuilder {
+        CompleteBuilder {
+            name: self.name.clone(),
+            map_type: self.map_type,
+            key_layout: self.key_layout.clone(),
+            value_layout: self.value_layout.clone(),
+            len: self.len,
+        }
+    }
+}
+
+/// Static boot descriptor (codegen); converted to [`RequiredMap`] at registration.
+#[derive(Clone, Copy, Debug)]
+pub struct BootRequiredMap {
+    pub name: &'static str,
+    pub map_type: MapType,
+    pub key_layout: Option<&'static [u8]>,
+    pub value_layout: Option<&'static [u8]>,
+    pub len: usize,
+}
+
+impl BootRequiredMap {
+    pub fn to_required(&self) -> RequiredMap {
+        RequiredMap::from_layouts(
+            self.name.into(),
+            self.map_type,
+            self.key_layout.map(|l| l.to_vec()),
+            self.value_layout.map(|l| l.to_vec()),
+            self.len,
+        )
+    }
+}
+
 /// User-visible XDP program metadata.
 #[derive(Clone)]
 pub struct XdpMeta {
@@ -29,7 +107,7 @@ pub struct XdpMeta {
     pub link_addr: usize,
     pub image_len: usize,
     pub abi_version: u32,
-    pub required_maps: Vec<String>,
+    pub required_maps: Vec<RequiredMap>,
     pub location: XdpLocation,
     pub(crate) arch: XdpArch,
     pub(crate) helper_address: usize,
@@ -82,22 +160,6 @@ impl XdpMeta {
         }
         if self.link_addr != 0 && (self.link_addr & 3) != 0 {
             return Err(XdpError::SlotAddressAlign);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn check_required_maps(
-        &self,
-        maps: Option<&MapRtGuard<'_>>,
-    ) -> Result<(), XdpError> {
-        if self.required_maps.is_empty() {
-            return Ok(());
-        }
-        let Some(rt) = maps else {
-            return Err(XdpError::MapsRequired);
-        };
-        for name in &self.required_maps {
-            rt.find(name).map_err(|_| XdpError::MissingMap)?;
         }
         Ok(())
     }

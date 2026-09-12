@@ -28,7 +28,7 @@ pub mod ops;
 
 use crate::map::kinds::array::BpfArrayMap;
 use crate::map::kinds::hash::BpfHashMap;
-#[cfg(feature = "event-ringbuf")]
+#[cfg(feature = "ringbuf")]
 use crate::map::kinds::ringbuf::RingbufMap;
 use crate::map::runtime::pool::{MapKind, ResourceId, pool_try_read, pool_try_write};
 pub use ops::{MapError, MapOps};
@@ -193,14 +193,14 @@ pub fn resolve_map_id(map: usize) -> Option<ResourceId> {
 pub(crate) enum TypedMap<'a> {
     Array(&'a mut BpfArrayMap),
     Hash(&'a mut BpfHashMap),
-    #[cfg(feature = "event-ringbuf")]
+    #[cfg(feature = "ringbuf")]
     Ringbuf(&'a mut RingbufMap),
 }
 
 pub(crate) enum TypedMapRef<'a> {
     Array(&'a BpfArrayMap),
     Hash(&'a BpfHashMap),
-    #[cfg(feature = "event-ringbuf")]
+    #[cfg(feature = "ringbuf")]
     Ringbuf(&'a RingbufMap),
 }
 
@@ -211,7 +211,7 @@ pub(crate) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> 
     let typed = match res.kind()? {
         MapKind::Array => TypedMap::Array(unsafe { res.as_mut() }),
         MapKind::Hash => TypedMap::Hash(unsafe { res.as_mut() }),
-        #[cfg(feature = "event-ringbuf")]
+        #[cfg(feature = "ringbuf")]
         MapKind::Ringbuf => TypedMap::Ringbuf(unsafe { res.as_mut() }),
     };
     Some(f(typed))
@@ -227,7 +227,7 @@ pub(crate) fn with_typed_map_ref<R>(
     let typed = match res.kind()? {
         MapKind::Array => TypedMapRef::Array(unsafe { res.as_ref() }),
         MapKind::Hash => TypedMapRef::Hash(unsafe { res.as_ref() }),
-        #[cfg(feature = "event-ringbuf")]
+        #[cfg(feature = "ringbuf")]
         MapKind::Ringbuf => TypedMapRef::Ringbuf(unsafe { res.as_ref() }),
     };
     Some(f(typed))
@@ -246,7 +246,7 @@ pub fn helper_lookup(map: usize, key: usize) -> usize {
     match with_typed_map_ref(id, |typed| match typed {
         TypedMapRef::Array(m) => MapOps::lookup(m, key),
         TypedMapRef::Hash(m) => MapOps::lookup(m, key),
-        #[cfg(feature = "event-ringbuf")]
+        #[cfg(feature = "ringbuf")]
         TypedMapRef::Ringbuf(_) => Err(MapError::Unsupported),
     }) {
         Some(Ok(p)) => p as usize,
@@ -272,7 +272,7 @@ pub fn helper_update(map: usize, key: usize, value: usize, flags: usize) -> usiz
     match with_typed_map(id, |typed| match typed {
         TypedMap::Array(m) => MapOps::update(m, key, value, flags as u64),
         TypedMap::Hash(m) => MapOps::update(m, key, value, flags as u64),
-        #[cfg(feature = "event-ringbuf")]
+        #[cfg(feature = "ringbuf")]
         TypedMap::Ringbuf(_) => Err(MapError::Unsupported),
     }) {
         Some(Ok(())) => 0,
@@ -295,7 +295,7 @@ pub fn helper_delete(map: usize, key: usize) -> usize {
     match with_typed_map(id, |typed| match typed {
         TypedMap::Array(m) => MapOps::delete(m, key),
         TypedMap::Hash(m) => MapOps::delete(m, key),
-        #[cfg(feature = "event-ringbuf")]
+        #[cfg(feature = "ringbuf")]
         TypedMap::Ringbuf(_) => Err(MapError::Unsupported),
     }) {
         Some(Ok(())) => 0,

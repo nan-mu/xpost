@@ -1,11 +1,11 @@
 //! RX ingress: preprocess, run leased XDP under a critical section, postprocess.
 //!
 //! Radio TX/free and action dispatch live outside this module so the CS only
-//! covers AOT flight state ([`crate::prog_table::XDP_FRAME`]).
+//! covers AOT flight state ([`crate::xdp::XDP_FRAME`]).
 //!
 //! **Stack contract (E3):** AOT runs on the **shared caller stack** (Wi-Fi /
 //! embassy callback). There is no dedicated `XDP_STACK` switch. The firmware
-//! wrapper saves callee-saved regs + return path in [`crate::prog_table::XDP_FRAME`]
+//! wrapper saves callee-saved regs + return path in [`crate::xdp::XDP_FRAME`]
 //! and requires 16-byte ILP32 stack alignment at the `jalr` boundary. Peak
 //! growth `A` (AOT + sync helpers) must satisfy `C + A + I <= S` from the
 //! deployment receipt; canaries detect overflow but do not prove N2/N3.
@@ -133,7 +133,7 @@ fn postprocess(ctx: &crate::ctx::XdpMd) {
 #[cfg(target_arch = "riscv32")]
 #[inline(always)]
 unsafe fn invoke_aot(entry: usize, ctx: *mut crate::ctx::XdpContext) -> i32 {
-    let frame = core::ptr::addr_of_mut!(crate::prog_table::XDP_FRAME);
+    let frame = core::ptr::addr_of_mut!(crate::xdp::XDP_FRAME);
     // Soft canary: paint words just below current sp before jalr.
     paint_canary();
     let result: i32;

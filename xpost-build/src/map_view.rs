@@ -1,12 +1,11 @@
 //! ESP32-C3 IBUS/DBUS dual-map terminal diagram (row-driven grid).
 
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
-use crate::util::parse_addr;
+use crate::layout::{self, Layout};
 
 /// Instruction bus base (ESP32-C3 SRAM window).
 pub const IBUS_BASE: u32 = 0x4037_0000;
@@ -69,32 +68,16 @@ pub struct RenderRow {
     pub dbus_addr: String,
 }
 
-/// Build dual-bus sections from generated `mem.toml` (IBUS regions + DBUS aliases).
-pub fn sections_from_mem_toml(path: &Path) -> Result<Vec<Section>> {
-    let text =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let root: toml::Table = text
-        .parse()
-        .with_context(|| format!("failed to parse {}", path.display()))?;
+/// Build dual-bus sections from a computed [`Layout`] (IBUS regions + DBUS aliases).
+pub fn sections_from_layout(layout: &Layout) -> Result<Vec<Section>> {
+    let mut ibus: Vec<(String, u32, u32)> = vec![(
+        "helper".into(),
+        layout.helper.base as u32,
+        layout.helper.length as u32,
+    )];
 
-    let helper = root
-        .get("helper")
-        .and_then(|v| v.as_table())
-        .ok_or_else(|| anyhow::anyhow!("mem.toml: missing [helper]"))?;
-    let h_base = parse_addr(helper, "base", "helper") as u32;
-    let h_len = parse_addr(helper, "length", "helper") as u32;
-
-    let mut ibus: Vec<(String, u32, u32)> = vec![("helper".into(), h_base, h_len)];
-
-    if let Some(arr) = root.get("hot_regions").and_then(|v| v.as_array()) {
-        for (i, entry) in arr.iter().enumerate() {
-            let t = entry
-                .as_table()
-                .ok_or_else(|| anyhow::anyhow!("mem.toml: hot_regions[{i}] must be a table"))?;
-            let base = parse_addr(t, "base", "hot_regions") as u32;
-            let length = parse_addr(t, "length", "hot_regions") as u32;
-            ibus.push((format!("slot{i}"), base, length));
-        }
+    for (i, r) in layout.hot_regions.iter().enumerate() {
+        ibus.push((format!("slot{i}"), r.base as u32, r.length as u32));
     }
 
     let mut out = Vec::with_capacity(ibus.len() * 2);
@@ -288,10 +271,10 @@ pub fn print_diagram(rows: &[RenderRow]) {
     }
 }
 
-/// Load `mem.toml`, render, print.
+/// Load board intent `layout.toml`, render, print.
 pub fn run_map(manifest_dir: &Path) -> Result<()> {
-    let path = manifest_dir.join("mem.toml");
-    let sections = sections_from_mem_toml(&path)?;
+    let layout = layout::compute_from_file(&manifest_dir.join("layout.toml"))?;
+    let sections = sections_from_layout(&layout)?;
     let rows = render(&sections)?;
     print_diagram(&rows);
     Ok(())

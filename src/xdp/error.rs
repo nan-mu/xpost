@@ -33,7 +33,13 @@ pub enum XdpError {
     SlotAddressAlign,
     MapsRequired,
     MissingMap,
+    /// Map present but type/layout/len/heap_size disagree with [`crate::xdp::RequiredMap`].
+    TypeMismatch,
     ImageDigest,
+    /// Reserved: image magic / header mismatch (layout TODO).
+    ImageMagic,
+    /// Reserved: image bytes disagree with [`XdpMeta`] beyond magic.
+    ImageMismatch,
     LinkedAddress,
     Storage,
     ScratchTooSmall,
@@ -42,7 +48,7 @@ pub enum XdpError {
     InvalidName,
     DuplicateName,
     NotImplemented,
-    /// `from-bpf-toml` feature: [`crate::xdp::XdpRt::lease`] before [`crate::xdp::XdpRt::from_bpf_toml`].
+    /// Deprecated alias kept for source compatibility; prefer registering builders first.
     BpfTomlNotLoaded,
 }
 
@@ -80,7 +86,10 @@ impl XdpError {
             Self::SlotAddressAlign => "slot address align",
             Self::MapsRequired => "maps required but none",
             Self::MissingMap => "missing map",
+            Self::TypeMismatch => "map type/layout mismatch",
             Self::ImageDigest => "image digest mismatch",
+            Self::ImageMagic => "image magic mismatch",
+            Self::ImageMismatch => "image storage mismatch",
             Self::LinkedAddress => "linked address mismatch",
             Self::Storage => "storage error",
             Self::ScratchTooSmall => "scratch too small",

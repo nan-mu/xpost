@@ -1,11 +1,14 @@
 //! BPF ringbuf TX + async-ringbuf RX.
 //!
+//! Incomplete — enabling Cargo feature `ringbuf` fails with `compile_error!`.
+//! Source retained for later implementation; remove the `compile_error!` when ready.
 //! BPF helpers (`bpf_ringbuf_*`) remain deferred / not dispatched.
-//! Firmware event ring lives in [`evt`] (Cargo feature `event-ringbuf`).
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-#[cfg(feature = "event-ringbuf")]
+compile_error!("feature `ringbuf` is not implemented yet; do not enable it");
+
+#[cfg(feature = "ringbuf")]
 pub mod evt;
 
 use core::alloc::Layout;

@@ -78,7 +78,7 @@ pub type ResourceId = MapIdx;
 pub enum MapKind {
     Array,
     Hash,
-    #[cfg(feature = "event-ringbuf")]
+    #[cfg(feature = "ringbuf")]
     Ringbuf,
 }
 
@@ -158,7 +158,7 @@ impl RawResource {
         }
     }
 
-    #[cfg(feature = "event-ringbuf")]
+    #[cfg(feature = "ringbuf")]
     pub(crate) fn as_ringbuf_map_mut(&mut self) -> &mut crate::map::kinds::ringbuf::RingbufMap {
         unsafe { self.as_mut() }
     }

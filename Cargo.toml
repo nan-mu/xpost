@@ -31,24 +31,54 @@ dev = ["debug"]
 # MCU development: radio + storage + ingress. Use with riscv32 target only
 # (`cargo check-c3`). Not for host `cargo check --features dev-c3`.
 dev-c3 = ["dev", "esp32c3-radio", "esp32c3-storage"]
-# Multicore / PERCPU_ARRAY extension stubs. Not part of the first-case ESP32-C3
-# safety contract (single-core ARRAY). Enabling this only exposes placeholder
-# APIs; no runtime PERCPU backend is implemented yet.
+# Incomplete — do not enable (compile_error!). PERCPU not implemented.
 multicore = []
-# Multi-image hot switch / save / switch. Default off. Flight-period image
-# invariance remains an open constraint when enabled (SC-09).
+# Incomplete — do not enable (compile_error!). Hot switch/save/switch unimplemented.
 hot-switch = []
-# Firmware event ringbuf (map/kinds/ringbuf/evt.rs).
-# Default off: BPF ringbuf helpers stay deferred; this feature is firmware-side
-# only and does not re-enable bpf_ringbuf_* or xpost_evt_wake.
-event-ringbuf = []
-# Boot maps/XDP images from board bpf.toml codegen (`from_bpf_toml` APIs).
-# Default off = direct-start path (empty bpf boot stubs; no toml boot APIs).
+# Incomplete — do not enable (compile_error!).
+# Pulls optional ringbuf / async-ringbuf crates; source kept for later work.
+ringbuf = ["dep:ringbuf", "dep:async-ringbuf"]
+# Boot maps/XDP images from board bpf.toml codegen (`Builder::from_bpf_toml`).
+# Mutually exclusive with `xdp-firmware-first`.
 from-bpf-toml = []
+# Default / firmware-first path (no bpf boot tables). Mutually exclusive with `from-bpf-toml`.
+xdp-firmware-first = []
 
 [package.metadata.rust-analyzer]
 # Prefer `rust-analyzer.toml` in this crate.
 features = ["dev"]
+
+# Default MCU layout sizes for path A (xpost-build sync / declare_runtime!).
+[package.metadata.xpost]
+schema_version = 1
+
+[package.metadata.xpost.map]
+heap_size = 65536
+
+[[package.metadata.xpost.slots.entries]]
+name = "a"
+length = 0xE00
+mount = "rx"
+primary = true
+
+[[package.metadata.xpost.slots.entries]]
+name = "b"
+length = 0x1000
+mount = "call"
+primary = false
+
+[package.metadata.xpost.xdp_table]
+flash_base = 0
+flash_len = 0x2000
+image_capacity = 0x1000
+image_count = 2
+
+[package.metadata.xpost.target]
+arch = "riscv32"
+abi = "ilp32"
+iram_base = 0x40380000
+arena_end = 0x40382000
+helper_length = 0x200
 
 
 [dependencies]
@@ -63,8 +93,8 @@ allocator-api2   = { version = "0.4", default-features = false, features = ["all
 allocator-api2-v02 = { version = "0.2", package = "allocator-api2", default-features = false, features = ["alloc"] }
 hashbrown        = { version = "0.17", default-features = false, features = ["allocator-api2", "default-hasher"] }
 portable-atomic  = { version = "1", default-features = false }
-ringbuf          = { version = "0.5.1", default-features = false, features = ["alloc", "portable-atomic"] }
-async-ringbuf    = { version = "0.3.8", default-features = false, features = ["alloc", "portable-atomic"] }
+ringbuf          = { version = "0.5.1", default-features = false, optional = true, features = ["alloc", "portable-atomic"] }
+async-ringbuf    = { version = "0.3.8", default-features = false, optional = true, features = ["alloc", "portable-atomic"] }
 embassy-time     = { version = "0.5.0", default-features = false, features = ["log"] }
 embassy-sync     = { version = "0.8.0", default-features = false, features = ["log"] }
 embedded-storage = { version = "0.3.1", optional = true }
@@ -78,9 +108,6 @@ esp-radio = { version = "0.18.0", default-features = false, optional = true, fea
   "unstable",
   "wifi",
 ] }
-
-[build-dependencies]
-xpost-build = { path = "xpost-build" }
 
 [profile.dev]
 opt-level = "s"
