@@ -1,19 +1,17 @@
-//! RX ingress: preprocess, run leased XDP under a critical section, postprocess.
+//! RX ingress: build `xdp_md`, run leased XDP under a critical section, record window.
 //!
 //! Radio TX/free and action dispatch live outside this module so the CS only
-//! covers AOT flight state ([`frame::XDP_FRAME`]).
+//! covers AOT flight state ([`XDP_FRAME`]).
 //!
 //! **Stack contract (E3):** AOT runs on the **shared caller stack** (Wi-Fi /
 //! embassy callback). There is no dedicated `XDP_STACK` switch. The firmware
-//! wrapper saves callee-saved regs + return path in [`frame::XDP_FRAME`]
+//! wrapper saves callee-saved regs + return path in [`XDP_FRAME`]
 //! and requires 16-byte ILP32 stack alignment at the `jalr` boundary. Peak
 //! growth `A` (AOT + sync helpers) must satisfy `C + A + I <= S` from the
 //! deployment receipt; canaries detect overflow but do not prove N2/N3.
 //!
-//! This crate targets RV32 only; typecheck with `cargo check-c3` (or an
-//! equivalent `--target riscv32imc-unknown-none-elf`).
-
-mod frame;
+//! This crate targets RV32 only; typecheck with `cargo check` / `cargo check-c3`
+//! (root `.cargo/config.toml` sets `--target riscv32imc-unknown-none-elf`).
 
 #[cfg(feature = "esp32c3-radio")]
 pub mod esp_radio;
@@ -22,15 +20,16 @@ use core::sync::atomic::Ordering;
 
 use crate::xdp::state::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY};
 
+/// Invoke scratch in `.bss`: `[sp, ra, s0..s11]` (14 × `usize`), byte offsets 0..52.
+/// Written/read only from RV32 asm in [`invoke_aot`]; CS covers the flight.
+#[unsafe(link_section = ".bss")]
+static mut XDP_FRAME: [usize; 14] = [0; 14];
+
 /// eBPF per-program stack budget (matches prevail `--stack-size` default).
 /// Used for documentation / canary spacing — not as a private stack size.
-#[allow(dead_code)]
 pub(crate) const BPF_STACK_BYTES: usize = 512;
 /// Extra room expected for synchronous helpers on the same caller stack.
-#[allow(dead_code)]
 pub(crate) const HELPER_STACK_MARGIN: usize = 512;
-/// Conservative AOT+helper peak assumed until stack-usage reports land.
-#[allow(dead_code)]
 pub(crate) const AOT_STACK_PEAK_BYTES: usize = BPF_STACK_BYTES + HELPER_STACK_MARGIN;
 
 /// Soft canary words below the current `sp` at invoke entry (debug/hwtest).
@@ -39,7 +38,6 @@ const CANARY_MAGIC: u32 = 0xA07_CAFE;
 
 /// True when an XDP image is leased for RX.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn is_leased() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
@@ -70,7 +68,7 @@ pub(crate) fn run(data: &mut [u8]) -> Option<i32> {
 fn run_flight(data: &mut [u8]) -> Option<i32> {
     use crate::ctx::XdpContext;
 
-    let mut ctx = preprocess(data);
+    let mut ctx = crate::ctx::XdpMd::from_buf(data);
     let ctx_ptr = &mut ctx as *mut XdpContext;
 
     let action = critical_section::with(|_cs| {
@@ -92,20 +90,8 @@ fn run_flight(data: &mut [u8]) -> Option<i32> {
         Some(result)
     })?;
 
-    postprocess(&ctx);
+    crate::ctx::record_window(&ctx);
     Some(action)
-}
-
-/// Build packet context before entering the AOT critical section.
-#[inline]
-fn preprocess(data: &mut [u8]) -> crate::ctx::XdpMd {
-    crate::ctx::XdpMd::from_buf(data)
-}
-
-/// Snapshot `data`/`data_end` after AOT so TX can clip to the adjusted window.
-#[inline]
-fn postprocess(ctx: &crate::ctx::XdpMd) {
-    crate::ctx::record_window(ctx);
 }
 
 /// Firmware invoke frame on the **shared caller stack**: save return path and
@@ -119,7 +105,7 @@ fn postprocess(ctx: &crate::ctx::XdpMd) {
 /// Caller must hold a critical section for the whole call (protects `XDP_FRAME`).
 #[inline(always)]
 unsafe fn invoke_aot(entry: usize, ctx: *mut crate::ctx::XdpContext) -> i32 {
-    let frame = core::ptr::addr_of_mut!(frame::XDP_FRAME);
+    let frame = core::ptr::addr_of_mut!(XDP_FRAME);
     // Soft canary: paint words just below current sp before jalr.
     paint_canary();
     let result: i32;
