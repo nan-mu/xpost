@@ -4,10 +4,19 @@ ESP_RADIO_CONFIG_WIFI_MAX_BURST_SIZE = "16"
 # Board dir for xpost build.rs (intent layout.toml / optional bpf.toml).
 XPOST_BOARD = { value = "examples/esp32c3-direct", relative = true }
 
+# Lib is RV32-only (inline asm / IRAM sections). Host packages override via --target
+# (see xtask alias). Matches examples/*/ .cargo/config.toml.
+[build]
+target = "riscv32imc-unknown-none-elf"
+
+# RV32IMC has no A (CAS). ESP32-C3 is single-core; same cfg esp-hal would set.
+[target.riscv32imc-unknown-none-elf]
+rustflags = ["--cfg", "portable_atomic_unsafe_assume_single_core"]
+
 [alias]
 # Root dispatcher: cargo xtask firmware doctor | cargo xtask agent | …
 xtask = "run -p xtask --target aarch64-apple-darwin --"
 # Flash the firmware example (from workspace root)
 fwrun = "run -p firmware --release"
-# Typecheck lib + ESP32-C3 features on the MCU target (ingress asm included).
-check-c3 = "check -p xpost --target riscv32imc-unknown-none-elf --features dev-c3"
+# Typecheck lib + ESP32-C3 features (radio/storage); plain `cargo check` is RV32 core only.
+check-c3 = "check -p xpost --features dev-c3"

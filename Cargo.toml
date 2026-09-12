@@ -24,12 +24,10 @@ bench = false
 debug = []
 esp32c3-storage = ["dep:embedded-storage", "dep:esp-storage", "esp-storage/esp32c3"]
 esp32c3-radio = ["dep:esp-hal", "dep:esp-radio"]
-# Development diagnostics (`debug`). Typecheck on RV32:
-# `cargo check -p xpost --target riscv32imc-unknown-none-elf --features dev`
-# Does NOT enable esp-hal — that forces `portable-atomic/unsafe-assume-single-core`,
-# which fails on aarch64/x86_64 hosts.
+# Development diagnostics (`debug`). Root `.cargo/config.toml` defaults to RV32.
+# `cargo check --features dev` — no esp-hal/radio.
 dev = ["debug"]
-# MCU development: radio + storage + ingress. RV32 only (`cargo check-c3`).
+# MCU development: radio + storage + ingress (`cargo check-c3`).
 dev-c3 = ["dev", "esp32c3-radio", "esp32c3-storage"]
 # Incomplete — do not enable (compile_error!). PERCPU not implemented.
 multicore = []
