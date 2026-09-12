@@ -134,7 +134,7 @@ impl XdpMeta {
     pub(crate) fn check_arch(&self) -> Result<(), XdpError> {
         match self.arch {
             XdpArch::Rv32Imc => {
-                #[cfg(all(target_arch = "riscv32", not(target_feature = "c")))]
+                #[cfg(not(target_feature = "c"))]
                 {
                     return Err(XdpError::Arch);
                 }

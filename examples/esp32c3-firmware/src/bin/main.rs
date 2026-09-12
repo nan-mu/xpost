@@ -36,7 +36,7 @@ const XDP_SLOT_LEN: usize = xpost::mem_map::HOT_A_LEN;
 static mut MAP_HEAP: [u8; MAP_HEAP_SIZE] = [0; MAP_HEAP_SIZE];
 
 #[unsafe(no_mangle)]
-#[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".xdp.hotload_0"))]
+#[unsafe(link_section = ".xdp.hotload_0")]
 static XDP_SLOT: xpost::xdp::Slot<XDP_SLOT_LEN> = xpost::xdp::Slot::new([0; XDP_SLOT_LEN]);
 
 #[allow(

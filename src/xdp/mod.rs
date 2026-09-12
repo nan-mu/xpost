@@ -13,7 +13,6 @@ macro_rules! xdp_debug {
 }
 
 mod error;
-pub(crate) mod frame;
 pub(crate) mod ingress;
 mod lock;
 pub(crate) mod map;
@@ -26,7 +25,6 @@ pub(crate) mod switch;
 pub mod table;
 
 pub use error::XdpError;
-pub use frame::{XdpCallFrame, XDP_FRAME};
 pub use lock::{RtMutex, RtMutexGuard, XdpRtGuard};
 pub use meta::{BootRequiredMap, RequiredMap, XdpLocation, XdpMeta};
 pub use slot::{Slot, XdpSlot};
@@ -803,7 +801,6 @@ impl XdpRt {
     }
 
     pub(crate) fn fence_instruction_cache() {
-        #[cfg(target_arch = "riscv32")]
         unsafe {
             core::arch::asm!("fence.i");
         }

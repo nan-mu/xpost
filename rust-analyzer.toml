@@ -1,12 +1,12 @@
 # rust-analyzer for the xpost workspace.
 #
-# Host analysis uses `dev` (ingress scaffolding, no esp-hal).
-# Full radio/storage + RV32 asm: `cargo check-c3` (or enable the override below
-# after confirming only `-p xpost` is checked).
+# Crate is RV32-only (inline asm / fence.i / link sections). Analyze with the
+# MCU target; host stubs via target_arch are gone.
 
 [cargo]
-features = ["dev"]
-allFeatures = false
+target = "riscv32imc-unknown-none-elf"
+# `dev` alone lacks CAS on RV32IMC; esp-hal (via dev-c3) supplies it.
+features = ["dev-c3"]
 
 [check]
 allTargets = false

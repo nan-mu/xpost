@@ -151,7 +151,7 @@ pub fn declare_runtime(input: TokenStream) -> TokenStream {
             [0u8; __xpost_runtime_gen::MAP_HEAP_SIZE];
 
         /// Dual-layer slot storage: `[slot_index][byte]` padded to `XDP_SLOT_LEN_MAX`.
-        #[cfg_attr(target_arch = "riscv32", unsafe(link_section = ".xdp.hotload_0"))]
+        #[unsafe(link_section = ".xdp.hotload_0")]
         static mut #slots: [[u8; __xpost_runtime_gen::XDP_SLOT_LEN_MAX]; __xpost_runtime_gen::XDP_SLOT_COUNT] =
             [[0u8; __xpost_runtime_gen::XDP_SLOT_LEN_MAX]; __xpost_runtime_gen::XDP_SLOT_COUNT];
 

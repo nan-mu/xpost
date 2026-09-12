@@ -312,7 +312,7 @@ fn write_hot_slots_rs(out_dir: &Path, hot: &[Region]) -> Result<()> {
     for i in 0..n {
         writeln!(
             rs,
-            "#[cfg_attr(target_arch = \"riscv32\", unsafe(link_section = \".xdp.hotload_{i}\"))]\n\
+            "#[unsafe(link_section = \".xdp.hotload_{i}\")]\n\
              #[unsafe(no_mangle)]\n\
              static mut HOT_SLOT_{i}: [u8; super::mem_map::HOT_SLOT_LENS[{i}]] =\n\
                  [0u8; super::mem_map::HOT_SLOT_LENS[{i}]];\n"

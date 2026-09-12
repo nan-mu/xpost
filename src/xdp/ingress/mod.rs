@@ -1,17 +1,19 @@
 //! RX ingress: preprocess, run leased XDP under a critical section, postprocess.
 //!
 //! Radio TX/free and action dispatch live outside this module so the CS only
-//! covers AOT flight state ([`crate::xdp::XDP_FRAME`]).
+//! covers AOT flight state ([`frame::XDP_FRAME`]).
 //!
 //! **Stack contract (E3):** AOT runs on the **shared caller stack** (Wi-Fi /
 //! embassy callback). There is no dedicated `XDP_STACK` switch. The firmware
-//! wrapper saves callee-saved regs + return path in [`crate::xdp::XDP_FRAME`]
+//! wrapper saves callee-saved regs + return path in [`frame::XDP_FRAME`]
 //! and requires 16-byte ILP32 stack alignment at the `jalr` boundary. Peak
 //! growth `A` (AOT + sync helpers) must satisfy `C + A + I <= S` from the
 //! deployment receipt; canaries detect overflow but do not prove N2/N3.
 //!
-//! Enable Cargo feature `dev` so host `cargo check` / rust-analyzer typecheck this
-//! path (RV32 asm is stubbed). Real asm: `cargo check-c3`.
+//! This crate targets RV32 only; typecheck with `cargo check-c3` (or an
+//! equivalent `--target riscv32imc-unknown-none-elf`).
+
+mod frame;
 
 #[cfg(feature = "esp32c3-radio")]
 pub mod esp_radio;
@@ -32,9 +34,7 @@ pub(crate) const HELPER_STACK_MARGIN: usize = 512;
 pub(crate) const AOT_STACK_PEAK_BYTES: usize = BPF_STACK_BYTES + HELPER_STACK_MARGIN;
 
 /// Soft canary words below the current `sp` at invoke entry (debug/hwtest).
-#[cfg(any(target_arch = "riscv32", feature = "dev"))]
 const CANARY_WORDS: usize = 8;
-#[cfg(any(target_arch = "riscv32", feature = "dev"))]
 const CANARY_MAGIC: u32 = 0xA07_CAFE;
 
 /// True when an XDP image is leased for RX.
@@ -64,20 +64,9 @@ fn primary_entry() -> Option<usize> {
 /// detected (`IN_FLIGHT != 0` at entry). Caller treats as PASS.
 pub(crate) fn run(data: &mut [u8]) -> Option<i32> {
     let _ = primary_entry()?;
-
-    #[cfg(any(target_arch = "riscv32", feature = "dev"))]
-    {
-        return run_flight(data);
-    }
-
-    #[cfg(not(any(target_arch = "riscv32", feature = "dev")))]
-    {
-        let _ = data;
-        Some(crate::action::XDP_PASS)
-    }
+    run_flight(data)
 }
 
-#[cfg(any(target_arch = "riscv32", feature = "dev"))]
 fn run_flight(data: &mut [u8]) -> Option<i32> {
     use crate::ctx::XdpContext;
 
@@ -108,14 +97,12 @@ fn run_flight(data: &mut [u8]) -> Option<i32> {
 }
 
 /// Build packet context before entering the AOT critical section.
-#[cfg(any(target_arch = "riscv32", feature = "dev"))]
 #[inline]
 fn preprocess(data: &mut [u8]) -> crate::ctx::XdpMd {
     crate::ctx::XdpMd::from_buf(data)
 }
 
 /// Snapshot `data`/`data_end` after AOT so TX can clip to the adjusted window.
-#[cfg(any(target_arch = "riscv32", feature = "dev"))]
 #[inline]
 fn postprocess(ctx: &crate::ctx::XdpMd) {
     crate::ctx::record_window(ctx);
@@ -130,10 +117,9 @@ fn postprocess(ctx: &crate::ctx::XdpMd) {
 /// # Safety
 /// `entry` must be a live IRAM XDP entry; `ctx` must remain valid for the call.
 /// Caller must hold a critical section for the whole call (protects `XDP_FRAME`).
-#[cfg(target_arch = "riscv32")]
 #[inline(always)]
 unsafe fn invoke_aot(entry: usize, ctx: *mut crate::ctx::XdpContext) -> i32 {
-    let frame = core::ptr::addr_of_mut!(crate::xdp::XDP_FRAME);
+    let frame = core::ptr::addr_of_mut!(frame::XDP_FRAME);
     // Soft canary: paint words just below current sp before jalr.
     paint_canary();
     let result: i32;
@@ -191,7 +177,6 @@ unsafe fn invoke_aot(entry: usize, ctx: *mut crate::ctx::XdpContext) -> i32 {
     result
 }
 
-#[cfg(target_arch = "riscv32")]
 #[inline(always)]
 fn paint_canary() {
     let mut sp: usize;
@@ -208,7 +193,6 @@ fn paint_canary() {
     }
 }
 
-#[cfg(target_arch = "riscv32")]
 #[inline(always)]
 fn check_canary() -> bool {
     let mut sp: usize;
@@ -224,11 +208,4 @@ fn check_canary() -> bool {
         p = unsafe { p.add(1) };
     }
     true
-}
-
-/// Host stub so `--features dev` typechecks the flight path without RV32 asm.
-#[cfg(all(feature = "dev", not(target_arch = "riscv32")))]
-unsafe fn invoke_aot(entry: usize, ctx: *mut crate::ctx::XdpContext) -> i32 {
-    let _ = (entry, ctx, AOT_STACK_PEAK_BYTES);
-    crate::action::XDP_PASS
 }

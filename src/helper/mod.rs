@@ -68,10 +68,7 @@ fn fmt_ret(ret: usize) -> (&'static str, i32) {
 
 /// Fixed-address IRAM entry for AOT helper calls.
 #[unsafe(no_mangle)]
-#[cfg_attr(
-    target_arch = "riscv32",
-    unsafe(link_section = ".xdp.helper_dispatcher")
-)]
+#[unsafe(link_section = ".xdp.helper_dispatcher")]
 #[inline(never)]
 #[allow(improper_ctypes_definitions)]
 pub extern "C" fn helper_dispatcher(
