@@ -22,9 +22,9 @@ pub mod action;
 pub mod ctx;
 /// Feature-gated optional surfaces (`ringbuf`, `hot-switch`, `multicore`).
 pub mod ext;
+/// AOT helper trampoline — not part of the integrator API; see [`helper::helper_dispatcher`].
+#[doc(hidden)]
 pub mod helper;
 mod log_gate;
 pub mod map;
 pub mod xdp;
-
-pub use helper::helper_dispatcher;

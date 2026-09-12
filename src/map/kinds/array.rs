@@ -240,7 +240,7 @@ fn check(name: &str, ok: bool, pass: &mut u32, fail: &mut u32) {
 
 /// HW selftest for the first ARRAY map in bpf.toml (when present).
 pub fn run_selftest(pass: &mut u32, fail: &mut u32) {
-    use crate::helper_dispatcher;
+    use crate::helper::helper_dispatcher;
     use crate::map::{BPF_ANY, helper_lookup, helper_update};
     use crate::map::{SELFTEST_KEY_SIZE, SELFTEST_MAP_ID, SELFTEST_VALUE_SIZE};
     use log::info;
