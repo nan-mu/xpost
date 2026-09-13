@@ -70,7 +70,7 @@ pub(crate) fn clear_window() {
 }
 
 /// Clip `buffer` to the last recorded md window if it lies inside `buffer`.
-#[allow(dead_code)] // used from ingress::action::esp_radio
+#[allow(dead_code)] // used from ingress::esp_radio (XDP_TX clip)
 pub(crate) fn clip_to_md_window(buffer: &mut [u8]) -> &mut [u8] {
     let (ptr, len) = critical_section::with(|cs| {
         core::mem::replace(&mut *LAST_WINDOW.borrow_ref_mut(cs), (0, 0))

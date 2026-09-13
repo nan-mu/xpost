@@ -2,13 +2,14 @@
 //!
 //! Internals capture the original `esp_wifi_internal_reg_rxcb` callbacks via
 //! linker `--wrap` and install a trampoline. Program run is [`super::run`];
-//! action handling is [`super::action`].
+//! `xdp_action` apply (PASS/DROP/TX) stays in this module, outside the invoke CS.
 
 use core::ffi::c_void;
 use core::sync::atomic::Ordering;
 
 use portable_atomic::{AtomicPtr, AtomicUsize};
 
+use super::action::{XdpAction, queue_egress_frame};
 use crate::xdp::state::{ESP_OK, WIFI_IF_AP, WIFI_IF_STA};
 
 type WifiRxCb = Option<unsafe extern "C" fn(*mut c_void, u16, *mut c_void) -> i32>;
@@ -81,7 +82,7 @@ unsafe extern "C" fn trampoline_ap(buffer: *mut c_void, len: u16, eb: *mut c_voi
     unsafe { hook(WIFI_IF_AP, buffer, len, eb) }
 }
 
-/// RX hook: run XDP when leased, then apply the action outside the AOT CS.
+/// RX hook: run XDP when leased, then apply the action outside the invoke CS.
 unsafe fn hook(ifx: u32, buffer: *mut c_void, len: u16, eb: *mut c_void) -> i32 {
     if WRAP_READY.load(Ordering::Acquire) == 0 || buffer.is_null() || len == 0 {
         return unsafe { call_orig(ifx, buffer, len, eb) };
@@ -90,10 +91,41 @@ unsafe fn hook(ifx: u32, buffer: *mut c_void, len: u16, eb: *mut c_void) -> i32 
     let Some(action) = super::run(frame) else {
         return unsafe { call_orig(ifx, buffer, len, eb) };
     };
-    unsafe { super::action::apply(ifx, buffer, len, eb, frame, action) }
+    unsafe { apply(ifx, buffer, len, eb, frame, action) }
 }
 
-pub(crate) unsafe fn call_orig(ifx: u32, buffer: *mut c_void, len: u16, eb: *mut c_void) -> i32 {
+/// Consume `action` for one RX delivery. Must not run under the invoke CS.
+unsafe fn apply(
+    ifx: u32,
+    buffer: *mut c_void,
+    len: u16,
+    eb: *mut c_void,
+    frame: &mut [u8],
+    action: i32,
+) -> i32 {
+    match XdpAction::from(action) {
+        XdpAction::Pass => unsafe { call_orig(ifx, buffer, len, eb) },
+        XdpAction::Drop | XdpAction::Aborted => {
+            finish_local(eb);
+            ESP_OK
+        }
+        XdpAction::Tx => {
+            let clipped = crate::ctx::clip_to_md_window(frame);
+            if !tx_by_ref(clipped) {
+                let _ = queue_egress_frame(clipped);
+            }
+            finish_local(eb);
+            ESP_OK
+        }
+        XdpAction::Redirect => {
+            // Unsupported without helper: drop.
+            finish_local(eb);
+            ESP_OK
+        }
+    }
+}
+
+unsafe fn call_orig(ifx: u32, buffer: *mut c_void, len: u16, eb: *mut c_void) -> i32 {
     let ptr = match ifx {
         WIFI_IF_STA => ORIG_STA.load(Ordering::Acquire),
         WIFI_IF_AP => ORIG_AP.load(Ordering::Acquire),
@@ -111,11 +143,11 @@ pub(crate) unsafe fn call_orig(ifx: u32, buffer: *mut c_void, len: u16, eb: *mut
 }
 
 #[inline]
-pub(crate) fn free_rx_buffer(buffer: *mut c_void) {
+fn free_rx_buffer(buffer: *mut c_void) {
     unsafe { esp_wifi_internal_free_rx_buffer(buffer) };
 }
 
-pub(crate) fn tx_by_ref(frame: &mut [u8]) -> bool {
+fn tx_by_ref(frame: &mut [u8]) -> bool {
     if frame.is_empty() {
         return false;
     }
@@ -130,6 +162,13 @@ pub(crate) fn tx_by_ref(frame: &mut [u8]) -> bool {
         )
     };
     rc == ESP_OK
+}
+
+#[inline]
+fn finish_local(eb: *mut c_void) {
+    if !eb.is_null() {
+        free_rx_buffer(eb);
+    }
 }
 
 unsafe extern "C" fn netstack_ref(_buf: *mut c_void) {}
