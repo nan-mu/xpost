@@ -34,9 +34,13 @@ pub fn new<'d>(
     ),
     esp_radio::wifi::WifiError,
 > {
-    super::egress::arm_zero_copy();
     WRAP_READY.store(1, Ordering::Release);
-    esp_radio::wifi::new(device, config)
+    let radio = esp_radio::wifi::new(device, config);
+    if radio.is_ok() {
+        // esp-radio initializes the Wi-Fi driver (and RX callbacks) in `new`.
+        super::egress::arm_zero_copy();
+    }
+    radio
 }
 
 #[unsafe(no_mangle)]
@@ -69,10 +73,10 @@ unsafe fn hook(ifx: u32, buffer: *mut c_void, len: u16, eb: *mut c_void) -> i32 
         return unsafe { call_orig(ifx, buffer, len, eb) };
     }
     let frame = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), len as usize) };
-    let Some(action) = super::run(frame) else {
+    let Some(result) = super::run(frame) else {
         return unsafe { call_orig(ifx, buffer, len, eb) };
     };
-    unsafe { apply(ifx, buffer, len, eb, frame, action) }
+    unsafe { apply(ifx, buffer, len, eb, frame, result) }
 }
 
 /// Consume `action` for one RX delivery. Must not run under the invoke CS.
@@ -82,22 +86,17 @@ unsafe fn apply(
     len: u16,
     eb: *mut c_void,
     frame: &mut [u8],
-    action: i32,
+    result: super::RunResult,
 ) -> i32 {
-    match XdpAction::from(action) {
+    match XdpAction::from(result.action) {
         XdpAction::Pass => unsafe { call_orig(ifx, buffer, len, eb) },
         XdpAction::Drop | XdpAction::Aborted => {
             finish_local(eb);
             ESP_OK
         }
         XdpAction::Tx => {
-            super::egress::transmit(frame);
-            finish_local(eb);
-            ESP_OK
-        }
-        XdpAction::Redirect => {
-            // Unsupported without helper: drop.
-            finish_local(eb);
+            // XDP_TX (and ABI XDP_REDIRECT rewritten to Tx): same RX iface.
+            let _ = super::egress::transmit(ifx, frame, result.window, eb);
             ESP_OK
         }
     }

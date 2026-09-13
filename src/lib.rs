@@ -18,7 +18,8 @@ compile_error!("features `from-bpf-toml` and `xdp-firmware-first` are mutually e
 extern crate alloc;
 extern crate self as xpost;
 
-pub mod ctx;
+/// Diagnostic failure / success counters (e.g. XDP_TX path).
+pub mod counters;
 /// Feature-gated optional surfaces (`ringbuf`, `hot-switch`, `multicore`).
 pub mod ext;
 /// AOT helper trampoline — not part of the integrator API; see [`helper::helper_dispatcher`].

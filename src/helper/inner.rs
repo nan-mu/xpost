@@ -1,6 +1,6 @@
 //! Consolidated BPF helper implementations (this version's dispatched set).
 //!
-//! Deleted: redirect, redirect_map, tail_call, adjust_head, load/store_bytes,
+//! Deleted: redirect_map, tail_call, adjust_head, load/store_bytes,
 //! dynptr, xpost_evt_wake. Deferred BPF ringbuf helpers live in
 //! `map/kinds/ringbuf/` (not dispatched).
 //!
@@ -299,7 +299,7 @@ pub(super) mod xdp_adjust_tail {
     //! Positive delta (grow into headroom) is rejected. Frame storage is the
     //! in-place RX buffer; there is no scratch grow path.
 
-    use crate::ctx::XdpMd;
+    use crate::xdp::ingress::ctx::XdpMd;
 
     const EINVAL: usize = (-22isize) as usize;
 

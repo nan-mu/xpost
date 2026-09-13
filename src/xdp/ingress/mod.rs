@@ -1,4 +1,4 @@
-//! RX ingress: build `xdp_md`, run leased XDP under a critical section, record window.
+//! RX ingress: build `xdp_md`, run leased XDP under a critical section, return action/window.
 //!
 //! Radio TX ([`egress`]) and action dispatch ([`action`] / [`esp_radio`]) live
 //! beside invoke so the CS only covers flight state ([`XDP_FRAME`]).
@@ -14,6 +14,7 @@
 //! (root `.cargo/config.toml` sets `--target riscv32imc-unknown-none-elf`).
 
 mod action;
+mod ctx;
 mod egress;
 mod stack;
 
@@ -28,40 +29,41 @@ use crate::xdp::state::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY};
 #[unsafe(link_section = ".bss")]
 static mut XDP_FRAME: [usize; 14] = [0; 14];
 
+/// Final packet range selected by an XDP program.
+#[derive(Clone, Copy)]
+pub(crate) struct PacketWindow {
+    pub(crate) data: *mut u8,
+    pub(crate) len: usize,
+}
+
+/// Result of one XDP flight.  Keeping the packet window with the action avoids
+/// a global post-flight scratch slot being overwritten by a later RX callback.
+#[derive(Clone, Copy)]
+pub(crate) struct RunResult {
+    pub(crate) action: i32,
+    pub(crate) window: PacketWindow,
+}
+
 /// True when an XDP image is leased for RX.
 #[inline]
 pub(crate) fn is_leased() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
 
-#[inline]
-fn primary_entry() -> Option<usize> {
-    if !ACTIVE.load(Ordering::Acquire) {
-        return None;
-    }
-    let entry = PRIMARY_ENTRY.load(Ordering::Acquire);
-    (entry != 0).then_some(entry)
-}
-
 /// Run the leased program on `data`.
 ///
-/// - **Pre (CS外):** fast lease check, build `xdp_md`
-/// - **CS内:** re-validate entry, clear pending, reset tail depth, `jalr` on
-///   the shared caller stack, restore callee-saved regs
-/// - **Post (CS外):** snapshot md window for TX clipping
+/// - **Pre (CS外):** build `xdp_md`
+/// - **CS内:** validate lease/entry, `jalr` on the shared caller stack, restore
+///   callee-saved regs
+/// - **Post (CS外):** return the final md window with the action
 ///
 /// Returns `None` when not leased, raced with release, or reentrancy is
 /// detected (`IN_FLIGHT != 0` at entry). Caller treats as PASS.
-pub(crate) fn run(data: &mut [u8]) -> Option<i32> {
-    let _ = primary_entry()?;
-    run_flight(data)
-}
+pub(crate) fn run(data: &mut [u8]) -> Option<RunResult> {
+    use ctx::{XdpContext, XdpMd};
 
-fn run_flight(data: &mut [u8]) -> Option<i32> {
-    use crate::ctx::XdpContext;
-
-    let mut ctx = crate::ctx::XdpMd::from_buf(data);
-    let ctx_ptr = &mut ctx as *mut XdpContext;
+    let mut ctx_md = XdpMd::from_buf(data);
+    let ctx_ptr = &mut ctx_md as *mut XdpContext;
 
     let action = critical_section::with(|_cs| {
         if !ACTIVE.load(Ordering::Relaxed) {
@@ -82,8 +84,12 @@ fn run_flight(data: &mut [u8]) -> Option<i32> {
         Some(result)
     })?;
 
-    crate::ctx::record_window(&ctx);
-    Some(action)
+    let data = ctx_md.data;
+    let len = (ctx_md.data_end as usize).checked_sub(data as usize)?;
+    Some(RunResult {
+        action,
+        window: PacketWindow { data, len },
+    })
 }
 
 /// Firmware invoke frame on the **shared caller stack**: save return path and
@@ -96,7 +102,7 @@ fn run_flight(data: &mut [u8]) -> Option<i32> {
 /// `entry` must be a live IRAM XDP entry; `ctx` must remain valid for the call.
 /// Caller must hold a critical section for the whole call (protects `XDP_FRAME`).
 #[inline(always)]
-unsafe fn invoke_aot(entry: usize, ctx: *mut crate::ctx::XdpContext) -> i32 {
+unsafe fn invoke_aot(entry: usize, ctx: *mut ctx::XdpContext) -> i32 {
     let frame = core::ptr::addr_of_mut!(XDP_FRAME);
     // Soft canary: paint words just below current sp before jalr.
     stack::paint_canary();

@@ -39,6 +39,14 @@ pub(crate) const WIFI_IF_STA: u32 = 0;
 pub(crate) const WIFI_IF_AP: u32 = 1;
 pub(crate) const ESP_OK: i32 = 0;
 
+// —— zero-copy TX ownership tokens (ingress::egress) ——
+
+/// Match the default maximum Wi-Fi RX burst; exhaustion fails closed (drop).
+pub(crate) const TX_TOKEN_CAPACITY: usize = 16;
+pub(crate) const TX_TOKEN_SLOT_EMPTY: usize = 0;
+pub(crate) const TX_TOKEN_SLOT_OWNED: usize = 1;
+pub(crate) const TX_TOKEN_SLOT_RELEASING: usize = 2;
+
 // —— lease / flight atomics ——
 
 pub static XDP_RT: OnceLock<RtMutex<XdpRt>> = OnceLock::new();
