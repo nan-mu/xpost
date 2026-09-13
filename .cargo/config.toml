@@ -18,5 +18,5 @@ rustflags = ["--cfg", "portable_atomic_unsafe_assume_single_core"]
 xtask = "run -p xtask --target aarch64-apple-darwin --"
 # Flash the firmware example (from workspace root)
 fwrun = "run -p firmware --release"
-# Typecheck lib + ESP32-C3 features (radio/storage); plain `cargo check` is RV32 core only.
+# Typecheck lib + ESP32-C3 features (storage); plain `cargo check` is RV32 + radio.
 check-c3 = "check -p xpost --features dev-c3"

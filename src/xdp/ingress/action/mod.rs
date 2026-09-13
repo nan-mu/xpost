@@ -1,7 +1,6 @@
 //! XDP action constants, TX egress queue, and return-value apply.
 
 mod egress;
-#[cfg(feature = "esp32c3-radio")]
 mod esp_radio;
 
 pub use egress::queue_egress_frame;
@@ -27,5 +26,4 @@ pub fn xdp_action_name(action: i32) -> &'static str {
     }
 }
 
-#[cfg(feature = "esp32c3-radio")]
 pub(crate) use esp_radio::apply;

@@ -16,7 +16,6 @@
 mod action;
 mod stack;
 
-#[cfg(feature = "esp32c3-radio")]
 pub mod esp_radio;
 
 use core::sync::atomic::Ordering;
