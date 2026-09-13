@@ -51,7 +51,7 @@ impl XdpMd {
 #[allow(dead_code)] // written/read by window helpers when radio path is linked
 static LAST_WINDOW: Mutex<RefCell<(usize, usize)>> = Mutex::new(RefCell::new((0, 0)));
 
-/// Snapshot `data`/`data_end` after AOT so XDP_TX can `tx_by_ref` the adjusted frame.
+/// Snapshot `data`/`data_end` after invoke so XDP_TX can clip before `tx_by_ref`.
 #[allow(dead_code)] // used from ingress / esp_radio when those features are on
 pub(crate) fn record_window(md: &XdpMd) {
     let ptr = md.data as usize;

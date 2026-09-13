@@ -2,14 +2,14 @@
 //!
 //! Internals capture the original `esp_wifi_internal_reg_rxcb` callbacks via
 //! linker `--wrap` and install a trampoline. Program run is [`super::run`];
-//! `xdp_action` apply (PASS/DROP/TX) stays in this module, outside the invoke CS.
+//! action apply stays here (outside the invoke CS); [`super::egress`] owns XDP_TX.
 
 use core::ffi::c_void;
 use core::sync::atomic::Ordering;
 
 use portable_atomic::{AtomicPtr, AtomicUsize};
 
-use super::action::{XdpAction, queue_egress_frame};
+use super::action::XdpAction;
 use crate::xdp::state::{ESP_OK, WIFI_IF_AP, WIFI_IF_STA};
 
 type WifiRxCb = Option<unsafe extern "C" fn(*mut c_void, u16, *mut c_void) -> i32>;
@@ -21,16 +21,6 @@ static WRAP_READY: AtomicUsize = AtomicUsize::new(0);
 unsafe extern "C" {
     fn __real_esp_wifi_internal_reg_rxcb(ifx: u32, fn_: WifiRxCb) -> i32;
     fn esp_wifi_internal_free_rx_buffer(buffer: *mut c_void);
-    fn esp_wifi_internal_tx_by_ref(
-        ifx: u32,
-        buffer: *mut c_void,
-        len: usize,
-        netstack_buf: *mut c_void,
-    ) -> i32;
-    fn esp_wifi_internal_reg_netstack_buf_cb(
-        ref_: Option<unsafe extern "C" fn(*mut c_void)>,
-        free: Option<unsafe extern "C" fn(*mut c_void)>,
-    ) -> i32;
 }
 
 /// Prepare the XDP trampoline, then call the stock `esp_radio::wifi::new`.
@@ -44,18 +34,9 @@ pub fn new<'d>(
     ),
     esp_radio::wifi::WifiError,
 > {
-    arm_netstack_callbacks();
+    super::egress::arm_zero_copy();
     WRAP_READY.store(1, Ordering::Release);
     esp_radio::wifi::new(device, config)
-}
-
-fn arm_netstack_callbacks() {
-    let rc =
-        unsafe { esp_wifi_internal_reg_netstack_buf_cb(Some(netstack_ref), Some(netstack_free)) };
-    if rc != ESP_OK {
-        // TX zero-copy may degrade to copy fallback; still allow PASS/DROP.
-        log::warn!("[xdp][esp-radio] reg_netstack_buf_cb rc={rc}");
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -110,10 +91,7 @@ unsafe fn apply(
             ESP_OK
         }
         XdpAction::Tx => {
-            let clipped = crate::ctx::clip_to_md_window(frame);
-            if !tx_by_ref(clipped) {
-                let _ = queue_egress_frame(clipped);
-            }
+            super::egress::transmit(frame);
             finish_local(eb);
             ESP_OK
         }
@@ -132,9 +110,7 @@ unsafe fn call_orig(ifx: u32, buffer: *mut c_void, len: u16, eb: *mut c_void) ->
         _ => core::ptr::null_mut(),
     };
     if ptr.is_null() {
-        if !eb.is_null() {
-            free_rx_buffer(eb);
-        }
+        finish_local(eb);
         return ESP_OK;
     }
     let cb: unsafe extern "C" fn(*mut c_void, u16, *mut c_void) -> i32 =
@@ -143,33 +119,8 @@ unsafe fn call_orig(ifx: u32, buffer: *mut c_void, len: u16, eb: *mut c_void) ->
 }
 
 #[inline]
-fn free_rx_buffer(buffer: *mut c_void) {
-    unsafe { esp_wifi_internal_free_rx_buffer(buffer) };
-}
-
-fn tx_by_ref(frame: &mut [u8]) -> bool {
-    if frame.is_empty() {
-        return false;
-    }
-    // netstack_buf is unused by the blob when callbacks are registered with a
-    // simple no-op pair; pass null and let free_rx_buffer reclaim on miss.
-    let rc = unsafe {
-        esp_wifi_internal_tx_by_ref(
-            WIFI_IF_STA,
-            frame.as_mut_ptr().cast(),
-            frame.len(),
-            core::ptr::null_mut(),
-        )
-    };
-    rc == ESP_OK
-}
-
-#[inline]
 fn finish_local(eb: *mut c_void) {
     if !eb.is_null() {
-        free_rx_buffer(eb);
+        unsafe { esp_wifi_internal_free_rx_buffer(eb) };
     }
 }
-
-unsafe extern "C" fn netstack_ref(_buf: *mut c_void) {}
-unsafe extern "C" fn netstack_free(_buf: *mut c_void) {}

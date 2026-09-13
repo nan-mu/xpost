@@ -1,7 +1,7 @@
 //! RX ingress: build `xdp_md`, run leased XDP under a critical section, record window.
 //!
-//! Radio TX/free and action dispatch ([`action`]) live beside invoke so the CS
-//! only covers flight state ([`XDP_FRAME`]).
+//! Radio TX ([`egress`]) and action dispatch ([`action`] / [`esp_radio`]) live
+//! beside invoke so the CS only covers flight state ([`XDP_FRAME`]).
 //!
 //! **Stack contract (E3):** the XDP image runs on the **shared caller stack**
 //! (Wi-Fi / embassy callback). There is no dedicated `XDP_STACK` switch. The
@@ -14,6 +14,7 @@
 //! (root `.cargo/config.toml` sets `--target riscv32imc-unknown-none-elf`).
 
 mod action;
+mod egress;
 mod stack;
 
 pub mod esp_radio;

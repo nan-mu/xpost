@@ -1,10 +1,6 @@
-//! XDP action codes and TX egress bounce queue.
-
-mod egress;
+//! XDP action codes (`enum xdp_action`).
 
 use core::fmt;
-
-pub use egress::queue_egress_frame;
 
 /// Linux `enum xdp_action` as returned by the XDP image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
