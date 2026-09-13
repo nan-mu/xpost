@@ -13,7 +13,7 @@ use crate::trace_log;
 
 /// Known helper ids — Linux `bpf_func_id` / `include/uapi/linux/bpf.h`.
 ///
-/// Deleted / unsupported: tail_call(12), redirect(23), xdp_adjust_head(44),
+/// Deleted / unsupported: tail_call(12), bpf_redirect(23), xdp_adjust_head(44),
 /// redirect_map(51), xdp_load/store_bytes(189/190), dynptr (197–203),
 /// for_each_map_elem(164), xpost_evt_wake(225).
 ///
@@ -67,6 +67,12 @@ fn fmt_ret(ret: usize) -> (&'static str, i32) {
 }
 
 /// Fixed-address IRAM entry for AOT helper calls.
+///
+/// Must stay `pub` + `#[no_mangle]`: libbpf-mcu / the linker resolve this **symbol
+/// by name and section** (`.xdp.helper_dispatcher`). It is an ABI trampoline, not
+/// an integrator-facing API — hence [`doc(hidden)`]. Prefer never calling it from
+/// firmware application code; use [`crate::map`] / [`crate::xdp`] instead.
+#[doc(hidden)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".xdp.helper_dispatcher")]
 #[inline(never)]

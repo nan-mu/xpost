@@ -14,15 +14,16 @@
 //! (root `.cargo/config.toml` sets `--target riscv32imc-unknown-none-elf`).
 
 mod action;
-mod ctx;
 mod egress;
 mod stack;
 
-pub mod esp_radio;
+pub(crate) mod ctx;
+pub(crate) mod esp_radio;
 
 use core::sync::atomic::Ordering;
 
 use crate::xdp::state::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY};
+use ctx::XdpMd;
 
 /// Invoke scratch in `.bss`: `[sp, ra, s0..s11]` (14 × `usize`), byte offsets 0..52.
 /// Written/read only from RV32 asm in [`invoke_aot`]; CS covers the flight.
@@ -60,10 +61,8 @@ pub(crate) fn is_leased() -> bool {
 /// Returns `None` when not leased, raced with release, or reentrancy is
 /// detected (`IN_FLIGHT != 0` at entry). Caller treats as PASS.
 pub(crate) fn run(data: &mut [u8]) -> Option<RunResult> {
-    use ctx::{XdpContext, XdpMd};
-
     let mut ctx_md = XdpMd::from_buf(data);
-    let ctx_ptr = &mut ctx_md as *mut XdpContext;
+    let ctx_ptr = &mut ctx_md as *mut XdpMd;
 
     let action = critical_section::with(|_cs| {
         if !ACTIVE.load(Ordering::Relaxed) {
@@ -102,7 +101,7 @@ pub(crate) fn run(data: &mut [u8]) -> Option<RunResult> {
 /// `entry` must be a live IRAM XDP entry; `ctx` must remain valid for the call.
 /// Caller must hold a critical section for the whole call (protects `XDP_FRAME`).
 #[inline(always)]
-unsafe fn invoke_aot(entry: usize, ctx: *mut ctx::XdpContext) -> i32 {
+unsafe fn invoke_aot(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
     let frame = core::ptr::addr_of_mut!(XDP_FRAME);
     // Soft canary: paint words just below current sp before jalr.
     stack::paint_canary();

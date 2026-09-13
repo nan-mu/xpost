@@ -15,7 +15,7 @@ pub(crate) const IFINDEX_WIFI: u32 = 0;
 pub(crate) const IFINDEX_WIRED: u32 = 1;
 
 #[repr(C)]
-pub struct XdpMd {
+pub(crate) struct XdpMd {
     pub data: *mut u8,
     pub data_end: *mut u8,
     pub data_meta: u32,
@@ -23,9 +23,6 @@ pub struct XdpMd {
     pub rx_queue_index: u32,
     pub egress_ifindex: u32,
 }
-
-/// Alias used by the XDP image invoke path.
-pub(crate) type XdpContext = XdpMd;
 
 impl XdpMd {
     /// Build a wifi-ingress context over `buf`.
