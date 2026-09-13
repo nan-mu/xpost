@@ -19,10 +19,10 @@ pub(crate) mod map;
 mod meta;
 /// Board layout codegen (`layout.toml` → `OUT_DIR/mem_map.rs`).
 pub mod mem_map;
-pub mod slot;
+pub(crate) mod slot;
 mod state;
 pub(crate) mod switch;
-pub mod table;
+pub(crate) mod table;
 
 pub use error::XdpError;
 pub use lock::{RtMutex, RtMutexGuard, XdpRtGuard};
@@ -30,15 +30,13 @@ pub use meta::{BootRequiredMap, RequiredMap, XdpLocation, XdpMeta};
 pub use slot::{Slot, XdpSlot};
 pub use state::XDP_RT;
 pub use table::builder::{Complete, Incomplete, XdpBuilder};
-pub use table::storage::{
-    COLD_TABLE_BYTES, DEFAULT_IMAGE_CAPACITY, MemoryXdpTable, XdpTable, XdpTableStorage,
-};
+pub use table::storage::{DEFAULT_IMAGE_CAPACITY, XdpTable, XdpTableStorage};
+pub(crate) use table::storage::MemoryXdpTable;
 
 #[cfg(feature = "esp32c3-storage")]
 pub use table::storage::EspFlashXdpTable;
 
-/// Board Wi-Fi bring-up with XDP RX wrap (feature `esp32c3-radio`).
-#[cfg(feature = "esp32c3-radio")]
+/// Board Wi-Fi bring-up with XDP RX wrap.
 pub use ingress::esp_radio::new;
 
 /// Static bpf.toml XDP boot descriptor (codegen → firmware `BOOT_XDPS`).
@@ -107,7 +105,7 @@ impl XdpRt {
     }
 
     /// Multi-slot init with internal SRAM cold table (legacy / tests).
-    pub async fn init_slots(slots: &'static [XdpSlot]) -> Result<XdpRtGuard<'static>, XdpError> {
+    pub(crate) async fn init_slots(slots: &'static [XdpSlot]) -> Result<XdpRtGuard<'static>, XdpError> {
         Self::init_with_slots(slots).await
     }
 
@@ -192,7 +190,7 @@ impl XdpRt {
     }
 
     /// Append another executable slot.
-    pub fn push_slot<const N: usize>(
+    pub(crate) fn push_slot<const N: usize>(
         &mut self,
         slot: &'static Slot<N>,
         is_prim: bool,
@@ -574,7 +572,7 @@ impl XdpRt {
     }
 
     /// Structural / future magic check that storage matches `meta` (hook; magic TODO).
-    pub fn validate_image_storage(&self, meta: &XdpMeta) -> Result<(), XdpError> {
+    pub(crate) fn validate_image_storage(&self, meta: &XdpMeta) -> Result<(), XdpError> {
         if meta.image_len == 0 {
             return Err(XdpError::ImageEmpty);
         }
@@ -604,7 +602,7 @@ impl XdpRt {
         }
     }
 
-    pub fn pre_lease(&self, maps: Option<&MapRtGuard<'_>>) -> Result<(), XdpError> {
+    pub(crate) fn pre_lease(&self, maps: Option<&MapRtGuard<'_>>) -> Result<(), XdpError> {
         self.check_primary_ready(maps)
     }
 
@@ -687,7 +685,7 @@ impl XdpRt {
     }
 
     /// Same as [`Self::lease`] (kept for call sites that already use this name).
-    pub fn lease_mut(&mut self, maps: Option<&mut MapRtGuard<'_>>) -> Result<(), XdpError> {
+    pub(crate) fn lease_mut(&mut self, maps: Option<&mut MapRtGuard<'_>>) -> Result<(), XdpError> {
         self.lease_inner(maps)
     }
 
