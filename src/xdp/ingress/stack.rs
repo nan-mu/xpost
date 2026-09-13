@@ -3,28 +3,28 @@
 //! Does **not** reserve stack for the XDP image, evaluate E3
 //! (`C + A + I <= S`), or prove N2/N3.
 
-/// Soft canary words below the current `sp` at invoke entry.
-const CANARY_WORDS: usize = 8;
-const CANARY_MAGIC: u32 = 0xA07_CAFE;
+use crate::xdp::state::{
+    STACK_CANARY_GAP_BYTES, STACK_CANARY_MAGIC, STACK_CANARY_WORDS,
+};
 
 /// Soft stack probe before `jalr` into the XDP image.
 ///
-/// Reads the current `sp`, skips 16 bytes below it, then paints
-/// [`CANARY_WORDS`] words with [`CANARY_MAGIC`]. The XDP image (and sync
-/// helpers) grow the **shared caller stack** downward; if they smash this
-/// band, [`check_canary`] fails. This does **not** reserve stack, enforce
-/// E3 (`C + A + I <= S`), or prove N2/N3.
+/// Reads the current `sp`, skips [`STACK_CANARY_GAP_BYTES`] below it, then
+/// paints [`STACK_CANARY_WORDS`] words with [`STACK_CANARY_MAGIC`]. The XDP
+/// image (and sync helpers) grow the **shared caller stack** downward; if they
+/// smash this band, [`check_canary`] fails. This does **not** reserve stack,
+/// enforce E3 (`C + A + I <= S`), or prove N2/N3.
 #[inline(always)]
 pub(super) fn paint_canary() {
     let mut sp: usize;
     unsafe {
         core::arch::asm!("mv {}, sp", out(reg) sp);
     }
-    // Leave 16B under sp (args / alignment gap); paint the next 8 words.
-    let mut p = (sp.saturating_sub(16 + CANARY_WORDS * 4)) as *mut u32;
-    for _ in 0..CANARY_WORDS {
+    let mut p =
+        (sp.saturating_sub(STACK_CANARY_GAP_BYTES + STACK_CANARY_WORDS * 4)) as *mut u32;
+    for _ in 0..STACK_CANARY_WORDS {
         unsafe {
-            core::ptr::write_volatile(p, CANARY_MAGIC);
+            core::ptr::write_volatile(p, STACK_CANARY_MAGIC);
             p = p.add(1);
         }
     }
@@ -41,10 +41,11 @@ pub(super) fn check_canary() -> bool {
     unsafe {
         core::arch::asm!("mv {}, sp", out(reg) sp);
     }
-    let mut p = (sp.saturating_sub(16 + CANARY_WORDS * 4)) as *const u32;
-    for _ in 0..CANARY_WORDS {
+    let mut p =
+        (sp.saturating_sub(STACK_CANARY_GAP_BYTES + STACK_CANARY_WORDS * 4)) as *const u32;
+    for _ in 0..STACK_CANARY_WORDS {
         let v = unsafe { core::ptr::read_volatile(p) };
-        if v != CANARY_MAGIC {
+        if v != STACK_CANARY_MAGIC {
             return false;
         }
         p = unsafe { p.add(1) };
