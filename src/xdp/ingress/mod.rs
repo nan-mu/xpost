@@ -13,6 +13,8 @@
 //! This crate targets RV32 only; typecheck with `cargo check` / `cargo check-c3`
 //! (root `.cargo/config.toml` sets `--target riscv32imc-unknown-none-elf`).
 
+mod stack;
+
 #[cfg(feature = "esp32c3-radio")]
 pub mod esp_radio;
 
@@ -31,10 +33,6 @@ pub(crate) const BPF_STACK_BYTES: usize = 512;
 /// Extra room expected for synchronous helpers on the same caller stack.
 pub(crate) const HELPER_STACK_MARGIN: usize = 512;
 pub(crate) const AOT_STACK_PEAK_BYTES: usize = BPF_STACK_BYTES + HELPER_STACK_MARGIN;
-
-/// Soft canary words below the current `sp` at invoke entry (debug/hwtest).
-const CANARY_WORDS: usize = 8;
-const CANARY_MAGIC: u32 = 0xA07_CAFE;
 
 /// True when an XDP image is leased for RX.
 #[inline]
@@ -107,7 +105,7 @@ fn run_flight(data: &mut [u8]) -> Option<i32> {
 unsafe fn invoke_aot(entry: usize, ctx: *mut crate::ctx::XdpContext) -> i32 {
     let frame = core::ptr::addr_of_mut!(XDP_FRAME);
     // Soft canary: paint words just below current sp before jalr.
-    paint_canary();
+    stack::paint_canary();
     let result: i32;
     unsafe {
         core::arch::asm!(
@@ -159,39 +157,6 @@ unsafe fn invoke_aot(entry: usize, ctx: *mut crate::ctx::XdpContext) -> i32 {
             clobber_abi("C")
         );
     }
-    debug_assert!(check_canary(), "XDP shared-stack canary corrupted");
+    debug_assert!(stack::check_canary(), "XDP shared-stack canary corrupted");
     result
-}
-
-#[inline(always)]
-fn paint_canary() {
-    let mut sp: usize;
-    unsafe {
-        core::arch::asm!("mv {}, sp", out(reg) sp);
-    }
-    // Paint downward from (sp - 16) so we do not clobber the red zone / args.
-    let mut p = (sp.saturating_sub(16 + CANARY_WORDS * 4)) as *mut u32;
-    for _ in 0..CANARY_WORDS {
-        unsafe {
-            core::ptr::write_volatile(p, CANARY_MAGIC);
-            p = p.add(1);
-        }
-    }
-}
-
-#[inline(always)]
-fn check_canary() -> bool {
-    let mut sp: usize;
-    unsafe {
-        core::arch::asm!("mv {}, sp", out(reg) sp);
-    }
-    let mut p = (sp.saturating_sub(16 + CANARY_WORDS * 4)) as *const u32;
-    for _ in 0..CANARY_WORDS {
-        let v = unsafe { core::ptr::read_volatile(p) };
-        if v != CANARY_MAGIC {
-            return false;
-        }
-        p = unsafe { p.add(1) };
-    }
-    true
 }
