@@ -1,18 +1,19 @@
 //! RX ingress: build `xdp_md`, run leased XDP under a critical section, record window.
 //!
-//! Radio TX/free and action dispatch live outside this module so the CS only
-//! covers AOT flight state ([`XDP_FRAME`]).
+//! Radio TX/free and action dispatch ([`action`]) live beside invoke so the CS
+//! only covers flight state ([`XDP_FRAME`]).
 //!
-//! **Stack contract (E3):** AOT runs on the **shared caller stack** (Wi-Fi /
-//! embassy callback). There is no dedicated `XDP_STACK` switch. The firmware
-//! wrapper saves callee-saved regs + return path in [`XDP_FRAME`]
+//! **Stack contract (E3):** the XDP image runs on the **shared caller stack**
+//! (Wi-Fi / embassy callback). There is no dedicated `XDP_STACK` switch. The
+//! firmware wrapper saves callee-saved regs + return path in [`XDP_FRAME`]
 //! and requires 16-byte ILP32 stack alignment at the `jalr` boundary. Peak
-//! growth `A` (AOT + sync helpers) must satisfy `C + A + I <= S` from the
+//! growth `A` (image + sync helpers) must satisfy `C + A + I <= S` from the
 //! deployment receipt; canaries detect overflow but do not prove N2/N3.
 //!
 //! This crate targets RV32 only; typecheck with `cargo check` / `cargo check-c3`
 //! (root `.cargo/config.toml` sets `--target riscv32imc-unknown-none-elf`).
 
+mod action;
 mod stack;
 
 #[cfg(feature = "esp32c3-radio")]
@@ -26,13 +27,6 @@ use crate::xdp::state::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY};
 /// Written/read only from RV32 asm in [`invoke_aot`]; CS covers the flight.
 #[unsafe(link_section = ".bss")]
 static mut XDP_FRAME: [usize; 14] = [0; 14];
-
-/// eBPF per-program stack budget (matches prevail `--stack-size` default).
-/// Used for documentation / canary spacing — not as a private stack size.
-pub(crate) const BPF_STACK_BYTES: usize = 512;
-/// Extra room expected for synchronous helpers on the same caller stack.
-pub(crate) const HELPER_STACK_MARGIN: usize = 512;
-pub(crate) const AOT_STACK_PEAK_BYTES: usize = BPF_STACK_BYTES + HELPER_STACK_MARGIN;
 
 /// True when an XDP image is leased for RX.
 #[inline]

@@ -18,7 +18,6 @@ compile_error!("features `from-bpf-toml` and `xdp-firmware-first` are mutually e
 extern crate alloc;
 extern crate self as xpost;
 
-pub mod action;
 pub mod ctx;
 /// Feature-gated optional surfaces (`ringbuf`, `hot-switch`, `multicore`).
 pub mod ext;
@@ -28,3 +27,6 @@ pub mod helper;
 mod log_gate;
 pub mod map;
 pub mod xdp;
+
+/// Board layout constants (`layout.toml` → `OUT_DIR/mem_map.rs`).
+pub use xdp::mem_map;
