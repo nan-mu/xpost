@@ -1,2 +1,0 @@
-# Direct-start board: no boot maps / images.
-# XDP bytes arrive via post-link inject into the primary IRAM slot.
