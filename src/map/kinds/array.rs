@@ -110,9 +110,7 @@ impl BpfArrayMap {
 impl MapOps for BpfArrayMap {
     fn lookup(&self, key: *const u8) -> Result<*mut u8, MapError> {
         if key.is_null() {
-            let e = MapError::InvalidArg;
-            e.log_if_bug("array.lookup");
-            return Err(e);
+            return Err(MapError::InvalidArg);
         }
         let idx = unsafe { ptr::read_unaligned(key as *const u32) } as usize;
         let p = self.elem_ptr(idx);
@@ -125,25 +123,19 @@ impl MapOps for BpfArrayMap {
 
     fn update(&mut self, key: *const u8, value: *const u8, _flags: u64) -> Result<(), MapError> {
         if key.is_null() || value.is_null() {
-            let e = MapError::InvalidArg;
-            e.log_if_bug("array.update");
-            return Err(e);
+            return Err(MapError::InvalidArg);
         }
         let idx = unsafe { ptr::read_unaligned(key as *const u32) } as usize;
         let dst = self.elem_ptr(idx);
         if dst.is_null() {
-            let e = MapError::InvalidArg;
-            e.log_if_bug("array.update");
-            return Err(e);
+            return Err(MapError::InvalidArg);
         }
         unsafe { ptr::copy_nonoverlapping(value, dst, self.value_size) };
         Ok(())
     }
 
     fn delete(&mut self, _key: *const u8) -> Result<(), MapError> {
-        let e = MapError::Unsupported;
-        e.log_if_bug("array.delete");
-        Err(e)
+        Err(MapError::Unsupported)
     }
 }
 
@@ -229,12 +221,10 @@ pub(crate) fn alloc_array_storage(
     ))
 }
 
-fn check(name: &str, ok: bool, pass: &mut u32, fail: &mut u32) {
+fn check(_name: &str, ok: bool, pass: &mut u32, fail: &mut u32) {
     if ok {
-        log::info!("[HWTEST] HELPER {}=ok", name);
         *pass += 1;
     } else {
-        log::info!("[HWTEST] HELPER {}=fail", name);
         *fail += 1;
     }
 }
@@ -245,15 +235,13 @@ pub(crate) fn run_selftest(pass: &mut u32, fail: &mut u32) {
     use crate::helper::helper_dispatcher;
     use crate::map::{BPF_ANY, helper_lookup, helper_update};
     use crate::map::{SELFTEST_KEY_SIZE, SELFTEST_MAP_ID, SELFTEST_VALUE_SIZE};
-    use log::info;
 
     const BPF_FUNC_FOR_EACH_MAP_ELEM: usize = 164;
 
-    info!(
-        "[HWTEST] ARRAY_OK id={} value_size={} stride={}",
+    let _ = (
         SELFTEST_MAP_ID,
         SELFTEST_VALUE_SIZE,
-        BpfArrayMap::value_stride(SELFTEST_VALUE_SIZE)
+        BpfArrayMap::value_stride(SELFTEST_VALUE_SIZE),
     );
     *pass += 1;
 

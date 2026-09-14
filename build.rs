@@ -1,4 +1,4 @@
-//! xpost library build: feature mutex + stub mem_map for host checks.
+//! xpost library build: stub mem_map for host / bare-lib checks.
 //!
 //! Board codegen moved to firmware / [`xpost_build::sync`]. This `build.rs` no
 //! longer reads `XPOST_BOARD` for full codegen.
@@ -8,28 +8,12 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    let from_bpf_toml = env::var_os("CARGO_FEATURE_FROM_BPF_TOML").is_some();
-    let firmware_first = env::var_os("CARGO_FEATURE_XDP_FIRMWARE_FIRST").is_some();
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FROM_BPF_TOML");
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_XDP_FIRMWARE_FIRST");
-
-    if from_bpf_toml && firmware_first {
-        panic!("features `from-bpf-toml` and `xdp-firmware-first` are mutually exclusive");
-    }
-
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     write_stub_codegen(&out_dir);
     println!(
         "cargo:custom-sections={}",
         out_dir.join("custom-sections.x").display()
     );
-    emit_radio_wrap();
-}
-
-fn emit_radio_wrap() {
-    if env::var_os("CARGO_FEATURE_ESP32C3_RADIO").is_some() {
-        println!("cargo:rustc-link-arg=--wrap=esp_wifi_internal_reg_rxcb");
-    }
 }
 
 fn write_stub_codegen(out_dir: &PathBuf) {
@@ -86,6 +70,9 @@ pub fn slot_link_addrs() -> [usize; 2] {
 "#,
     )
     .unwrap();
-    fs::write(out_dir.join("custom-sections.x"), "/* stub — firmware sync emits real linker fragment */\n")
-        .unwrap();
+    fs::write(
+        out_dir.join("custom-sections.x"),
+        "/* stub — firmware sync emits real linker fragment */\n",
+    )
+    .unwrap();
 }

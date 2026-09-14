@@ -9,6 +9,7 @@ use portable_atomic::{AtomicUsize, Ordering};
 use crate::xdp::{
     ingress::{action::XdpAction, run},
     state::ACTIVE,
+    stats::inc_bad_md,
 };
 
 /// Process-wide XDP program mounted on esp-radio RX ingress.
@@ -56,6 +57,7 @@ impl Prog for XdpProg {
         let valid = (window.data.cast_const() == frame.as_ptr()) & (window.len <= frame.len());
 
         if !valid {
+            inc_bad_md();
             return (bad_md_action, frame);
         }
 

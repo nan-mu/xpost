@@ -10,7 +10,6 @@ use core::{
 
 use allocator_api2::{alloc::AllocError, boxed::Box};
 use hashbrown::HashMap;
-use log::error;
 
 use crate::map::{
     helper::{
@@ -170,9 +169,7 @@ impl BpfHashMap {
 impl MapOps for BpfHashMap {
     fn lookup(&self, key: *const u8) -> Result<*mut u8, MapError> {
         let Some(k) = (unsafe { KeyBlob::from_ptr(key, self.key_size) }) else {
-            let e = MapError::InvalidArg;
-            e.log_if_bug("hash.lookup");
-            return Err(e);
+            return Err(MapError::InvalidArg);
         };
         match self.table.get(&k) {
             Some(v) => Ok(v.as_ptr()),
@@ -182,14 +179,10 @@ impl MapOps for BpfHashMap {
 
     fn update(&mut self, key: *const u8, value: *const u8, flags: u64) -> Result<(), MapError> {
         let Some(k) = (unsafe { KeyBlob::from_ptr(key, self.key_size) }) else {
-            let e = MapError::InvalidArg;
-            e.log_if_bug("hash.update");
-            return Err(e);
+            return Err(MapError::InvalidArg);
         };
         let Some(v) = (unsafe { ValSlot::from_ptr(value, self.value_size) }) else {
-            let e = MapError::InvalidArg;
-            e.log_if_bug("hash.update");
-            return Err(e);
+            return Err(MapError::InvalidArg);
         };
         let exists = self.table.contains_key(&k);
         if flags == BPF_NOEXIST && exists {
@@ -199,9 +192,7 @@ impl MapOps for BpfHashMap {
             return Err(MapError::NotFound);
         }
         if !exists && self.table.len() >= self.max_entries {
-            let e = MapError::NoMem;
-            e.log_if_bug("hash.update");
-            return Err(e);
+            return Err(MapError::NoMem);
         }
         self.table.insert(k, v);
         Ok(())
@@ -209,9 +200,7 @@ impl MapOps for BpfHashMap {
 
     fn delete(&mut self, key: *const u8) -> Result<(), MapError> {
         let Some(k) = (unsafe { KeyBlob::from_ptr(key, self.key_size) }) else {
-            let e = MapError::InvalidArg;
-            e.log_if_bug("hash.delete");
-            return Err(e);
+            return Err(MapError::InvalidArg);
         };
         if self.table.remove(&k).is_some() {
             Ok(())
@@ -318,7 +307,6 @@ impl BpfHashMapBuilder {
         .await?;
         if let Some(n) = name {
             if !register_map_name(n, id) {
-                error!("[hash] build: register_map_name({n}) failed");
                 let _ = RawResource::destroy(id).await;
                 return Err(HashBuildError::NameFull);
             }
@@ -373,10 +361,7 @@ pub(crate) async fn create_bpf_hash(
         .map(|_| ())
         .map_err(|e| match e {
             HashBuildError::Oom => AllocError,
-            other => {
-                error!("[hash] create_bpf_hash: {:?}", other);
-                AllocError
-            }
+            _other => AllocError,
         })
 }
 

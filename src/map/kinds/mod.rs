@@ -1,8 +1,6 @@
-//! Map kinds: HASH / ARRAY / optional RINGBUF / PERCPU stubs.
+//! Map kinds: HASH / ARRAY / optional RINGBUF stub.
 
-pub mod array;
-pub mod hash;
-#[cfg(feature = "multicore")]
-pub mod percpu;
+pub(crate) mod array;
+pub(crate) mod hash;
 #[cfg(feature = "ringbuf")]
-pub mod ringbuf;
+pub(crate) mod ringbuf;

@@ -1,13 +1,28 @@
-# rust-analyzer for the xpost workspace.
+# rust-analyzer for the xpost MCU lib.
 #
-# Crate is RV32-only (inline asm / fence.i / link sections). Analyze with the
-# MCU target; host stubs via target_arch are gone.
+# Root `.cargo/config.toml` defaults to RV32. Host workspace members (agent,
+# xtask, xpost-build) and examples must NOT be typechecked under that target —
+# they pull std crates and flood the Problems panel (thousands of false errors).
 
 [cargo]
 target = "riscv32imc-unknown-none-elf"
-# `dev` alone lacks CAS on RV32IMC; esp-hal (via dev-c3) supplies it.
-features = ["dev-c3"]
+features = []
+allTargets = false
 
 [check]
 allTargets = false
 workspace = false
+# Only the MCU lib; never `--workspace` (host members explode on RV32).
+overrideCommand = [
+    "cargo",
+    "check",
+    "-p",
+    "xpost",
+    "--target",
+    "riscv32imc-unknown-none-elf",
+    "--message-format=json",
+]
+
+[files]
+# Host tools + stale example APIs — ignore for analysis.
+exclude = ["agent", "xtask", "xpost-build", "examples"]

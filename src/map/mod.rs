@@ -19,8 +19,7 @@ pub mod ops {
     pub use crate::map::helper::ops::{MapError, MapOps};
 }
 pub(crate) use helper::{
-    BPF_ANY, clear_map_aliases, helper_delete, helper_lookup, helper_update, resolve_map_id,
-    set_map_aliases,
+    BPF_ANY, clear_map_aliases, helper_delete, helper_lookup, helper_update, set_map_aliases,
 };
 
 #[cfg(feature = "ringbuf")]

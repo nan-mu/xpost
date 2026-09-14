@@ -22,7 +22,7 @@ pub const DEFAULT_IMAGE_CAPACITY: usize = 4096;
 /// Sized for ~two default images — ESP32-C3 has ~400 KiB SRAM total; a 512 KiB
 /// BSS table is not viable. Prefer [`crate::xdp::XdpRt::claim_table`] / Flash
 /// `[cold_table]` for real capacity.
-pub const COLD_TABLE_BYTES: usize = 2 * DEFAULT_IMAGE_CAPACITY;
+pub(crate) const COLD_TABLE_BYTES: usize = 2 * DEFAULT_IMAGE_CAPACITY;
 
 /// Internal cold-image BSS used until [`crate::xdp::XdpRt::claim_table`].
 pub(crate) static mut COLD_TABLE: [u8; COLD_TABLE_BYTES] = [0u8; COLD_TABLE_BYTES];
@@ -52,17 +52,17 @@ impl<const N: usize> XdpTable<N> {
     }
 }
 
-pub struct MemoryXdpTable {
+pub(crate) struct MemoryXdpTable {
     bytes: &'static mut [u8],
     image_capacity: usize,
 }
 
 impl MemoryXdpTable {
-    pub fn try_new(storage: &'static mut [u8]) -> Result<Self, XdpError> {
+    pub(crate) fn try_new(storage: &'static mut [u8]) -> Result<Self, XdpError> {
         Self::try_with_image_capacity(storage, DEFAULT_IMAGE_CAPACITY)
     }
 
-    pub fn try_with_image_capacity(
+    pub(crate) fn try_with_image_capacity(
         storage: &'static mut [u8],
         image_capacity: usize,
     ) -> Result<Self, XdpError> {
@@ -113,7 +113,6 @@ impl XdpTableStorage for MemoryXdpTable {
     }
 }
 
-#[cfg(feature = "esp32c3-storage")]
 /// Flash-backed cold table. Wire via [`crate::xdp::XdpRt::claim_table`] after
 /// constructing with partition offset/len from layout codegen
 /// (`COLD_TABLE_FLASH_*`).
@@ -124,7 +123,6 @@ pub struct EspFlashXdpTable {
     image_capacity: usize,
 }
 
-#[cfg(feature = "esp32c3-storage")]
 impl EspFlashXdpTable {
     /// `partition_offset` / `partition_len` are flash-chip absolute addresses
     /// matching layout `[cold_table]` / `espflash write-bin`.
@@ -172,7 +170,6 @@ impl EspFlashXdpTable {
     }
 }
 
-#[cfg(feature = "esp32c3-storage")]
 impl XdpTableStorage for EspFlashXdpTable {
     fn capacity(&self) -> usize {
         self.partition_len as usize

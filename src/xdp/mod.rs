@@ -1,17 +1,6 @@
 //! XDP execution runtime. Control-plane mutation is serialized by `XDP_RT`;
 //! RX sees only the atomically published entry in `state`.
 
-#[cfg(feature = "debug")]
-macro_rules! xdp_debug {
-    ($($arg:tt)*) => {
-        log::debug!($($arg)*);
-    };
-}
-#[cfg(not(feature = "debug"))]
-macro_rules! xdp_debug {
-    ($($arg:tt)*) => {};
-}
-
 mod error;
 pub(crate) mod ingress;
 mod lock;
@@ -21,7 +10,7 @@ pub mod mem_map;
 mod meta;
 pub(crate) mod slot;
 mod state;
-pub(crate) mod switch;
+pub mod stats;
 pub(crate) mod table;
 
 pub use error::XdpError;
@@ -29,12 +18,10 @@ pub use lock::{RtMutex, RtMutexGuard, XdpRtGuard};
 pub use meta::{BootRequiredMap, RequiredMap, XdpLocation, XdpMeta};
 pub use slot::{Slot, XdpSlot};
 pub use state::XDP_RT;
+pub use stats::{ERRORS, ErrorCounters, ErrorCountersSnapshot};
 pub use table::builder::{Complete, Incomplete, XdpBuilder};
 pub(crate) use table::storage::MemoryXdpTable;
-pub use table::storage::{DEFAULT_IMAGE_CAPACITY, XdpTable, XdpTableStorage};
-
-#[cfg(feature = "esp32c3-storage")]
-pub use table::storage::EspFlashXdpTable;
+pub use table::storage::{DEFAULT_IMAGE_CAPACITY, EspFlashXdpTable, XdpTable, XdpTableStorage};
 
 /// Static bpf.toml XDP boot descriptor (codegen → firmware `BOOT_XDPS`).
 #[derive(Clone, Copy, Debug)]
@@ -505,7 +492,6 @@ impl XdpRt {
             .ok_or(XdpError::UnknownImage)?
             .meta
             .set_location(XdpLocation::Slot { index: slot });
-        xdp_debug!("[xdp][move] id={id} slot={slot}");
         Ok(())
     }
 
@@ -558,7 +544,6 @@ impl XdpRt {
             .ok_or(XdpError::UnknownImage)?
             .meta
             .set_location(XdpLocation::Table { index: table_id });
-        xdp_debug!("[xdp][move] id={id} table={table_id}");
         Ok(())
     }
 

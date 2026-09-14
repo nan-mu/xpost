@@ -24,6 +24,7 @@ use core::sync::atomic::Ordering;
 use crate::xdp::{
     ingress::ctx::XdpMd,
     state::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY},
+    stats::{inc_inactive_skip, inc_reentry, inc_stack_misalign},
 };
 
 /// Invoke scratch in `.bss`: `[sp, ra, s0..s11]` (14 × `usize`), byte offsets 0..52.
@@ -61,14 +62,17 @@ pub(crate) fn run(data: &mut [u8]) -> Option<RunResult> {
 
     let action = critical_section::with(|_cs| {
         if !ACTIVE.load(Ordering::Relaxed) {
+            inc_inactive_skip();
             return None;
         }
         let entry = PRIMARY_ENTRY.load(Ordering::Relaxed);
         if entry == 0 {
+            inc_inactive_skip();
             return None;
         }
         // Fail closed on reentrancy: at most one XDP flight (E4).
         if IN_FLIGHT.load(Ordering::Relaxed) != 0 {
+            inc_reentry();
             return None;
         }
 
@@ -103,13 +107,22 @@ pub(crate) fn run(data: &mut [u8]) -> Option<RunResult> {
 unsafe fn invoke_aot(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
     // Soft canary: paint words just below current sp before jalr.
     stack::paint_canary();
+
+    // Fail closed on misaligned SP before touching the frame (count + PASS).
+    let sp: usize;
+    unsafe {
+        core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
+    }
+    if sp & 15 != 0 {
+        inc_stack_misalign();
+        return 2; // XDP_PASS
+    }
+
     let result: i32;
     unsafe {
         core::arch::asm!(
             // —— firmware prologue (shared stack; no sp switch) ——
             "mv t0, sp",
-            "andi t1, t0, 15",
-            "bnez t1, 2f",           // misaligned → force PASS path via sentinel
             "lla t1, 1f",
             "lla t2, {frame_sym}",
             "sw t0, 0(t2)",          // save caller sp for N3 return restore
@@ -144,10 +157,6 @@ unsafe fn invoke_aot(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
             "lw s10, 48(t2)",
             "lw s11, 52(t2)",
             "lw sp, 0(t2)",
-            "j 3f",
-            "2:",
-            "li a0, 2",              // XDP_PASS on alignment fault
-            "3:",
             frame_sym = sym XDP_FRAME,
             entry = in(reg) entry,
             in("a0") ctx,

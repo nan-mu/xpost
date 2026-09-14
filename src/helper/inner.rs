@@ -88,7 +88,6 @@ pub(super) mod csum_diff {
 pub(super) mod printk {
     use core::fmt::Write;
     use heapless::{String, Vec};
-    use log::error;
     use nom::{
         IResult, Parser,
         branch::alt,
@@ -158,7 +157,6 @@ pub(super) mod printk {
 
         while !curr_input.is_empty() {
             if curr_input.starts_with(b"%s") {
-                error!("[helper]bpf_printk: %s is rejected");
                 return None;
             }
 
@@ -172,13 +170,11 @@ pub(super) mod printk {
             {
                 Ok(a) => a,
                 Err(_e) => {
-                    error!("[helper]bpf_printk: parse error");
                     return None;
                 }
             };
 
             if results.push(token).is_err() {
-                error!("[helper]bpf_printk: too many format tokens");
                 return None;
             }
             curr_input = next_input;
@@ -195,24 +191,15 @@ pub(super) mod printk {
                 Token::Text(s) => {
                     let text = match core::str::from_utf8(s) {
                         Ok(s) => s,
-                        Err(e) => {
-                            error!(
-                                "[helper]bpf_printk: utf8 decode failed in format text: {:?}",
-                                e
-                            );
-                            ""
-                        }
+                        Err(_e) => "",
                     };
-                    if write!(buf, "{}", text).is_err() {
-                        error!("[helper]bpf_printk: buffer full, skip text");
-                    }
+                    let _ = write!(buf, "{}", text);
                 }
                 Token::Spec(spec_type) => {
                     let Some(&val) = arg.next() else {
-                        error!("[helper]bpf_printk: not enough arguments for format specifier");
                         continue;
                     };
-                    let result = match spec_type {
+                    let _ = match spec_type {
                         SpecType::Signed => write!(buf, "{}", val as isize),
                         SpecType::Unsigned => write!(buf, "{}", val),
                         SpecType::Hex => write!(buf, "{:#x}", val),
@@ -227,9 +214,6 @@ pub(super) mod printk {
                             }
                         }
                     };
-                    if result.is_err() {
-                        error!("[helper]bpf_printk: buffer full, skip value");
-                    }
                 }
             }
         }
@@ -244,11 +228,6 @@ pub(super) mod printk {
             .filter(|t| matches!(t, Token::Spec(_)))
             .count();
         if nspecs != args.len() {
-            error!(
-                "[helper]bpf_printk: soft assert failed: placeholders={} nargs={}",
-                nspecs,
-                args.len()
-            );
             return Err(());
         }
 
@@ -269,10 +248,6 @@ pub(super) mod printk {
         let fmt_size = fmt_len & BPF_PRINTK_SIZE_MASK;
 
         if fmt_ptr == 0 || fmt_size == 0 || fmt_size > BPF_PRINTK_MAX_FMT_SIZE || nargs > 3 {
-            error!(
-                "[helper]bpf_printk: invalid args: fmt_ptr={:#x} fmt_size={} nargs={}",
-                fmt_ptr, fmt_size, nargs
-            );
             return usize::MAX;
         }
 

@@ -198,7 +198,7 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<()> {
             }
             "BPF_MAP_TYPE_PERCPU_ARRAY" | "BPF_MAP_TYPE_PERCPU_HASH" => {
                 bail!(
-                    "[maps.{}] `{}` requires Cargo feature `multicore` \
+                    "[maps.{}] `{}` is unsupported \
                      (first-case ESP32-C3 contract uses ARRAY only)",
                     spec.name,
                     spec.map_type

@@ -1,7 +1,11 @@
 [workspace]
 resolver = "2"
-members = [".", "xpost-build", "xpost-macros", "xtask", "agent"]
+# MCU packages only under the default RV32 target. Host tools live under
+# `exclude` so they are not typechecked as riscv32 (thousands of false RA
+# errors from std crates). Invoke via `--manifest-path` / the `xtask` alias.
+members = [".", "esp-radio", "xpost-macros"]
 default-members = ["."]
+exclude = ["xpost-build", "xtask", "agent", "examples"]
 
 [package]
 edition      = "2024"
@@ -19,30 +23,13 @@ test = false
 bench = false
 
 [features]
-# Compile detailed XDP ingress diagnostics. Kept out of normal firmware builds
-# because every message is on a packet-path or lifecycle boundary.
-debug = []
-esp32c3-storage = ["dep:embedded-storage", "dep:esp-storage", "esp-storage/esp32c3"]
-# Development diagnostics (`debug`). Root `.cargo/config.toml` defaults to RV32.
-dev = ["debug"]
-# MCU development: storage + diagnostics (`cargo check-c3`).
-dev-c3 = ["dev", "esp32c3-storage"]
-# Incomplete — do not enable (compile_error!). PERCPU not implemented.
-multicore = []
-# Incomplete — do not enable (compile_error!). Hot switch/save/switch unimplemented.
-hot-switch = []
+default = []
+# Boot path B: bpf.toml codegen (`Builder::from_bpf_toml`).
+# Firmware-first (path A) is implicit when this is off — no named feature.
+from-bpf-toml = []
 # Incomplete — do not enable (compile_error!).
 # Pulls optional ringbuf / async-ringbuf crates; source kept for later work.
 ringbuf = ["dep:ringbuf", "dep:async-ringbuf"]
-# Boot maps/XDP images from board bpf.toml codegen (`Builder::from_bpf_toml`).
-# Mutually exclusive with `xdp-firmware-first`.
-from-bpf-toml = []
-# Default / firmware-first path (no bpf boot tables). Mutually exclusive with `from-bpf-toml`.
-xdp-firmware-first = []
-
-[package.metadata.rust-analyzer]
-# Prefer `rust-analyzer.toml` in this crate.
-features = ["dev-c3"]
 
 # Default MCU layout sizes for path A (xpost-build sync / declare_runtime!).
 [package.metadata.xpost]
@@ -93,16 +80,17 @@ ringbuf          = { version = "0.5.1", default-features = false, optional = tru
 async-ringbuf    = { version = "0.3.8", default-features = false, optional = true, features = ["alloc", "portable-atomic"] }
 embassy-time     = { version = "0.5.0", default-features = false, features = ["log"] }
 embassy-sync     = { version = "0.8.0", default-features = false, features = ["log"] }
-embedded-storage = { version = "0.3.1", optional = true }
-esp-storage      = { version = "0.9.0", default-features = false, optional = true }
+embedded-storage = { version = "0.3.1" }
+esp-storage      = { version = "0.9.0", default-features = false, features = ["esp32c3"] }
 esp-hal = { version = "~1.1.0", default-features = false, features = [
   "esp32c3",
   "unstable",
 ] }
-esp-radio = { version = "0.18.0", default-features = false, features = [
+esp-radio = { version = "0.18.0", path = "esp-radio", default-features = false, features = [
   "esp32c3",
   "unstable",
   "wifi",
+  "xdp",
 ] }
 
 [profile.dev]

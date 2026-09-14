@@ -12,7 +12,7 @@ xpost/                          # this repo (publishable library at root)
   xpost-build/                  # board codegen (layout/bpf.toml → Rust + IRAM linker script)
   xtask/                        # root dispatcher only
   examples/
-    esp32c3-direct/             # firmware-first (xdp-firmware-first)
+    esp32c3-direct/             # firmware-first (default boot path)
     esp32c3-bpf-toml/           # from-bpf-toml boot path
       xtask/                    # board-local doctor / map / gen / layout-export
       layout.toml bpf.toml config.toml   # intent layout; mem.toml obsolete
@@ -22,14 +22,16 @@ xpost/                          # this repo (publishable library at root)
 - **Each example**: independent MCU project with its own xtask; can be copied out of tree.
 - **`mem.toml` is obsolete**. Codegen consumes intent `layout.toml` in memory. The libbpf-mcu **contract** `layout.toml` (§3.2) is exported under `target/layout-export/` (see docs/book/xdp-runtime-plan.md §3.1–3.2).
 
-## Two mutually exclusive boot features
+## Boot paths
 
-| Feature | Example | Boot | Deliverable |
-|---------|---------|------|-------------|
-| `xdp-firmware-first` | `esp32c3-direct` | `assume_injected` + `lease(None)` | firmware + contract `layout.toml` |
-| `from-bpf-toml` | `esp32c3-bpf-toml` | `from_bpf_toml` + lease | runnable firmware (images embedded) |
+Firmware-first is the **default** (no Cargo feature). Opt into bpf.toml boot with `from-bpf-toml`.
 
-Enabling both features fails at compile time.
+| Mode | Feature | Example | Boot |
+|------|---------|---------|------|
+| Firmware-first (default) | _(none)_ | `esp32c3-direct` | inject + `lease` |
+| bpf.toml | `from-bpf-toml` | `esp32c3-bpf-toml` | `from_bpf_toml` + lease |
+
+Soft errors on the RX / helper path are exposed via `xpost::xdp::ERRORS` (atomics), not logs. Control-plane APIs return `Result`.
 
 ## Commands
 

@@ -7,7 +7,6 @@ use core::{
 };
 
 use allocator_api2::{alloc::AllocError, boxed::Box};
-use log::error;
 use talc::{TalcCell, source::Manual};
 
 use crate::map::runtime::rt::{self as runtime, MapIdx};
@@ -104,22 +103,22 @@ impl Drop for RawResource {
         let addr = ptr as usize;
         let align = self.layout.align();
         if addr % align != 0 {
-            error!("[pool] drop: ptr {:#x} misaligned; leaking", addr);
+            crate::xdp::stats::inc_pool_drop_misalign();
             return;
         }
         unsafe { (self.drop_fn)(ptr) };
     }
 }
 
-pub(crate) unsafe fn reclaim_talc_box<T>(ptr: *mut u8, tag: &'static str) {
+pub(crate) unsafe fn reclaim_talc_box<T>(ptr: *mut u8, _tag: &'static str) {
     if ptr.is_null() {
-        error!("[pool] reclaim {}: null", tag);
+        crate::xdp::stats::inc_pool_drop_misalign();
         return;
     }
     let addr = ptr as usize;
     let align = align_of::<T>();
     if addr % align != 0 {
-        error!("[pool] reclaim {}: misaligned; leaking", tag);
+        crate::xdp::stats::inc_pool_drop_misalign();
         return;
     }
     let _ = unsafe { Box::from_raw_in(ptr as *mut T, allocator()) };

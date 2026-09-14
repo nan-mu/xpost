@@ -4,28 +4,26 @@
 //! - [`map::MapRt`] / [`map::MapBuilder`] / [`map::declare_runtime`]
 //! - [`xdp::XdpRt`] / [`xdp::XdpBuilder`]
 //!
-//! Optional / incomplete feature surfaces live under [`ext`] (`ringbuf`, `hot-switch`,
-//! `multicore`). Board codegen is **`xpost-build`**. Features `from-bpf-toml` and
-//! `xdp-firmware-first` are mutually exclusive.
+//! Optional / incomplete feature surface: [`ext`] (`ringbuf`). Board codegen is
+//! **`xpost-build`**. Firmware-first boot is the default; enable `from-bpf-toml`
+//! for bpf.toml codegen boot.
 //!
 //! Current hardware instantiation is ESP32-C3 (RV32IMC). No ESP-IDF, no host libc.
 
 #![no_std]
 
-#[cfg(all(feature = "from-bpf-toml", feature = "xdp-firmware-first"))]
-compile_error!("features `from-bpf-toml` and `xdp-firmware-first` are mutually exclusive");
-
 extern crate alloc;
 extern crate self as xpost;
 
-/// Diagnostic failure / success counters (e.g. XDP_TX path).
-pub mod counters;
-/// Feature-gated optional surfaces (`ringbuf`, `hot-switch`, `multicore`).
+/// Wi-Fi bring-up with native-XDP `::esp_radio::wifi::Prog` attach.
+pub mod esp_radio {
+    pub use crate::xdp::ingress::esp_radio::{XDP_PROG, XdpProg, new};
+}
+/// Feature-gated optional surfaces (`ringbuf`).
 pub mod ext;
 /// AOT helper trampoline — not part of the integrator API; see [`helper::helper_dispatcher`].
 #[doc(hidden)]
 pub mod helper;
-mod log_gate;
 pub mod map;
 pub mod xdp;
 

@@ -15,8 +15,12 @@ rustflags = ["--cfg", "portable_atomic_unsafe_assume_single_core"]
 
 [alias]
 # Root dispatcher: cargo xtask firmware doctor | cargo xtask agent | …
-xtask = "run -p xtask --target aarch64-apple-darwin --"
+# Host binary — must not inherit workspace RV32 `build.target`.
+xtask = "run --manifest-path xtask/Cargo.toml --target aarch64-apple-darwin --"
 # Flash the firmware example (from workspace root)
 fwrun = "run -p firmware --release"
-# Typecheck lib + ESP32-C3 features (storage); plain `cargo check` is RV32 + radio.
-check-c3 = "check -p xpost --features dev-c3"
+# Typecheck MCU lib (storage is always on).
+check-c3 = "check -p xpost"
+# Typecheck esp-radio native-XDP ingress via xpost (unifies esp-hal/unstable +
+# esp-radio features esp32c3,wifi,unstable,xdp).
+check-esp-radio-xdp = "check -p xpost"

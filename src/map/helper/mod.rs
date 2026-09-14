@@ -66,7 +66,7 @@ pub fn bind_map_symbols(binds: &[(&str, usize)]) -> usize {
             continue;
         }
         let Some(id) = crate::map::runtime::names::resolve_map_name(name) else {
-            log::warn!("[MAP] bind_map_symbols: unknown name {name}");
+            crate::xdp::stats::inc_bind_unknown();
             continue;
         };
         if register_map_addr(addr, id) {
@@ -240,7 +240,7 @@ pub(crate) fn with_typed_map_ref<R>(
 /// `Busy` (writer held) still returns null — same ABI as a key miss.
 pub(crate) fn helper_lookup(map: usize, key: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
-        log::error!("[Helper][MAP][helper_lookup]: unresolved map ptr {}", map);
+        crate::xdp::stats::inc_helper_unresolved();
         return 0;
     };
     let key = key as *const u8;
@@ -253,12 +253,12 @@ pub(crate) fn helper_lookup(map: usize, key: usize) -> usize {
         Some(Ok(p)) => p as usize,
         Some(Err(MapError::NotFound)) => 0,
         Some(Err(MapError::Unsupported)) => {
-            MapError::Unsupported.log_if_bug("helper_lookup");
+            MapError::Unsupported.count_if_bug();
             0
         }
         Some(Err(_)) => 0,
         None => {
-            MapError::Busy.log_if_bug("helper_lookup");
+            MapError::Busy.count_if_bug();
             0
         }
     }
@@ -278,11 +278,11 @@ pub(crate) fn helper_update(map: usize, key: usize, value: usize, flags: usize) 
     }) {
         Some(Ok(())) => 0,
         Some(Err(e)) => {
-            e.log_if_bug("helper_update");
+            e.count_if_bug();
             e.errno() as usize
         }
         None => {
-            MapError::Busy.log_if_bug("helper_update");
+            MapError::Busy.count_if_bug();
             MapError::Busy.errno() as usize
         }
     }
@@ -301,11 +301,11 @@ pub(crate) fn helper_delete(map: usize, key: usize) -> usize {
     }) {
         Some(Ok(())) => 0,
         Some(Err(e)) => {
-            e.log_if_bug("helper_delete");
+            e.count_if_bug();
             e.errno() as usize
         }
         None => {
-            MapError::Busy.log_if_bug("helper_delete");
+            MapError::Busy.count_if_bug();
             MapError::Busy.errno() as usize
         }
     }

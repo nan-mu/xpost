@@ -6,17 +6,9 @@
 //! | Module | Feature | Notes |
 //! |--------|---------|-------|
 //! | [`ringbuf`] | `ringbuf` | incomplete → `compile_error!` in kinds |
-//! | [`hot_switch`] | `hot-switch` | incomplete → `compile_error!` |
-//! | [`multicore`] | `multicore` | incomplete → `compile_error!` |
 //!
-//! Boot paths (`from-bpf-toml` / firmware-first) are not modules here: use
-//! [`crate::map::MapBuilder`] / [`crate::xdp::XdpBuilder`] directly.
+//! Boot: firmware-first is the default; enable `from-bpf-toml` for bpf.toml codegen.
+//! Use [`crate::map::MapBuilder`] / [`crate::xdp::XdpBuilder`] directly.
 
 #[cfg(feature = "ringbuf")]
 pub mod ringbuf;
-
-#[cfg(feature = "hot-switch")]
-pub mod hot_switch;
-
-#[cfg(feature = "multicore")]
-pub mod multicore;

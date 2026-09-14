@@ -1,7 +1,5 @@
 //! XDP-facing map ops: enum errors; helpers convert to errno / null.
 
-use log::{debug, error};
-
 /// BPF map operation failure (Linux-aligned errno via [`MapError::errno`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapError {
@@ -14,14 +12,14 @@ pub enum MapError {
 }
 
 impl MapError {
-    /// Log BUG / logic failures. `NotFound` / `Exists` / datapath `Busy` are quiet.
-    pub(crate) fn log_if_bug(self, ctx: &str) {
+    /// Soft-fail on the helper path: bump [`crate::xdp::stats`] for bug-class errors.
+    /// `NotFound` / `Exists` stay quiet (normal datapath misses).
+    pub(crate) fn count_if_bug(self) {
         match self {
             Self::NotFound | Self::Exists => {}
-            Self::Busy => debug!("[Helper][MAP][{}]: pool busy", ctx),
-            Self::InvalidArg => error!("[Helper][MAP][{}]: invalid argument", ctx),
-            Self::NoMem => error!("[Helper][MAP][{}]: out of MAP capacity", ctx),
-            Self::Unsupported => error!("[Helper][MAP][{}]: unsupported operation", ctx),
+            Self::Busy | Self::InvalidArg | Self::NoMem | Self::Unsupported => {
+                crate::xdp::stats::inc_helper_map();
+            }
         }
     }
 
