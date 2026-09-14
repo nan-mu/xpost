@@ -2,29 +2,36 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use core::alloc::Layout;
-use core::hash::{Hash, Hasher};
-use core::mem::size_of;
+use core::{
+    alloc::Layout,
+    hash::{Hash, Hasher},
+    mem::size_of,
+};
 
-use allocator_api2::alloc::AllocError;
-use allocator_api2::boxed::Box;
+use allocator_api2::{alloc::AllocError, boxed::Box};
 use hashbrown::HashMap;
 use log::error;
 
-use crate::map::helper::ops::{MapError, MapOps};
-use crate::map::helper::{BPF_EXIST, BPF_NOEXIST};
-use crate::map::runtime::names::register_map_name;
-use crate::map::runtime::pool::{MapKind, RawResource, ResourceId, TalcAlloc, allocator};
+use crate::map::{
+    helper::{
+        BPF_EXIST, BPF_NOEXIST,
+        ops::{MapError, MapOps},
+    },
+    runtime::{
+        names::register_map_name,
+        pool::{MapKind, RawResource, ResourceId, TalcAlloc, allocator},
+    },
+};
 
 const MAX_KEY_BYTES: usize = 64;
 const MAX_VAL_BYTES: usize = 256;
 
 /// Inner hashbrown table of [`BpfHashMap`] (`KeyBlob` → `ValSlot`).
-pub type BpfHashTable = HashMap<KeyBlob, ValSlot, hashbrown::DefaultHashBuilder, TalcAlloc>;
+pub(crate) type BpfHashTable = HashMap<KeyBlob, ValSlot, hashbrown::DefaultHashBuilder, TalcAlloc>;
 
 /// Opaque key bytes for [`BpfHashMap`].
 #[derive(Clone, Copy)]
-pub struct KeyBlob {
+pub(crate) struct KeyBlob {
     len: u8,
     data: [u8; MAX_KEY_BYTES],
 }
@@ -64,7 +71,7 @@ impl KeyBlob {
 }
 
 /// Opaque value slot for [`BpfHashMap`].
-pub struct ValSlot {
+pub(crate) struct ValSlot {
     #[allow(dead_code)]
     len: usize,
     data: [u8; MAX_VAL_BYTES],
@@ -102,10 +109,10 @@ impl ValSlot {
 }
 
 /// Byte-keyed BPF hash map (fixed capacity).
-pub struct BpfHashMap {
-    pub key_size: usize,
-    pub value_size: usize,
-    pub max_entries: usize,
+pub(crate) struct BpfHashMap {
+    pub(crate) key_size: usize,
+    pub(crate) value_size: usize,
+    pub(crate) max_entries: usize,
     table: BpfHashTable,
 }
 
@@ -216,7 +223,7 @@ impl MapOps for BpfHashMap {
 
 /// Fluent factory for [`BpfHashMap`] (userspace / control plane).
 #[derive(Clone, Copy, Default)]
-pub struct BpfHashMapBuilder {
+pub(crate) struct BpfHashMapBuilder {
     key_size: Option<usize>,
     value_size: Option<usize>,
     id: Option<ResourceId>,
@@ -225,7 +232,7 @@ pub struct BpfHashMapBuilder {
 
 /// Builder failure (incomplete spec, OOM, or name table full).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HashBuildError {
+pub(crate) enum HashBuildError {
     MissingKey,
     MissingValue,
     MissingId,
@@ -351,7 +358,7 @@ fn alloc_bpf_hash(
 ///
 /// Prefer [`BpfHashMap::build`] for typed userspace creates; this remains for
 /// `bpf.toml` codegen and [`super::ctrl`].
-pub async fn create_bpf_hash(
+pub(crate) async fn create_bpf_hash(
     id: ResourceId,
     key_size: usize,
     value_size: usize,

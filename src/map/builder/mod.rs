@@ -1,14 +1,12 @@
 //! Type-state [`MapBuilder`] and map K/V traits.
 
-pub mod traits;
+pub(crate) mod traits;
 
 pub use traits::{MapKey, MapValue};
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
-use crate::map::runtime::MapRt;
-use traits::layout_vec;
+use crate::map::{builder::traits::layout_vec, runtime::MapRt};
 
 /// BPF map kind stored in [`super::MapMeta`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

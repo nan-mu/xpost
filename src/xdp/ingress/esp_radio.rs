@@ -3,12 +3,13 @@
 //! Attaches [`XDP_PROG`] before `wifi::new`. Buffer ownership stays in esp-radio.
 //! Packet window: no adjust_head; adjust_tail shrink-only → prefix of `frame`.
 
+use esp_radio::wifi::{Action, Prog, attach_prog};
 use portable_atomic::{AtomicUsize, Ordering};
 
-use super::action::XdpAction;
-use super::run;
-use crate::xdp::state::ACTIVE;
-use ::esp_radio::wifi::{Action, Prog, attach_prog};
+use crate::xdp::{
+    ingress::{action::XdpAction, run},
+    state::ACTIVE,
+};
 
 /// Process-wide XDP program mounted on esp-radio RX ingress.
 pub static XDP_PROG: XdpProg = XdpProg {

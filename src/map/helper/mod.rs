@@ -24,21 +24,22 @@ use core::cell::RefCell;
 
 use critical_section::Mutex;
 
-pub mod ops;
+pub(crate) mod ops;
 
-use crate::map::kinds::array::BpfArrayMap;
-use crate::map::kinds::hash::BpfHashMap;
+use crate::map::{
+    kinds::{array::BpfArrayMap, hash::BpfHashMap},
+    runtime::pool::{MapKind, ResourceId, pool_try_read, pool_try_write},
+};
 #[cfg(feature = "ringbuf")]
 use crate::map::kinds::ringbuf::RingbufMap;
-use crate::map::runtime::pool::{MapKind, ResourceId, pool_try_read, pool_try_write};
-pub use ops::{MapError, MapOps};
+pub use crate::map::helper::ops::{MapError, MapOps};
 
 /// Linux `bpf_map_update_elem` flags (low bits).
-pub const BPF_ANY: u64 = 0;
-pub const BPF_NOEXIST: u64 = 1;
-pub const BPF_EXIST: u64 = 2;
+pub(crate) const BPF_ANY: u64 = 0;
+pub(crate) const BPF_NOEXIST: u64 = 1;
+pub(crate) const BPF_EXIST: u64 = 2;
 
-pub const MAX_MAP_ALIASES: usize = 16;
+pub(crate) const MAX_MAP_ALIASES: usize = 16;
 
 /// Bumped under CS after alias table writes (weak publish token for readers).
 static ALIAS_EPOCH: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
@@ -109,7 +110,7 @@ pub(crate) fn register_map_addr(addr: usize, id: ResourceId) -> bool {
 }
 
 /// Remove a single AOT address binding (no-op if absent).
-pub fn unbind_map_addr(addr: usize) {
+pub(crate) fn unbind_map_addr(addr: usize) {
     if addr == 0 {
         return;
     }
@@ -128,7 +129,7 @@ pub fn unbind_map_addr(addr: usize) {
 ///
 /// `binds` entries with `addr == 0` are skipped. Fails if filtered length
 /// exceeds [`MAX_MAP_ALIASES`].
-pub fn set_map_aliases(binds: &[(usize, ResourceId)]) -> Result<(), AliasError> {
+pub(crate) fn set_map_aliases(binds: &[(usize, ResourceId)]) -> Result<(), AliasError> {
     let filtered: heapless::Vec<(usize, ResourceId), MAX_MAP_ALIASES> = {
         let mut v = heapless::Vec::new();
         for &(addr, id) in binds {
@@ -154,7 +155,7 @@ pub fn set_map_aliases(binds: &[(usize, ResourceId)]) -> Result<(), AliasError> 
 }
 
 /// Clear every alias (e.g. before a full ABI reload).
-pub fn clear_map_aliases() {
+pub(crate) fn clear_map_aliases() {
     critical_section::with(|cs| {
         *MAP_ALIASES.borrow_ref_mut(cs) = [None; MAX_MAP_ALIASES];
     });
@@ -162,7 +163,7 @@ pub fn clear_map_aliases() {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AliasError {
+pub(crate) enum AliasError {
     Full,
 }
 
@@ -170,7 +171,7 @@ pub enum AliasError {
 ///
 /// Unresolved VMAs return `None` — callers must not treat a bare integer as a
 /// [`ResourceId`] fallback (that masked binding bugs on the hot path).
-pub fn resolve_map_id(map: usize) -> Option<ResourceId> {
+pub(crate) fn resolve_map_id(map: usize) -> Option<ResourceId> {
     if map == 0 {
         return None;
     }
@@ -237,7 +238,7 @@ pub(crate) fn with_typed_map_ref<R>(
 ///
 /// ARRAY/HASH only. Uses a pool **read** lock so lookups do not exclusive-contend.
 /// `Busy` (writer held) still returns null — same ABI as a key miss.
-pub fn helper_lookup(map: usize, key: usize) -> usize {
+pub(crate) fn helper_lookup(map: usize, key: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
         log::error!("[Helper][MAP][helper_lookup]: unresolved map ptr {}", map);
         return 0;
@@ -263,7 +264,7 @@ pub fn helper_lookup(map: usize, key: usize) -> usize {
     }
 }
 
-pub fn helper_update(map: usize, key: usize, value: usize, flags: usize) -> usize {
+pub(crate) fn helper_update(map: usize, key: usize, value: usize, flags: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
         return MapError::InvalidArg.errno() as usize;
     };
@@ -287,7 +288,7 @@ pub fn helper_update(map: usize, key: usize, value: usize, flags: usize) -> usiz
     }
 }
 
-pub fn helper_delete(map: usize, key: usize) -> usize {
+pub(crate) fn helper_delete(map: usize, key: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
         return MapError::InvalidArg.errno() as usize;
     };
@@ -323,7 +324,7 @@ type ForEachCb = extern "C" fn(usize, usize, usize, usize) -> i32;
 /// Returns `-ENOTSUP`. Implementation retained under `allow(dead_code)` for a
 /// future constrained restore — do not re-enable without closing SC-10.
 #[allow(dead_code)]
-pub fn helper_for_each_map_elem(
+pub(crate) fn helper_for_each_map_elem(
     map: usize,
     callback_fn: usize,
     callback_ctx: usize,

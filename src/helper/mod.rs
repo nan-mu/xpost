@@ -8,8 +8,7 @@ mod inner;
 
 use log::debug;
 
-use crate::map::resolve_map_id;
-use crate::trace_log;
+use crate::{map::resolve_map_id, trace_log};
 
 /// Known helper ids — Linux `bpf_func_id` / `include/uapi/linux/bpf.h`.
 ///

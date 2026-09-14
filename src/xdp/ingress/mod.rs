@@ -21,8 +21,10 @@ pub(crate) mod esp_radio;
 
 use core::sync::atomic::Ordering;
 
-use crate::xdp::state::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY};
-use ctx::XdpMd;
+use crate::xdp::{
+    ingress::ctx::XdpMd,
+    state::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY},
+};
 
 /// Invoke scratch in `.bss`: `[sp, ra, s0..s11]` (14 × `usize`), byte offsets 0..52.
 /// Written/read only from RV32 asm in [`invoke_aot`]; CS covers the flight.

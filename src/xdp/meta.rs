@@ -1,13 +1,14 @@
 //! XDP image metadata and runtime checks.
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
-use super::error::XdpError;
-use super::slot::XdpSlot;
-use crate::map::builder::{CompleteBuilder, MapType};
-use crate::map::runtime::MapRt;
-use crate::xdp::{XdpSlotId, XdpTableId};
+use crate::{
+    map::{
+        builder::{CompleteBuilder, MapType},
+        runtime::MapRt,
+    },
+    xdp::{XdpSlotId, XdpTableId, error::XdpError, slot::XdpSlot},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum XdpArch {
@@ -53,8 +54,12 @@ impl RequiredMap {
             value_layout.as_deref(),
             len,
         );
-        let elem_size =
-            MapRt::map_elem_size(map_type, key_layout.as_deref(), value_layout.as_deref(), len);
+        let elem_size = MapRt::map_elem_size(
+            map_type,
+            key_layout.as_deref(),
+            value_layout.as_deref(),
+            len,
+        );
         Self {
             name,
             map_type,
@@ -89,7 +94,7 @@ pub struct BootRequiredMap {
 }
 
 impl BootRequiredMap {
-    pub fn to_required(&self) -> RequiredMap {
+    pub(crate) fn to_required(&self) -> RequiredMap {
         RequiredMap::from_layouts(
             self.name.into(),
             self.map_type,
@@ -134,11 +139,11 @@ impl XdpMeta {
     pub(crate) fn check_arch(&self) -> Result<(), XdpError> {
         match self.arch {
             XdpArch::Rv32Imc => {
-                #[cfg(not(target_feature = "c"))]
-                {
-                    return Err(XdpError::Arch);
+                if cfg!(target_feature = "c") {
+                    Ok(())
+                } else {
+                    Err(XdpError::Arch)
                 }
-                Ok(())
             }
         }
     }

@@ -1,6 +1,6 @@
 //! Immutable executable-slot registration.
 
-use super::error::XdpError;
+use crate::xdp::error::XdpError;
 
 #[derive(Clone, Copy)]
 pub struct XdpSlot {
@@ -70,11 +70,11 @@ impl<const N: usize> Slot<N> {
         unsafe { XdpSlot::from_raw_parts(self.bytes.as_ptr() as usize, N, primary) }
     }
 
-    pub fn as_ptr(&self) -> *const u8 {
+    pub(crate) fn as_ptr(&self) -> *const u8 {
         self.bytes.as_ptr()
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         N
     }
 }

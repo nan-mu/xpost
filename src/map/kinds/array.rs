@@ -10,22 +10,23 @@
 
 use core::ptr;
 
-use allocator_api2::alloc::AllocError;
-use allocator_api2::boxed::Box;
+use allocator_api2::{alloc::AllocError, boxed::Box};
 
-use crate::map::helper::ops::{MapError, MapOps};
-use crate::map::runtime::pool::{HEAP_SIZE, MapKind, RawResource, ResourceId, allocator};
+use crate::map::{
+    helper::ops::{MapError, MapOps},
+    runtime::pool::{HEAP_SIZE, MapKind, RawResource, ResourceId, allocator},
+};
 
 /// Max single-element size (same bound as other BPF maps).
-pub const MAX_ELEM_BYTES: usize = 256;
+pub(crate) const MAX_ELEM_BYTES: usize = 256;
 
 /// Dense ARRAY map: key = `u32` index, value = `value_size` bytes at `index * stride`.
-pub struct BpfArrayMap {
+pub(crate) struct BpfArrayMap {
     /// Logical sizeof(value) — bytes copied on update / exposed to helpers.
-    pub value_size: usize,
+    pub(crate) value_size: usize,
     /// Aligned element pitch for address calculation (`>= value_size`).
-    pub value_stride: usize,
-    pub max_entries: usize,
+    pub(crate) value_stride: usize,
+    pub(crate) max_entries: usize,
     /// Contiguous `max_entries * value_stride` bytes, zero-initialized.
     data: Box<[u8], &'static talc::TalcCell<talc::source::Manual>>,
 }
@@ -204,7 +205,7 @@ pub(crate) async fn create_array(
 }
 
 /// Alias used by `bpf.toml` codegen (`init_firmware_maps`).
-pub async fn create_bpf_array(
+pub(crate) async fn create_bpf_array(
     id: ResourceId,
     value_size: usize,
     max_entries: usize,
@@ -239,7 +240,8 @@ fn check(name: &str, ok: bool, pass: &mut u32, fail: &mut u32) {
 }
 
 /// HW selftest for the first ARRAY map in bpf.toml (when present).
-pub fn run_selftest(pass: &mut u32, fail: &mut u32) {
+#[allow(dead_code)]
+pub(crate) fn run_selftest(pass: &mut u32, fail: &mut u32) {
     use crate::helper::helper_dispatcher;
     use crate::map::{BPF_ANY, helper_lookup, helper_update};
     use crate::map::{SELFTEST_KEY_SIZE, SELFTEST_MAP_ID, SELFTEST_VALUE_SIZE};

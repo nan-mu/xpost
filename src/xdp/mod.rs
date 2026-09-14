@@ -48,14 +48,17 @@ pub struct BootXdpDesc {
     pub bytes: &'static [u8],
 }
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 use core::sync::atomic::Ordering;
 
-use crate::map::MapRtGuard;
-use map::VmrTable;
-use meta::XdpMeta as Meta;
-use state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_MAP_REFS, MAX_SLOTS, PRIMARY_ENTRY};
+use crate::{
+    map::MapRtGuard,
+    xdp::{
+        map::VmrTable,
+        meta::XdpMeta as Meta,
+        state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_MAP_REFS, MAX_SLOTS, PRIMARY_ENTRY},
+    },
+};
 pub type XdpId = usize;
 pub type XdpSlotId = usize;
 pub type XdpTableId = usize;

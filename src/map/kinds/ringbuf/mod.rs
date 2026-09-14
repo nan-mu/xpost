@@ -9,30 +9,31 @@
 compile_error!("feature `ringbuf` is not implemented yet; do not enable it");
 
 #[cfg(feature = "ringbuf")]
-pub mod evt;
+pub(crate) mod evt;
 
-use core::alloc::Layout;
-use core::mem::MaybeUninit;
-use core::ptr;
+use core::{alloc::Layout, mem::MaybeUninit, ptr};
 
-use allocator_api2::alloc::AllocError;
-use allocator_api2::boxed::Box;
-use async_ringbuf::Arc;
-use async_ringbuf::AsyncRb;
-use async_ringbuf::traits::{Producer, Split};
-use async_ringbuf::wrap::{AsyncCons, AsyncProd};
-use ringbuf::SharedRb;
-use ringbuf::storage::Ref;
+use allocator_api2::{alloc::AllocError, boxed::Box};
+use async_ringbuf::{
+    Arc, AsyncRb,
+    traits::{Producer, Split},
+    wrap::{AsyncCons, AsyncProd},
+};
+use ringbuf::{SharedRb, storage::Ref};
 
-use crate::map::helper::ops::{MapError, MapOps};
-use crate::map::helper::{TypedMap, with_typed_map};
-use crate::map::runtime::pool::{self, MapKind, RawResource, ResourceId, allocator};
+use crate::map::{
+    helper::{
+        TypedMap, with_typed_map,
+        ops::{MapError, MapOps},
+    },
+    runtime::pool::{self, MapKind, RawResource, ResourceId, allocator},
+};
 
-pub const MAX_RECORD_BYTES: usize = 256;
-pub const RINGBUF_SLOT_BYTES: usize = MAX_RECORD_BYTES + 4;
+pub(crate) const MAX_RECORD_BYTES: usize = 256;
+pub(crate) const RINGBUF_SLOT_BYTES: usize = MAX_RECORD_BYTES + 4;
 
 /// Fixed-size async ring element (LE u32 length prefix + payload).
-pub type RingbufRecord = [u8; RINGBUF_SLOT_BYTES];
+pub(crate) type RingbufRecord = [u8; RINGBUF_SLOT_BYTES];
 
 /// async-ringbuf consumer half (RX).
 pub type RingbufRx = AsyncCons<Arc<AsyncRb<Ref<'static, RingbufRecord>>>>;
@@ -46,12 +47,12 @@ pub fn ringbuf_record_payload(record: &RingbufRecord) -> Option<&[u8]> {
     Some(&record[4..4 + len])
 }
 
-pub fn ringbuf_slot_count(byte_capacity: usize) -> usize {
+pub(crate) fn ringbuf_slot_count(byte_capacity: usize) -> usize {
     core::cmp::max(16, byte_capacity / RINGBUF_SLOT_BYTES)
 }
 
 /// Combined BPF TX byte ring + async RX slot ring.
-pub struct RingbufMap {
+pub(crate) struct RingbufMap {
     pub bpf: BpfRingBuf,
     slots: Box<[MaybeUninit<RingbufRecord>], &'static talc::TalcCell<talc::source::Manual>>,
     prod: AsyncProd<Arc<AsyncRb<Ref<'static, RingbufRecord>>>>,
@@ -75,7 +76,7 @@ impl RingbufMap {
 }
 
 /// BPF byte ring (XDP TX only).
-pub struct BpfRingBuf {
+pub(crate) struct BpfRingBuf {
     data: Box<[u8], &'static talc::TalcCell<talc::source::Manual>>,
     capacity: usize,
     prod: usize,
@@ -147,7 +148,10 @@ pub(crate) fn take_rx_consumer(map: &mut RingbufMap) -> Option<RingbufRx> {
     map.cons_slot.take()
 }
 
-pub async fn create_bpf_ringbuf(id: ResourceId, byte_capacity: usize) -> Result<(), AllocError> {
+pub(crate) async fn create_bpf_ringbuf(
+    id: ResourceId,
+    byte_capacity: usize,
+) -> Result<(), AllocError> {
     let _ = (id, byte_capacity);
     unimplemented!("RINGBUF is deferred");
 }
@@ -274,31 +278,31 @@ fn with_ring_matching<R>(
 /// BPF ringbuf helpers are deferred: not dispatched from `helper_dispatcher`.
 /// Kept for file structure / future restore; return `-ENOTSUP` if called.
 #[allow(dead_code)]
-pub fn helper_ringbuf_reserve(map: usize, size: usize, _flags: usize) -> usize {
+pub(crate) fn helper_ringbuf_reserve(map: usize, size: usize, _flags: usize) -> usize {
     let _ = (map, size);
     (-95i32) as usize
 }
 
 #[allow(dead_code)]
-pub fn helper_ringbuf_submit(data: usize) -> usize {
+pub(crate) fn helper_ringbuf_submit(data: usize) -> usize {
     let _ = data;
     (-95i32) as usize
 }
 
 #[allow(dead_code)]
-pub fn helper_ringbuf_discard(data: usize) -> usize {
+pub(crate) fn helper_ringbuf_discard(data: usize) -> usize {
     let _ = data;
     (-95i32) as usize
 }
 
 #[allow(dead_code)]
-pub fn helper_ringbuf_output(map: usize, data: usize, size: usize, _flags: usize) -> usize {
+pub(crate) fn helper_ringbuf_output(map: usize, data: usize, size: usize, _flags: usize) -> usize {
     let _ = (map, data, size);
     (-95i32) as usize
 }
 
 #[allow(dead_code)]
-pub fn helper_ringbuf_query(map: usize, _flags: usize) -> usize {
+pub(crate) fn helper_ringbuf_query(map: usize, _flags: usize) -> usize {
     let _ = map;
     (-95i32) as usize
 }

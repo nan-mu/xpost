@@ -2,9 +2,10 @@
 
 use hashbrown::HashMap;
 
-use super::state::MAX_VMR_BINDS;
-use crate::map::MapId;
-use crate::map::runtime::pool::TalcAlloc;
+use crate::{
+    map::{MapId, runtime::pool::TalcAlloc},
+    xdp::state::MAX_VMR_BINDS,
+};
 
 /// One published VMR→RMA binding for helpers during lease.
 struct VmrBind {

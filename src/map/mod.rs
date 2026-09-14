@@ -1,32 +1,36 @@
 //! XDP MAP resource pool + BPF map types + helper ABI.
 
-pub mod builder;
-pub mod helper;
-pub mod kinds;
-pub mod runtime;
+pub(crate) mod builder;
+pub(crate) mod helper;
+pub(crate) mod kinds;
+pub(crate) mod runtime;
 
 #[cfg(feature = "ringbuf")]
 pub use builder::RingbufView;
-pub use builder::{ArrayView, CompleteBuilder, HashView, MapBuilder as TypedMapBuilder, MapType};
+pub use builder::{
+    ArrayView, CompleteBuilder, HasCapacity, HasKey, HasName, HasValue, HashView, Incomplete,
+    MapBuilder as TypedMapBuilder, MapType,
+};
 pub use builder::{MapKey, MapValue};
 
-pub use helper::ops;
-pub use helper::{
-    AliasError, BPF_ANY, BPF_EXIST, BPF_NOEXIST, MAX_MAP_ALIASES, bind_map_symbols,
-    clear_map_aliases, helper_delete, helper_for_each_map_elem, helper_lookup, helper_update,
-    resolve_map_id, set_map_aliases, unbind_map_addr,
+pub use helper::{MapError, MapOps, bind_map_symbols};
+/// Re-export map ops under the historical `map::ops` path.
+pub mod ops {
+    pub use crate::map::helper::ops::{MapError, MapOps};
+}
+pub(crate) use helper::{
+    BPF_ANY, clear_map_aliases, helper_delete, helper_lookup, helper_update, resolve_map_id,
+    set_map_aliases,
 };
-pub use helper::{MapError, MapOps};
 
-pub use kinds::hash::{BpfHashTable, HashBuildError, KeyBlob, ValSlot};
 #[cfg(feature = "ringbuf")]
-pub use kinds::ringbuf;
-#[cfg(feature = "ringbuf")]
-pub use kinds::ringbuf::{
-    MAX_RECORD_BYTES as RINGBUF_MAX_RECORD_BYTES, RINGBUF_SLOT_BYTES, RingbufRecord, RingbufRx,
+pub(crate) use kinds::ringbuf::{
+    MAX_RECORD_BYTES as RINGBUF_MAX_RECORD_BYTES, RINGBUF_SLOT_BYTES, RingbufRecord,
     helper_ringbuf_discard, helper_ringbuf_output, helper_ringbuf_query, helper_ringbuf_reserve,
-    helper_ringbuf_submit, ringbuf_record_payload,
+    helper_ringbuf_submit,
 };
+#[cfg(feature = "ringbuf")]
+pub use kinds::ringbuf::{RingbufRx, ringbuf_record_payload};
 
 #[cfg(feature = "ringbuf")]
 pub use runtime::MapIdxExt;
@@ -53,16 +57,16 @@ pub struct BootMapDesc {
 pub struct MapBuilder;
 
 impl MapBuilder {
-    pub fn hash() -> TypedMapBuilder<HashView, builder::Incomplete> {
+    pub fn hash() -> TypedMapBuilder<HashView, Incomplete> {
         TypedMapBuilder::hash()
     }
 
-    pub fn array() -> TypedMapBuilder<ArrayView, builder::Incomplete> {
+    pub fn array() -> TypedMapBuilder<ArrayView, Incomplete> {
         TypedMapBuilder::array()
     }
 
     #[cfg(feature = "ringbuf")]
-    pub fn ringbuf() -> TypedMapBuilder<RingbufView, builder::Incomplete> {
+    pub fn ringbuf() -> TypedMapBuilder<RingbufView, Incomplete> {
         TypedMapBuilder::ringbuf()
     }
 
@@ -81,11 +85,19 @@ pub const AOT_MAP_BINDS: &[(&str, usize)] = &[];
 pub const AOT_MAP_USER_NAMES: &[&str] = &[];
 
 /// Stubs formerly emitted by board bpf_maps codegen (library no longer includes OUT_DIR).
-pub const FIRMWARE_MAP_COUNT: usize = 0;
-pub const FIRMWARE_HAS_ARRAY: bool = false;
-pub const FIRMWARE_HAS_HASH: bool = false;
-pub const FIRMWARE_HAS_RINGBUF: bool = false;
-pub const SELFTEST_MAP_ID: MapIdx = 0;
-pub const SELFTEST_MAP_TYPE: &str = "stub";
-pub const SELFTEST_KEY_SIZE: usize = 4;
-pub const SELFTEST_VALUE_SIZE: usize = 8;
+#[allow(dead_code)]
+pub(crate) const FIRMWARE_MAP_COUNT: usize = 0;
+#[allow(dead_code)]
+pub(crate) const FIRMWARE_HAS_ARRAY: bool = false;
+#[allow(dead_code)]
+pub(crate) const FIRMWARE_HAS_HASH: bool = false;
+#[allow(dead_code)]
+pub(crate) const FIRMWARE_HAS_RINGBUF: bool = false;
+#[allow(dead_code)]
+pub(crate) const SELFTEST_MAP_ID: MapIdx = 0;
+#[allow(dead_code)]
+pub(crate) const SELFTEST_MAP_TYPE: &str = "stub";
+#[allow(dead_code)]
+pub(crate) const SELFTEST_KEY_SIZE: usize = 4;
+#[allow(dead_code)]
+pub(crate) const SELFTEST_VALUE_SIZE: usize = 8;

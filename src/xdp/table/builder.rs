@@ -1,11 +1,12 @@
 //! Unique XDP image metadata registration factory.
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
-use crate::xdp::error::XdpError;
-use crate::xdp::meta::{RequiredMap, XdpArch, XdpLocation, XdpMeta};
-use crate::xdp::{XdpId, XdpRt, XdpTableId};
+use crate::xdp::{
+    XdpId, XdpRt, XdpTableId,
+    error::XdpError,
+    meta::{RequiredMap, XdpArch, XdpLocation, XdpMeta},
+};
 
 /// Incomplete builder marker.
 #[derive(Clone, Copy, Debug, Default)]
@@ -98,8 +99,11 @@ impl XdpBuilder<Incomplete> {
             } else {
                 helper_address
             };
-            let required: alloc::vec::Vec<_> =
-                image.required_maps.iter().map(|m| m.to_required()).collect();
+            let required: alloc::vec::Vec<_> = image
+                .required_maps
+                .iter()
+                .map(|m| m.to_required())
+                .collect();
             let id = rt.push_at_table(
                 image.name,
                 image.bytes,
@@ -227,9 +231,7 @@ impl XdpBuilder<Complete> {
         if self.image_len == 0 || self.image_len > cap {
             return Err(XdpError::ImageTooLarge);
         }
-        let offset = table_id
-            .checked_mul(cap)
-            .ok_or(XdpError::TableIdOverflow)?;
+        let offset = table_id.checked_mul(cap).ok_or(XdpError::TableIdOverflow)?;
         if offset.saturating_add(cap) > rt.table.capacity() {
             return Err(XdpError::TableFull);
         }

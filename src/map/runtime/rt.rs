@@ -1,19 +1,21 @@
 //! Map runtime — [`MapRt`], guards, and embedder `init` entrypoint.
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use allocator_api2::alloc::AllocError;
 use embassy_sync::once_lock::OnceLock;
 
-use super::pool::{RawResource, allocator};
-use crate::map::builder::traits::layout_size;
-use crate::map::builder::{CompleteBuilder, MapType};
-use crate::map::kinds::array::{self, BpfArrayMap};
-use crate::map::kinds::hash::{self, BpfHashMap, BpfHashTable};
+use crate::map::{
+    MapRtGuard, RtMutex,
+    builder::{CompleteBuilder, MapType, traits::layout_size},
+    kinds::{
+        array::{self, BpfArrayMap},
+        hash::{self, BpfHashMap, BpfHashTable},
+    },
+    runtime::pool::{RawResource, allocator},
+};
 #[cfg(feature = "ringbuf")]
 use crate::map::kinds::ringbuf::{self, RingbufRx};
-use crate::map::{MapRtGuard, RtMutex};
 
 /// Map index into [`MapRt::meta`].
 pub type MapIdx = usize;
@@ -21,7 +23,7 @@ pub type MapIdx = usize;
 pub type MapId = MapIdx;
 
 /// Legacy alias — XDP helpers and codegen still use this name internally.
-pub type ResourceId = MapIdx;
+pub(crate) type ResourceId = MapIdx;
 
 /// Global map runtime singleton.
 pub static MAP_RT: OnceLock<RtMutex<MapRt>> = OnceLock::new();
@@ -236,7 +238,7 @@ impl MapRt {
             size,
             storage,
         });
-        let _ = super::names::register_map_name_idx(&self.meta[idx].name, idx);
+        let _ = crate::map::runtime::names::register_map_name_idx(&self.meta[idx].name, idx);
         Ok(idx)
     }
 
@@ -289,7 +291,7 @@ impl MapRt {
         if meta.storage.users > 0 {
             return Err(Error::Busy);
         }
-        super::names::unregister_map_name(&meta.name);
+        crate::map::runtime::names::unregister_map_name(&meta.name);
         self.meta.remove(idx);
         Ok(())
     }
@@ -362,7 +364,7 @@ pub struct MapMutGuard<'a> {
 }
 
 impl MapGuard<'_> {
-    pub fn as_hash(&self) -> Result<&BpfHashTable, GuardError> {
+    pub(crate) fn as_hash(&self) -> Result<&BpfHashTable, GuardError> {
         if self.meta.map_type != MapType::Hash {
             return Err(GuardError::TypeMismatch);
         }
@@ -384,7 +386,7 @@ impl MapGuard<'_> {
 }
 
 impl MapMutGuard<'_> {
-    pub fn as_hash(&mut self) -> Result<&mut BpfHashTable, GuardError> {
+    pub(crate) fn as_hash(&mut self) -> Result<&mut BpfHashTable, GuardError> {
         if self.meta.map_type != MapType::Hash {
             return Err(GuardError::TypeMismatch);
         }

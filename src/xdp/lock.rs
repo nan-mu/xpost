@@ -1,7 +1,9 @@
 //! Shared embassy_sync lock aliases for the XDP runtime.
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::{Mutex, MutexGuard};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    mutex::{Mutex, MutexGuard},
+};
 
 pub type RtMutex<T> = Mutex<CriticalSectionRawMutex, T>;
 pub type RtMutexGuard<'a, T> = MutexGuard<'a, CriticalSectionRawMutex, T>;

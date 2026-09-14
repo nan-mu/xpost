@@ -3,10 +3,10 @@
 //! Ingress and board hooks should pull numeric limits from here; atomics for
 //! lease/flight live alongside them.
 
-use super::lock::RtMutex;
-use crate::xdp::XdpRt;
 use embassy_sync::once_lock::OnceLock;
 use portable_atomic::{AtomicBool, AtomicUsize};
+
+use crate::xdp::{XdpRt, lock::RtMutex};
 
 // —— runtime table capacities ——
 
@@ -32,20 +32,6 @@ pub(crate) const STACK_CANARY_WORDS: usize = 8;
 pub(crate) const STACK_CANARY_MAGIC: u32 = 0xA07_CAFE;
 /// Bytes left unused between `sp` and the canary band (args / align gap).
 pub(crate) const STACK_CANARY_GAP_BYTES: usize = 16;
-
-// —— esp-radio / Wi-Fi iface ids (esp_wifi internal) ——
-
-pub(crate) const WIFI_IF_STA: u32 = 0;
-pub(crate) const WIFI_IF_AP: u32 = 1;
-pub(crate) const ESP_OK: i32 = 0;
-
-// —— zero-copy TX ownership tokens (ingress::egress) ——
-
-/// Match the default maximum Wi-Fi RX burst; exhaustion fails closed (drop).
-pub(crate) const TX_TOKEN_CAPACITY: usize = 16;
-pub(crate) const TX_TOKEN_SLOT_EMPTY: usize = 0;
-pub(crate) const TX_TOKEN_SLOT_OWNED: usize = 1;
-pub(crate) const TX_TOKEN_SLOT_RELEASING: usize = 2;
 
 // —— lease / flight atomics ——
 

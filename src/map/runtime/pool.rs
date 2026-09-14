@@ -1,21 +1,20 @@
 //! Talc allocator + [`RawResource`] storage shell.
 
-use core::alloc::{GlobalAlloc, Layout};
-use core::mem::align_of;
-use core::ptr::NonNull;
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    mem::align_of,
+    ptr::NonNull,
+};
 
-use allocator_api2::alloc::AllocError;
-use allocator_api2::boxed::Box;
+use allocator_api2::{alloc::AllocError, boxed::Box};
 use log::error;
-use talc::TalcCell;
-use talc::source::Manual;
+use talc::{TalcCell, source::Manual};
 
-use super::rt as runtime;
-use super::rt::MapIdx;
+use crate::map::runtime::rt::{self as runtime, MapIdx};
 
 pub const HEAP_SIZE: usize = 65536;
 
-pub struct SyncTalc(TalcCell<Manual>);
+pub(crate) struct SyncTalc(TalcCell<Manual>);
 unsafe impl Sync for SyncTalc {}
 
 impl SyncTalc {
@@ -25,7 +24,7 @@ impl SyncTalc {
     }
 
     #[inline]
-    pub fn allocated_bytes(&self) -> usize {
+    pub(crate) fn allocated_bytes(&self) -> usize {
         self.0.counters().allocated_bytes
     }
 
@@ -42,10 +41,10 @@ impl SyncTalc {
     }
 }
 
-pub static ALLOCATOR: SyncTalc = SyncTalc(TalcCell::new(Manual));
+pub(crate) static ALLOCATOR: SyncTalc = SyncTalc(TalcCell::new(Manual));
 
 #[derive(Clone, Copy)]
-pub struct TalcAlloc;
+pub(crate) struct TalcAlloc;
 
 unsafe impl allocator_api2_v02::alloc::Allocator for TalcAlloc {
     fn allocate(
@@ -72,25 +71,25 @@ unsafe impl allocator_api2_v02::alloc::Allocator for TalcAlloc {
     }
 }
 
-pub type ResourceId = MapIdx;
+pub(crate) type ResourceId = MapIdx;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MapKind {
+pub(crate) enum MapKind {
     Array,
     Hash,
     #[cfg(feature = "ringbuf")]
     Ringbuf,
 }
 
-pub struct RawResource {
-    pub ptr: *mut u8,
-    pub layout: Layout,
+pub(crate) struct RawResource {
+    pub(crate) ptr: *mut u8,
+    pub(crate) layout: Layout,
     drop_fn: unsafe fn(*mut u8),
-    pub kind: Option<MapKind>,
-    pub key_size: usize,
-    pub value_size: usize,
-    pub value_stride: usize,
-    pub users: u32,
+    pub(crate) kind: Option<MapKind>,
+    pub(crate) key_size: usize,
+    pub(crate) value_size: usize,
+    pub(crate) value_stride: usize,
+    pub(crate) users: u32,
 }
 
 unsafe impl Send for RawResource {}
@@ -112,7 +111,7 @@ impl Drop for RawResource {
     }
 }
 
-pub unsafe fn reclaim_talc_box<T>(ptr: *mut u8, tag: &'static str) {
+pub(crate) unsafe fn reclaim_talc_box<T>(ptr: *mut u8, tag: &'static str) {
     if ptr.is_null() {
         error!("[pool] reclaim {}: null", tag);
         return;
@@ -128,12 +127,12 @@ pub unsafe fn reclaim_talc_box<T>(ptr: *mut u8, tag: &'static str) {
 
 impl RawResource {
     #[inline]
-    pub unsafe fn as_ref<T>(&self) -> &T {
+    pub(crate) unsafe fn as_ref<T>(&self) -> &T {
         unsafe { &*(self.ptr as *const T) }
     }
 
     #[inline]
-    pub unsafe fn as_mut<T>(&mut self) -> &mut T {
+    pub(crate) unsafe fn as_mut<T>(&mut self) -> &mut T {
         unsafe { &mut *(self.ptr as *mut T) }
     }
 
@@ -216,13 +215,18 @@ impl RawResource {
 }
 
 #[inline]
-pub fn allocator() -> &'static TalcCell<Manual> {
+pub(crate) fn allocator() -> &'static TalcCell<Manual> {
     ALLOCATOR.cell()
 }
 
 pub(crate) mod pool_access {
-    use super::*;
-    use crate::map::MapRtGuard;
+    use crate::map::{
+        MapRtGuard,
+        runtime::{
+            pool::{MapKind, ResourceId},
+            rt as runtime,
+        },
+    };
 
     pub struct PoolWriteGuard<'a> {
         /// Held for the duration of helper access (lock token).

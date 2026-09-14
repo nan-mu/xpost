@@ -9,18 +9,20 @@ use core::cell::RefCell;
 
 use critical_section::Mutex;
 
-use crate::map::kinds::ringbuf::RingbufMap;
-use crate::map::runtime::pool::{MapKind, ResourceId, pool_try_write};
+use crate::map::{
+    kinds::ringbuf::RingbufMap,
+    runtime::pool::{MapKind, ResourceId, pool_try_write},
+};
 
 /// `struct xpost_evt_feed` in `xdp_drop.c`
-pub const EVT_FEED: u32 = 1;
+pub(crate) const EVT_FEED: u32 = 1;
 /// `struct xpost_evt_bench` — cap reached; host should stop blast.
-pub const EVT_BENCH_DONE: u32 = 2;
+pub(crate) const EVT_BENCH_DONE: u32 = 2;
 /// Idle notification (board-defined).
-pub const EVT_IDLE: u32 = 3;
+pub(crate) const EVT_IDLE: u32 = 3;
 
-pub const FEED_REC_LEN: usize = 8;
-pub const BENCH_REC_LEN: usize = 32;
+pub(crate) const FEED_REC_LEN: usize = 8;
+pub(crate) const BENCH_REC_LEN: usize = 32;
 
 type WakeHook = fn();
 type BenchHook = fn(u64, u64, u64);
@@ -44,54 +46,54 @@ static STATE: Mutex<RefCell<State>> = Mutex::new(RefCell::new(State {
 }));
 
 /// Bind the DUT event ring by registered map name.
-pub fn bind_ring_named(name: &str) {
+pub(crate) fn bind_ring_named(name: &str) {
     if let Some(id) = crate::map::resolve_map_name(name) {
         bind_ring(id);
     }
 }
 
 /// Bind the DUT event ring (`ResourceId` from [`crate::map::resolve_map_name`]).
-pub fn bind_ring(id: ResourceId) {
+pub(crate) fn bind_ring(id: ResourceId) {
     critical_section::with(|cs| {
         STATE.borrow_ref_mut(cs).ring_id = Some(id);
     });
 }
 
 /// Board hook: pend software interrupt when a record needs immediate service.
-pub fn set_wake_hook(hook: WakeHook) {
+pub(crate) fn set_wake_hook(hook: WakeHook) {
     critical_section::with(|cs| {
         STATE.borrow_ref_mut(cs).wake = Some(hook);
     });
 }
 
-pub fn set_bench_done_hook(hook: BenchHook) {
+pub(crate) fn set_bench_done_hook(hook: BenchHook) {
     critical_section::with(|cs| {
         STATE.borrow_ref_mut(cs).on_bench_done = Some(hook);
     });
 }
 
-pub fn set_idle_hook(hook: IdleHook) {
+pub(crate) fn set_idle_hook(hook: IdleHook) {
     critical_section::with(|cs| {
         STATE.borrow_ref_mut(cs).on_idle = Some(hook);
     });
 }
 
-pub fn set_feed_hook(hook: FeedHook) {
+pub(crate) fn set_feed_hook(hook: FeedHook) {
     critical_section::with(|cs| {
         STATE.borrow_ref_mut(cs).on_feed = Some(hook);
     });
 }
 
 /// Called from [`crate::map::kinds::ringbuf`] after a record is committed.
-pub fn on_ring_produced() {}
+pub(crate) fn on_ring_produced() {}
 
 /// Unsupported BPF helper leftover: `bpf_xpost_evt_wake` is not dispatched.
 #[allow(dead_code)]
-pub fn helper_wake() -> usize {
+pub(crate) fn helper_wake() -> usize {
     usize::MAX
 }
 
-pub fn emit_idle() {
+pub(crate) fn emit_idle() {
     let mut rec = [0u8; FEED_REC_LEN];
     rec[0..4].copy_from_slice(&EVT_IDLE.to_le_bytes());
     let _ = output_record(&rec);
@@ -99,7 +101,7 @@ pub fn emit_idle() {
 }
 
 /// Drain pending records (ISR / timer). Returns number dispatched.
-pub fn drain_isr() -> usize {
+pub(crate) fn drain_isr() -> usize {
     let ring_id = critical_section::with(|cs| STATE.borrow_ref(cs).ring_id);
     let Some(ring_id) = ring_id else {
         return 0;
@@ -143,7 +145,7 @@ fn try_pop_record(ring_id: ResourceId, out: &mut [u8]) -> Option<usize> {
 }
 
 /// Decode one ringbuf record (feed / bench_done / idle hooks).
-pub fn dispatch_record(buf: &[u8]) {
+pub(crate) fn dispatch_record(buf: &[u8]) {
     dispatch(buf);
 }
 
