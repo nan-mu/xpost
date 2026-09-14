@@ -1,7 +1,7 @@
 //! RX ingress: build `xdp_md`, run leased XDP under a critical section, return action/window.
 //!
-//! Radio TX ([`egress`]) and action dispatch ([`action`] / [`esp_radio`]) live
-//! beside invoke so the CS only covers flight state ([`XDP_FRAME`]).
+//! Action mapping and Wi-Fi attach live in [`esp_radio`]; zero-copy Tx ownership
+//! is handled by esp-radio's `xdp` feature.
 //!
 //! **Stack contract (E3):** the XDP image runs on the **shared caller stack**
 //! (Wi-Fi / embassy callback). There is no dedicated `XDP_STACK` switch. The
@@ -14,7 +14,6 @@
 //! (root `.cargo/config.toml` sets `--target riscv32imc-unknown-none-elf`).
 
 mod action;
-mod egress;
 mod stack;
 
 pub(crate) mod ctx;
@@ -45,18 +44,12 @@ pub(crate) struct RunResult {
     pub(crate) window: PacketWindow,
 }
 
-/// True when an XDP image is leased for RX.
-#[inline]
-pub(crate) fn is_leased() -> bool {
-    ACTIVE.load(Ordering::Acquire)
-}
-
 /// Run the leased program on `data`.
 ///
-/// - **Pre (CS外):** build `xdp_md`
-/// - **CS内:** validate lease/entry, `jalr` on the shared caller stack, restore
+/// - **Pre (Out of CS):** build `xdp_md`
+/// - **In CS:** validate lease/entry, `jalr` on the shared caller stack, restore
 ///   callee-saved regs
-/// - **Post (CS外):** return the final md window with the action
+/// - **Post (Out of CS):** return the final md window with the action
 ///
 /// Returns `None` when not leased, raced with release, or reentrancy is
 /// detected (`IN_FLIGHT != 0` at entry). Caller treats as PASS.
@@ -97,12 +90,15 @@ pub(crate) fn run(data: &mut [u8]) -> Option<RunResult> {
 ///
 /// AOT still emits its own BPF prologue/epilogue on top of this stack.
 ///
+/// `XDP_FRAME` is addressed via `lla t2, …` **before and after** `jalr`. An
+/// `in(reg)` frame pointer does not survive the call: LLVM may place it in a
+/// caller-saved reg (observed: `a2`), which the image is free to clobber.
+///
 /// # Safety
 /// `entry` must be a live IRAM XDP entry; `ctx` must remain valid for the call.
 /// Caller must hold a critical section for the whole call (protects `XDP_FRAME`).
 #[inline(always)]
 unsafe fn invoke_aot(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
-    let frame = core::ptr::addr_of_mut!(XDP_FRAME);
     // Soft canary: paint words just below current sp before jalr.
     stack::paint_canary();
     let result: i32;
@@ -113,46 +109,50 @@ unsafe fn invoke_aot(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
             "andi t1, t0, 15",
             "bnez t1, 2f",           // misaligned → force PASS path via sentinel
             "lla t1, 1f",
-            "sw t0, 0({frame})",     // save caller sp for N3 return restore
-            "sw t1, 4({frame})",
-            "sw s0, 8({frame})",
-            "sw s1, 12({frame})",
-            "sw s2, 16({frame})",
-            "sw s3, 20({frame})",
-            "sw s4, 24({frame})",
-            "sw s5, 28({frame})",
-            "sw s6, 32({frame})",
-            "sw s7, 36({frame})",
-            "sw s8, 40({frame})",
-            "sw s9, 44({frame})",
-            "sw s10, 48({frame})",
-            "sw s11, 52({frame})",
+            "lla t2, {frame_sym}",
+            "sw t0, 0(t2)",          // save caller sp for N3 return restore
+            "sw t1, 4(t2)",          // unused after jalr (ra set by jalr); kept for frame layout
+            "sw s0, 8(t2)",
+            "sw s1, 12(t2)",
+            "sw s2, 16(t2)",
+            "sw s3, 20(t2)",
+            "sw s4, 24(t2)",
+            "sw s5, 28(t2)",
+            "sw s6, 32(t2)",
+            "sw s7, 36(t2)",
+            "sw s8, 40(t2)",
+            "sw s9, 44(t2)",
+            "sw s10, 48(t2)",
+            "sw s11, 52(t2)",
             "jalr {entry}",
             // —— firmware epilogue ——
             "1:",
-            "lw s0, 8({frame})",
-            "lw s1, 12({frame})",
-            "lw s2, 16({frame})",
-            "lw s3, 20({frame})",
-            "lw s4, 24({frame})",
-            "lw s5, 28({frame})",
-            "lw s6, 32({frame})",
-            "lw s7, 36({frame})",
-            "lw s8, 40({frame})",
-            "lw s9, 44({frame})",
-            "lw s10, 48({frame})",
-            "lw s11, 52({frame})",
-            "lw sp, 0({frame})",
+            // Rematerialize: t2 is caller-saved and dead after jalr.
+            "lla t2, {frame_sym}",
+            "lw s0, 8(t2)",
+            "lw s1, 12(t2)",
+            "lw s2, 16(t2)",
+            "lw s3, 20(t2)",
+            "lw s4, 24(t2)",
+            "lw s5, 28(t2)",
+            "lw s6, 32(t2)",
+            "lw s7, 36(t2)",
+            "lw s8, 40(t2)",
+            "lw s9, 44(t2)",
+            "lw s10, 48(t2)",
+            "lw s11, 52(t2)",
+            "lw sp, 0(t2)",
             "j 3f",
             "2:",
             "li a0, 2",              // XDP_PASS on alignment fault
             "3:",
-            frame = in(reg) frame,
+            frame_sym = sym XDP_FRAME,
             entry = in(reg) entry,
             in("a0") ctx,
             lateout("a0") result,
             out("t0") _,
             out("t1") _,
+            out("t2") _,
             clobber_abi("C")
         );
     }

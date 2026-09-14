@@ -1,125 +1,89 @@
-//! Replace `esp_radio::wifi::new` so XDP runs before the radio RX queue.
+//! XDP RX ingress via esp-radio's native-XDP [`Prog`] surface.
 //!
-//! Internals capture the original `esp_wifi_internal_reg_rxcb` callbacks via
-//! linker `--wrap` and install a trampoline. Program run is [`super::run`];
-//! action apply stays here (outside the invoke CS); [`super::egress`] owns XDP_TX.
+//! Attaches [`XDP_PROG`] before `wifi::new`. Buffer ownership stays in esp-radio.
+//! Packet window: no adjust_head; adjust_tail shrink-only → prefix of `frame`.
 
-use core::ffi::c_void;
-use core::sync::atomic::Ordering;
-
-use portable_atomic::{AtomicPtr, AtomicUsize};
+use portable_atomic::{AtomicUsize, Ordering};
 
 use super::action::XdpAction;
-use crate::xdp::state::{ESP_OK, WIFI_IF_AP, WIFI_IF_STA};
+use super::run;
+use crate::xdp::state::ACTIVE;
+use ::esp_radio::wifi::{Action, Prog, attach_prog};
 
-type WifiRxCb = Option<unsafe extern "C" fn(*mut c_void, u16, *mut c_void) -> i32>;
+/// Process-wide XDP program mounted on esp-radio RX ingress.
+pub static XDP_PROG: XdpProg = XdpProg {
+    drop_cnt: AtomicUsize::new(0),
+    failed_tx_cnt: AtomicUsize::new(0),
+};
 
-static ORIG_STA: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-static ORIG_AP: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-static WRAP_READY: AtomicUsize = AtomicUsize::new(0);
-
-unsafe extern "C" {
-    fn __real_esp_wifi_internal_reg_rxcb(ifx: u32, fn_: WifiRxCb) -> i32;
-    fn esp_wifi_internal_free_rx_buffer(buffer: *mut c_void);
+/// Prog that invokes the leased XDP image and records driver counter callbacks.
+pub struct XdpProg {
+    drop_cnt: AtomicUsize,
+    failed_tx_cnt: AtomicUsize,
 }
 
-/// Prepare the XDP trampoline, then call the stock `esp_radio::wifi::new`.
+impl XdpProg {
+    #[inline]
+    pub fn drop_count(&self) -> usize {
+        self.drop_cnt.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn failed_tx_count(&self) -> usize {
+        self.failed_tx_cnt.load(Ordering::Relaxed)
+    }
+}
+
+impl Prog for XdpProg {
+    fn run<'a>(&self, frame: &'a mut [u8]) -> (Action, &'a mut [u8]) {
+        // Fast path: not leased → Pass without md / critical section.
+        if !ACTIVE.load(Ordering::Acquire) {
+            return (Action::Pass, frame);
+        }
+        let Some(result) = run(frame) else {
+            return (Action::Pass, frame);
+        };
+        let (ok_action, bad_md_action) = match XdpAction::from(result.action) {
+            XdpAction::Aborted | XdpAction::Drop => {
+                return (Action::Drop, frame);
+            }
+            XdpAction::Pass => (Action::Pass, Action::Pass),
+            XdpAction::Tx => (Action::Tx, Action::Drop),
+        };
+
+        let window = result.window;
+        let valid = (window.data.cast_const() == frame.as_ptr()) & (window.len <= frame.len());
+
+        if !valid {
+            return (bad_md_action, frame);
+        }
+
+        (ok_action, &mut frame[..window.len])
+    }
+
+    #[inline]
+    fn count_drop(&self) {
+        self.drop_cnt.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn count_failed_tx(&self) {
+        self.failed_tx_cnt.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Install the ingress prog before creating the stock Wi-Fi controller.
 pub fn new<'d>(
     device: esp_hal::peripherals::WIFI<'d>,
-    config: esp_radio::wifi::ControllerConfig,
+    config: ::esp_radio::wifi::ControllerConfig,
 ) -> Result<
     (
-        esp_radio::wifi::WifiController<'d>,
-        esp_radio::wifi::Interfaces<'d>,
+        ::esp_radio::wifi::WifiController<'d>,
+        ::esp_radio::wifi::Interfaces<'d>,
     ),
-    esp_radio::wifi::WifiError,
+    ::esp_radio::wifi::WifiError,
 > {
-    WRAP_READY.store(1, Ordering::Release);
-    let radio = esp_radio::wifi::new(device, config);
-    if radio.is_ok() {
-        // esp-radio initializes the Wi-Fi driver (and RX callbacks) in `new`.
-        super::egress::arm_zero_copy();
-    }
-    radio
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __wrap_esp_wifi_internal_reg_rxcb(ifx: u32, fn_: WifiRxCb) -> i32 {
-    let ptr = fn_.map(|f| f as *mut ()).unwrap_or(core::ptr::null_mut());
-    match ifx {
-        WIFI_IF_STA => {
-            ORIG_STA.store(ptr, Ordering::Release);
-            unsafe { __real_esp_wifi_internal_reg_rxcb(ifx, Some(trampoline_sta)) }
-        }
-        WIFI_IF_AP => {
-            ORIG_AP.store(ptr, Ordering::Release);
-            unsafe { __real_esp_wifi_internal_reg_rxcb(ifx, Some(trampoline_ap)) }
-        }
-        _ => unsafe { __real_esp_wifi_internal_reg_rxcb(ifx, fn_) },
-    }
-}
-
-unsafe extern "C" fn trampoline_sta(buffer: *mut c_void, len: u16, eb: *mut c_void) -> i32 {
-    unsafe { hook(WIFI_IF_STA, buffer, len, eb) }
-}
-
-unsafe extern "C" fn trampoline_ap(buffer: *mut c_void, len: u16, eb: *mut c_void) -> i32 {
-    unsafe { hook(WIFI_IF_AP, buffer, len, eb) }
-}
-
-/// RX hook: run XDP when leased, then apply the action outside the invoke CS.
-unsafe fn hook(ifx: u32, buffer: *mut c_void, len: u16, eb: *mut c_void) -> i32 {
-    if WRAP_READY.load(Ordering::Acquire) == 0 || buffer.is_null() || len == 0 {
-        return unsafe { call_orig(ifx, buffer, len, eb) };
-    }
-    let frame = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), len as usize) };
-    let Some(result) = super::run(frame) else {
-        return unsafe { call_orig(ifx, buffer, len, eb) };
-    };
-    unsafe { apply(ifx, buffer, len, eb, frame, result) }
-}
-
-/// Consume `action` for one RX delivery. Must not run under the invoke CS.
-unsafe fn apply(
-    ifx: u32,
-    buffer: *mut c_void,
-    len: u16,
-    eb: *mut c_void,
-    frame: &mut [u8],
-    result: super::RunResult,
-) -> i32 {
-    match XdpAction::from(result.action) {
-        XdpAction::Pass => unsafe { call_orig(ifx, buffer, len, eb) },
-        XdpAction::Drop | XdpAction::Aborted => {
-            finish_local(eb);
-            ESP_OK
-        }
-        XdpAction::Tx => {
-            // XDP_TX (and ABI XDP_REDIRECT rewritten to Tx): same RX iface.
-            let _ = super::egress::transmit(ifx, frame, result.window, eb);
-            ESP_OK
-        }
-    }
-}
-
-unsafe fn call_orig(ifx: u32, buffer: *mut c_void, len: u16, eb: *mut c_void) -> i32 {
-    let ptr = match ifx {
-        WIFI_IF_STA => ORIG_STA.load(Ordering::Acquire),
-        WIFI_IF_AP => ORIG_AP.load(Ordering::Acquire),
-        _ => core::ptr::null_mut(),
-    };
-    if ptr.is_null() {
-        finish_local(eb);
-        return ESP_OK;
-    }
-    let cb: unsafe extern "C" fn(*mut c_void, u16, *mut c_void) -> i32 =
-        unsafe { core::mem::transmute(ptr) };
-    unsafe { cb(buffer, len, eb) }
-}
-
-#[inline]
-fn finish_local(eb: *mut c_void) {
-    if !eb.is_null() {
-        unsafe { esp_wifi_internal_free_rx_buffer(eb) };
-    }
+    // One-shot: first attach wins; retry `wifi::new` without re-attach.
+    let _ = attach_prog(&XDP_PROG);
+    ::esp_radio::wifi::new(device, config)
 }

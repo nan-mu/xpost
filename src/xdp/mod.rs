@@ -16,9 +16,9 @@ mod error;
 pub(crate) mod ingress;
 mod lock;
 pub(crate) mod map;
-mod meta;
 /// Board layout codegen (`layout.toml` → `OUT_DIR/mem_map.rs`).
 pub mod mem_map;
+mod meta;
 pub(crate) mod slot;
 mod state;
 pub(crate) mod switch;
@@ -30,14 +30,11 @@ pub use meta::{BootRequiredMap, RequiredMap, XdpLocation, XdpMeta};
 pub use slot::{Slot, XdpSlot};
 pub use state::XDP_RT;
 pub use table::builder::{Complete, Incomplete, XdpBuilder};
-pub use table::storage::{DEFAULT_IMAGE_CAPACITY, XdpTable, XdpTableStorage};
 pub(crate) use table::storage::MemoryXdpTable;
+pub use table::storage::{DEFAULT_IMAGE_CAPACITY, XdpTable, XdpTableStorage};
 
 #[cfg(feature = "esp32c3-storage")]
 pub use table::storage::EspFlashXdpTable;
-
-/// Board Wi-Fi bring-up with XDP RX wrap.
-pub use ingress::esp_radio::new;
 
 /// Static bpf.toml XDP boot descriptor (codegen → firmware `BOOT_XDPS`).
 #[derive(Clone, Copy, Debug)]
@@ -98,14 +95,19 @@ impl XdpRt {
         let storage: &'static mut dyn XdpTableStorage = unsafe {
             static mut TABLE: Option<MemoryXdpTable> = None;
             let ptr = core::ptr::addr_of_mut!(TABLE);
-            *ptr = Some(MemoryXdpTable::try_with_image_capacity(bytes, image_capacity)?);
+            *ptr = Some(MemoryXdpTable::try_with_image_capacity(
+                bytes,
+                image_capacity,
+            )?);
             (*ptr).as_mut().unwrap()
         };
         Self::init_with_table(slots, storage).await
     }
 
     /// Multi-slot init with internal SRAM cold table (legacy / tests).
-    pub(crate) async fn init_slots(slots: &'static [XdpSlot]) -> Result<XdpRtGuard<'static>, XdpError> {
+    pub(crate) async fn init_slots(
+        slots: &'static [XdpSlot],
+    ) -> Result<XdpRtGuard<'static>, XdpError> {
         Self::init_with_slots(slots).await
     }
 
@@ -527,9 +529,7 @@ impl XdpRt {
         if image_len > cap {
             return Err(XdpError::ImageTooLarge);
         }
-        let offset = table_id
-            .checked_mul(cap)
-            .ok_or(XdpError::TableIdOverflow)?;
+        let offset = table_id.checked_mul(cap).ok_or(XdpError::TableIdOverflow)?;
         if offset.saturating_add(cap) > self.table.capacity() {
             return Err(XdpError::TableFull);
         }
@@ -582,9 +582,7 @@ impl XdpRt {
                 if meta.image_len > cap {
                     return Err(XdpError::ImageTooLarge);
                 }
-                let offset = index
-                    .checked_mul(cap)
-                    .ok_or(XdpError::TableIdOverflow)?;
+                let offset = index.checked_mul(cap).ok_or(XdpError::TableIdOverflow)?;
                 if offset.saturating_add(cap) > self.table.capacity() {
                     return Err(XdpError::TableFull);
                 }
@@ -630,11 +628,7 @@ impl XdpRt {
     }
 
     /// Slot/ABI checks for `meta` against the current primary (before map deps).
-    fn validate_meta_for_primary_slot(
-        &self,
-        meta: &XdpMeta,
-        id: XdpId,
-    ) -> Result<(), XdpError> {
+    fn validate_meta_for_primary_slot(&self, meta: &XdpMeta, id: XdpId) -> Result<(), XdpError> {
         let primary = self.primary;
         // ABI/arch/helper/link_addr/image_len vs primary slot.
         self.check(id, primary)?;

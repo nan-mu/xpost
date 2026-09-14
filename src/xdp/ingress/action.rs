@@ -1,7 +1,6 @@
 //! XDP action codes (`enum xdp_action`).
 //!
-//! This target only implements TX egress. ABI value `XDP_REDIRECT` (4) is
-//! rewritten to [`XdpAction::Tx`] at the apply boundary.
+//! `XDP_REDIRECT` (4) is folded to same-iface [`XdpAction::Tx`] (no devmap).
 
 use core::fmt;
 

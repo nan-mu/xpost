@@ -123,7 +123,7 @@ static TX_TOKENS: [RxBufferOwnership; TX_TOKEN_CAPACITY] =
 
 /// Register callbacks used by `esp_wifi_internal_tx_by_ref`.
 ///
-/// Call only after `esp_radio::wifi::new` has initialized the Wi-Fi driver.
+/// Called once from the RX `reg_rxcb` wrap after the driver registers STA/AP.
 pub(super) fn arm_zero_copy() {
     let rc =
         unsafe { esp_wifi_internal_reg_netstack_buf_cb(Some(netstack_ref), Some(netstack_free)) };

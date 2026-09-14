@@ -3,9 +3,7 @@
 //! Does **not** reserve stack for the XDP image, evaluate E3
 //! (`C + A + I <= S`), or prove N2/N3.
 
-use crate::xdp::state::{
-    STACK_CANARY_GAP_BYTES, STACK_CANARY_MAGIC, STACK_CANARY_WORDS,
-};
+use crate::xdp::state::{STACK_CANARY_GAP_BYTES, STACK_CANARY_MAGIC, STACK_CANARY_WORDS};
 
 /// Soft stack probe before `jalr` into the XDP image.
 ///
@@ -20,8 +18,7 @@ pub(super) fn paint_canary() {
     unsafe {
         core::arch::asm!("mv {}, sp", out(reg) sp);
     }
-    let mut p =
-        (sp.saturating_sub(STACK_CANARY_GAP_BYTES + STACK_CANARY_WORDS * 4)) as *mut u32;
+    let mut p = (sp.saturating_sub(STACK_CANARY_GAP_BYTES + STACK_CANARY_WORDS * 4)) as *mut u32;
     for _ in 0..STACK_CANARY_WORDS {
         unsafe {
             core::ptr::write_volatile(p, STACK_CANARY_MAGIC);
@@ -41,8 +38,7 @@ pub(super) fn check_canary() -> bool {
     unsafe {
         core::arch::asm!("mv {}, sp", out(reg) sp);
     }
-    let mut p =
-        (sp.saturating_sub(STACK_CANARY_GAP_BYTES + STACK_CANARY_WORDS * 4)) as *const u32;
+    let mut p = (sp.saturating_sub(STACK_CANARY_GAP_BYTES + STACK_CANARY_WORDS * 4)) as *const u32;
     for _ in 0..STACK_CANARY_WORDS {
         let v = unsafe { core::ptr::read_volatile(p) };
         if v != STACK_CANARY_MAGIC {
