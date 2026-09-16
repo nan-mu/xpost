@@ -1,9 +1,20 @@
-//! Derive macros for [`xpost::map::MapKey`] / [`MapValue`] and runtime memory injection.
+//! Derive macros for [`xpost::map::MapKey`] / [`MapValue`], runtime injection,
+//! and Compact ELF fixed wire views (`flash_layout!`).
+
+mod flash_layout;
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{Data, DeriveInput, Fields, Ident, Token, parse_macro_input};
+
+/// Fixed wire layout over an already-loaded SRAM slice (`from_bytes` + getters).
+///
+/// No Flash I/O — caller reads via `XdpTableStorage`, then passes a subslice.
+#[proc_macro]
+pub fn flash_layout(input: TokenStream) -> TokenStream {
+    flash_layout::expand(input)
+}
 
 fn field_widths(input: &DeriveInput) -> syn::Result<Vec<usize>> {
     let Data::Struct(data) = &input.data else {
@@ -135,8 +146,9 @@ impl Parse for DeclareRuntimeArgs {
     }
 }
 
-/// Inject `map_heap` / dual-layer `slots` / `XdpTable` from firmware `OUT_DIR` codegen.
+/// Inject `map_heap` / dual-layer `slots` / SRAM `XdpTable` (`from-bpf-toml`).
 ///
+/// Firmware-first does not use this — [`::xpost::xdp::XdpRt::init`] takes FLASH.
 /// Requires `xpost-build` sync to have written `OUT_DIR/xpost_runtime_gen.rs`.
 #[proc_macro]
 pub fn declare_runtime(input: TokenStream) -> TokenStream {
@@ -162,7 +174,7 @@ pub fn declare_runtime(input: TokenStream) -> TokenStream {
         /// Build [`::xpost::xdp::XdpSlot`] descriptors over the dual-layer `#slots` buffer.
         ///
         /// # Safety
-        /// Call once at boot before [`::xpost::xdp::XdpRt::init`]; slots must not move.
+        /// Call once at boot before [`::xpost::xdp::XdpRt::init_table`]; slots must not move.
         unsafe fn __xpost_xdp_slots() -> [::xpost::xdp::XdpSlot; __xpost_runtime_gen::XDP_SLOT_COUNT] {
             let mut out =
                 [::xpost::xdp::XdpSlot::dangling_primary(); __xpost_runtime_gen::XDP_SLOT_COUNT];

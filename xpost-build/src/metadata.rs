@@ -255,15 +255,14 @@ fn parse_xdp_table(meta: &toml::Table) -> Result<Option<XdpTableMeta>> {
         .get("flash_base")
         .and_then(|v| v.as_integer())
         .unwrap_or(0) as usize;
-    let flash_len = t
-        .get("flash_len")
-        .and_then(|v| v.as_integer())
-        .ok_or_else(|| anyhow::anyhow!("xdp_table.flash_len required"))? as usize;
-    let image_capacity = t
-        .get("image_capacity")
-        .and_then(|v| v.as_integer())
-        .ok_or_else(|| anyhow::anyhow!("xdp_table.image_capacity required"))?
-        as usize;
+    let flash_len =
+        t.get("flash_len")
+            .and_then(|v| v.as_integer())
+            .ok_or_else(|| anyhow::anyhow!("xdp_table.flash_len required"))? as usize;
+    let image_capacity =
+        t.get("image_capacity")
+            .and_then(|v| v.as_integer())
+            .ok_or_else(|| anyhow::anyhow!("xdp_table.image_capacity required"))? as usize;
     let image_count = t
         .get("image_count")
         .and_then(|v| v.as_integer())
@@ -391,8 +390,8 @@ fn meta_from_layout_overlay(mut meta: XpostMetadata, layout: &Layout) -> XpostMe
             })
             .collect();
     }
-    if meta.xdp_table.is_none() {
-        meta.xdp_table = layout.cold_table.as_ref().map(|c| XdpTableMeta {
+    if let Some(c) = &layout.cold_table {
+        meta.xdp_table = Some(XdpTableMeta {
             flash_base: c.base,
             flash_len: c.length,
             image_capacity: c.image_capacity,
@@ -418,18 +417,15 @@ fn layout_with_meta(layout: &Layout, meta: &XpostMetadata) -> Layout {
 }
 
 fn layout_from_metadata(meta: &XpostMetadata) -> Result<Layout> {
-    let iram_base = meta
-        .target
-        .iram_base
-        .ok_or_else(|| anyhow::anyhow!("metadata.xpost.target.iram_base required without layout.toml"))?;
-    let arena_end = meta
-        .target
-        .arena_end
-        .ok_or_else(|| anyhow::anyhow!("metadata.xpost.target.arena_end required without layout.toml"))?;
-    let helper_len = meta
-        .target
-        .helper_length
-        .ok_or_else(|| anyhow::anyhow!("metadata.xpost.target.helper_length required without layout.toml"))?;
+    let iram_base = meta.target.iram_base.ok_or_else(|| {
+        anyhow::anyhow!("metadata.xpost.target.iram_base required without layout.toml")
+    })?;
+    let arena_end = meta.target.arena_end.ok_or_else(|| {
+        anyhow::anyhow!("metadata.xpost.target.arena_end required without layout.toml")
+    })?;
+    let helper_len = meta.target.helper_length.ok_or_else(|| {
+        anyhow::anyhow!("metadata.xpost.target.helper_length required without layout.toml")
+    })?;
 
     if meta.slots.is_empty() {
         bail!("metadata.xpost.slots empty");

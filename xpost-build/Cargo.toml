@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 description = "Board codegen for xpost integrators (layout/mem/bpf.toml → Rust + IRAM linker script)"
 
+# Independent host workspace (parent defaults to RV32).
+[workspace]
+
 [lib]
 name = "xpost_build"
 path = "src/lib.rs"

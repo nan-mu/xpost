@@ -3,7 +3,7 @@ resolver = "2"
 # MCU packages only under the default RV32 target. Host tools live under
 # `exclude` so they are not typechecked as riscv32 (thousands of false RA
 # errors from std crates). Invoke via `--manifest-path` / the `xtask` alias.
-members = [".", "esp-radio", "xpost-macros"]
+members = [".", "esp-radio", "xpost-macros", "xpost-elf"]
 default-members = ["."]
 exclude = ["xpost-build", "xtask", "agent", "examples"]
 
@@ -24,14 +24,15 @@ bench = false
 
 [features]
 default = []
-# Boot path B: bpf.toml codegen (`Builder::from_bpf_toml`).
+# Boot path B: bpf.toml codegen (`boot_maps` / `boot_xdps`).
 # Firmware-first (path A) is implicit when this is off — no named feature.
 from-bpf-toml = []
 # Incomplete — do not enable (compile_error!).
 # Pulls optional ringbuf / async-ringbuf crates; source kept for later work.
 ringbuf = ["dep:ringbuf", "dep:async-ringbuf"]
 
-# Default MCU layout sizes for path A (xpost-build sync / declare_runtime!).
+# Default MCU layout sizes for path A (xpost-build sync).
+# SRAM `declare_runtime!` table sizes are from-bpf-toml only.
 [package.metadata.xpost]
 schema_version = 1
 
@@ -66,6 +67,7 @@ helper_length = 0x200
 
 [dependencies]
 xpost-macros     = { path = "xpost-macros" }
+xpost-elf        = { path = "xpost-elf" }
 log              = "0.4.27"
 anyhow           = { version = "1.0.104", default-features = false }
 critical-section = "1.2.0"

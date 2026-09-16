@@ -13,8 +13,8 @@ mod bpf_xdp;
 mod config;
 mod layout;
 mod map_view;
-pub mod metadata;
 mod mem_map;
+pub mod metadata;
 pub mod partitions;
 pub mod sync;
 mod util;
@@ -34,9 +34,7 @@ pub use metadata::{
     METADATA_SCHEMA_VERSION, SlotEntry, TargetMeta, XdpTableMeta, XpostMetadata,
     load_from_cargo_toml, resolve_layout,
 };
-pub use partitions::{
-    PartitionRow, parse_partitions_csv, validate_xdp_table_against_partitions,
-};
+pub use partitions::{PartitionRow, parse_partitions_csv, validate_xdp_table_against_partitions};
 pub use sync::{
     SyncMode, SyncReport, SyncRequest, codegen, doctor_with_metadata, export, patch_elf,
     sync_default, sync_from_bpf_toml, validate, write_bin,

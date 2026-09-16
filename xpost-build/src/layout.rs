@@ -272,19 +272,29 @@ pub fn write_write_bin_addrs(path: &Path, layout: &Layout) -> Result<()> {
     let mut out = String::new();
     writeln!(
         out,
-        "# @generated — absolute flash addresses for `espflash write-bin <addr> <image.bin>`\n"
+        "# @generated — packed Compact ELF region for `espflash write-bin <addr> <xdp.elf>`\n"
     )
     .unwrap();
     match &layout.cold_table {
         None => {
-            writeln!(out, "# [cold_table] absent in intent layout.toml — no write-bin targets.")
-                .unwrap();
+            writeln!(
+                out,
+                "# [cold_table] absent in intent layout.toml — no write-bin targets."
+            )
+            .unwrap();
         }
         Some(c) => {
             writeln!(out, "cold_table_flash_base = {:#x}", c.base).unwrap();
             writeln!(out, "cold_table_flash_len = {:#x}", c.length).unwrap();
             writeln!(out, "image_capacity = {:#x}", c.image_capacity).unwrap();
             writeln!(out, "image_count = {}", c.image_count()).unwrap();
+            writeln!(out).unwrap();
+            writeln!(
+                out,
+                "# Packed Compact ELF (variable-length) starts at cold_table_flash_base."
+            )
+            .unwrap();
+            writeln!(out, "#   espflash write-bin {:#x} <xdp.elf>", c.base).unwrap();
             writeln!(out).unwrap();
             for i in 0..c.image_count() {
                 if let Some(abs) = c.image_abs(i) {
@@ -320,7 +330,7 @@ pub fn write_bin_report_lines(layout: &Layout) -> Vec<String> {
             ));
             if let Some(abs0) = c.image_abs(0) {
                 lines.push(format!(
-                    "write-bin example: espflash write-bin {abs0:#x} <xdp.bin>"
+                    "write-bin example: espflash write-bin {abs0:#x} <xdp.elf>"
                 ));
             }
         }

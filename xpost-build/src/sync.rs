@@ -234,7 +234,9 @@ fn write_runtime_gen(meta: &XpostMetadata, out_dir: &Path) -> Result<()> {
         meta.slots.len()
     ));
     let max_len = meta.slots.iter().map(|s| s.length).max().unwrap_or(0);
-    out.push_str(&format!("pub const XDP_SLOT_LEN_MAX: usize = {max_len:#x};\n"));
+    out.push_str(&format!(
+        "pub const XDP_SLOT_LEN_MAX: usize = {max_len:#x};\n"
+    ));
     out.push_str("pub const XDP_SLOT_LENS: &[usize] = &[");
     for (i, s) in meta.slots.iter().enumerate() {
         if i > 0 {
@@ -256,7 +258,9 @@ fn write_runtime_gen(meta: &XpostMetadata, out_dir: &Path) -> Result<()> {
         Some(t) => (t.flash_len, t.image_capacity, t.flash_base),
         None => (2 * 4096, 4096, 0usize),
     };
-    out.push_str(&format!("pub const XDP_TABLE_BYTES: usize = {table_len:#x};\n"));
+    out.push_str(&format!(
+        "pub const XDP_TABLE_BYTES: usize = {table_len:#x};\n"
+    ));
     out.push_str(&format!(
         "pub const XDP_TABLE_IMAGE_CAPACITY: usize = {image_cap:#x};\n"
     ));
@@ -273,12 +277,12 @@ fn write_empty_bpf_boot_arrays(out_dir: &Path) -> Result<()> {
         out_dir.join("bpf_maps.rs"),
         r#"// empty — path A
 pub const FIRMWARE_MAP_COUNT: usize = 0;
-pub const BOOT_MAPS: &[::xpost::map::BootMapDesc] = &[];
+pub fn boot_maps(_rt: &mut ::xpost::map::MapRt) -> Result<(), ::xpost::map::Error> { Ok(()) }
 "#,
     )?;
     fs::write(
         out_dir.join("xdp_bpf.rs"),
-        "pub static BOOT_XDPS: &[::xpost::xdp::BootXdpDesc] = &[];\n",
+        "pub fn boot_xdps(_rt: &mut ::xpost::xdp::XdpRt) -> Result<(), ::xpost::xdp::XdpError> { Ok(()) }\n",
     )?;
     fs::write(
         out_dir.join("aot_map_bind.rs"),

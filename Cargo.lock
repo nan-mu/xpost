@@ -2011,6 +2011,16 @@ dependencies = [
  "portable-atomic",
  "ringbuf",
  "talc",
+ "xpost-elf",
+ "xpost-macros",
+]
+
+[[package]]
+name = "xpost-elf"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.9.3",
+ "sha2",
  "xpost-macros",
 ]
 
