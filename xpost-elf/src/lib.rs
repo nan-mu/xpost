@@ -1,14 +1,22 @@
-//! Compact ELF V0 decode：一块 SRAM buffer、`flash_layout!` 视图、[`ByteSource`]。
+//! Compact ELF V0 decode + firmware mem-map contract blob (`XPM1`).
 //!
-//! 物理布局：EHDR | SHT×4 | `.xpost.meta` | image | names | pad | digest。
+//! Compact ELF layout：EHDR | SHT×4 | `.xpost.meta` | image | names | pad | digest。
 //!
 //! 冷区扫描分两档失败：
 //! - `HardFail`：连容器边界都算不出（非 ELF / 读失败 / 长度溢出）→ 停扫。
 //! - `SoftSkip`：`file_len` 可信，但不是合法 V0 profile → 按长度跳过，继续找下一个。
 //!
+//! 固件 ELF 上的 [mem_map]（`.xpost.mem`）只含编解码；读写 ELF 文件由 xpost-build 负责。
+//!
 //! 不含 `XdpBuilder` / map runtime；调用方把 [`ParsedContainer`] 再填进固件侧。
 
 #![no_std]
+
+mod mem_map;
+
+pub use mem_map::{
+    MAGIC, MemMapError, MemMapV0, SECTION_NAME, WIRE_SIZE, decode, encode,
+};
 
 use sha2::{Digest, Sha256};
 

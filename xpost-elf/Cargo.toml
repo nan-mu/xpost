@@ -3,7 +3,7 @@ name = "xpost-elf"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Compact ELF V0 decode (no_std); host tests and MCU cold-table scan share this crate"
+description = "Compact ELF V0 decode + XPM1 mem-map blob (no_std)"
 
 [dependencies]
 xpost-macros = { path = "../xpost-macros" }

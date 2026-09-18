@@ -28,5 +28,5 @@ pub mod helper;
 pub mod map;
 pub mod xdp;
 
-/// Board layout constants (`layout.toml` → `OUT_DIR/mem_map.rs`).
+/// Board layout constants (firmware `xpost-build` sync → `OUT_DIR/mem_map.rs`).
 pub use xdp::mem_map;

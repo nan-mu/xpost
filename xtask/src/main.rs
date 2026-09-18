@@ -56,6 +56,13 @@ enum SyncAction {
         #[arg(long)]
         contract: Option<PathBuf>,
     },
+    /// Embed XPM1 `.xpost.mem` into a linked firmware ELF (path A endpoint).
+    EmbedLayout {
+        #[arg(long)]
+        board: PathBuf,
+        #[arg(long)]
+        elf: PathBuf,
+    },
 }
 
 fn workspace_root() -> PathBuf {
@@ -186,6 +193,21 @@ fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
             };
             xpost_build::patch_elf(&req)?;
             println!("patched {}", contract.display());
+        }
+        SyncAction::EmbedLayout { board, elf } => {
+            let out = tmp_out.clone();
+            let req = xpost_build::SyncRequest {
+                mode: xpost_build::SyncMode::Default,
+                crate_manifest: &crate_manifest,
+                board_dir: Some(&board),
+                out_dir: &out,
+                contract_out: None,
+                elf_path: Some(&elf),
+            };
+            let report = xpost_build::embed_layout_sync(&req)?;
+            for line in report.lines {
+                println!("{line}");
+            }
         }
     }
     Ok(ExitCode::SUCCESS)

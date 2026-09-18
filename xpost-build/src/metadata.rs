@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use crate::layout::{ColdTable, HotRegion, Layout, MountKind, Region, compute_from_file};
+use crate::layout::{ColdTable, HotRegion, Layout, MountKind, Region};
 
 /// Schema version understood by this crate.
 pub const METADATA_SCHEMA_VERSION: u32 = 1;
@@ -89,16 +89,16 @@ impl XpostMetadata {
             ],
             xdp_table: Some(XdpTableMeta {
                 flash_base: 0,
-                flash_len: 2 * 4096,
+                flash_len: 0,
                 image_capacity: 4096,
-                image_count: Some(2),
-                partition: None,
+                image_count: None,
+                partition: Some("xdp".into()),
             }),
             target: TargetMeta {
                 arch: crate::layout::CONTRACT_ARCH.into(),
                 abi: crate::layout::CONTRACT_ABI.into(),
                 iram_base: Some(0x40380000),
-                arena_end: Some(0x40382000),
+                arena_end: Some(0x40380200),
                 helper_length: Some(0x200),
             },
             maps_names: Vec::new(),
@@ -251,14 +251,10 @@ fn parse_xdp_table(meta: &toml::Table) -> Result<Option<XdpTableMeta>> {
     let Some(t) = meta.get("xdp_table").and_then(|v| v.as_table()) else {
         return Ok(XpostMetadata::default_esp32c3().xdp_table);
     };
-    let flash_base = t
-        .get("flash_base")
-        .and_then(|v| v.as_integer())
-        .unwrap_or(0) as usize;
-    let flash_len =
-        t.get("flash_len")
-            .and_then(|v| v.as_integer())
-            .ok_or_else(|| anyhow::anyhow!("xdp_table.flash_len required"))? as usize;
+    let partition = t
+        .get("partition")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let image_capacity =
         t.get("image_capacity")
             .and_then(|v| v.as_integer())
@@ -267,10 +263,20 @@ fn parse_xdp_table(meta: &toml::Table) -> Result<Option<XdpTableMeta>> {
         .get("image_count")
         .and_then(|v| v.as_integer())
         .map(|n| n as usize);
-    let partition = t
-        .get("partition")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    // flash_base / flash_len: optional when `partition` is set (filled from partitions.csv).
+    let flash_base = t
+        .get("flash_base")
+        .and_then(|v| v.as_integer())
+        .map(|n| n as usize)
+        .unwrap_or(0);
+    let flash_len = t
+        .get("flash_len")
+        .and_then(|v| v.as_integer())
+        .map(|n| n as usize)
+        .unwrap_or(0);
+    if partition.is_none() && flash_len == 0 {
+        bail!("xdp_table needs `partition` (partitions.csv) or flash_len");
+    }
     Ok(Some(XdpTableMeta {
         flash_base,
         flash_len,
@@ -314,9 +320,11 @@ fn parse_target(meta: &toml::Table) -> Result<TargetMeta> {
     })
 }
 
-/// Merge crate metadata with optional board override metadata and/or intent `layout.toml`.
+/// Merge crate metadata with optional board Cargo.toml override.
 ///
-/// Precedence: board Cargo.toml metadata > crate metadata > intent layout.toml for IRAM.
+/// Default path: **does not** read board `layout.toml`. Cold flash span comes
+/// from `partitions.csv` when `xdp_table.partition` is set. Post-link host
+/// contract is `.xpost.mem` (XPM1) via [`crate::embed::embed_layout`].
 pub fn resolve_layout(
     crate_meta: &XpostMetadata,
     board_dir: Option<&Path>,
@@ -329,16 +337,22 @@ pub fn resolve_layout(
                 merge_metadata(&mut meta, &over);
             }
         }
-        let intent = board.join("layout.toml");
-        if intent.is_file() {
-            let layout = compute_from_file(&intent)?;
-            let meta = meta_from_layout_overlay(meta, &layout);
-            let layout = layout_with_meta(&layout, &meta);
-            return Ok((meta, layout));
-        }
+        apply_cold_from_partitions(&mut meta, board)?;
     }
     let layout = layout_from_metadata(&meta)?;
     Ok((meta, layout))
+}
+
+/// Resolve `xdp_table.flash_base` / `flash_len` from board `partitions.csv`.
+fn apply_cold_from_partitions(meta: &mut XpostMetadata, board: &Path) -> Result<()> {
+    let Some(table) = meta.xdp_table.as_mut() else {
+        return Ok(());
+    };
+    if table.partition.is_none() {
+        return Ok(());
+    }
+    let csv = board.join("partitions.csv");
+    crate::partitions::fill_xdp_table_from_csv(table, &csv)
 }
 
 fn merge_metadata(base: &mut XpostMetadata, over: &XpostMetadata) {
@@ -372,79 +386,39 @@ fn merge_metadata(base: &mut XpostMetadata, over: &XpostMetadata) {
     }
 }
 
-fn meta_from_layout_overlay(mut meta: XpostMetadata, layout: &Layout) -> XpostMetadata {
-    meta.target.iram_base = Some(layout.iram_base);
-    meta.target.arena_end = Some(layout.arena_end);
-    meta.target.helper_length = Some(layout.helper.length);
-    if meta.slots.is_empty() {
-        let primary = layout.primary_slot_index();
-        meta.slots = layout
-            .hot_regions
-            .iter()
-            .enumerate()
-            .map(|(i, r)| SlotEntry {
-                name: r.name.clone(),
-                length: r.length,
-                mount: r.mount,
-                primary: i == primary,
-            })
-            .collect();
-    }
-    if let Some(c) = &layout.cold_table {
-        meta.xdp_table = Some(XdpTableMeta {
-            flash_base: c.base,
-            flash_len: c.length,
-            image_capacity: c.image_capacity,
-            image_count: Some(c.image_count()),
-            partition: c.partition.clone(),
-        });
-    }
-    if meta.maps_names.is_empty() {
-        meta.maps_names = layout.maps_names.clone();
-    }
-    meta
-}
-
-fn layout_with_meta(layout: &Layout, meta: &XpostMetadata) -> Layout {
-    let mut out = layout.clone();
-    if let Some(t) = &meta.xdp_table {
-        out.cold_table = Some(t.to_cold_table());
-    }
-    if !meta.maps_names.is_empty() {
-        out.maps_names = meta.maps_names.clone();
-    }
-    out
-}
-
 fn layout_from_metadata(meta: &XpostMetadata) -> Result<Layout> {
     let iram_base = meta.target.iram_base.ok_or_else(|| {
-        anyhow::anyhow!("metadata.xpost.target.iram_base required without layout.toml")
-    })?;
-    let arena_end = meta.target.arena_end.ok_or_else(|| {
-        anyhow::anyhow!("metadata.xpost.target.arena_end required without layout.toml")
+        anyhow::anyhow!("metadata.xpost.target.iram_base required")
     })?;
     let helper_len = meta.target.helper_length.ok_or_else(|| {
-        anyhow::anyhow!("metadata.xpost.target.helper_length required without layout.toml")
+        anyhow::anyhow!("metadata.xpost.target.helper_length required")
     })?;
 
     if meta.slots.is_empty() {
         bail!("metadata.xpost.slots empty");
     }
+    if let Some(t) = &meta.xdp_table {
+        if t.partition.is_some() && t.flash_len == 0 {
+            bail!("xdp_table.partition set but flash_len still 0 (need partitions.csv)");
+        }
+    }
+    // Default: helper-only IRAM patch window. Slot buffers are firmware-owned
+    // (base 0 = not pinned by custom-sections.x).
+    let arena_end = iram_base + helper_len;
     let helper = Region {
         base: iram_base,
         length: helper_len,
     };
-    let mut cursor = iram_base + helper_len;
-    let mut hot_regions = Vec::with_capacity(meta.slots.len());
-    for s in &meta.slots {
-        hot_regions.push(HotRegion {
+    let hot_regions = meta
+        .slots
+        .iter()
+        .map(|s| HotRegion {
             name: s.name.clone(),
-            base: cursor,
+            base: 0,
             length: s.length,
             mount: s.mount,
-        });
-        cursor += s.length;
-    }
+        })
+        .collect();
     Ok(Layout {
         iram_base,
         arena_end,

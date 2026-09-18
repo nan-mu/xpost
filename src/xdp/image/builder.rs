@@ -88,12 +88,18 @@ impl XdpBuilder<Incomplete> {
         }
     }
 
-    /// Record the intended hot-slot link address (`HOT_SLOT_BASES[slot]`).
+    /// Record a planned slot link address from codegen (`SLOT_BASES[slot]`).
+    ///
+    /// Returns [`XdpError::UnknownSlot`] when the index is OOB or the base is
+    /// still 0 (firmware-owned buffer — pass the real address via the ELF path).
     pub fn with_slot(mut self, slot: SlotId) -> Result<Self, XdpError> {
-        let base = crate::xdp::mem_map::HOT_SLOT_BASES
+        let base = crate::xdp::mem_map::SLOT_BASES
             .get(slot)
             .copied()
             .ok_or(XdpError::UnknownSlot)?;
+        if base == 0 {
+            return Err(XdpError::UnknownSlot);
+        }
         self.link_addr = base;
         Ok(self)
     }

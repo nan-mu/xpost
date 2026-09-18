@@ -1,4 +1,4 @@
-//! Optional partitions.csv ↔ XdpTable flash region check (phased).
+//! `partitions.csv` as the flash-region source of truth for cold XDP storage.
 
 use std::fs;
 use std::path::Path;
@@ -50,8 +50,35 @@ fn parse_csv_usize(s: &str) -> Option<usize> {
     s.parse().ok()
 }
 
-/// If `partition` label is set on XdpTable meta, require a matching csv row whose
-/// offset/size cover `flash_base..flash_base+flash_len` when both sides have numbers.
+/// Fill `flash_base` / `flash_len` from the named partition row.
+///
+/// `image_capacity` stays on the metadata side; CSV only owns the flash span.
+pub fn fill_xdp_table_from_csv(table: &mut XdpTableMeta, partitions_csv: &Path) -> Result<()> {
+    let Some(label) = table.partition.clone() else {
+        bail!("xdp_table.partition required to resolve flash from partitions.csv");
+    };
+    if !partitions_csv.is_file() {
+        bail!(
+            "xdp_table.partition={label} set but {} missing",
+            partitions_csv.display()
+        );
+    }
+    let rows = parse_partitions_csv(partitions_csv)?;
+    let Some(row) = rows.iter().find(|r| r.name == label) else {
+        bail!("partitions.csv has no row named `{label}` for xdp_table.partition");
+    };
+    let (Some(off), Some(sz)) = (row.offset, row.size) else {
+        bail!("partitions.csv row `{label}` needs Offset and Size");
+    };
+    if sz == 0 {
+        bail!("partitions.csv row `{label}` Size must be > 0");
+    }
+    table.flash_base = off;
+    table.flash_len = sz;
+    Ok(())
+}
+
+/// Sanity check: metadata flash span must sit inside the named partition.
 pub fn validate_xdp_table_against_partitions(
     table: &XdpTableMeta,
     partitions_csv: &Path,

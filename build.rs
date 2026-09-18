@@ -24,19 +24,16 @@ pub const IRAM_BASE: usize = 0;
 pub const ARENA_END: usize = 0;
 pub const HELPER_DISPATCHER_BASE: usize = 0;
 pub const HELPER_WINDOW_LEN: usize = 0;
-pub const HOT_SLOT_COUNT: usize = 2;
-pub const HOT_SLOT_BASES: [usize; 2] = [0, 0];
-pub const HOT_SLOT_LENS: [usize; 2] = [0, 0];
-pub const HOT_SLOT_NAMES: [&str; 2] = ["a", "b"];
-pub const HOT_SLOT_MOUNTS: [&str; 2] = ["rx", "call"];
+pub const SLOT_COUNT: usize = 2;
+pub const SLOT_BASES: [usize; 2] = [0, 0];
+pub const SLOT_LENS: [usize; 2] = [0, 0];
+pub const SLOT_NAMES: [&str; 2] = ["a", "b"];
+pub const SLOT_MOUNTS: [&str; 2] = ["rx", "call"];
 pub const MOUNT_RX_SLOT: Option<usize> = Some(0);
-pub const HOT_SLOT_LEN_MAX: usize = 0;
-pub const HOT_A_BASE: usize = 0;
-pub const HOT_A_LEN: usize = 0;
-pub const HOT_REGION_BASE: usize = 0;
+pub const SLOT_LEN_MAX: usize = 0;
+pub const SLOT_A_LEN: usize = 0;
 pub const HOT_REGION_LEN: usize = 0;
-pub const HOT_B_BASE: usize = 0;
-pub const HOT_B_LEN: usize = 0;
+pub const SLOT_B_LEN: usize = 0;
 pub const COLD_TABLE_PRESENT: bool = false;
 pub const COLD_TABLE_FLASH_BASE: usize = 0;
 pub const COLD_TABLE_FLASH_LEN: usize = 0;
@@ -46,21 +43,15 @@ pub const LAYOUT_MAP_NAMES: &[&str] = &[];
 pub const fn cold_table_image_abs(_index: usize) -> Option<usize> {
     None
 }
-pub fn assert_linked_addresses(helper_addr: usize, slot_addrs: &[usize]) {
-    let _ = (helper_addr, slot_addrs);
-}
-pub const unsafe fn firmware_xdp_slots() -> [::xpost::xdp::XdpSlot; HOT_SLOT_COUNT] {
-    [
-        unsafe { ::xpost::xdp::XdpSlot::from_raw_parts(HOT_SLOT_BASES[0], HOT_SLOT_LENS[0], true) },
-        unsafe { ::xpost::xdp::XdpSlot::from_raw_parts(HOT_SLOT_BASES[1], HOT_SLOT_LENS[1], false) },
-    ]
+pub fn assert_linked_addresses(helper_addr: usize, _slot_addrs: &[usize]) {
+    let _ = helper_addr;
 }
 "#,
     )
     .unwrap();
     fs::write(
         out_dir.join("hot_slots.rs"),
-        r#"// stub hot slots
+        r#"// stub — firmware owns slot buffers
 pub fn slot_buf(_i: usize) -> (*mut u8, usize) {
     (core::ptr::null_mut(), 0)
 }

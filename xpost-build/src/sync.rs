@@ -1,4 +1,7 @@
-//! Unified sync entry: validate / codegen / export-contract / patch-elf / write-bin.
+//! Unified sync entry: validate / codegen / embed_layout / export / patch-elf / write-bin.
+//!
+//! Path A default endpoint is [`embed_layout_sync`] (`.xpost.mem` / XPM1).
+//! Contract `layout.toml` export remains available but is no longer the main contract.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,7 +14,7 @@ use crate::{RuntimeGen, generate_runtime, mem_map};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyncMode {
-    /// Default path A: layout/metadata only; export contract `layout.toml`.
+    /// Default path A: metadata + partitions; post-link embeds `.xpost.mem`.
     Default,
     /// Path B: `bpf.toml` + bin → boot arrays; no contract export.
     FromBpfToml,
@@ -21,7 +24,7 @@ pub struct SyncRequest<'a> {
     pub mode: SyncMode,
     /// Crate providing `[package.metadata.xpost]` (usually xpost root).
     pub crate_manifest: &'a Path,
-    /// Board dir (intent `layout.toml` / optional `bpf.toml`). Optional for metadata-only.
+    /// Board dir (`partitions.csv` / optional `bpf.toml`). Optional for metadata-only.
     pub board_dir: Option<&'a Path>,
     pub out_dir: &'a Path,
     /// Where to write contract (path A). Default: `board_dir/target/layout-export/layout.toml`.
@@ -144,7 +147,7 @@ pub fn patch_elf(req: &SyncRequest<'_>) -> Result<SyncReport> {
         bail!("patch_elf requires board_dir (intent layout for slot index)");
     };
     let contract_path = contract_path_for(req)?;
-    patch_contract_from_elf(board, &contract_path, elf)?;
+    patch_contract_from_elf(req.crate_manifest, board, &contract_path, elf)?;
     let (meta, layout) = resolve(req)?;
     Ok(SyncReport {
         meta,
@@ -181,20 +184,48 @@ pub fn write_bin(req: &SyncRequest<'_>) -> Result<SyncReport> {
     })
 }
 
-/// Full path-A sync: codegen → export (optional patch if elf set).
+/// Full path-A sync: codegen, then embed `.xpost.mem` when `elf_path` is set.
 pub fn sync_default(req: &SyncRequest<'_>) -> Result<SyncReport> {
     let mut report = codegen(req)?;
-    let exp = export(req)?;
-    report.contract_path = exp.contract_path.clone();
-    report.lines = exp.lines;
     if req.elf_path.is_some() {
-        let patched = patch_elf(req)?;
-        report.contract_path = patched.contract_path;
+        let emb = embed_layout_sync(req)?;
+        report.lines = emb.lines;
+        report.warnings.extend(emb.warnings);
     }
     Ok(report)
 }
 
-/// Full path-B sync: codegen boot arrays only (no layout.toml export).
+/// Embed XPM1 `.xpost.mem` into the linked firmware ELF (path A endpoint).
+pub fn embed_layout_sync(req: &SyncRequest<'_>) -> Result<SyncReport> {
+    if req.mode != SyncMode::Default {
+        bail!("embed_layout is only valid for SyncMode::Default");
+    }
+    let Some(elf) = req.elf_path else {
+        bail!("embed_layout requires elf_path");
+    };
+    let Some(board) = req.board_dir else {
+        bail!("embed_layout requires board_dir (partitions.csv)");
+    };
+    let map = crate::embed::embed_layout(req.crate_manifest, board, elf)?;
+    let (meta, layout) = resolve(req)?;
+    let lines = vec![
+        format!(
+            ".xpost.mem helper={:#x} slot={:#x}+{:#x} table={:#x}+{:#x}",
+            map.helper_addr, map.slot_addr, map.slot_len, map.table_addr, map.table_len
+        ),
+        format!("embedded into {}", elf.display()),
+    ];
+    Ok(SyncReport {
+        meta,
+        layout,
+        custom_sections_path: None,
+        contract_path: None,
+        warnings: Vec::new(),
+        lines,
+    })
+}
+
+/// Full path-B sync: codegen boot arrays only (no mem embed).
 pub fn sync_from_bpf_toml(req: &SyncRequest<'_>) -> Result<SyncReport> {
     let r = SyncRequest {
         mode: SyncMode::FromBpfToml,

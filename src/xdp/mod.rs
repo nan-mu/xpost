@@ -6,7 +6,7 @@ pub(crate) mod image;
 pub(crate) mod ingress;
 mod lock;
 pub(crate) mod map;
-/// Board layout codegen (`layout.toml` → `OUT_DIR/mem_map.rs`).
+/// Board layout codegen (`metadata` + `partitions.csv` → `OUT_DIR/mem_map.rs`).
 pub mod mem_map;
 pub(crate) mod slot;
 mod state;

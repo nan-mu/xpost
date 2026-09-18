@@ -1,6 +1,6 @@
-//! Fixed IRAM / cold-table addresses from board intent `layout.toml`.
+//! Fixed IRAM / cold-table addresses from board codegen.
 //!
-//! Emitted by `build.rs` / `xpost-build` for every boot path. Stub constants
-//! when `XPOST_BOARD` is unset.
+//! Emitted by firmware `xpost-build` sync (`metadata` + `partitions.csv`).
+//! Stub constants when the library builds without board sync.
 
 include!(concat!(env!("OUT_DIR"), "/mem_map.rs"));

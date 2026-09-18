@@ -52,16 +52,14 @@ mount = "call"
 primary = false
 
 [package.metadata.xpost.xdp_table]
-flash_base = 0
-flash_len = 0x2000
+partition = "xdp"
 image_capacity = 0x1000
-image_count = 2
 
 [package.metadata.xpost.target]
 arch = "riscv32"
 abi = "ilp32"
 iram_base = 0x40380000
-arena_end = 0x40382000
+arena_end = 0x40380200
 helper_length = 0x200
 
 

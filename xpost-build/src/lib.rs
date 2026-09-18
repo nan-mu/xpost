@@ -1,9 +1,9 @@
-//! Board codegen library — layout/metadata/bpf.toml → Rust + IRAM linker script.
+//! Board codegen library — metadata / partitions.csv → Rust + helper IRAM linker script.
 //!
-//! Prefer [`sync`] as the unified entry (`validate` / `codegen` / `export` /
-//! `patch_elf` / `write_bin`). Board directory may still supply intent
-//! `layout.toml` and optional `bpf.toml`. Crate sizes come from
-//! `[package.metadata.xpost]`.
+//! Prefer [`sync`] as the unified entry (`validate` / `codegen` / `embed_layout` /
+//! `write_bin`). Default path: cold flash from `partitions.csv`; after link,
+//! [`embed::embed_layout`] writes `.xpost.mem` (XPM1) into the firmware ELF.
+//! Crate sizes come from `[package.metadata.xpost]`.
 //!
 //! `mem.toml` is obsolete; codegen consumes in-memory [`Layout`].
 
@@ -11,6 +11,7 @@ mod aot_bind;
 mod bpf_maps;
 mod bpf_xdp;
 mod config;
+pub mod embed;
 mod layout;
 mod map_view;
 mod mem_map;
@@ -23,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+pub use embed::{HELPER_SYMBOL, SLOT_SYMBOL, embed_layout, read_mem_section};
 pub use layout::{
     CONTRACT_ABI, CONTRACT_ARCH, ColdTable, Layout, LayoutReport, MAX_SLOT_COUNT, MIN_SLOT_COUNT,
     MountKind, elf_symbol_addr, export_contract, map_names_from_bpf_toml, patch_contract_from_elf,
@@ -34,10 +36,12 @@ pub use metadata::{
     METADATA_SCHEMA_VERSION, SlotEntry, TargetMeta, XdpTableMeta, XpostMetadata,
     load_from_cargo_toml, resolve_layout,
 };
-pub use partitions::{PartitionRow, parse_partitions_csv, validate_xdp_table_against_partitions};
+pub use partitions::{
+    PartitionRow, fill_xdp_table_from_csv, parse_partitions_csv, validate_xdp_table_against_partitions,
+};
 pub use sync::{
-    SyncMode, SyncReport, SyncRequest, codegen, doctor_with_metadata, export, patch_elf,
-    sync_default, sync_from_bpf_toml, validate, write_bin,
+    SyncMode, SyncReport, SyncRequest, codegen, doctor_with_metadata, embed_layout_sync, export,
+    patch_elf, sync_default, sync_from_bpf_toml, validate, write_bin,
 };
 
 /// Resolve board dir: `XPOST_BOARD` env, else `manifest_dir` (example package root).
