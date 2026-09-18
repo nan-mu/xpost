@@ -1,4 +1,4 @@
-//! Compact ELF V0 decode + firmware mem-map contract blob (`XPM1`).
+//! Compact ELF V0 decode/encode + firmware mem-map contract blob (`XPM1`).
 //!
 //! Compact ELF layout：EHDR | SHT×4 | `.xpost.meta` | image | names | pad | digest。
 //!
@@ -12,8 +12,14 @@
 
 #![no_std]
 
+#[path = "encode.rs"]
+mod compact;
 mod mem_map;
 
+pub use compact::{
+    EncodeError, ImageMetadataV0, MAX_CONTAINER_SIZE, MAX_ENTRIES, MAX_META_SIZE, MapDescriptorV0,
+    SECTION_NAMES, build_container,
+};
 pub use mem_map::{
     MAGIC, MemMapError, MemMapV0, SECTION_NAME, WIRE_SIZE, decode, encode,
 };
@@ -109,6 +115,7 @@ xpost_macros::flash_layout! {
 }
 
 /// 冷区扫描一步的结果。`file_len` 只在还能定位容器尾时给出。
+#[derive(Debug)]
 pub enum ScanOutcome {
     /// 无法判断容器边界，调用方应终止扫描。
     HardFail,
@@ -120,6 +127,7 @@ pub enum ScanOutcome {
 }
 
 /// 一张已通过 wire / digest 校验的 Compact ELF 容器（相对 `at` 的偏移）。
+#[derive(Debug)]
 pub struct ParsedContainer {
     pub name: heapless::String<{ MAX_NAME + 1 }>,
     pub slot_address: usize,
@@ -132,6 +140,7 @@ pub struct ParsedContainer {
 }
 
 /// 一条 MapDescriptorV0；空 layout 为 `None`（ARRAY 的 implicit key）。
+#[derive(Debug)]
 pub struct ParsedMap {
     pub name: heapless::String<{ MAX_NAME + 1 }>,
     pub map_type: u8,
@@ -163,7 +172,7 @@ struct MapRecord<'a> {
 }
 
 #[inline(always)]
-const fn align4(x: usize) -> usize {
+pub(crate) const fn align4(x: usize) -> usize {
     (x + 3) & !3
 }
 

@@ -9,6 +9,7 @@
 
 mod aot_bind;
 mod bpf_maps;
+mod bpf_toml_meta;
 mod bpf_xdp;
 mod config;
 pub mod embed;
@@ -20,6 +21,8 @@ pub mod metadata;
 pub mod partitions;
 pub mod sync;
 mod util;
+
+pub use bpf_toml_meta::metadata_from_bpf_toml;
 
 use std::path::{Path, PathBuf};
 
