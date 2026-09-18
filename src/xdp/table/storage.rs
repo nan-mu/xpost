@@ -6,7 +6,7 @@ use crate::xdp::XdpError;
 ///
 /// `Send` is required because `XdpRt` lives in an embassy `Mutex`. On the
 /// single-core MCU path the bound is a type-system requirement only.
-pub trait XdpTableStorage: Send {
+pub(crate) trait XdpTableStorage: Send {
     fn capacity(&self) -> usize;
     fn image_capacity(&self) -> usize;
     fn read(&mut self, offset: usize, out: &mut [u8]) -> Result<(), XdpError>;
@@ -15,26 +15,37 @@ pub trait XdpTableStorage: Send {
 }
 
 /// Default image stride when embedder hands a flat SRAM/DRAM blob.
-pub const DEFAULT_IMAGE_CAPACITY: usize = 4096;
+pub(crate) const DEFAULT_IMAGE_CAPACITY: usize = 4096;
 
-/// SRAM fallback for [`crate::xdp::XdpRt::init`] when no Flash table is claimed.
-///
-/// Sized for ~two default images — ESP32-C3 has ~400 KiB SRAM total; a 512 KiB
-/// BSS table is not viable. Prefer [`crate::xdp::XdpRt::claim_table`] / Flash
-/// `[cold_table]` for real capacity.
-pub(crate) const COLD_TABLE_BYTES: usize = 2 * DEFAULT_IMAGE_CAPACITY;
+/// Packed Compact ELF region in Flash (`espflash write-bin` target).
+#[derive(Clone, Copy, Debug)]
+pub struct ColdRegion {
+    /// Absolute chip flash address of the region start.
+    pub flash_base: u32,
+    /// Region length in bytes.
+    pub flash_len: u32,
+    /// Max size of one Compact ELF container.
+    pub image_capacity: usize,
+}
 
-/// Internal cold-image BSS used until [`crate::xdp::XdpRt::claim_table`].
-pub(crate) static mut COLD_TABLE: [u8; COLD_TABLE_BYTES] = [0u8; COLD_TABLE_BYTES];
+impl ColdRegion {
+    pub const fn new(flash_base: usize, flash_len: usize, image_capacity: usize) -> Self {
+        Self {
+            flash_base: flash_base as u32,
+            flash_len: flash_len as u32,
+            image_capacity,
+        }
+    }
+}
 
-/// Embedder-owned XDP table buffer produced by `declare_runtime!`.
-///
-/// Pass `&mut XDP_TABLE` into [`crate::xdp::XdpRt::init`].
-pub struct XdpTable<const N: usize> {
+/// SRAM table for a later `from-bpf-toml` / `from-elf` boot path.
+#[allow(dead_code)]
+pub(crate) struct XdpTable<const N: usize> {
     bytes: [u8; N],
     image_capacity: usize,
 }
 
+#[allow(dead_code)]
 impl<const N: usize> XdpTable<N> {
     pub const fn new(image_capacity: usize) -> Self {
         Self {
@@ -52,11 +63,13 @@ impl<const N: usize> XdpTable<N> {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) struct MemoryXdpTable {
     bytes: &'static mut [u8],
     image_capacity: usize,
 }
 
+#[allow(dead_code)]
 impl MemoryXdpTable {
     pub(crate) fn try_new(storage: &'static mut [u8]) -> Result<Self, XdpError> {
         Self::try_with_image_capacity(storage, DEFAULT_IMAGE_CAPACITY)
@@ -76,6 +89,7 @@ impl MemoryXdpTable {
     }
 }
 
+#[allow(dead_code)]
 impl XdpTableStorage for MemoryXdpTable {
     fn capacity(&self) -> usize {
         self.bytes.len()
@@ -113,10 +127,9 @@ impl XdpTableStorage for MemoryXdpTable {
     }
 }
 
-/// Flash-backed cold table. Wire via [`crate::xdp::XdpRt::claim_table`] after
-/// constructing with partition offset/len from layout codegen
-/// (`COLD_TABLE_FLASH_*`).
-pub struct EspFlashXdpTable {
+/// Flash-backed cold table. [`crate::xdp::XdpRt::init`] constructs this from
+/// layout `[cold_table]` / `COLD_TABLE_FLASH_*`.
+pub(crate) struct EspFlashXdpTable {
     flash: esp_storage::FlashStorage<'static>,
     partition_offset: u32,
     partition_len: u32,
@@ -140,9 +153,7 @@ impl EspFlashXdpTable {
         if partition_len == 0 || partition_offset % esp_storage::FlashStorage::SECTOR_SIZE != 0 {
             return Err(XdpError::Storage);
         }
-        if partition_len as usize % image_capacity != 0 {
-            return Err(XdpError::Storage);
-        }
+        // `image_capacity` is max single Compact ELF size, not a cell stride.
         let _ = flash.capacity();
         Ok(Self {
             flash,
@@ -150,18 +161,6 @@ impl EspFlashXdpTable {
             partition_len,
             image_capacity,
         })
-    }
-
-    /// Absolute flash address of cold-table cell `table_id` (for host write-bin).
-    pub fn image_abs(&self, table_id: usize) -> Result<u32, XdpError> {
-        let off = table_id
-            .checked_mul(self.image_capacity)
-            .ok_or(XdpError::Storage)?;
-        if off.saturating_add(self.image_capacity) > self.partition_len as usize {
-            return Err(XdpError::Storage);
-        }
-        let off_u = u32::try_from(off).map_err(|_| XdpError::Storage)?;
-        Ok(self.partition_offset.saturating_add(off_u))
     }
 
     fn abs(&self, offset: usize) -> Result<u32, XdpError> {

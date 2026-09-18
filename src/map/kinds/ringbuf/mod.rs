@@ -23,8 +23,9 @@ use ringbuf::{SharedRb, storage::Ref};
 
 use crate::map::{
     helper::{
-        TypedMap, with_typed_map,
+        TypedMap,
         ops::{MapError, MapOps},
+        with_typed_map,
     },
     runtime::pool::{self, MapKind, RawResource, ResourceId, allocator},
 };

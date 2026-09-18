@@ -125,6 +125,21 @@ pub(crate) unsafe fn reclaim_talc_box<T>(ptr: *mut u8, _tag: &'static str) {
 }
 
 impl RawResource {
+    /// Spec-only placeholder (no heap allocation). Drop is a no-op on null.
+    pub(crate) fn unbound() -> Self {
+        unsafe fn noop(_: *mut u8) {}
+        Self {
+            ptr: core::ptr::null_mut(),
+            layout: Layout::from_size_align(1, 1).unwrap(),
+            drop_fn: noop,
+            kind: None,
+            key_size: 0,
+            value_size: 0,
+            value_stride: 0,
+            users: 0,
+        }
+    }
+
     #[inline]
     pub(crate) unsafe fn as_ref<T>(&self) -> &T {
         unsafe { &*(self.ptr as *const T) }

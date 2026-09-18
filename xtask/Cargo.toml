@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 description = "xpost workspace dispatcher: cargo xtask <example> <cmd>"
 
+# Independent host workspace (parent defaults to RV32).
+[workspace]
+
 [[bin]]
 name = "xtask"
 path = "src/main.rs"

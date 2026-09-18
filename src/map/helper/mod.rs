@@ -26,13 +26,13 @@ use critical_section::Mutex;
 
 pub(crate) mod ops;
 
+pub use crate::map::helper::ops::{MapError, MapOps};
+#[cfg(feature = "ringbuf")]
+use crate::map::kinds::ringbuf::RingbufMap;
 use crate::map::{
     kinds::{array::BpfArrayMap, hash::BpfHashMap},
     runtime::pool::{MapKind, ResourceId, pool_try_read, pool_try_write},
 };
-#[cfg(feature = "ringbuf")]
-use crate::map::kinds::ringbuf::RingbufMap;
-pub use crate::map::helper::ops::{MapError, MapOps};
 
 /// Linux `bpf_map_update_elem` flags (low bits).
 pub(crate) const BPF_ANY: u64 = 0;

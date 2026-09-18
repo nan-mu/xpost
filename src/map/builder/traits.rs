@@ -44,5 +44,7 @@ macro_rules! impl_map_value {
     };
 }
 
+#[allow(unused_imports)] // #[macro_export] macros; keep discoverable at `map::builder::traits`
 pub use impl_map_key;
+#[allow(unused_imports)]
 pub use impl_map_value;

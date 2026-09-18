@@ -1,4 +1,3 @@
-//! Cold XDP table storage and builder.
+//! Cold XDP table storage.
 
-pub mod builder;
-pub mod storage;
+pub(crate) mod storage;

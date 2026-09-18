@@ -2,53 +2,48 @@
 //! RX sees only the atomically published entry in `state`.
 
 mod error;
+pub(crate) mod image;
 pub(crate) mod ingress;
 mod lock;
 pub(crate) mod map;
 /// Board layout codegen (`layout.toml` → `OUT_DIR/mem_map.rs`).
 pub mod mem_map;
-mod meta;
 pub(crate) mod slot;
 mod state;
 pub mod stats;
 pub(crate) mod table;
+// TODO: `pub(crate) mod faults` — sibling error counters for ELF collect / ingress / table
+// (see plan XDP ELF faults-module; not implemented this phase).
 
 pub use error::XdpError;
+pub(crate) use image::XdpMeta;
+pub use image::{Complete, Incomplete, XdpBuilder, XdpLocation, XdpMaps};
 pub use lock::{RtMutex, RtMutexGuard, XdpRtGuard};
-pub use meta::{BootRequiredMap, RequiredMap, XdpLocation, XdpMeta};
 pub use slot::{Slot, XdpSlot};
 pub use state::XDP_RT;
 pub use stats::{ERRORS, ErrorCounters, ErrorCountersSnapshot};
-pub use table::builder::{Complete, Incomplete, XdpBuilder};
-pub(crate) use table::storage::MemoryXdpTable;
-pub use table::storage::{DEFAULT_IMAGE_CAPACITY, EspFlashXdpTable, XdpTable, XdpTableStorage};
-
-/// Static bpf.toml XDP boot descriptor (codegen → firmware `BOOT_XDPS`).
-#[derive(Clone, Copy, Debug)]
-pub struct BootXdpDesc {
-    pub name: &'static str,
-    pub table_id: XdpTableId,
-    pub link_addr: usize,
-    pub helper_address: usize,
-    pub abi_version: u32,
-    pub required_maps: &'static [BootRequiredMap],
-    pub bytes: &'static [u8],
-}
+pub use table::storage::ColdRegion;
+pub(crate) use table::storage::{DEFAULT_IMAGE_CAPACITY, EspFlashXdpTable, XdpTableStorage};
 
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::Ordering;
 
 use crate::{
-    map::MapRtGuard,
+    map::{Error as MapError, MapBuilder, MapRtGuard, MapType},
     xdp::{
         map::VmrTable,
-        meta::XdpMeta as Meta,
         state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_MAP_REFS, MAX_SLOTS, PRIMARY_ENTRY},
     },
 };
 pub type XdpId = usize;
-pub type XdpSlotId = usize;
-pub type XdpTableId = usize;
+pub type SlotId = usize;
+
+/// Boot inventory from [`XdpRt::init`]: image and map names/types only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReportItem {
+    Xdp(String),
+    Map(MapType, String),
+}
 
 pub(crate) struct SlotState {
     pub(crate) slot: XdpSlot,
@@ -57,9 +52,8 @@ pub(crate) struct SlotState {
 }
 
 pub(crate) struct ImageRecord {
-    pub(crate) meta: Meta,
-    pub(crate) table_id: XdpTableId,
-    pub(crate) image_len: usize,
+    pub(crate) meta: XdpMeta,
+    pub(crate) table_id: XdpId,
 }
 
 pub struct XdpRt {
@@ -73,42 +67,33 @@ pub struct XdpRt {
     vmr_binds: VmrTable,
 }
 impl XdpRt {
-    /// Register slots and an embedder-owned [`XdpTable`]; return the lock guard.
+    /// Firmware-first boot: Flash `[cold_table]` + IRAM slots, scan Compact ELF,
+    /// create required maps.
     ///
-    /// Preferred entry: firmware `declare_runtime!` provides `XDP_TABLE` + `XDP_SLOTS`.
-    pub async fn init<const N: usize>(
-        table: &'static mut XdpTable<N>,
-        slots: &'static [XdpSlot],
-    ) -> Result<XdpRtGuard<'static>, XdpError> {
-        let image_capacity = table.image_capacity();
-        let bytes = table.as_bytes_mut();
+    /// `flash` is the chip FLASH peripheral. Packed `xdp.elf` is written with
+    /// `espflash write-bin <cold.flash_base> <xdp.elf>`. Empty / erased regions
+    /// register nothing. [`crate::map::MapRt`] must already be initialized (heap claimed).
+    pub async fn init(
+        flash: esp_hal::peripherals::FLASH<'static>,
+        slots: &[XdpSlot],
+        cold: ColdRegion,
+        maps: &mut MapRtGuard<'_>,
+    ) -> Result<(XdpRtGuard<'static>, Vec<ReportItem>), XdpError> {
+        Self::assert_board_links()?;
+        let table = EspFlashXdpTable::try_new(
+            esp_storage::FlashStorage::new(flash),
+            cold.flash_base,
+            cold.flash_len,
+            cold.image_capacity,
+        )?;
         let storage: &'static mut dyn XdpTableStorage = unsafe {
-            static mut TABLE: Option<MemoryXdpTable> = None;
+            static mut TABLE: Option<EspFlashXdpTable> = None;
             let ptr = core::ptr::addr_of_mut!(TABLE);
-            *ptr = Some(MemoryXdpTable::try_with_image_capacity(
-                bytes,
-                image_capacity,
-            )?);
+            *ptr = Some(table);
             (*ptr).as_mut().unwrap()
         };
-        Self::init_with_table(slots, storage).await
-    }
-
-    /// Multi-slot init with internal SRAM cold table (legacy / tests).
-    pub(crate) async fn init_slots(
-        slots: &'static [XdpSlot],
-    ) -> Result<XdpRtGuard<'static>, XdpError> {
-        Self::init_with_slots(slots).await
-    }
-
-    /// Init with an embedder-owned cold table (Flash or custom SRAM).
-    pub async fn init_with_table(
-        slots: &'static [XdpSlot],
-        table: &'static mut dyn XdpTableStorage,
-    ) -> Result<XdpRtGuard<'static>, XdpError> {
-        Self::assert_board_links()?;
         let mut rt = Self {
-            table,
+            table: storage,
             slots: heapless::Vec::new(),
             images: heapless::Vec::new(),
             primary: usize::MAX,
@@ -119,66 +104,85 @@ impl XdpRt {
         for slot in slots {
             rt.register_slot(*slot)?;
         }
+        Self::start(rt, maps).await
+    }
+
+    async fn start(
+        mut rt: Self,
+        maps: &mut MapRtGuard<'_>,
+    ) -> Result<(XdpRtGuard<'static>, Vec<ReportItem>), XdpError> {
         if rt.primary == usize::MAX {
             return Err(XdpError::NoPrimarySlot);
         }
+        let _ = rt.discover_elfs();
+        let report = rt.create_required_maps(maps)?;
         if XDP_RT.init(RtMutex::new(rt)).is_err() {
             return Err(XdpError::AlreadyInitialized);
         }
-        Ok(XDP_RT.get().await.lock().await)
-    }
-
-    async fn init_with_slots(slots: &[XdpSlot]) -> Result<XdpRtGuard<'static>, XdpError> {
-        Self::assert_board_links()?;
-        let table: &'static mut dyn XdpTableStorage = unsafe {
-            static mut TABLE: Option<MemoryXdpTable> = None;
-            let ptr = core::ptr::addr_of_mut!(TABLE);
-            *ptr = Some(MemoryXdpTable::try_new(&mut *core::ptr::addr_of_mut!(
-                table::storage::COLD_TABLE
-            ))?);
-            (*ptr).as_mut().unwrap()
-        };
-        let mut rt = Self {
-            table,
-            slots: heapless::Vec::new(),
-            images: heapless::Vec::new(),
-            primary: usize::MAX,
-            leased: false,
-            map_refs: heapless::Vec::new(),
-            vmr_binds: VmrTable::new(),
-        };
-        for slot in slots {
-            rt.register_slot(*slot)?;
-        }
-        if rt.primary == usize::MAX {
-            return Err(XdpError::NoPrimarySlot);
-        }
-        if XDP_RT.init(RtMutex::new(rt)).is_err() {
-            return Err(XdpError::AlreadyInitialized);
-        }
-        Ok(XDP_RT.get().await.lock().await)
-    }
-
-    /// Replace the cold table with board Flash/SRAM storage.
-    ///
-    /// Must be called before any image is registered and while not leased.
-    /// Prefer [`Self::init_with_table`] when the backend is known at boot.
-    pub fn claim_table(&mut self, table: &'static mut dyn XdpTableStorage) -> Result<(), XdpError> {
-        if self.leased {
-            return Err(XdpError::Leased);
-        }
-        if !self.images.is_empty() {
-            return Err(XdpError::Storage);
-        }
-        self.table = table;
-        Ok(())
+        Ok((XDP_RT.get().await.lock().await, report))
     }
 
     /// Absolute flash address of cold-table cell `table_id` from layout codegen.
     ///
     /// Returns `None` when intent has no `[cold_table]` or `table_id` is OOB.
-    pub fn cold_table_image_abs(table_id: XdpTableId) -> Option<usize> {
+    pub fn cold_table_image_abs(table_id: XdpId) -> Option<usize> {
         crate::xdp::mem_map::cold_table_image_abs(table_id)
+    }
+
+    pub fn image_count(&self) -> usize {
+        self.images.len()
+    }
+
+    /// Scan the cold region for Compact ELF containers and register each image.
+    ///
+    /// Returns how many images were registered. [`XdpMeta`] stays crate-internal.
+    /// Default [`Self::init`] already runs this once.
+    pub(crate) fn discover_elfs(&mut self) -> usize {
+        let metas = image::elf::collect_metas(self.table);
+        let mut n = 0usize;
+        for meta in metas {
+            let table_id = match meta.location() {
+                XdpLocation::Table { index } => index,
+                XdpLocation::Slot { .. } => continue,
+            };
+            if self.register_meta(meta, table_id).is_ok() {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn create_required_maps(
+        &self,
+        maps: &mut MapRtGuard<'_>,
+    ) -> Result<Vec<ReportItem>, XdpError> {
+        let mut report = Vec::new();
+        for img in &self.images {
+            report.push(ReportItem::Xdp(img.meta.name.clone()));
+        }
+        for img in &self.images {
+            for spec in &img.meta.required_maps {
+                if report
+                    .iter()
+                    .any(|item| matches!(item, ReportItem::Map(_, n) if n == &spec.name))
+                {
+                    maps.check(spec).map_err(map_error)?;
+                    continue;
+                }
+                match maps.find(&spec.name) {
+                    Ok(_) => {
+                        maps.check(spec).map_err(map_error)?;
+                    }
+                    Err(MapError::NotFound) => {
+                        maps.create(MapBuilder::from_meta(spec))
+                            .map_err(map_error)?;
+                    }
+                    Err(e) => return Err(map_error(e)),
+                }
+                report.push(ReportItem::Map(spec.map_type, spec.name.clone()));
+            }
+        }
+        Ok(report)
     }
 
     /// Append another executable slot.
@@ -186,7 +190,7 @@ impl XdpRt {
         &mut self,
         slot: &'static Slot<N>,
         is_prim: bool,
-    ) -> Result<XdpSlotId, XdpError> {
+    ) -> Result<SlotId, XdpError> {
         if self.leased {
             return Err(XdpError::Leased);
         }
@@ -239,18 +243,9 @@ impl XdpRt {
     }
 
     /// Write image bytes into the cold table and register metadata via [`XdpBuilder`].
+    ///
+    /// Map deps: use [`XdpBuilder`] with [`XdpBuilder::with_maps`] instead of this helper.
     pub fn push(&mut self, name: impl Into<String>, image: &[u8]) -> Result<XdpId, XdpError> {
-        self.push_with(name, image, 0, None)
-    }
-
-    /// Like [`Self::push`], with explicit `link_addr` and optional rich map deps.
-    pub fn push_with(
-        &mut self,
-        name: impl Into<String>,
-        image: &[u8],
-        link_addr: usize,
-        required_maps: Option<&[RequiredMap]>,
-    ) -> Result<XdpId, XdpError> {
         if self.leased {
             return Err(XdpError::Leased);
         }
@@ -269,49 +264,21 @@ impl XdpRt {
         }
         self.table.erase(offset, self.table.image_capacity())?;
         self.table.write(offset, image)?;
-        let mut b = XdpBuilder::new()
-            .with_name(name)
-            .with_table_index(table_id)
-            .with_image_len(image.len())
-            .with_link_addr(link_addr);
-        if let Some(maps) = required_maps {
-            b = b.with_required_maps(maps.iter().cloned());
-        }
-        b.complete()?.build(self)
-    }
-
-    /// Register metadata for an image already present at cold-table cell `table_id`.
-    ///
-    /// Flash hand path: host wrote bytes via `espflash write-bin` to
-    /// [`Self::cold_table_image_abs`]; this only creates [`XdpMeta`]. Follow with
-    /// [`Self::r#move`] into the primary slot and [`Self::lease`].
-    pub fn register_inplace(
-        &mut self,
-        name: impl Into<String>,
-        table_id: XdpTableId,
-        image_len: usize,
-        required_maps: Option<&[RequiredMap]>,
-    ) -> Result<XdpId, XdpError> {
-        let mut b = XdpBuilder::for_existing(table_id, image_len)
-            .with_name(name)
-            .with_primary_link_addr()
-            .with_layout_helper_address();
-        if let Some(maps) = required_maps {
-            b = b.with_required_maps(maps.iter().cloned());
-        }
-        b.complete()?.build(self)
+        // Bytes now sit in the cold table; registration is the same as the Flash path.
+        XdpBuilder::from_existing(table_id, image.len(), Some(name))
+            .complete()?
+            .build(self)
     }
 
     /// Register metadata for bytes already stored at `table_id`.
     ///
     /// Hand path: Flash already programmed via `espflash write-bin` at
-    /// [`Self::cold_table_image_abs`]; prefer [`Self::register_inplace`] or
-    /// [`XdpBuilder`] then [`Self::r#move`].
+    /// [`Self::cold_table_image_abs`]; prefer [`XdpBuilder::from_existing`] then
+    /// [`Self::r#move`].
     pub(crate) fn register_meta(
         &mut self,
-        meta: Meta,
-        table_id: XdpTableId,
-        image_len: usize,
+        meta: XdpMeta,
+        table_id: XdpId,
     ) -> Result<XdpId, XdpError> {
         if self.leased {
             return Err(XdpError::Leased);
@@ -330,26 +297,13 @@ impl XdpRt {
             }
         }
         self.images
-            .push(ImageRecord {
-                meta,
-                table_id,
-                image_len,
-            })
+            .push(ImageRecord { meta, table_id })
             .map_err(|_| XdpError::TooManyImages)?;
         Ok(id)
     }
 
-    /// Write image to a forced table cell then register via builder (boot path).
-    pub(crate) fn push_at_table(
-        &mut self,
-        name: impl Into<String>,
-        image: &[u8],
-        table_id: XdpTableId,
-        link_addr: usize,
-        helper_address: usize,
-        abi_version: u32,
-        required_maps: &[RequiredMap],
-    ) -> Result<XdpId, XdpError> {
+    /// Write `image` into cold-table cell `table_id` (erase + write). Does not register meta.
+    pub fn write_table_image(&mut self, table_id: XdpId, image: &[u8]) -> Result<(), XdpError> {
         if self.leased {
             return Err(XdpError::Leased);
         }
@@ -367,16 +321,7 @@ impl XdpRt {
         }
         self.table.erase(offset, self.table.image_capacity())?;
         self.table.write(offset, image)?;
-        XdpBuilder::new()
-            .with_name(name)
-            .with_table_index(table_id)
-            .with_image_len(image.len())
-            .with_link_addr(link_addr)
-            .with_helper_address(helper_address)
-            .with_abi_version(abi_version)
-            .with_required_maps(required_maps.iter().cloned())
-            .complete()?
-            .build(self)
+        Ok(())
     }
 
     pub fn find(&self, name: &str) -> Result<XdpId, XdpError> {
@@ -400,9 +345,15 @@ impl XdpRt {
             }
         }
         let table_id = image.table_id;
-        let cap = self.table.image_capacity();
-        let offset = table_id * cap;
-        self.table.erase(offset, cap)?;
+        let (offset, erase_len) = if image.meta.container_len != 0 {
+            (image.meta.container_abs, image.meta.container_len)
+        } else {
+            (
+                table_id * self.table.image_capacity(),
+                self.table.image_capacity(),
+            )
+        };
+        self.table.erase(offset, erase_len)?;
         self.images.remove(id);
         // Fix up slot image ids after dense remove.
         for slot in self.slots.iter_mut() {
@@ -418,22 +369,14 @@ impl XdpRt {
         Ok(())
     }
 
-    pub fn meta(&self, id: XdpId) -> Result<&XdpMeta, XdpError> {
-        self.images
-            .get(id)
-            .map(|img| &img.meta)
-            .ok_or(XdpError::UnknownImage)
-    }
-
     /// Check whether `id` can execute in `slot` (no map checks).
-    pub fn check(&self, id: XdpId, slot: XdpSlotId) -> Result<(), XdpError> {
+    pub fn check(&self, id: XdpId, slot: SlotId) -> Result<(), XdpError> {
         let image = self.images.get(id).ok_or(XdpError::UnknownImage)?;
         let slot_state = self.slots.get(slot).ok_or(XdpError::UnknownSlot)?;
-        image.meta.check_abi()?;
         image.meta.check_arch()?;
         image.meta.check_helper_address()?;
         image.meta.check_slot_address(&slot_state.slot)?;
-        if image.image_len > slot_state.slot.len() {
+        if image.meta.image_len > slot_state.slot.len() {
             return Err(XdpError::ImageTooLarge);
         }
         Ok(())
@@ -450,11 +393,15 @@ impl XdpRt {
         }
     }
 
-    fn move_to_slot(&mut self, id: XdpId, slot: XdpSlotId) -> Result<(), XdpError> {
+    fn move_to_slot(&mut self, id: XdpId, slot: SlotId) -> Result<(), XdpError> {
         self.check(id, slot)?;
-        let (table_id, image_len, link_addr) = {
+        let (aot_abs, image_len, link_addr) = {
             let image = self.images.get(id).ok_or(XdpError::UnknownImage)?;
-            (image.table_id, image.image_len, image.meta.link_addr)
+            (
+                image.meta.aot_abs(),
+                image.meta.image_len,
+                image.meta.link_addr,
+            )
         };
         let (dst, capacity, occupied) = {
             let slot_state = self.slots.get(slot).ok_or(XdpError::UnknownSlot)?;
@@ -477,8 +424,7 @@ impl XdpRt {
         if image_len > buf.len() {
             return Err(XdpError::ScratchTooSmall);
         }
-        let offset = table_id * self.table.image_capacity();
-        self.table.read(offset, &mut buf[..image_len])?;
+        self.table.read(aot_abs, &mut buf[..image_len])?;
         unsafe {
             core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, image_len);
             core::ptr::write_bytes(dst.add(image_len), 0, capacity - image_len);
@@ -495,9 +441,9 @@ impl XdpRt {
         Ok(())
     }
 
-    /// Copy the unique image from its current slot back into cold-table cell `table_id`.
-    fn move_to_table(&mut self, id: XdpId, table_id: XdpTableId) -> Result<(), XdpError> {
-        let (image_len, from_slot, prev_table) = {
+    /// Copy the unique image from its current slot back into cold-table PROGBITS.
+    fn move_to_table(&mut self, id: XdpId, table_id: XdpId) -> Result<(), XdpError> {
+        let (image_len, from_slot, prev_table, aot_abs) = {
             let image = self.images.get(id).ok_or(XdpError::UnknownImage)?;
             match image.meta.location() {
                 XdpLocation::Table { index } if index == table_id => {
@@ -507,20 +453,20 @@ impl XdpRt {
                     // Already cold but different cell: reject (no multi-copy).
                     return Err(XdpError::NotImplemented);
                 }
-                XdpLocation::Slot { index } => (image.image_len, index, image.table_id),
+                XdpLocation::Slot { index } => (
+                    image.meta.image_len,
+                    index,
+                    image.table_id,
+                    image.meta.aot_abs(),
+                ),
             }
         };
         if table_id != prev_table {
             // Keep table_id stable with registration; only accept the recorded cell.
             return Err(XdpError::TableIdOverflow);
         }
-        let cap = self.table.image_capacity();
-        if image_len > cap {
+        if image_len > self.table.image_capacity() {
             return Err(XdpError::ImageTooLarge);
-        }
-        let offset = table_id.checked_mul(cap).ok_or(XdpError::TableIdOverflow)?;
-        if offset.saturating_add(cap) > self.table.capacity() {
-            return Err(XdpError::TableFull);
         }
         let mut buf = [0u8; DEFAULT_IMAGE_CAPACITY];
         if image_len > buf.len() {
@@ -534,8 +480,7 @@ impl XdpRt {
         unsafe {
             core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), image_len);
         }
-        self.table.erase(offset, cap)?;
-        self.table.write(offset, &buf[..image_len])?;
+        self.table.write(aot_abs, &buf[..image_len])?;
         let slot_state = self.slots.get_mut(from_slot).ok_or(XdpError::UnknownSlot)?;
         slot_state.loaded_len = 0;
         slot_state.image = None;
@@ -547,7 +492,7 @@ impl XdpRt {
         Ok(())
     }
 
-    pub fn set_primary(&mut self, slot: XdpSlotId) -> Result<(), XdpError> {
+    pub fn set_primary(&mut self, slot: SlotId) -> Result<(), XdpError> {
         if self.leased {
             return Err(XdpError::Leased);
         }
@@ -559,20 +504,22 @@ impl XdpRt {
         Ok(())
     }
 
-    /// Structural / future magic check that storage matches `meta` (hook; magic TODO).
+    /// Structural check that storage matches `meta`.
     pub(crate) fn validate_image_storage(&self, meta: &XdpMeta) -> Result<(), XdpError> {
         if meta.image_len == 0 {
             return Err(XdpError::ImageEmpty);
         }
         match meta.location() {
-            XdpLocation::Table { index } => {
-                let cap = self.table.image_capacity();
-                if meta.image_len > cap {
-                    return Err(XdpError::ImageTooLarge);
-                }
-                let offset = index.checked_mul(cap).ok_or(XdpError::TableIdOverflow)?;
-                if offset.saturating_add(cap) > self.table.capacity() {
+            XdpLocation::Table { .. } => {
+                let end = meta
+                    .aot_abs()
+                    .checked_add(meta.image_len)
+                    .ok_or(XdpError::TableFull)?;
+                if end > self.table.capacity() {
                     return Err(XdpError::TableFull);
+                }
+                if meta.image_len > self.table.image_capacity() {
+                    return Err(XdpError::ImageTooLarge);
                 }
                 let _ = (XdpError::ImageMagic, XdpError::ImageMismatch);
                 Ok(())
@@ -608,7 +555,7 @@ impl XdpRt {
             // No assume_injected: primary must have an XdpMeta row.
             return Err(XdpError::PrimaryEmpty);
         };
-        let meta = self.meta(id)?;
+        let meta = &self.images.get(id).ok_or(XdpError::UnknownImage)?.meta;
         self.validate_image_storage(meta)?;
         self.validate_meta_for_primary_slot(meta, id)?;
         self.check_required_maps_rich(meta, maps)?;
@@ -638,17 +585,7 @@ impl XdpRt {
             return Err(XdpError::MapsRequired);
         };
         for req in &meta.required_maps {
-            let expected = crate::map::MapRt::estimate_map_heap_size(
-                req.map_type,
-                req.key_layout.as_deref(),
-                req.value_layout.as_deref(),
-                req.len,
-            );
-            if req.heap_size != expected {
-                return Err(XdpError::TypeMismatch);
-            }
-            let spec = req.to_complete();
-            match rt.check(&spec) {
+            match rt.check(req) {
                 Ok(_) => {}
                 Err(crate::map::Error::NotFound) => return Err(XdpError::MissingMap),
                 Err(crate::map::Error::TypeMismatch) => return Err(XdpError::TypeMismatch),
@@ -773,7 +710,7 @@ impl XdpRt {
         Ok(())
     }
 
-    pub(crate) fn slot_for(&self, address: usize) -> Result<XdpSlotId, XdpError> {
+    pub fn slot_for(&self, address: usize) -> Result<SlotId, XdpError> {
         self.slots
             .iter()
             .position(|slot| slot.slot.base() == address)
@@ -784,5 +721,16 @@ impl XdpRt {
         unsafe {
             core::arch::asm!("fence.i");
         }
+    }
+}
+
+fn map_error(e: MapError) -> XdpError {
+    match e {
+        MapError::TypeMismatch => XdpError::TypeMismatch,
+        MapError::AlreadyExists => XdpError::DuplicateName,
+        MapError::InvalidName => XdpError::InvalidName,
+        MapError::NotFound => XdpError::MissingMap,
+        MapError::Oom => XdpError::MapLease,
+        _ => XdpError::MapLease,
     }
 }

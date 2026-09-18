@@ -29,7 +29,7 @@ Firmware-first is the **default** (no Cargo feature). Opt into bpf.toml boot wit
 | Mode | Feature | Example | Boot |
 |------|---------|---------|------|
 | Firmware-first (default) | _(none)_ | `esp32c3-direct` | inject + `lease` |
-| bpf.toml | `from-bpf-toml` | `esp32c3-bpf-toml` | `from_bpf_toml` + lease |
+| bpf.toml | `from-bpf-toml` | `esp32c3-bpf-toml` | `boot_maps` / `boot_xdps` + lease |
 
 Soft errors on the RX / helper path are exposed via `xpost::xdp::ERRORS` (atomics), not logs. Control-plane APIs return `Result`.
 

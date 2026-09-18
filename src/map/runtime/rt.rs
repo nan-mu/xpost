@@ -5,17 +5,17 @@ use alloc::{string::String, vec::Vec};
 use allocator_api2::alloc::AllocError;
 use embassy_sync::once_lock::OnceLock;
 
+#[cfg(feature = "ringbuf")]
+use crate::map::kinds::ringbuf::{self, RingbufRx};
 use crate::map::{
     MapRtGuard, RtMutex,
-    builder::{CompleteBuilder, MapType, traits::layout_size},
+    builder::{MapBuilder, MapType, traits::layout_size},
     kinds::{
         array::{self, BpfArrayMap},
         hash::{self, BpfHashMap, BpfHashTable},
     },
     runtime::pool::{RawResource, allocator},
 };
-#[cfg(feature = "ringbuf")]
-use crate::map::kinds::ringbuf::{self, RingbufRx};
 
 /// Map index into [`MapRt::meta`].
 pub type MapIdx = usize;
@@ -71,7 +71,7 @@ pub struct MapRt {
     pub(crate) meta: Vec<MapMeta>,
 }
 
-/// Per-map metadata row.
+/// Per-map metadata row (also used as XDP required-map dependency specs).
 pub struct MapMeta {
     pub name: String,
     pub map_type: MapType,
@@ -80,6 +80,55 @@ pub struct MapMeta {
     pub len: usize,
     pub size: usize,
     pub(crate) storage: RawResource,
+}
+
+impl MapMeta {
+    /// Build a storage-less spec from a validated [`MapBuilder`].
+    pub fn from_builder(builder: MapBuilder) -> Result<Self, Error> {
+        builder.validate()?;
+        let name = builder.name.clone().ok_or(Error::InvalidName)?;
+        let size = MapRt::estimate_map_heap_size(
+            builder.map_type,
+            builder.key_layout.as_deref(),
+            builder.value_layout.as_deref(),
+            builder.len,
+        );
+        Ok(Self {
+            name,
+            map_type: builder.map_type,
+            key_layout: builder.key_layout,
+            value_layout: builder.value_layout,
+            len: builder.len,
+            size,
+            storage: RawResource::unbound(),
+        })
+    }
+
+    /// Copy comparison fields; storage is unbound (for XDP required-map rows).
+    pub(crate) fn spec_clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            map_type: self.map_type,
+            key_layout: self.key_layout.clone(),
+            value_layout: self.value_layout.clone(),
+            len: self.len,
+            size: self.size,
+            storage: RawResource::unbound(),
+        }
+    }
+
+    /// Identity fields only (name matched by caller). `len` is excluded per Compact ELF V0.
+    fn identity_eq(&self, other: &MapMeta) -> bool {
+        self.map_type == other.map_type
+            && self.key_layout == other.key_layout
+            && self.value_layout == other.value_layout
+    }
+}
+
+impl Clone for MapMeta {
+    fn clone(&self) -> Self {
+        self.spec_clone()
+    }
 }
 
 impl MapRt {
@@ -104,13 +153,6 @@ impl MapRt {
             return Err(Error::AlreadyInitialized);
         }
         Ok(MAP_RT.get().await.lock().await)
-    }
-
-    fn validate_name(name: &str) -> Result<(), Error> {
-        if name.is_empty() || name.len() > 15 || !name.is_ascii() {
-            return Err(Error::InvalidName);
-        }
-        Ok(())
     }
 
     fn find_name(&self, name: &str) -> Option<MapIdx> {
@@ -144,49 +186,20 @@ impl MapRt {
                 let slots = ringbuf::ringbuf_slot_count(len);
                 len + slots * ringbuf::RINGBUF_SLOT_BYTES + 512
             }
-            #[cfg(not(feature = "ringbuf"))]
-            MapType::Ringbuf => 0,
-        }
-    }
-
-    /// Element byte size used in [`crate::xdp::RequiredMap::elem_size`].
-    pub(crate) fn map_elem_size(
-        map_type: MapType,
-        key_layout: Option<&[u8]>,
-        value_layout: Option<&[u8]>,
-        len: usize,
-    ) -> usize {
-        match map_type {
-            MapType::Hash => {
-                key_layout.map(|l| layout_size(l)).unwrap_or(0)
-                    + value_layout.map(|l| layout_size(l)).unwrap_or(0)
-            }
-            MapType::Array => value_layout.map(|l| layout_size(l)).unwrap_or(0),
-            MapType::Ringbuf => len,
         }
     }
 
     /// Assert heap already has a matching, usable map instance for `spec`.
-    pub fn check(&self, spec: &CompleteBuilder) -> Result<MapId, Error> {
+    ///
+    /// Identity = (name, map_type, key_layout, value_layout). Existing `len` must
+    /// be ≥ requested `len` (no resize); smaller capacity rejects the binding.
+    pub fn check(&self, spec: &MapMeta) -> Result<MapId, Error> {
         let idx = self.find_name(&spec.name).ok_or(Error::NotFound)?;
         let meta = &self.meta[idx];
-        if meta.map_type != spec.map_type
-            || meta.len != spec.len
-            || !Self::layouts_match(
-                meta,
-                spec.key_layout.as_deref(),
-                spec.value_layout.as_deref(),
-            )
-        {
+        if !spec.identity_eq(meta) {
             return Err(Error::TypeMismatch);
         }
-        let expected = Self::estimate_map_heap_size(
-            spec.map_type,
-            spec.key_layout.as_deref(),
-            spec.value_layout.as_deref(),
-            spec.len,
-        );
-        if meta.size != expected {
+        if meta.len < spec.len {
             return Err(Error::TypeMismatch);
         }
         if meta.storage.ptr.is_null() {
@@ -196,12 +209,13 @@ impl MapRt {
     }
 
     /// Allocate storage and register a new map row.
-    pub fn create(&mut self, builder: CompleteBuilder) -> Result<MapId, Error> {
-        Self::validate_name(&builder.name)?;
-        if self.find_name(&builder.name).is_some() {
+    pub fn create(&mut self, builder: MapBuilder) -> Result<MapId, Error> {
+        builder.validate()?;
+        let name = builder.name.clone().ok_or(Error::InvalidName)?;
+        if self.find_name(&name).is_some() {
             return Err(Error::AlreadyExists);
         }
-        let size = Self::estimate_map_heap_size(
+        let size = MapRt::estimate_map_heap_size(
             builder.map_type,
             builder.key_layout.as_deref(),
             builder.value_layout.as_deref(),
@@ -217,20 +231,12 @@ impl MapRt {
                 let vl = builder.value_layout.as_ref().ok_or(Error::TypeMismatch)?;
                 array::alloc_array_storage(layout_size(vl), builder.len)?
             }
-            MapType::Ringbuf => {
-                #[cfg(feature = "ringbuf")]
-                {
-                    ringbuf::alloc_ringbuf_storage(builder.len)?
-                }
-                #[cfg(not(feature = "ringbuf"))]
-                {
-                    return Err(Error::Unsupported);
-                }
-            }
+            #[cfg(feature = "ringbuf")]
+            MapType::Ringbuf => ringbuf::alloc_ringbuf_storage(builder.len)?,
         };
         let idx = self.meta.len();
         self.meta.push(MapMeta {
-            name: builder.name,
+            name,
             map_type: builder.map_type,
             key_layout: builder.key_layout,
             value_layout: builder.value_layout,
@@ -240,20 +246,6 @@ impl MapRt {
         });
         let _ = crate::map::runtime::names::register_map_name_idx(&self.meta[idx].name, idx);
         Ok(idx)
-    }
-
-    /// Create every non-`runtime` map from a bpf.toml boot descriptor table.
-    pub fn create_from_boot_descs(
-        &mut self,
-        descs: &[crate::map::BootMapDesc],
-    ) -> Result<(), Error> {
-        for d in descs {
-            if d.runtime {
-                continue;
-            }
-            let _ = self.create(CompleteBuilder::from_boot_desc(d))?;
-        }
-        Ok(())
     }
 
     pub fn lookup(

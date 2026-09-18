@@ -13,6 +13,8 @@ use crate::xdp::{XdpRt, lock::RtMutex};
 pub(crate) const MAX_SLOTS: usize = 4;
 pub(crate) const MAX_MAP_REFS: usize = 16;
 pub(crate) const MAX_IMAGES: usize = 8;
+/// MapDescriptorV0 / AOT bind entries per Compact ELF image.
+pub(crate) const MAX_REQUIRED_MAPS: usize = 8;
 pub(crate) const MAX_VMR_BINDS: usize = 16;
 
 // —— shared-stack budget (E3 docs / placeholders; not enforced at runtime) ——

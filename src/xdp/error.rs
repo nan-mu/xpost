@@ -33,12 +33,12 @@ pub enum XdpError {
     SlotAddressAlign,
     MapsRequired,
     MissingMap,
-    /// Map present but type/layout/len/heap_size disagree with [`crate::xdp::RequiredMap`].
+    /// Map present but type/layout/len/heap_size disagree with required map deps.
     TypeMismatch,
     ImageDigest,
     /// Reserved: image magic / header mismatch (layout TODO).
     ImageMagic,
-    /// Reserved: image bytes disagree with [`XdpMeta`] beyond magic.
+    /// Reserved: image bytes disagree with registered metadata beyond magic.
     ImageMismatch,
     LinkedAddress,
     Storage,
