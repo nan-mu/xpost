@@ -1,9 +1,9 @@
 //! Board codegen library — metadata / partitions.csv → Rust + helper IRAM linker script.
 //!
-//! Prefer [`sync`] as the unified entry (`validate` / `codegen` / `embed_layout` /
-//! `write_bin`). Default path: cold flash from `partitions.csv`; after link,
-//! [`embed::embed_layout`] writes `.xpost.mem` (XPM1) into the firmware ELF.
-//! Crate sizes come from `[package.metadata.xpost]`.
+//! Firmware `build.rs` calls [`firmware_codegen`] (path A): emits linker scripts +
+//! embed meta, and ensures the host [`link_wrap`] binary exists. Boards set
+//! `[target.*.linker] = "…/xpost-build/xpost-link"` so plain `cargo build` runs
+//! `rust-lld` then embeds `.xpost.mem` (XPM1). Cold flash from `partitions.csv`.
 //!
 //! `mem.toml` is obsolete; codegen consumes in-memory [`Layout`].
 
@@ -13,6 +13,7 @@ mod bpf_xdp;
 mod config;
 pub mod embed;
 mod layout;
+pub mod link_wrap;
 mod map_view;
 mod mem_map;
 pub mod metadata;
@@ -25,6 +26,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 pub use embed::{HELPER_SYMBOL, SLOT_SYMBOL, embed_layout, read_mem_section};
+pub use link_wrap::try_run as try_link_wrap;
 pub use layout::{
     CONTRACT_ABI, CONTRACT_ARCH, ColdTable, Layout, LayoutReport, MAX_SLOT_COUNT, MIN_SLOT_COUNT,
     MountKind, elf_symbol_addr, export_contract, map_names_from_bpf_toml, patch_contract_from_elf,
@@ -41,7 +43,7 @@ pub use partitions::{
 };
 pub use sync::{
     SyncMode, SyncReport, SyncRequest, codegen, doctor_with_metadata, embed_layout_sync, export,
-    patch_elf, sync_default, sync_from_bpf_toml, validate, write_bin,
+    firmware_codegen, patch_elf, sync_default, sync_from_bpf_toml, validate, write_bin,
 };
 
 /// Resolve board dir: `XPOST_BOARD` env, else `manifest_dir` (example package root).

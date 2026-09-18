@@ -31,8 +31,9 @@ from-bpf-toml = []
 # Pulls optional ringbuf / async-ringbuf crates; source kept for later work.
 ringbuf = ["dep:ringbuf", "dep:async-ringbuf"]
 
-# Default MCU layout sizes for path A (xpost-build sync).
-# SRAM `declare_runtime!` table sizes are from-bpf-toml only.
+# Path A defaults for `xpost-build::firmware_codegen` when the firmware crate
+# omits `[package.metadata.xpost]`. Firmware may override map/slots/target;
+# cold flash span always comes from the board `partitions.csv`.
 [package.metadata.xpost]
 schema_version = 1
 

@@ -22,7 +22,7 @@ pub enum SyncMode {
 
 pub struct SyncRequest<'a> {
     pub mode: SyncMode,
-    /// Crate providing `[package.metadata.xpost]` (usually xpost root).
+    /// Base `[package.metadata.xpost]` (usually the **xpost** library Cargo.toml).
     pub crate_manifest: &'a Path,
     /// Board dir (`partitions.csv` / optional `bpf.toml`). Optional for metadata-only.
     pub board_dir: Option<&'a Path>,
@@ -30,6 +30,139 @@ pub struct SyncRequest<'a> {
     /// Where to write contract (path A). Default: `board_dir/target/layout-export/layout.toml`.
     pub contract_out: Option<&'a Path>,
     pub elf_path: Option<&'a Path>,
+}
+
+/// Firmware `build.rs` entry for path A (default).
+///
+/// Reads `CARGO_MANIFEST_DIR` / `OUT_DIR`. Defaults come from the **xpost**
+/// library `[package.metadata.xpost]`; the firmware crate may override via its
+/// own metadata (optional). Cold `flash_base` / `flash_len` always come from
+/// the board `partitions.csv`. Emits linker args for `custom-sections.x` +
+/// `linkall.x`, and writes embed meta for the post-link `xpost-link` wrapper
+/// (board `.cargo/config.toml` must set `linker` to `xpost-build/xpost-link`).
+pub fn firmware_codegen() -> Result<SyncReport> {
+    use std::env;
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").context("CARGO_MANIFEST_DIR")?);
+    let out_dir = PathBuf::from(env::var("OUT_DIR").context("OUT_DIR")?);
+    let firmware_cargo = manifest_dir.join("Cargo.toml");
+    let partitions = manifest_dir.join("partitions.csv");
+    // xpost-build lives at `<repo>/xpost-build`; library metadata is sibling.
+    let xpost_cargo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../Cargo.toml");
+
+    println!("cargo:rerun-if-changed={}", xpost_cargo.display());
+    println!("cargo:rerun-if-changed={}", firmware_cargo.display());
+    if partitions.is_file() {
+        println!("cargo:rerun-if-changed={}", partitions.display());
+    }
+
+    let req = SyncRequest {
+        mode: SyncMode::Default,
+        crate_manifest: &xpost_cargo,
+        board_dir: Some(&manifest_dir),
+        out_dir: &out_dir,
+        contract_out: None,
+        elf_path: None,
+    };
+    let report = codegen(&req)?;
+    let custom = report
+        .custom_sections_path
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("firmware_codegen: missing custom-sections.x"))?;
+    println!("cargo:rustc-link-arg=-T{}", custom.display());
+    println!("cargo:rustc-link-arg=-Tlinkall.x");
+
+    let meta_path = out_dir.join("xpost_embed_meta.txt");
+    crate::link_wrap::write_embed_meta(&meta_path, &xpost_cargo, &manifest_dir)?;
+    // Stable path: rustc → linker may not inherit cargo:rustc-env on all hosts.
+    let stable_meta = manifest_dir.join("target/xpost_embed_meta.txt");
+    if let Some(parent) = stable_meta.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    crate::link_wrap::write_embed_meta(&stable_meta, &xpost_cargo, &manifest_dir)?;
+    println!(
+        "cargo:rustc-env={}={}",
+        crate::link_wrap::EMBED_META_ENV,
+        meta_path.display()
+    );
+    // NOTE: cargo 1.100 nightly ignores `cargo:rustc-linker`. Boards must set
+    // `[target.*.linker]` to `xpost-build/xpost-link`. Prebuild the host bin here
+    // so the wrapper never nested-`cargo`s under the firmware link lock.
+    ensure_xpost_link_bin()?;
+
+    Ok(report)
+}
+
+/// Build host `xpost-link` into `xpost-build/target` if missing.
+fn ensure_xpost_link_bin() -> Result<()> {
+    use std::process::Command;
+
+    let xb = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let host = host_triple()?;
+    let target_dir = xb.join("target");
+    let candidates = [
+        target_dir.join(&host).join("release/xpost-link"),
+        target_dir.join("release/xpost-link"),
+    ];
+    if candidates.iter().any(|p| p.is_file()) {
+        return Ok(());
+    }
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "--manifest-path",
+            xb.join("Cargo.toml").to_str().unwrap(),
+            "--release",
+            "--bin",
+            "xpost-link",
+            "--target",
+            &host,
+        ])
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .status()
+        .context("spawn cargo to build xpost-link")?;
+    if !status.success() {
+        bail!("failed to build host xpost-link (exit {:?})", status.code());
+    }
+    if !candidates.iter().any(|p| p.is_file()) {
+        // New cargo layout: search.
+        let found = find_named_bin(&target_dir, "xpost-link")?;
+        if found.is_none() {
+            bail!("xpost-link built but not found under {}", target_dir.display());
+        }
+    }
+    Ok(())
+}
+
+fn host_triple() -> Result<String> {
+    use std::process::Command;
+    let out = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .context("rustc -vV")?;
+    let text = String::from_utf8(out.stdout)?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("host: ").map(|s| s.to_string()))
+        .ok_or_else(|| anyhow::anyhow!("rustc -vV: no host:"))
+}
+
+fn find_named_bin(root: &Path, name: &str) -> Result<Option<PathBuf>> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let rd = match fs::read_dir(&dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().and_then(|s| s.to_str()) == Some(name) {
+                return Ok(Some(p));
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub struct SyncReport {

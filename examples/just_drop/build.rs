@@ -1,31 +1,8 @@
-use std::env;
-use std::path::PathBuf;
-
-use xpost_build::{SyncMode, SyncRequest, codegen};
+use xpost_build::firmware_codegen;
 
 fn main() {
     linker_be_nice();
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    println!(
-        "cargo:rerun-if-changed={}",
-        manifest_dir.join("partitions.csv").display()
-    );
-    let crate_manifest = manifest_dir.join("../../Cargo.toml");
-    let req = SyncRequest {
-        mode: SyncMode::Default,
-        crate_manifest: &crate_manifest,
-        board_dir: Some(&manifest_dir),
-        out_dir: &out_dir,
-        contract_out: None,
-        elf_path: None,
-    };
-    codegen(&req).unwrap();
-    println!(
-        "cargo:rustc-link-arg=-T{}",
-        out_dir.join("custom-sections.x").display()
-    );
-    println!("cargo:rustc-link-arg=-Tlinkall.x");
+    firmware_codegen().unwrap();
 }
 
 fn linker_be_nice() {

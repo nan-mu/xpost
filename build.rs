@@ -35,9 +35,7 @@ pub const SLOT_A_LEN: usize = 0;
 pub const HOT_REGION_LEN: usize = 0;
 pub const SLOT_B_LEN: usize = 0;
 pub const COLD_TABLE_PRESENT: bool = false;
-pub const COLD_TABLE_FLASH_BASE: usize = 0;
-pub const COLD_TABLE_FLASH_LEN: usize = 0;
-pub const COLD_TABLE_IMAGE_CAPACITY: usize = 0;
+pub const TABLE: (usize, usize, usize) = (0, 0, 0);
 pub const COLD_TABLE_IMAGE_COUNT: usize = 0;
 pub const LAYOUT_MAP_NAMES: &[&str] = &[];
 pub const fn cold_table_image_abs(_index: usize) -> Option<usize> {

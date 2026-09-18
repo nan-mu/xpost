@@ -38,6 +38,13 @@ impl ColdRegion {
     }
 }
 
+impl From<(usize, usize, usize)> for ColdRegion {
+    /// `(flash_base, flash_len, image_capacity)` — same order as codegen `TABLE`.
+    fn from((flash_base, flash_len, image_capacity): (usize, usize, usize)) -> Self {
+        Self::new(flash_base, flash_len, image_capacity)
+    }
+}
+
 /// SRAM table for a later `from-bpf-toml` / `from-elf` boot path.
 #[allow(dead_code)]
 pub(crate) struct XdpTable<const N: usize> {
@@ -128,7 +135,7 @@ impl XdpTableStorage for MemoryXdpTable {
 }
 
 /// Flash-backed cold table. [`crate::xdp::XdpRt::init`] constructs this from
-/// layout `[cold_table]` / `COLD_TABLE_FLASH_*`.
+/// layout `[cold_table]` / codegen `TABLE`.
 pub(crate) struct EspFlashXdpTable {
     flash: esp_storage::FlashStorage<'static>,
     partition_offset: u32,

@@ -13,6 +13,20 @@ path = "./src/bin/main.rs"
 [package.metadata.espflash]
 partition_table = "partitions.csv"
 
+# Single-slot board override (xpost library metadata still lists optional slot b).
+[package.metadata.xpost]
+schema_version = 1
+
+[[package.metadata.xpost.slots.entries]]
+name = "a"
+length = 0xE00
+mount = "rx"
+primary = true
+
+[package.metadata.xpost.xdp_table]
+partition = "xdp"
+image_capacity = 0x1000
+
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
 

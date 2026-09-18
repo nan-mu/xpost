@@ -12,6 +12,10 @@ description = "Board codegen for xpost integrators (layout/mem/bpf.toml → Rust
 name = "xpost_build"
 path = "src/lib.rs"
 
+[[bin]]
+name = "xpost-link"
+path = "src/bin/xpost-link.rs"
+
 [dependencies]
 anyhow = "1"
 object = { version = "0.36", default-features = false, features = ["read", "write", "elf"] }

@@ -212,27 +212,24 @@ fn write_mem_map_rs(
          pub const MOUNT_RX_SLOT: Option<usize> = {rx_slot};\n\
          /// Largest slot capacity.\n\
          pub const SLOT_LEN_MAX: usize = {len_max};\n\
+         /// Cold Compact ELF region: `(flash_base, flash_len, image_capacity)`.\n\
+         /// Pass to [`xpost::xdp::XdpRt::init`] as the `cold` argument.\n\
+         pub const TABLE: (usize, usize, usize) = ({cold_base:#x}, {cold_len:#x}, {cold_cap:#x});\n\
          /// Whether a cold Compact ELF flash region is configured.\n\
          pub const COLD_TABLE_PRESENT: bool = {cold_present};\n\
-         /// Absolute flash address of the packed Compact ELF region (`partitions.csv`).\n\
-         pub const COLD_TABLE_FLASH_BASE: usize = {cold_base:#x};\n\
-         /// Cold-table total length in bytes.\n\
-         pub const COLD_TABLE_FLASH_LEN: usize = {cold_len:#x};\n\
-         /// Max bytes of one Compact ELF container (not a write stride).\n\
-         pub const COLD_TABLE_IMAGE_CAPACITY: usize = {cold_cap:#x};\n\
-         /// `FLASH_LEN / IMAGE_CAPACITY` (upper bound on packed images).\n\
+         /// `TABLE.1 / TABLE.2` (upper bound on packed images).\n\
          pub const COLD_TABLE_IMAGE_COUNT: usize = {cold_count};\n\
          /// Map names from metadata (may be empty).\n\
          pub const LAYOUT_MAP_NAMES: &[&str] = &[{map_names_rs}];\n\
          /// Absolute flash address of cold-table cell `index`, if in range.\n\
          pub const fn cold_table_image_abs(index: usize) -> Option<usize> {{\n\
-             if !COLD_TABLE_PRESENT || COLD_TABLE_IMAGE_CAPACITY == 0 {{\n\
+             if !COLD_TABLE_PRESENT || TABLE.2 == 0 {{\n\
                  return None;\n\
              }}\n\
              if index >= COLD_TABLE_IMAGE_COUNT {{\n\
                  return None;\n\
              }}\n\
-             Some(COLD_TABLE_FLASH_BASE + index * COLD_TABLE_IMAGE_CAPACITY)\n\
+             Some(TABLE.0 + index * TABLE.2)\n\
          }}",
         len_max = hot.iter().map(|r| r.length).max().unwrap_or(0),
     )

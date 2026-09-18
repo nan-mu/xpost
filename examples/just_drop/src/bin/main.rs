@@ -15,7 +15,7 @@ use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use log::{error, info};
 use xpost::map::{HEAP_SIZE, MapRt};
-use xpost::xdp::{ColdRegion, ReportItem, Slot, XdpRt};
+use xpost::xdp::{ReportItem, Slot, XdpRt};
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -31,13 +31,10 @@ esp_bootloader_esp_idf::esp_app_desc!();
 #[unsafe(link_section = ".bss")]
 static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
-/// Primary RX slot (firmware-owned; length from metadata slots.a).
+/// Single RX slot (firmware-owned). Symbol name matches xpost-build `SLOT_SYMBOL`.
+#[unsafe(no_mangle)]
 #[unsafe(link_section = ".bss")]
-static SLOT_A: Slot<0xE00> = Slot::new([0u8; 0xE00]);
-
-/// Secondary call slot (firmware-owned; length from metadata slots.b).
-#[unsafe(link_section = ".bss")]
-static SLOT_B: Slot<0x1000> = Slot::new([0u8; 0x1000]);
+static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
 #[allow(
     clippy::large_stack_frames,
@@ -60,42 +57,27 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Embassy initialized!");
 
+    // `main -> !` cannot return `Result`; boot-fatal errors panic into our handler.
     let map_heap: &'static mut [u8] = unsafe { &mut *addr_of_mut!(MAP_HEAP) };
-    let mut maps = match MapRt::init(map_heap).await {
-        Ok(g) => g,
-        Err(e) => {
-            error!("map init failed: {e:?}");
-            loop {
-                Timer::after(Duration::from_secs(1)).await;
-            }
-        }
-    };
+    let mut maps = MapRt::init(map_heap)
+        .await
+        .expect("MapRt::init");
 
-    let slots = [
-        unsafe { SLOT_A.as_xdp_slot(true) },
-        unsafe { SLOT_B.as_xdp_slot(false) },
-    ];
-    let cold = ColdRegion::new(
-        just_drop::mem_map::COLD_TABLE_FLASH_BASE,
-        just_drop::mem_map::COLD_TABLE_FLASH_LEN,
-        just_drop::mem_map::COLD_TABLE_IMAGE_CAPACITY,
+    let slots = [unsafe { xdp_slot.as_xdp_slot(true) }];
+
+    let (rt, report) = XdpRt::init(flash, &slots, just_drop::mem_map::TABLE, &mut maps)
+        .await
+        .expect("XdpRt::init");
+    info!(
+        "xdp init ok images={} write-bin {:#x} <xdp.elf>",
+        rt.image_count(),
+        just_drop::mem_map::TABLE.0
     );
-
-    match XdpRt::init(flash, &slots, cold, &mut maps).await {
-        Ok((rt, report)) => {
-            info!(
-                "xdp init ok images={} write-bin {:#x} <xdp.elf>",
-                rt.image_count(),
-                just_drop::mem_map::COLD_TABLE_FLASH_BASE
-            );
-            for item in &report {
-                match item {
-                    ReportItem::Xdp(name) => info!("report xdp {name}"),
-                    ReportItem::Map(ty, name) => info!("report map {ty:?} {name}"),
-                }
-            }
+    for item in &report {
+        match item {
+            ReportItem::Xdp(name) => info!("report xdp {name}"),
+            ReportItem::Map(ty, name) => info!("report map {ty:?} {name}"),
         }
-        Err(e) => error!("xdp init failed: {e}"),
     }
 
     let (mut _wifi_controller, _interfaces) =

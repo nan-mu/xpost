@@ -73,13 +73,17 @@ impl XdpRt {
     /// `flash` is the chip FLASH peripheral. Packed `xdp.elf` is written with
     /// `espflash write-bin <cold.flash_base> <xdp.elf>`. Empty / erased regions
     /// register nothing. [`crate::map::MapRt`] must already be initialized (heap claimed).
+    ///
+    /// `cold` is typically board codegen `mem_map::TABLE`:
+    /// `(flash_base, flash_len, image_capacity)`.
     pub async fn init(
         flash: esp_hal::peripherals::FLASH<'static>,
         slots: &[XdpSlot],
-        cold: ColdRegion,
+        cold: impl Into<ColdRegion>,
         maps: &mut MapRtGuard<'_>,
     ) -> Result<(XdpRtGuard<'static>, Vec<ReportItem>), XdpError> {
         Self::assert_board_links()?;
+        let cold = cold.into();
         let table = EspFlashXdpTable::try_new(
             esp_storage::FlashStorage::new(flash),
             cold.flash_base,
