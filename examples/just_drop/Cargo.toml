@@ -60,6 +60,7 @@ esp-radio = { version = "0.18.0", path = "../../esp-radio", features = [
   "log-04",
   "unstable",
   "wifi",
+  "xdp",
 ] }
 xpost = { path = "../.." }
 critical-section = "1.2.0"

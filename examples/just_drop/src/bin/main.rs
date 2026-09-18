@@ -81,8 +81,13 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     let (mut _wifi_controller, _interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, Default::default())
+        xpost::esp_radio::new(peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
+    info!(
+        "wifi+xdp attached drop={} failed_tx={}",
+        xpost::esp_radio::XDP_PROG.drop_count(),
+        xpost::esp_radio::XDP_PROG.failed_tx_count()
+    );
 
     let _ = spawner;
 
