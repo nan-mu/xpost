@@ -1,12 +1,13 @@
 //! xpost — XDP datapath on MCU (express post): maps, helpers, IRAM slots, RX ingest.
 //!
 //! Integrator-facing surface is primarily [`map`] and [`xdp`]:
-//! - [`map::MapRt`] / [`map::MapBuilder`] / [`map::declare_runtime`]
+//! - [`map::MapRt`] / [`map::MapBuilder`] / [`map::declare_runtime`] (`from-bpf-toml`)
 //! - [`xdp::XdpRt`] / [`xdp::XdpBuilder`]
 //!
 //! Optional / incomplete feature surface: [`ext`] (`ringbuf`). Board codegen is
-//! **`xpost-build`**. Firmware-first boot is the default; enable `from-bpf-toml`
-//! for bpf.toml codegen boot.
+//! **`xpost-build`**. Firmware-first boot is the default (`XdpRt::init` scans Flash
+//! Compact ELF and creates required maps, returning `Vec<ReportItem>`); enable
+//! `from-bpf-toml` for bpf.toml codegen boot.
 //!
 //! Current hardware instantiation is ESP32-C3 (RV32IMC). No ESP-IDF, no host libc.
 

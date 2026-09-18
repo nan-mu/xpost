@@ -25,8 +25,8 @@ pub enum XdpMaps<'a> {
     Registered(MapId, &'a MapRt),
 }
 
-/// Registers metadata for an XDP image **already** present in the cold [`crate::xdp::XdpTable`]
-/// (Flash programmed before boot). Does not write image bytes.
+/// Registers metadata for an XDP image **already** present in the cold Flash region
+/// (programmed before boot). Does not write image bytes.
 ///
 /// Only runtime fields are retained (slot, helper, maps, image flash span, digest).
 /// Compact ELF wire temporaries are validated in [`crate::xdp::image::elf`] and discarded.

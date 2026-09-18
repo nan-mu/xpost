@@ -1,7 +1,7 @@
 //! xpost library build: stub mem_map for host / bare-lib checks.
 //!
-//! Board codegen moved to firmware / [`xpost_build::sync`]. This `build.rs` no
-//! longer reads `XPOST_BOARD` for full codegen.
+//! Board codegen lives in the firmware `build.rs` (`xpost-build` sync). This
+//! `build.rs` does not read `XPOST_BOARD`.
 
 use std::env;
 use std::fs;
@@ -19,7 +19,7 @@ fn main() {
 fn write_stub_codegen(out_dir: &PathBuf) {
     fs::write(
         out_dir.join("mem_map.rs"),
-        r#"// stub — board codegen via xpost-build sync / firmware OUT_DIR
+        r#"// stub — board codegen via firmware xpost-build sync
 pub const IRAM_BASE: usize = 0;
 pub const ARENA_END: usize = 0;
 pub const HELPER_DISPATCHER_BASE: usize = 0;
@@ -49,10 +49,10 @@ pub const fn cold_table_image_abs(_index: usize) -> Option<usize> {
 pub fn assert_linked_addresses(helper_addr: usize, slot_addrs: &[usize]) {
     let _ = (helper_addr, slot_addrs);
 }
-pub const unsafe fn firmware_xdp_slots() -> [crate::xdp::XdpSlot; HOT_SLOT_COUNT] {
+pub const unsafe fn firmware_xdp_slots() -> [::xpost::xdp::XdpSlot; HOT_SLOT_COUNT] {
     [
-        unsafe { crate::xdp::XdpSlot::from_raw_parts(HOT_SLOT_BASES[0], HOT_SLOT_LENS[0], true) },
-        unsafe { crate::xdp::XdpSlot::from_raw_parts(HOT_SLOT_BASES[1], HOT_SLOT_LENS[1], false) },
+        unsafe { ::xpost::xdp::XdpSlot::from_raw_parts(HOT_SLOT_BASES[0], HOT_SLOT_LENS[0], true) },
+        unsafe { ::xpost::xdp::XdpSlot::from_raw_parts(HOT_SLOT_BASES[1], HOT_SLOT_LENS[1], false) },
     ]
 }
 "#,

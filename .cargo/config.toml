@@ -2,7 +2,7 @@
 ESP_LOG = "info"
 ESP_RADIO_CONFIG_WIFI_MAX_BURST_SIZE = "16"
 # Board dir for xpost build.rs (intent layout.toml / optional bpf.toml).
-XPOST_BOARD = { value = "examples/esp32c3-direct", relative = true }
+XPOST_BOARD = { value = "examples/esp32c3", relative = true }
 
 # Lib is RV32-only (inline asm / IRAM sections). Host packages override via --target
 # (see xtask alias). Matches examples/*/ .cargo/config.toml.
