@@ -5,7 +5,7 @@ resolver = "2"
 # errors from std crates). Invoke via `--manifest-path` / the `xtask` alias.
 members = [".", "esp-radio", "xpost-macros", "xpost-elf"]
 default-members = ["."]
-exclude = ["xpost-build", "xtask", "agent", "examples"]
+exclude = ["xpost-build", "xtask", "agent", "serial", "examples"]
 
 [package]
 edition      = "2024"

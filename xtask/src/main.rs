@@ -193,10 +193,15 @@ fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
 
 fn dispatch_example(root: &PathBuf, example: &str, rest: &[String]) -> Result<ExitCode> {
     if example == "agent" {
+        // `agent/` is workspace-exclude (own host crate). Do not use `-p` on the
+        // RV32 root workspace.
+        let manifest = root.join("agent/Cargo.toml");
         let mut args = vec![
             "run".to_string(),
-            "-p".to_string(),
-            "xpost-agent".to_string(),
+            "--manifest-path".to_string(),
+            manifest.display().to_string(),
+            "--target".to_string(),
+            host_triple().to_string(),
             "--".to_string(),
         ];
         args.extend(rest.iter().cloned());

@@ -1,0 +1,3 @@
+# Override parent workspace RV32 default.
+[build]
+target = "x86_64-unknown-linux-gnu"

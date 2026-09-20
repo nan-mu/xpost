@@ -16,7 +16,8 @@ rustflags = ["--cfg", "portable_atomic_unsafe_assume_single_core"]
 [alias]
 # Root dispatcher: cargo xtask firmware doctor | cargo xtask agent | …
 # Host binary — must not inherit workspace RV32 `build.target`.
-xtask = "run --manifest-path xtask/Cargo.toml --target aarch64-apple-darwin --"
+# Prefer `rustc` host; override with CARGO_XPOST_HOST_TARGET if needed.
+xtask = "run --manifest-path xtask/Cargo.toml --target x86_64-unknown-linux-gnu --"
 # Flash the firmware example (from workspace root)
 fwrun = "run -p firmware --release"
 # Typecheck MCU lib (storage is always on).

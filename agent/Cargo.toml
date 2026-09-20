@@ -1,0 +1,22 @@
+[package]
+name = "xpost-agent"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+description = "Host agent exercising xpost-serial (write-bin / program / request)"
+
+# Independent host workspace (parent defaults to RV32).
+[workspace]
+
+[[bin]]
+name = "xpost-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+xpost-serial = { path = "../serial" }
+
+[profile.release]
+lto = false
