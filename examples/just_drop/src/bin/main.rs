@@ -9,13 +9,20 @@
 
 use core::ptr::addr_of_mut;
 
+use alloc::string::ToString;
+use portable_atomic::{AtomicU32, AtomicUsize, Ordering};
+
 use embassy_executor::Spawner;
+use embassy_net::StackResources;
+use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
+use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use log::{error, info};
+use static_cell::StaticCell;
 use xpost::map::{HEAP_SIZE, MapRt};
-use xpost::xdp::{ReportItem, Slot, XdpRt};
+use xpost::xdp::{ReportItem, Slot, XdpLocation, XdpRt};
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -27,14 +34,30 @@ extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+/// UDP port the netstack accepts. Drop XDP never reaches this socket.
+const STIM_PORT: u16 = 8080;
+
 /// Map talc heap — size must match `[package.metadata.xpost.map].heap_size`.
 #[unsafe(link_section = ".bss")]
 static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
-/// Single RX slot (firmware-owned). Symbol name matches xpost-build `SLOT_SYMBOL`.
+/// Single RX slot (firmware-owned). Must live in IRAM (executable), not `.bss`.
+/// Symbol name matches xpost-build `SLOT_SYMBOL`.
 #[unsafe(no_mangle)]
-#[unsafe(link_section = ".bss")]
+#[unsafe(link_section = ".xdp.hotload_0")]
 static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
+
+/// Packets that reached the netstack (XDP Pass). Drop XDP does not increment this.
+static NET_RX: AtomicUsize = AtomicUsize::new(0);
+/// Optional fixed ACK destination (host order). Zero address → reply to the sender.
+static ACK_IP: AtomicU32 = AtomicU32::new(0);
+static ACK_PORT: AtomicU32 = AtomicU32::new(0);
+
+static NET_RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
+static UDP_RX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
+static UDP_TX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
+static UDP_RX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
+static UDP_TX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 
 #[allow(
     clippy::large_stack_frames,
@@ -57,15 +80,16 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Embassy initialized!");
 
+    let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
+    spawner.spawn(serial_task(usb_rx).unwrap());
+
     // `main -> !` cannot return `Result`; boot-fatal errors panic into our handler.
     let map_heap: &'static mut [u8] = unsafe { &mut *addr_of_mut!(MAP_HEAP) };
-    let mut maps = MapRt::init(map_heap)
-        .await
-        .expect("MapRt::init");
+    let mut maps = MapRt::init(map_heap).await.expect("MapRt::init");
 
     let slots = [unsafe { xdp_slot.as_xdp_slot(true) }];
 
-    let (rt, report) = XdpRt::init(flash, &slots, just_drop::mem_map::TABLE, &mut maps)
+    let (mut rt, report) = XdpRt::init(flash, &slots, just_drop::mem_map::TABLE, &mut maps)
         .await
         .expect("XdpRt::init");
     info!(
@@ -79,20 +103,281 @@ async fn main(spawner: Spawner) -> ! {
             ReportItem::Map(ty, name) => info!("report map {ty:?} {name}"),
         }
     }
+    // Cold image stays Pass until moved into the primary IRAM slot and leased.
+    // Soft-fail: a stale cold ELF (wrong link_addr after BSS shift) must not panic
+    // the board — leave Prog on Pass until `agent program` writes a matching image.
+    if rt.image_count() > 0 {
+        let id = 0;
+        let primary = 0;
+        match rt.r#move(id, XdpLocation::Slot { index: primary }) {
+            Ok(()) => match rt.lease(Some(&mut maps)) {
+                Ok(()) => info!("xdp leased primary image_id={id}"),
+                Err(e) => error!("xdp lease failed: {e:?}"),
+            },
+            Err(e) => error!("xdp move primary failed: {e:?} (cold image link_addr mismatch?)"),
+        }
+    } else {
+        info!("xdp cold empty; Prog Pass until program+reboot");
+    }
+    // Release MapRtGuard: RX helpers use try_lock; holding this forever → Busy / helper_map++.
+    drop(rt);
+    drop(maps);
+    info!("map_rt unlocked (RX helpers can proceed)");
 
-    let (mut _wifi_controller, _interfaces) =
+    let (mut controller, interfaces) =
         xpost::esp_radio::new(peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
     info!(
-        "wifi+xdp attached drop={} failed_tx={}",
+        "wifi+xdp attached drop={} failed_tx={} map_lock={}",
         xpost::esp_radio::XDP_PROG.drop_count(),
-        xpost::esp_radio::XDP_PROG.failed_tx_count()
+        xpost::esp_radio::XDP_PROG.failed_tx_count(),
+        map_lock_status(),
     );
 
-    let _ = spawner;
+    match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
+        (Some(ssid), Some(pass)) if !ssid.is_empty() => {
+            let station = esp_radio::wifi::Config::Station(
+                esp_radio::wifi::sta::StationConfig::default()
+                    .with_ssid(ssid)
+                    .with_password(pass.to_string()),
+            );
+            controller
+                .set_config(&station)
+                .expect("wifi set_config");
+            let seed = 0xC3C3_5A5A;
+            let resources = NET_RESOURCES.init(StackResources::new());
+            let net_config = embassy_net::Config::dhcpv4(Default::default());
+            let (stack, runner) =
+                embassy_net::new(interfaces.station, net_config, resources, seed);
+            spawner.spawn(net_task(runner).unwrap());
+            spawner.spawn(udp_task(stack).unwrap());
+            spawner.spawn(wifi_task(controller).unwrap());
+            info!("sta ssid={ssid} stim_port={STIM_PORT}");
+        }
+        _ => {
+            info!("WIFI_SSID/WIFI_PASS unset; UDP ack disabled, serial counters still live");
+        }
+    }
 
     loop {
-        info!("just_drop idle");
-        Timer::after(Duration::from_secs(1)).await;
+        Timer::after(Duration::from_secs(60)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
+    loop {
+        match controller.connect_async().await {
+            Ok(_) => info!("wifi connected"),
+            Err(e) => {
+                error!("wifi connect: {e:?}");
+                Timer::after(Duration::from_secs(2)).await;
+            }
+        }
+        let _ = controller.wait_for_disconnect_async().await;
+        info!("wifi disconnected");
+        Timer::after(Duration::from_secs(2)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn net_task(
+    mut runner: embassy_net::Runner<'static, esp_radio::wifi::Interface<'static>>,
+) {
+    runner.run().await
+}
+
+#[embassy_executor::task]
+async fn udp_task(stack: embassy_net::Stack<'static>) {
+    stack.wait_config_up().await;
+    if let Some(v4) = stack.config_v4() {
+        info!("dhcp {}", v4.address);
+    }
+
+    let rx_meta = UDP_RX_META.init([PacketMetadata::EMPTY; 4]);
+    let tx_meta = UDP_TX_META.init([PacketMetadata::EMPTY; 4]);
+    let rx_buf = UDP_RX_BUF.init([0; 1536]);
+    let tx_buf = UDP_TX_BUF.init([0; 1536]);
+    let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
+    socket.bind(STIM_PORT).expect("bind stim");
+    info!("udp ack listening {STIM_PORT}");
+
+    let mut buf = [0u8; 256];
+    loop {
+        let Ok((n, meta)) = socket.recv_from(&mut buf).await else {
+            continue;
+        };
+        NET_RX.fetch_add(1, Ordering::Relaxed);
+        let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
+        let payload = b"ACK\n";
+        if socket.send_to(payload, dest).await.is_err() {
+            error!("ack send failed bytes={n}");
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn serial_task(mut rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>) {
+    let mut line = [0u8; 80];
+    let mut len = 0usize;
+    loop {
+        match rx.read_byte() {
+            Ok(b) => {
+                if b == b'\n' || b == b'\r' {
+                    if len > 0 {
+                        let text = core::str::from_utf8(&line[..len]).unwrap_or("");
+                        dispatch_serial(text);
+                        len = 0;
+                    }
+                } else if len < line.len() {
+                    line[len] = b;
+                    len += 1;
+                }
+            }
+            Err(_) => Timer::after(Duration::from_millis(10)).await,
+        }
+    }
+}
+
+fn dispatch_serial(line: &str) {
+    let line = line.trim();
+    if line.eq_ignore_ascii_case("ping") {
+        esp_println::println!("OK ping");
+    } else if line.eq_ignore_ascii_case("counters") || line.eq_ignore_ascii_case("report counters")
+    {
+        print_counters();
+    } else if let Some(rest) = strip_cmd(line, "rxcnt") {
+        print_rxcnt(rest);
+    } else if let Some(rest) = strip_cmd(line, "ack-dest") {
+        match parse_ack_dest(rest) {
+            Some((ip, port)) => {
+                ACK_IP.store(ip, Ordering::Relaxed);
+                ACK_PORT.store(u32::from(port), Ordering::Relaxed);
+                esp_println::println!("OK ack-dest {rest}");
+            }
+            None => esp_println::println!("ERR ack-dest <ipv4> <port>"),
+        }
+    } else {
+        esp_println::println!("ERR unknown");
+    }
+}
+
+fn map_lock_status() -> &'static str {
+    match xpost::map::MAP_RT.try_get() {
+        None => "no-rt",
+        Some(lock) => match lock.try_lock() {
+            Ok(_g) => "free",
+            Err(_) => "held",
+        },
+    }
+}
+
+fn print_counters() {
+    let e = xpost::xdp::ERRORS.snapshot();
+    esp_println::println!(
+        "OK counters drop={} failed_tx={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={}",
+        xpost::esp_radio::XDP_PROG.drop_count(),
+        xpost::esp_radio::XDP_PROG.failed_tx_count(),
+        NET_RX.load(Ordering::Relaxed),
+        e.inactive_skip,
+        e.reentry,
+        e.stack_misalign,
+        e.bad_md,
+        e.helper_unresolved,
+        e.helper_map,
+        e.bind_unknown,
+        e.pool_drop_misalign,
+        map_lock_status(),
+    );
+}
+
+fn print_rxcnt(rest: &str) {
+    let Ok(key) = rest.trim().parse::<u32>() else {
+        esp_println::println!("ERR rxcnt <key>");
+        return;
+    };
+    let Some(lock) = xpost::map::MAP_RT.try_get() else {
+        esp_println::println!("ERR rxcnt no-rt");
+        return;
+    };
+    let Ok(guard) = lock.try_lock() else {
+        esp_println::println!("ERR busy");
+        return;
+    };
+    let Ok(id) = guard.find("rxcnt") else {
+        esp_println::println!("ERR rxcnt not-found");
+        return;
+    };
+    let Ok(mg) = guard.get(id) else {
+        esp_println::println!("ERR rxcnt get");
+        return;
+    };
+    match mg.array_get_u64(key) {
+        Ok(v) => esp_println::println!("OK rxcnt key={key} value={v}"),
+        Err(_) => esp_println::println!("ERR rxcnt key={key}"),
+    }
+}
+
+fn strip_cmd<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {
+    let rest = line.get(cmd.len()..)?;
+    if !line[..cmd.len()].eq_ignore_ascii_case(cmd) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    if rest.is_empty() { None } else { Some(rest) }
+}
+
+fn parse_ack_dest(rest: &str) -> Option<(u32, u16)> {
+    let mut parts = rest.split_whitespace();
+    let ip = parse_v4(parts.next()?)?;
+    let port: u16 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || port == 0 {
+        return None;
+    }
+    Some((ip, port))
+}
+
+fn parse_v4(s: &str) -> Option<u32> {
+    let mut out = 0u32;
+    let mut parts = 0u8;
+    let mut acc = 0u32;
+    let mut digits = 0u8;
+    for b in s.bytes() {
+        if b == b'.' {
+            if digits == 0 || parts >= 3 {
+                return None;
+            }
+            out = (out << 8) | acc;
+            acc = 0;
+            digits = 0;
+            parts += 1;
+        } else if b.is_ascii_digit() {
+            digits += 1;
+            if digits > 3 {
+                return None;
+            }
+            acc = acc * 10 + u32::from(b - b'0');
+            if acc > 255 {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+    if parts != 3 || digits == 0 {
+        return None;
+    }
+    Some((out << 8) | acc)
+}
+
+/// Fixed `ack-dest` when set; otherwise the stimulus source (the agent socket).
+fn ack_endpoint(src: embassy_net::IpAddress, src_port: u16) -> (embassy_net::IpAddress, u16) {
+    let ip = ACK_IP.load(Ordering::Relaxed);
+    let port = ACK_PORT.load(Ordering::Relaxed) as u16;
+    if ip != 0 && port != 0 {
+        let o = ip.to_be_bytes();
+        (embassy_net::IpAddress::v4(o[0], o[1], o[2], o[3]), port)
+    } else {
+        (src, src_port)
     }
 }

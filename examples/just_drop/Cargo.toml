@@ -64,6 +64,7 @@ esp-radio = { version = "0.18.0", path = "../../esp-radio", features = [
 ] }
 xpost = { path = "../.." }
 critical-section = "1.2.0"
+portable-atomic = { version = "1", default-features = false }
 static_cell      = "2.1.1"
 
 [build-dependencies]

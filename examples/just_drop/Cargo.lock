@@ -1393,6 +1393,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "log",
+ "portable-atomic",
  "static_cell",
  "xpost",
  "xpost-build",
