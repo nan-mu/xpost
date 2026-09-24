@@ -88,6 +88,22 @@ enum Command {
     /// just_drop ACK path: clear vs drop XDP → `xdp_ack_*`.
     #[command(name = "just-drop")]
     JustDrop,
+    /// just_drop / just_drop_hal PPS: periodic drop sampling during UDP blast.
+    #[command(name = "just-drop-pps")]
+    JustDropPps {
+        /// Measurement arm: `xdp` (cold just_drop ELF) or `hal` (`drop on`).
+        #[arg(long, value_parser = ["xdp", "hal"])]
+        path: String,
+        /// Counter sample period while blasting (ms).
+        #[arg(long, default_value_t = 1000)]
+        sample_interval_ms: u64,
+        /// CSV output path (time series + sidecar `*_summary.json`).
+        #[arg(long, default_value = "just_drop_pps.csv")]
+        out: std::path::PathBuf,
+        /// Skip `agent program` for `--path xdp` (assume ELF already leased).
+        #[arg(long)]
+        no_program: bool,
+    },
     /// Alias of `rate-rtt`.
     Bench,
     /// Alias of `wl-loss`.
@@ -122,6 +138,7 @@ async fn main() -> Result<()> {
             | Command::RateRtt
             | Command::RateLoss
             | Command::JustDrop
+            | Command::JustDropPps { .. }
             | Command::Bench
             | Command::BenchLoss
             | Command::Serve { .. },
@@ -159,6 +176,28 @@ async fn main() -> Result<()> {
                 no_perf: args.no_perf,
                 smoke: args.smoke,
                 window_secs: args.window_secs,
+            },
+        )
+        .await;
+    }
+    if let Some(Command::JustDropPps {
+        path,
+        sample_interval_ms,
+        out,
+        no_program,
+    }) = &args.command
+    {
+        let path = bench::PpsPath::parse(path)?;
+        return bench::run_just_drop_pps(
+            &cfg,
+            bench::JustDropPpsOpts {
+                path,
+                smoke: args.smoke,
+                window_secs: args.window_secs,
+                sample_interval_ms: *sample_interval_ms,
+                rounds: args.rounds,
+                out: out.clone(),
+                program: !no_program,
             },
         )
         .await;
@@ -206,6 +245,7 @@ async fn main() -> Result<()> {
             return bench::run_rate_loss(&mut harness, args.smoke, args.formal).await;
         }
         Some(Command::JustDrop) => unreachable!("handled before harness open"),
+        Some(Command::JustDropPps { .. }) => unreachable!("handled before harness open"),
         Some(Command::Suite) => {}
         None => unreachable!(),
     }
