@@ -268,7 +268,8 @@ pub(crate) const BPF_MAP_TYPE_ARRAY: u8 = 2;
 const MAX_LAYOUT_DESCS: usize = 32;
 const MAX_KEY_BYTES: usize = 64;
 const MAX_VALUE_BYTES: usize = 256;
-const MAX_ENTRIES: u32 = 64;
+/// Keep in lockstep with [`xpost_elf::MAX_ENTRIES`] (XDP ELF V0 profile).
+const MAX_ENTRIES: u32 = xpost_elf::MAX_ENTRIES;
 
 fn validate_layout(layout: &[u8], max_bytes: usize) -> Result<(), XdpError> {
     if layout.is_empty() || layout.len() > MAX_LAYOUT_DESCS {
