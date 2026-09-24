@@ -64,6 +64,10 @@ Drop XDP should yield `no-ack` and a rising `drop` counter. `counters` is one
 counters). `ack-dest <ipv4> <port>` points the firmware ACK at a fixed listener;
 otherwise the ACK returns to the stimulus source.
 
+On TR3000, `./probe just-drop` runs the ACK functional path (50 stims, or 10 with
+`--smoke`) then a UDP×4 link-rate blast (`--no-perf` skips perf;
+`--window-secs` overrides 40s / smoke 10s). Use `--no-pg` to skip Postgres.
+
 Wi-Fi STA needs `WIFI_SSID` and `WIFI_PASS` (or `WIFI_PASSWORD` in
 `examples/just_drop/.env`, loaded by that crate's `build.rs`). Without them the
 UDP path stays down and serial `counters` still works.
