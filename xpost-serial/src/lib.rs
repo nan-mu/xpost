@@ -15,7 +15,7 @@ pub use event::{
     Chip, Dir, Event, FlashPhase, Image, IoData, Kind, Mode, SessionWhy, XdpImage,
 };
 pub use session::Session;
-pub use sink::{Sink, StdoutSink, VecSink};
+pub use sink::{FileSink, Sink, StdoutSink, VecSink};
 pub use table::{
     ColdTable, InstallOutcome, JUST_DROP_TABLE, XdpEntry, list_entries, plan_install,
     xdp_name_from_bytes, xdp_name_from_file,
