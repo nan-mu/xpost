@@ -64,8 +64,9 @@ Drop XDP should yield `no-ack` and a rising `drop` counter. `counters` is one
 counters). `ack-dest <ipv4> <port>` points the firmware ACK at a fixed listener;
 otherwise the ACK returns to the stimulus source.
 
-Wi-Fi STA needs `WIFI_SSID` and `WIFI_PASS` in the just_drop build env. Without
-them the UDP path stays down and serial `counters` still works.
+Wi-Fi STA needs `WIFI_SSID` and `WIFI_PASS` (or `WIFI_PASSWORD` in
+`examples/just_drop/.env`, loaded by that crate's `build.rs`). Without them the
+UDP path stays down and serial `counters` still works.
 
 ## Scope
 
