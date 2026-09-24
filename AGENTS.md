@@ -42,6 +42,9 @@ cargo xtask agent program --elf /Users/nan/bs/build/just_drop/just_drop.elf
 # List cold-table entries
 cargo xtask agent list
 
+# Erase all XDP ELF containers in the cold table
+cargo xtask agent clear
+
 cargo xtask agent request PING
 ```
 
