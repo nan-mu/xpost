@@ -206,9 +206,10 @@ pub(crate) enum TypedMapRef<'a> {
 }
 
 pub(crate) fn with_typed_map<R>(id: ResourceId, f: impl FnOnce(TypedMap<'_>) -> R) -> Option<R> {
+    // Access storage via the held PoolWriteGuard snapshot — do NOT call
+    // try_read/write_storage (nested try_lock on non-reentrant Mutex → false Busy).
     let mut guard = pool_try_write()?;
-    let mut table = guard.as_mut()?;
-    let mut res = table.get_mut(&id)?;
+    let mut res = guard.get_mut(&id)?;
     let typed = match res.kind()? {
         MapKind::Array => TypedMap::Array(unsafe { res.as_mut() }),
         MapKind::Hash => TypedMap::Hash(unsafe { res.as_mut() }),
@@ -223,8 +224,7 @@ pub(crate) fn with_typed_map_ref<R>(
     f: impl FnOnce(TypedMapRef<'_>) -> R,
 ) -> Option<R> {
     let guard = pool_try_read()?;
-    let table = guard.as_ref()?;
-    let res = table.get(&id)?;
+    let res = guard.get(&id)?;
     let typed = match res.kind()? {
         MapKind::Array => TypedMapRef::Array(unsafe { res.as_ref() }),
         MapKind::Hash => TypedMapRef::Hash(unsafe { res.as_ref() }),

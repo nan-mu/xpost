@@ -10,6 +10,7 @@ use crate::map::kinds::ringbuf::{self, RingbufRx};
 use crate::map::{
     MapRtGuard, RtMutex,
     builder::{MapBuilder, MapType, traits::layout_size},
+    helper::ops::MapOps,
     kinds::{
         array::{self, BpfArrayMap},
         hash::{self, BpfHashMap, BpfHashTable},
@@ -56,12 +57,14 @@ impl From<AllocError> for Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GuardError {
     TypeMismatch,
+    NotFound,
 }
 
 impl From<GuardError> for Error {
     fn from(e: GuardError) -> Self {
         match e {
             GuardError::TypeMismatch => Self::TypeMismatch,
+            GuardError::NotFound => Self::NotFound,
         }
     }
 }
@@ -368,6 +371,25 @@ impl MapGuard<'_> {
             return Err(GuardError::TypeMismatch);
         }
         Ok(unsafe { self.meta.storage.as_ref::<BpfArrayMap>() }.data())
+    }
+
+    /// Control-plane: read ARRAY element `index` as little-endian u64 (zero-extend).
+    pub fn array_get_u64(&self, index: u32) -> Result<u64, GuardError> {
+        if self.meta.map_type != MapType::Array {
+            return Err(GuardError::TypeMismatch);
+        }
+        let arr = unsafe { self.meta.storage.as_ref::<BpfArrayMap>() };
+        let key = index;
+        let p = MapOps::lookup(arr, &key as *const u32 as *const u8).map_err(|e| match e {
+            crate::map::MapError::NotFound => GuardError::NotFound,
+            _ => GuardError::TypeMismatch,
+        })?;
+        let vs = arr.value_size.min(8);
+        let mut buf = [0u8; 8];
+        unsafe {
+            core::ptr::copy_nonoverlapping(p, buf.as_mut_ptr(), vs);
+        }
+        Ok(u64::from_le_bytes(buf))
     }
 
     #[cfg(feature = "ringbuf")]

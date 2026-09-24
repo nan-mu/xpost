@@ -243,80 +243,101 @@ pub(crate) mod pool_access {
     };
 
     pub struct PoolWriteGuard<'a> {
-        /// Held for the duration of helper access (lock token).
-        #[allow(dead_code)]
+        /// Held for the duration of helper / pool access (lock token).
         pub guard: MapRtGuard<'a>,
-    }
-
-    #[derive(Clone, Copy)]
-    pub struct PoolMapShim;
-
-    impl PoolWriteGuard<'_> {
-        pub fn as_mut(&mut self) -> Option<PoolMapShim> {
-            Some(PoolMapShim)
-        }
-
-        pub fn as_ref(&self) -> Option<PoolMapShim> {
-            Some(PoolMapShim)
-        }
     }
 
     /// Shared with write path — Mutex has a single guard type.
     pub type PoolReadGuard<'a> = PoolWriteGuard<'a>;
 
-    impl PoolMapShim {
+    impl PoolWriteGuard<'_> {
+        /// Snapshot storage fields under the held lock (no nested try_lock).
         pub fn get(&self, id: &ResourceId) -> Option<StorageRef> {
-            if runtime::contains(*id) {
-                Some(StorageRef { id: *id })
-            } else {
-                None
-            }
+            let meta = self.guard.meta.get(*id)?;
+            Some(StorageRef {
+                id: *id,
+                kind: meta.storage.kind,
+                ptr: meta.storage.ptr as *const u8,
+            })
         }
 
         pub fn get_mut(&mut self, id: &ResourceId) -> Option<StorageMut> {
-            if runtime::contains(*id) {
-                Some(StorageMut { id: *id })
-            } else {
-                None
-            }
+            let meta = self.guard.meta.get_mut(*id)?;
+            Some(StorageMut {
+                id: *id,
+                kind: meta.storage.kind,
+                ptr: meta.storage.ptr,
+                value_size: meta.storage.value_size,
+                value_stride: meta.storage.value_stride,
+            })
+        }
+
+        /// Iterate all map slots as storage snapshots (held-lock, no nested try_lock).
+        pub fn iter_mut(&mut self) -> impl Iterator<Item = (ResourceId, StorageMut)> + '_ {
+            self.guard.meta.iter_mut().enumerate().map(|(id, meta)| {
+                (
+                    id,
+                    StorageMut {
+                        id,
+                        kind: meta.storage.kind,
+                        ptr: meta.storage.ptr,
+                        value_size: meta.storage.value_size,
+                        value_stride: meta.storage.value_stride,
+                    },
+                )
+            })
+        }
+
+        /// Compat: former `as_ref()` / `as_mut()` returned a shim; now the guard
+        /// itself is the table view.
+        pub fn as_ref(&self) -> Option<&Self> {
+            Some(self)
+        }
+
+        pub fn as_mut(&mut self) -> Option<&mut Self> {
+            Some(self)
         }
     }
 
     pub struct StorageRef {
         pub id: ResourceId,
+        kind: Option<MapKind>,
+        ptr: *const u8,
     }
 
     impl StorageRef {
         pub fn kind(&self) -> Option<MapKind> {
-            runtime::try_read_storage(self.id, |r| r.kind).flatten()
+            self.kind
         }
 
         pub unsafe fn as_ref<T>(&self) -> &T {
-            let ptr = runtime::try_read_storage(self.id, |r| r.ptr as *const T).expect("storage");
-            unsafe { &*ptr }
+            unsafe { &*(self.ptr as *const T) }
         }
     }
 
     pub struct StorageMut {
         pub id: ResourceId,
+        kind: Option<MapKind>,
+        ptr: *mut u8,
+        value_size: usize,
+        value_stride: usize,
     }
 
     impl StorageMut {
         pub fn kind(&self) -> Option<MapKind> {
-            runtime::try_read_storage(self.id, |r| r.kind).flatten()
+            self.kind
         }
 
         pub fn value_size(&self) -> usize {
-            runtime::try_read_storage(self.id, |r| r.value_size).unwrap_or(0)
+            self.value_size
         }
 
         pub fn value_stride(&self) -> usize {
-            runtime::try_read_storage(self.id, |r| r.value_stride).unwrap_or(0)
+            self.value_stride
         }
 
         pub unsafe fn as_mut<T>(&mut self) -> &mut T {
-            let ptr = runtime::try_write_storage(self.id, |r| r.ptr as *mut T).expect("storage");
-            unsafe { &mut *ptr }
+            unsafe { &mut *(self.ptr as *mut T) }
         }
     }
 
