@@ -5,7 +5,7 @@ resolver = "2"
 # errors from std crates). Invoke via `--manifest-path` / the `xtask` alias.
 members = [".", "esp-radio", "xpost-macros", "xpost-elf"]
 default-members = ["."]
-exclude = ["xpost-build", "xtask", "xpost-agent", "xpost-serial", "examples"]
+exclude = ["xpost-build", "xtask", "xpost-agent", "xpost-serial", "xpost-test", "examples"]
 
 [package]
 edition      = "2024"
@@ -24,9 +24,6 @@ bench = false
 
 [features]
 default = []
-# Boot path B: bpf.toml codegen (`boot_maps` / `boot_xdps`).
-# Firmware-first (path A) is implicit when this is off — no named feature.
-from-bpf-toml = []
 # Incomplete — do not enable (compile_error!).
 # Pulls optional ringbuf / async-ringbuf crates; source kept for later work.
 ringbuf = ["dep:ringbuf", "dep:async-ringbuf"]

@@ -47,8 +47,6 @@ pub enum XdpError {
     InvalidName,
     DuplicateName,
     NotImplemented,
-    /// Deprecated alias kept for source compatibility; prefer registering builders first.
-    BpfTomlNotLoaded,
 }
 
 impl XdpError {
@@ -96,7 +94,6 @@ impl XdpError {
             Self::InvalidName => "invalid name",
             Self::DuplicateName => "duplicate name",
             Self::NotImplemented => "not implemented",
-            Self::BpfTomlNotLoaded => "bpf.toml boot not loaded",
         }
     }
 }

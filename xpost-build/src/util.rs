@@ -53,11 +53,6 @@ pub fn parse_dotted_ipv4(s: &str, ctx: &str) -> [u8; 4] {
     out
 }
 
-pub fn parse_optional_addr(table: &toml::Table, key: &str, map_name: &str) -> Option<usize> {
-    let v = table.get(key)?;
-    Some(parse_addr_value(v, key, map_name))
-}
-
 pub fn parse_addr_value(v: &toml::Value, key: &str, map_name: &str) -> usize {
     if let Some(i) = v.as_integer() {
         assert!(i >= 0, "[maps.{map_name}].{key} must be non-negative");
@@ -74,30 +69,4 @@ pub fn parse_addr_value(v: &toml::Value, key: &str, map_name: &str) -> usize {
             .unwrap_or_else(|e| panic!("[maps.{map_name}].{key}: invalid address `{s}`: {e}"));
     }
     panic!("[maps.{map_name}].{key}: expected integer or hex string");
-}
-
-/// Optional `[maps.*].aot_aliases = [0x…, …]` — extra AOT `.maps` VMAs for hot-siblings.
-pub fn parse_addr_list(table: &toml::Table, key: &str, map_name: &str) -> Vec<usize> {
-    let Some(v) = table.get(key) else {
-        return Vec::new();
-    };
-    let Some(arr) = v.as_array() else {
-        panic!("[maps.{map_name}].{key}: expected array of addresses");
-    };
-    arr.iter()
-        .map(|e| parse_addr_value(e, key, map_name))
-        .collect()
-}
-
-pub fn snake_to_pascal(s: &str) -> String {
-    s.split('_')
-        .filter(|p| !p.is_empty())
-        .map(|p| {
-            let mut c = p.chars();
-            match c.next() {
-                None => String::new(),
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-            }
-        })
-        .collect()
 }

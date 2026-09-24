@@ -39,8 +39,6 @@ enum SyncAction {
         board: Option<PathBuf>,
         #[arg(long)]
         out: PathBuf,
-        #[arg(long)]
-        from_bpf_toml: bool,
     },
     Export {
         #[arg(long)]
@@ -110,7 +108,6 @@ fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
         SyncAction::Validate { board } => {
             let out = tmp_out.clone();
             let req = xpost_build::SyncRequest {
-                mode: xpost_build::SyncMode::Default,
                 crate_manifest: &crate_manifest,
                 board_dir: board.as_deref(),
                 out_dir: &out,
@@ -130,18 +127,8 @@ fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
                 }
             }
         }
-        SyncAction::Codegen {
-            board,
-            out,
-            from_bpf_toml,
-        } => {
-            let mode = if from_bpf_toml {
-                xpost_build::SyncMode::FromBpfToml
-            } else {
-                xpost_build::SyncMode::Default
-            };
+        SyncAction::Codegen { board, out } => {
             let req = xpost_build::SyncRequest {
-                mode,
                 crate_manifest: &crate_manifest,
                 board_dir: board.as_deref(),
                 out_dir: &out,
@@ -160,7 +147,6 @@ fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| board.join("target/layout-export"));
             let req = xpost_build::SyncRequest {
-                mode: xpost_build::SyncMode::Default,
                 crate_manifest: &crate_manifest,
                 board_dir: Some(&board),
                 out_dir: &out_dir,
@@ -184,7 +170,6 @@ fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| board.join("target/layout-export"));
             let req = xpost_build::SyncRequest {
-                mode: xpost_build::SyncMode::Default,
                 crate_manifest: &crate_manifest,
                 board_dir: Some(&board),
                 out_dir: &out_dir,
@@ -197,7 +182,6 @@ fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
         SyncAction::EmbedLayout { board, elf } => {
             let out = tmp_out.clone();
             let req = xpost_build::SyncRequest {
-                mode: xpost_build::SyncMode::Default,
                 crate_manifest: &crate_manifest,
                 board_dir: Some(&board),
                 out_dir: &out,

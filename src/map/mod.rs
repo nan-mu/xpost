@@ -35,23 +35,9 @@ pub use runtime::{
     RtMutex, RtMutexGuard,
 };
 
-pub use xpost_macros::{MapKey, MapValue, declare_runtime};
+pub use xpost_macros::{MapKey, MapValue};
 
-/// Empty AOT binds when firmware does not include generated `aot_map_bind.rs`.
-pub fn bind_aot_map_addrs() {}
-pub const AOT_MAP_BIND_COUNT: usize = 0;
-pub const AOT_MAP_BINDS: &[(&str, usize)] = &[];
-pub const AOT_MAP_USER_NAMES: &[&str] = &[];
-
-/// Stubs formerly emitted by board bpf_maps codegen (library no longer includes OUT_DIR).
-#[allow(dead_code)]
-pub(crate) const FIRMWARE_MAP_COUNT: usize = 0;
-#[allow(dead_code)]
-pub(crate) const FIRMWARE_HAS_ARRAY: bool = false;
-#[allow(dead_code)]
-pub(crate) const FIRMWARE_HAS_HASH: bool = false;
-#[allow(dead_code)]
-pub(crate) const FIRMWARE_HAS_RINGBUF: bool = false;
+/// HW selftest placeholders (no board codegen in-tree).
 #[allow(dead_code)]
 pub(crate) const SELFTEST_MAP_ID: MapIdx = 0;
 #[allow(dead_code)]

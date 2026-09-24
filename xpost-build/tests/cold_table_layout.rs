@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use xpost_build::{SyncMode, SyncRequest, export};
+use xpost_build::{SyncRequest, export};
 
 fn board_with_partition() -> PathBuf {
     let dir = tempfile_dir();
@@ -39,7 +39,6 @@ fn export_cold_table_from_partitions_csv() {
     let out = board.join("target/layout-export");
     let contract = out.join("layout.toml");
     let req = SyncRequest {
-        mode: SyncMode::Default,
         crate_manifest: &crate_manifest,
         board_dir: Some(&board),
         out_dir: &out,

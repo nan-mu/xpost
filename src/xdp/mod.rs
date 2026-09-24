@@ -601,6 +601,9 @@ impl XdpRt {
 
     /// Enable the datapath: publish primary entry and install VMR→RMA aliases.
     ///
+    /// VMR pairs come only from the primary image's runtime meta (`aot_binds`,
+    /// typically filled when scanning a cold XDP ELF).
+    ///
     /// Requires `&mut MapRtGuard` so map refcounts and the helper alias table can
     /// be updated. Pass `None` only when the leased image has no `required_maps`.
     pub fn lease(&mut self, maps: Option<&mut MapRtGuard<'_>>) -> Result<(), XdpError> {
@@ -628,24 +631,20 @@ impl XdpRt {
         self.vmr_binds.clear();
         self.map_refs.clear();
         if let Some(maps) = maps {
-            for &(name, vma) in crate::map::AOT_MAP_BINDS {
-                if vma == 0 {
-                    continue;
-                }
-                let map_id = maps.find(name).map_err(|_| XdpError::RequiredMapAbsent)?;
-                let rma = maps.storage_ptr(map_id).map_err(|_| XdpError::MapLease)?;
-                maps.add_user(map_id).map_err(|_| XdpError::MapLease)?;
-                if self.map_refs.push(map_id).is_err() {
-                    self.rollback_map_users(maps);
-                    return Err(XdpError::MapLease);
-                }
-                if self.vmr_binds.insert(vma, map_id, rma).is_err() {
-                    self.rollback_map_users(maps);
-                    return Err(XdpError::MapLease);
-                }
-            }
-            // Also lease required_maps by name if not already in AOT binds.
             if let Some(id) = self.slots.get(self.primary).and_then(|s| s.image) {
+                // Runtime scan: VMR pairs on the leased image meta.
+                let binds: Vec<(String, usize)> =
+                    self.images[id].meta.aot_binds.iter().cloned().collect();
+                for (name, vma) in binds {
+                    if vma == 0 {
+                        continue;
+                    }
+                    if self.bind_vmr(maps, &name, vma).is_err() {
+                        self.rollback_map_users(maps);
+                        return Err(XdpError::MapLease);
+                    }
+                }
+                // Hold required_maps by name if not already referenced via VMR.
                 let names: Vec<String> = self.images[id]
                     .meta
                     .required_maps
@@ -667,8 +666,8 @@ impl XdpRt {
                     }
                 }
             }
-            // Install codegen aliases only when present. Empty AOT_MAP_BINDS must
-            // not call set_map_aliases(&[]) — that would wipe hand `bind_map_symbols`.
+            // Install aliases only when this lease produced binds. Empty must not
+            // call set_map_aliases(&[]) — that would wipe hand `bind_map_symbols`.
             let binds = self.vmr_binds.alias_pairs();
             if !binds.is_empty() {
                 crate::map::set_map_aliases(&binds).map_err(|_| XdpError::MapLease)?;
@@ -681,6 +680,26 @@ impl XdpRt {
         PRIMARY_ENTRY.store(entry, Ordering::Release);
         ACTIVE.store(true, Ordering::Release);
         self.leased = true;
+        Ok(())
+    }
+
+    fn bind_vmr(
+        &mut self,
+        maps: &mut MapRtGuard<'_>,
+        name: &str,
+        vma: usize,
+    ) -> Result<(), XdpError> {
+        let map_id = maps.find(name).map_err(|_| XdpError::RequiredMapAbsent)?;
+        let rma = maps.storage_ptr(map_id).map_err(|_| XdpError::MapLease)?;
+        if !self.map_refs.iter().any(|m| *m == map_id) {
+            maps.add_user(map_id).map_err(|_| XdpError::MapLease)?;
+            self.map_refs
+                .push(map_id)
+                .map_err(|_| XdpError::MapLease)?;
+        }
+        self.vmr_binds
+            .insert(vma, map_id, rma)
+            .map_err(|_| XdpError::MapLease)?;
         Ok(())
     }
 

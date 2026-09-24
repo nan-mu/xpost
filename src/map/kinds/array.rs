@@ -196,7 +196,7 @@ pub(crate) async fn create_array(
     .await
 }
 
-/// Alias used by `bpf.toml` codegen (`init_firmware_maps`).
+/// Alias used by map create helpers.
 pub(crate) async fn create_bpf_array(
     id: ResourceId,
     value_size: usize,
