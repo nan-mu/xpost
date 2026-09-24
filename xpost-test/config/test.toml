@@ -1,0 +1,54 @@
+# Compile-time probe config (embedded into the binary via include_str!).
+# Edit this file, rebuild, scp the single `test` binary to TR3000, then:
+#   ./probe serve          # HTTP daemon (remote jobs via scripts/fwctl.sh)
+#   ./probe all …          # local formal benches
+#   ./probe --json         # suite: pretty-JSON on stdout + write report_path
+#
+# 本文件启用的 [[tests]].name 必须与 firmware/config.toml 的 [[tests]] 同名。
+
+[probe]
+iface = "br-lan"
+pair_timeout_ms = 5000
+report_path = "/tmp/test-report.json"
+# Optional Ethernet source MAC override (default: iface hardware address)
+# src_mac = "00:11:22:33:44:55"
+
+[target]
+esp_ip = "192.168.110.103"
+vip_ip = "192.168.110.200"
+# From firmware `[Init][STA] mac=…`
+esp_mac = "dc:1e:d5:e5:e0:c8"
+echo_port = 8080
+reply_port = 18080
+# Stimulus UDP sport; must ≠ reply_port (bounce swaps ports; TC uses dport!=reply).
+stim_sport = 18081
+ctrl_port = 8081
+# Must match firmware [[tests.seeds]] for test0 (idx0 DROP, idx1 XDP_TX).
+ban_ip = "10.0.0.1"
+tx_ip = "10.0.0.2"
+
+# Mac USB flash agent on LAN (TR3000 → Mac IP:9240, no SSH tunnel).
+# Runtime override on TR3000: XPOST_AGENT_ENDPOINT=<mac-ip>:9240 ./probe all …
+[agent]
+endpoint = "192.168.110.96:9240"
+
+[serve]
+http_listen = "0.0.0.0:19081"
+
+[profiles]
+drop_hal = "drop-hal"
+drop_xdp = "drop-xdp"
+firmware = "firmware"
+
+[[tests]]
+name = "test0"
+enabled = true
+
+[[tests.cases]]
+id = "drop"
+src_ip = "10.0.0.1"
+
+[[tests.cases]]
+id = "tx"
+src_ip = "10.0.0.2"
+expect_bounce = true

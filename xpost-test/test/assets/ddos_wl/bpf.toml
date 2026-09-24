@@ -1,0 +1,59 @@
+source = "/Users/nan/bs/libbpf-mcu/tests/xdp/ddos_wl.c"
+size = 9224
+
+[xdp]
+size = 232
+asm = """
+0000000000000000 <ddos_wl_xdp>:
+       0:	w0 = 0x2
+       1:	w2 = *(u32 *)(r1 + 0x4)
+       2:	w3 = *(u32 *)(r1 + 0x0)
+       3:	r1 = r3
+       4:	r1 += 0xe
+       5:	if r1 > r2 goto +0x16 <ddos_wl_xdp+0xe0>
+       6:	w4 = *(u16 *)(r3 + 0xc)
+       7:	if w4 != 0x8 goto +0x14 <ddos_wl_xdp+0xe0>
+       8:	r4 = r3
+       9:	r4 += 0x22
+      10:	if r4 > r2 goto +0x11 <ddos_wl_xdp+0xe0>
+      11:	w5 = *(u8 *)(r1 + 0x9)
+      12:	if w5 != 0x11 goto +0x4 <ddos_wl_xdp+0x88>
+      13:	r3 += 0x2a
+      14:	if r3 > r2 goto +0x2 <ddos_wl_xdp+0x88>
+      15:	w2 = *(u16 *)(r4 + 0x2)
+      16:	if w2 == 0x911f goto +0xb <ddos_wl_xdp+0xe0>
+      17:	w1 = *(u32 *)(r1 + 0xc)
+      18:	*(u32 *)(r10 - 0x4) = w1
+      19:	r2 = r10
+      20:	r2 += -0x4
+      21:	r1 = 0x0 ll
+      23:	call 0x1
+      24:	r1 = r0
+      25:	w0 = 0x1
+      26:	if r1 == 0x0 goto +0x1 <ddos_wl_xdp+0xe0>
+      27:	w0 = 0x2
+      28:	exit
+"""
+
+[maps.ddos_wl]
+map_type = "BPF_MAP_TYPE_HASH"
+max_entries = 64
+estimated_bytes = 320
+aot_addr = 0x40380278
+key = """
+    u32 v
+"""
+value = """
+    u8 v
+"""
+
+[CORE]
+records = """
+insn_off,type_id,access_str,kind,type_name,section
+0x0008,16,0:1,0,xdp_md,xdp
+0x0010,16,0:0,0,xdp_md,xdp
+0x0030,19,0:2,0,ethhdr,xdp
+0x0058,24,0:7,0,iphdr,xdp
+0x0078,30,0:1,0,udphdr,xdp
+0x0088,24,0:9:0:0,0,iphdr,xdp
+"""

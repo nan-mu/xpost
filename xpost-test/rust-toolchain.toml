@@ -1,0 +1,5 @@
+[toolchain]
+# Absolute path required (rustup rejects relative path toolchains).
+# Mac rustup runs this cargo → docker exec quirky_villani.
+# Inside the container the shim sets RUSTUP_TOOLCHAIN=nightly (no recurse).
+path = "/Users/nan/bs/xpost/xpost-test/.cargo/docker-toolchain"

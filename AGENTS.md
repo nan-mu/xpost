@@ -17,8 +17,9 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 
 - Root crate `xpost`: board-agnostic runtime (maps, helpers, IRAM slots, RX ingest).
 - `examples/<app>/`: self-contained MCU projects.
-- Host (workspace `exclude`, own triple): `xpost-serial` (library), `xpost-agent`
-  (CLI), `xpost-build`, `xtask`, `xpost-test` (experiment harness, own workspace).
+- Host (workspace `exclude`, own Cargo workspace / triple): `xpost-serial`
+  (library), `xpost-agent` (CLI), `xpost-build`, `xtask`, `xpost-test`
+  (experiment harness; same git tree, separate `Cargo.toml`).
 
 ## Host serial / agent
 

@@ -1,0 +1,13 @@
+source = "/Users/nan/bs/libbpf-mcu/tests/xdp/fw_hash_drop.c"
+size = 140
+
+[maps.fw_rules]
+map_type = "BPF_MAP_TYPE_HASH"
+max_entries = 16
+aot_addr = 0x4038107c
+key = """
+    u32 v
+"""
+value = """
+    u8 v
+"""

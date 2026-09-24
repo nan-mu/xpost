@@ -1,0 +1,7 @@
+/target
+/target-docker
+/.cargo-docker
+**/*.rs.bk
+.DS_Store
+*.log
+.env

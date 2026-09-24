@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["test", "test-common", "test-ebpf", "test-report", "xtask"]
+default-members = ["test", "test-common", "test-report"]
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
+edition = "2024"
+
+[workspace.dependencies]
+aya = { version = "0.13.1", default-features = false }
+aya-build = { version = "0.1.2", default-features = false }
+aya-ebpf = { version = "0.1.1", default-features = false }
+aya-log = { version = "0.2.1", default-features = false }
+aya-log-ebpf = { version = "0.1.0", default-features = false }
+
+anyhow = { version = "1", default-features = false }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "query"] }
+cargo_metadata = { version = "0.19", default-features = false }
+clap = { version = "4.5", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+env_logger = { version = "0.11", default-features = false }
+libc = { version = "0.2", default-features = false }
+log = { version = "0.4", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+tokio = { version = "1.40", default-features = false }
+toml = { version = "0.8" }
+which = { version = "6", default-features = false }
+
+[profile.release.package.test-ebpf]
+debug = 2
+codegen-units = 1
+strip = false
