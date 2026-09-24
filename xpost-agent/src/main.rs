@@ -11,7 +11,7 @@ use xpost_serial::{
 };
 
 /// Default XDP ELF for just_drop cold table.
-const DEFAULT_XDP_ELF: &str = "/Users/nan/bs/build/just_drop/just_drop.elf";
+const DEFAULT_XDP_ELF: &str = "examples/just_drop/just_drop.elf";
 
 #[derive(Parser, Debug)]
 #[command(name = "xpost-agent", about = "Exercise xpost-serial against an ESP32-C3")]

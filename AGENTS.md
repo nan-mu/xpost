@@ -37,7 +37,8 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 cargo xtask just_drop build --release
 
 # Install / overwrite just_drop XDP ELF in the cold table (default just_drop.elf)
-cargo xtask agent program --elf /Users/nan/bs/build/just_drop/just_drop.elf
+cargo xtask agent program --elf examples/just_drop/just_drop.elf
+# or omit --elf (same default)
 
 # List cold-table entries
 cargo xtask agent list
