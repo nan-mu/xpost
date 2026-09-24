@@ -10,7 +10,7 @@ pub const MAX_CONTAINER_SIZE: usize = 4096;
 /// `.xpost.meta` size limit.
 pub const MAX_META_SIZE: usize = 1024;
 /// Map capacity profile limit.
-pub const MAX_ENTRIES: u32 = 64;
+pub const MAX_ENTRIES: u32 = 256;
 
 const ELF32_EHDR_SIZE: u16 = 52;
 const ELF32_SHDR_SIZE: usize = 40;
