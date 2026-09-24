@@ -53,6 +53,9 @@ cargo xtask agent clear
 cargo xtask agent request PING
 cargo xtask agent request counters
 cargo xtask agent probe <esp-ipv4>
+
+# Long-running RPC for xpost-test / fwctl (default device session)
+cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
 ```
 
 `probe` sends one UDP datagram to port 8080 and prints `ack` or `no-ack`.
