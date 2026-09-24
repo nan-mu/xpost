@@ -18,7 +18,7 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 - Root crate `xpost`: board-agnostic runtime (maps, helpers, IRAM slots, RX ingest).
 - `examples/<app>/`: self-contained MCU projects.
 - Host (workspace `exclude`, own triple): `xpost-serial` (library), `xpost-agent`
-  (CLI), `xpost-build`, `xtask`.
+  (CLI), `xpost-build`, `xtask`, `xpost-test` (experiment harness, own workspace).
 
 ## Host serial / agent
 
@@ -28,6 +28,10 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 - **`xpost-agent/`** (crate `xpost-agent`): CLI. Dispatch stays `cargo xtask agent …`
   (`--manifest-path xpost-agent/Cargo.toml`). Agent uses `xpost-elf` to read the
   program name from the XDP ELF, then calls `Session::install_xdp(name, path)`.
+- **`xpost-test/`**: experiment director. It decides the scenario (load drop or not,
+  send a stimulus, expect `ack` or `no-ack`, then read counters). It calls
+  `xpost-agent` / `xpost-serial`; it does not own the USB session itself while
+  the agent is running.
 - **`--port`**: optional. Omit → pick the unique USB serial port; if zero or many,
   error and require `--port`.
 
@@ -47,7 +51,18 @@ cargo xtask agent list
 cargo xtask agent clear
 
 cargo xtask agent request PING
+cargo xtask agent request counters
+cargo xtask agent probe <esp-ipv4>
 ```
+
+`probe` sends one UDP datagram to port 8080 and prints `ack` or `no-ack`.
+Drop XDP should yield `no-ack` and a rising `drop` counter. `counters` is one
+`OK counters …` line (`drop`, `failed_tx`, `net_rx`, and the runtime error
+counters). `ack-dest <ipv4> <port>` points the firmware ACK at a fixed listener;
+otherwise the ACK returns to the stimulus source.
+
+Wi-Fi STA needs `WIFI_SSID` and `WIFI_PASS` in the just_drop build env. Without
+them the UDP path stays down and serial `counters` still works.
 
 ## Scope
 
