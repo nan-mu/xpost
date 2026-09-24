@@ -452,6 +452,8 @@ name = "xpost-build"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "clap",
+ "heapless",
  "object",
  "toml",
  "xpost-elf",
