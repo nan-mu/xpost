@@ -1216,6 +1216,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "log",
+ "portable-atomic",
  "smoltcp",
  "static_cell",
 ]

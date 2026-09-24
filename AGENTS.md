@@ -73,6 +73,25 @@ Wi-Fi STA needs `WIFI_SSID` and `WIFI_PASS` (or `WIFI_PASSWORD` in
 `examples/just_drop/.env`, loaded by that crate's `build.rs`). Without them the
 UDP path stays down and serial `counters` still works.
 
+## Control: `just_drop_hal`
+
+crates.io-only esp-hal / embassy-net / smoltcp firmware — **no** path deps into
+the xpost tree, **no** local `esp-radio` fork, **no** cold XDP / `agent program`.
+
+```bash
+cargo xtask just_drop_hal build --release
+cargo xtask agent request "drop off"   # Pass: ACK + net_rx↑
+cargo xtask agent request "drop on"    # Drop: no-ack + drop/rxcnt[17]↑
+cargo xtask agent probe <esp-ipv4>
+cargo xtask agent request counters
+cargo xtask agent request "rxcnt 17"
+```
+
+Drop is application-layer on UDP:8080 (packet already entered smoltcp), not
+Wi-Fi ingress. Serial surface matches `just_drop` (`ping` / `counters` /
+`rxcnt` / `ack-dest`); XDP error fields in `OK counters` are always 0,
+`map_lock=no-rt`. Wi-Fi creds: `examples/just_drop_hal/.env` (same keys).
+
 ## Scope
 
 Bare-metal only (no ESP-IDF). Static loading of XDP ELF image bytes into slots;

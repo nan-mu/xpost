@@ -60,6 +60,7 @@ smoltcp = { version = "0.13.0", default-features = false, features = [
 ] }
 
 critical-section = "1.2.0"
+portable-atomic = { version = "1", default-features = false }
 static_cell      = "2.1.1"
 
 

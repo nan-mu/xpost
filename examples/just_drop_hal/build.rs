@@ -1,7 +1,34 @@
 fn main() {
+    load_dotenv();
     linker_be_nice();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+}
+
+/// Read `.env` next to Cargo.toml into compile-time `option_env!` keys.
+/// Accepts `WIFI_PASS` or `WIFI_PASSWORD` → rustc-env `WIFI_PASS`.
+fn load_dotenv() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
+    println!("cargo:rerun-if-changed={}", path.display());
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, val)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let val = val.trim().trim_matches('"').trim_matches('\'');
+        match key {
+            "WIFI_SSID" => println!("cargo:rustc-env=WIFI_SSID={val}"),
+            "WIFI_PASS" | "WIFI_PASSWORD" => println!("cargo:rustc-env=WIFI_PASS={val}"),
+            _ => {}
+        }
+    }
 }
 
 fn linker_be_nice() {
