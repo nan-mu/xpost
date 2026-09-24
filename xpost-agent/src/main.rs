@@ -1,17 +1,23 @@
-//! CLI front-end for [`xpost_serial`]. True hardware verification entry.
+//! CLI front-end for [`xpost_serial`]. One-shot commands or a long-running listen RPC.
 
-use std::path::PathBuf;
+mod listen;
+
+use std::io::ErrorKind;
+use std::net::UdpSocket;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use xpost_serial::{
-    Chip, InstallOutcome, JUST_DROP_TABLE, Session, StdoutSink, xdp_name_from_file,
+    Chip, FileSink, InstallOutcome, JUST_DROP_TABLE, Session, xdp_name_from_file,
 };
 
 /// Default XDP ELF for just_drop cold table.
 const DEFAULT_XDP_ELF: &str = "examples/just_drop/just_drop.elf";
+/// Default serial transcript path (tee to stdout).
+const DEFAULT_LOG: &str = "target/xpost-agent/serial.log";
 
 #[derive(Parser, Debug)]
 #[command(name = "xpost-agent", about = "Exercise xpost-serial against an ESP32-C3")]
@@ -20,8 +26,20 @@ struct Cli {
     #[arg(long, global = true)]
     port: Option<PathBuf>,
 
+    /// Append serial transcript here (also printed to stdout).
+    #[arg(long, global = true, default_value = DEFAULT_LOG)]
+    log: PathBuf,
+
+    /// Bind TCP RPC (program / clear / counters / probe). Mutually exclusive with subcommands.
+    #[arg(long)]
+    listen: Option<String>,
+
+    /// Accepted for fwctl compatibility (agent owns the USB session; no extra monitor).
+    #[arg(long, default_value_t = false)]
+    no_monitor: bool,
+
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -62,6 +80,18 @@ enum Cmd {
         #[arg(long, default_value_t = 5.0)]
         timeout_secs: f64,
     },
+    /// Send one UDP stimulus to the firmware and wait for `ACK`.
+    ///
+    /// Timeout prints `no-ack` (expected when drop XDP is loaded).
+    Probe {
+        /// Firmware IPv4 address.
+        esp: String,
+        /// Firmware UDP port (just_drop stim port).
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        #[arg(long, default_value_t = 2.0)]
+        timeout_secs: f64,
+    },
 }
 
 fn parse_u32_arg(s: &str) -> std::result::Result<u32, String> {
@@ -83,9 +113,26 @@ fn main() -> ExitCode {
     }
 }
 
+fn open_session(port: Option<&Path>, log: &Path) -> Result<Session<FileSink>> {
+    let sink = FileSink::create(log, true)
+        .with_context(|| format!("create serial log {}", log.display()))?;
+    eprintln!("xpost-agent serial log {}", sink.path().display());
+    Session::open(port, Chip::Esp32c3, sink).context("open session")
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    match cli.cmd {
+    let _ = cli.no_monitor;
+    if let Some(addr) = cli.listen.as_deref() {
+        if cli.cmd.is_some() {
+            bail!("--listen cannot be combined with a subcommand");
+        }
+        return listen::serve(addr, cli.port.as_deref(), &cli.log);
+    }
+    let Some(cmd) = cli.cmd else {
+        bail!("subcommand required (or pass --listen ADDR)");
+    };
+    match cmd {
         Cmd::Program {
             elf,
             table_base,
@@ -97,8 +144,7 @@ fn run() -> Result<()> {
             }
             let name = xdp_name_from_file(&elf)
                 .with_context(|| format!("parse name from {}", elf.display()))?;
-            let mut session = Session::open(cli.port.as_deref(), Chip::Esp32c3, StdoutSink)
-                .context("open session")?;
+            let mut session = open_session(cli.port.as_deref(), &cli.log)?;
             session.cold_table = xpost_serial::ColdTable {
                 base: table_base,
                 len: table_len,
@@ -123,8 +169,7 @@ fn run() -> Result<()> {
             table_base,
             table_len,
         } => {
-            let mut session = Session::open(cli.port.as_deref(), Chip::Esp32c3, StdoutSink)
-                .context("open session")?;
+            let mut session = open_session(cli.port.as_deref(), &cli.log)?;
             session.cold_table = xpost_serial::ColdTable {
                 base: table_base,
                 len: table_len,
@@ -148,8 +193,7 @@ fn run() -> Result<()> {
             table_base,
             table_len,
         } => {
-            let mut session = Session::open(cli.port.as_deref(), Chip::Esp32c3, StdoutSink)
-                .context("open session")?;
+            let mut session = open_session(cli.port.as_deref(), &cli.log)?;
             session.cold_table = xpost_serial::ColdTable {
                 base: table_base,
                 len: table_len,
@@ -163,8 +207,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Request { cmd, timeout_secs } => {
-            let mut session = Session::open(cli.port.as_deref(), Chip::Esp32c3, StdoutSink)
-                .context("open session")?;
+            let mut session = open_session(cli.port.as_deref(), &cli.log)?;
             let reply = session
                 .request_timeout(&cmd, Duration::from_secs_f64(timeout_secs))
                 .with_context(|| format!("request `{cmd}`"))?;
@@ -172,5 +215,146 @@ fn run() -> Result<()> {
             session.close().context("close")?;
             Ok(())
         }
+        Cmd::Probe {
+            esp,
+            port,
+            timeout_secs,
+        } => {
+            let got = probe_ack(&esp, port, Duration::from_secs_f64(timeout_secs))?;
+            println!("{got}");
+            Ok(())
+        }
+    }
+}
+
+/// One datagram to the DUT. Returns `ack` or `no-ack`.
+pub(crate) fn probe_ack(esp: &str, port: u16, timeout: Duration) -> Result<&'static str> {
+    match probe_ack_native(esp, port, timeout) {
+        Ok(v) => Ok(v),
+        // macOS Local Network Privacy: ad-hoc Rust UDP often gets EHOSTUNREACH (65)
+        // while Apple-signed `/usr/bin/python3` / `nc` still work.
+        Err(e) if cfg!(target_os = "macos") => {
+            eprintln!("xpost-agent: native UDP probe failed ({e:#}); trying /usr/bin/python3");
+            probe_ack_via_python(esp, port, timeout)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Fire-and-forget N STIMs (no ACK wait). Used so drop-phase volume is not gated by 2s timeouts.
+pub(crate) fn probe_burst(esp: &str, port: u16, n: u32) -> Result<u32> {
+    match probe_burst_native(esp, port, n) {
+        Ok(v) => Ok(v),
+        Err(e) if cfg!(target_os = "macos") => {
+            eprintln!("xpost-agent: native UDP burst failed ({e:#}); trying /usr/bin/python3");
+            probe_burst_via_python(esp, port, n)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn probe_burst_native(esp: &str, port: u16, n: u32) -> Result<u32> {
+    let sock = UdpSocket::bind("0.0.0.0:0").context("bind burst socket")?;
+    let dest = format!("{esp}:{port}");
+    let mut sent = 0u32;
+    for _ in 0..n {
+        sock.send_to(b"STIM\n", &dest)
+            .with_context(|| format!("burst send to {dest}"))?;
+        sent += 1;
+    }
+    Ok(sent)
+}
+
+fn probe_burst_via_python(esp: &str, port: u16, n: u32) -> Result<u32> {
+    let code = r#"
+import socket, sys
+esp, port, n = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sent = 0
+for _ in range(n):
+    s.sendto(b"STIM\n", (esp, port))
+    sent += 1
+print(sent)
+"#;
+    let out = std::process::Command::new("/usr/bin/python3")
+        .args(["-c", code, esp, &port.to_string(), &n.to_string()])
+        .output()
+        .context("spawn /usr/bin/python3 for UDP burst")?;
+    if !out.status.success() {
+        bail!(
+            "python burst failed: status={} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let msg = String::from_utf8_lossy(&out.stdout);
+    msg.trim()
+        .parse()
+        .with_context(|| format!("python burst count: {msg}"))
+}
+
+fn probe_ack_native(esp: &str, port: u16, timeout: Duration) -> Result<&'static str> {
+    let sock = UdpSocket::bind("0.0.0.0:0").context("bind probe socket")?;
+    sock.set_read_timeout(Some(timeout))
+        .context("set probe timeout")?;
+    let dest = format!("{esp}:{port}");
+    sock.send_to(b"STIM\n", &dest)
+        .with_context(|| format!("send stim to {dest}"))?;
+    let mut buf = [0u8; 64];
+    match sock.recv_from(&mut buf) {
+        Ok((n, from)) => {
+            let msg = String::from_utf8_lossy(&buf[..n]);
+            let msg = msg.trim_end();
+            if msg.starts_with("ACK") {
+                Ok("ack")
+            } else {
+                bail!("unexpected payload from {from}: {msg}");
+            }
+        }
+        Err(e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => {
+            Ok("no-ack")
+        }
+        Err(e) => Err(e).context("recv ack"),
+    }
+}
+
+fn probe_ack_via_python(esp: &str, port: u16, timeout: Duration) -> Result<&'static str> {
+    let code = r#"
+import socket, sys
+esp, port, to = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(to)
+try:
+    s.sendto(b"STIM\n", (esp, port))
+    data, _ = s.recvfrom(64)
+    print(data.decode(errors="replace").strip())
+except socket.timeout:
+    print("no-ack")
+"#;
+    let out = std::process::Command::new("/usr/bin/python3")
+        .args([
+            "-c",
+            code,
+            esp,
+            &port.to_string(),
+            &timeout.as_secs_f64().to_string(),
+        ])
+        .output()
+        .context("spawn /usr/bin/python3 for UDP probe")?;
+    if !out.status.success() {
+        bail!(
+            "python probe failed: status={} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let msg = String::from_utf8_lossy(&out.stdout);
+    let msg = msg.trim();
+    if msg.starts_with("ACK") || msg == "ack" {
+        Ok("ack")
+    } else if msg == "no-ack" {
+        Ok("no-ack")
+    } else {
+        bail!("unexpected python probe output: {msg}");
     }
 }
