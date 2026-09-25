@@ -111,3 +111,16 @@ See [`benchmark/README.md`](benchmark/README.md).
 Bare-metal only (no ESP-IDF). Static loading of XDP ELF image bytes into slots;
 no on-device ELF parse of the firmware image. Preserve ABI / linker layout with
 `libbpf-mcu` XPM1 and board `partitions.csv`.
+
+### Maps / boot
+
+Firmware-first: `MapRt::init` claims the talc heap, then `XdpRt::init` scans cold
+XDP ELF and `MapRt::create`s each image's `required_maps`. Lease installs VMR→RMA
+aliases from meta `aot_binds` (`set_map_aliases`). There is no userspace
+`register_map_name` path — map names live in `MapRt` meta and XDP ELF descriptors.
+
+Control-plane errors are `crate::error` (small enums per public entrypoint).
+BPF helper errno is `map::ops::MapOpError` (not nested into control-plane enums).
+
+Optional / incomplete: `ext::ringbuf` behind Cargo feature `ringbuf` (currently
+`compile_error!`).

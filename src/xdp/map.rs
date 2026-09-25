@@ -10,16 +10,17 @@
 //! bpf_map allocations inside `map_rt` only.
 
 use crate::{
-    map::{MapId, MapIdx, MapRtGuard},
+    error::{MapUseError, XdpLeaseError},
+    map::{MapIdx, MapRtGuard},
     xdp::{
-        XdpError, XdpRt,
+        XdpRt,
         state::{MAX_MAP_REFS, MAX_VMR_BINDS},
     },
 };
 
 /// One published VMR→RMA binding for helpers during lease.
 struct VmrBind {
-    map_id: MapId,
+    map_id: MapIdx,
     #[allow(dead_code)] // retained for lease-time RMA audit / future helper paths
     rma: usize,
 }
@@ -40,7 +41,7 @@ impl VmrTable {
         self.by_vma.clear();
     }
 
-    pub(crate) fn insert(&mut self, vma: usize, map_id: MapId, rma: usize) -> Result<(), ()> {
+    pub(crate) fn insert(&mut self, vma: usize, map_id: MapIdx, rma: usize) -> Result<(), ()> {
         if self.by_vma.len() >= MAX_VMR_BINDS && !self.by_vma.contains_key(&vma) {
             return Err(());
         }
@@ -50,7 +51,7 @@ impl VmrTable {
         }
     }
 
-    pub(crate) fn alias_pairs(&self) -> heapless::Vec<(usize, MapId), MAX_VMR_BINDS> {
+    pub(crate) fn alias_pairs(&self) -> heapless::Vec<(usize, MapIdx), MAX_VMR_BINDS> {
         let mut out = heapless::Vec::new();
         for (&vma, b) in self.by_vma.iter() {
             let _ = out.push((vma, b.map_id));
@@ -86,20 +87,23 @@ impl XdpRt {
         maps: &mut MapRtGuard<'_>,
         name: &str,
         vma: usize,
-    ) -> Result<(), XdpError> {
-        let map_id = maps.find(name).map_err(|_| XdpError::RequiredMapAbsent)?;
-        let rma = maps.storage_ptr(map_id).map_err(|_| XdpError::MapLease)?;
+    ) -> Result<(), XdpLeaseError> {
+        let map_id = maps.find(name).map_err(|e| match e {
+            MapUseError::NotFound => XdpLeaseError::MissingMap,
+            MapUseError::TypeMismatch => XdpLeaseError::Map(e),
+        })?;
+        let rma = maps.storage_ptr(map_id)?;
         if !self.map_lease.refs.iter().any(|m| *m == map_id) {
-            maps.add_user(map_id).map_err(|_| XdpError::MapLease)?;
+            maps.add_user(map_id)?;
             self.map_lease
                 .refs
                 .push(map_id)
-                .map_err(|_| XdpError::MapLease)?;
+                .map_err(|_| XdpLeaseError::AliasFull)?;
         }
         self.map_lease
             .vmr
             .insert(vma, map_id, rma)
-            .map_err(|_| XdpError::MapLease)?;
+            .map_err(|_| XdpLeaseError::AliasFull)?;
         Ok(())
     }
 

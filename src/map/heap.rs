@@ -6,10 +6,10 @@ use core::{
     ptr::NonNull,
 };
 
-use allocator_api2::{alloc::AllocError, boxed::Box};
+use allocator_api2::boxed::Box;
 use talc::{TalcCell, source::Manual};
 
-use crate::map::runtime::rt::{self as runtime, MapIdx};
+use crate::map::MapType;
 
 pub const HEAP_SIZE: usize = 65536;
 
@@ -20,23 +20,6 @@ impl SyncTalc {
     #[inline]
     pub(crate) fn cell(&'static self) -> &'static TalcCell<Manual> {
         &self.0
-    }
-
-    #[inline]
-    pub(crate) fn allocated_bytes(&self) -> usize {
-        self.0.counters().allocated_bytes
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn available_bytes(&self) -> usize {
-        self.0.counters().available_bytes
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn claimed_bytes(&self) -> usize {
-        self.0.counters().claimed_bytes
     }
 }
 
@@ -70,21 +53,11 @@ unsafe impl allocator_api2_v02::alloc::Allocator for TalcAlloc {
     }
 }
 
-pub(crate) type ResourceId = MapIdx;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MapKind {
-    Array,
-    Hash,
-    #[cfg(feature = "ringbuf")]
-    Ringbuf,
-}
-
 pub(crate) struct RawResource {
     pub(crate) ptr: *mut u8,
     pub(crate) layout: Layout,
     drop_fn: unsafe fn(*mut u8),
-    pub(crate) kind: Option<MapKind>,
+    pub(crate) kind: Option<MapType>,
     pub(crate) key_size: usize,
     pub(crate) value_size: usize,
     pub(crate) value_stride: usize,
@@ -154,7 +127,7 @@ impl RawResource {
         ptr: *mut u8,
         layout: Layout,
         drop_fn: unsafe fn(*mut u8),
-        kind: Option<MapKind>,
+        kind: Option<MapType>,
         key_size: usize,
         value_size: usize,
         value_stride: usize,
@@ -170,62 +143,6 @@ impl RawResource {
             users: 0,
         }
     }
-
-    #[cfg(feature = "ringbuf")]
-    pub(crate) fn as_ringbuf_map_mut(&mut self) -> &mut crate::map::kinds::ringbuf::RingbufMap {
-        unsafe { self.as_mut() }
-    }
-
-    pub(crate) async fn insert(
-        id: ResourceId,
-        ptr: *mut u8,
-        layout: Layout,
-        drop_fn: unsafe fn(*mut u8),
-        kind: Option<MapKind>,
-        key_size: usize,
-        value_size: usize,
-        value_stride: usize,
-    ) -> Result<(), AllocError> {
-        let resource = Self::build(
-            ptr,
-            layout,
-            drop_fn,
-            kind,
-            key_size,
-            value_size,
-            value_stride,
-        );
-        let mut guard = runtime::MAP_RT.get().await.lock().await;
-        if guard.meta.len() != id {
-            return Err(AllocError);
-        }
-        guard.meta.push(runtime::MapMeta {
-            name: alloc::format!("map_{id}"),
-            map_type: crate::map::builder::MapType::Hash,
-            key_layout: None,
-            value_layout: None,
-            len: 0,
-            size: 0,
-            storage: resource,
-        });
-        Ok(())
-    }
-
-    pub(crate) async fn destroy(id: ResourceId) -> bool {
-        let lock = match runtime::MAP_RT.try_get() {
-            Some(l) => l,
-            None => return false,
-        };
-        let mut guard = match lock.try_lock().ok() {
-            Some(g) => g,
-            None => return false,
-        };
-        if id >= guard.meta.len() {
-            return false;
-        }
-        guard.meta.remove(id);
-        true
-    }
 }
 
 #[inline]
@@ -233,26 +150,21 @@ pub(crate) fn allocator() -> &'static TalcCell<Manual> {
     ALLOCATOR.cell()
 }
 
-pub(crate) mod pool_access {
-    use crate::map::{
+/// Held-lock storage views for BPF helpers (no nested try_lock).
+pub(crate) mod access {
+    use crate::{
         MapRtGuard,
-        runtime::{
-            pool::{MapKind, ResourceId},
-            rt as runtime,
-        },
+        map::{MapIdx, MapType, state::MAP_RT},
     };
 
-    pub struct PoolWriteGuard<'a> {
-        /// Held for the duration of helper / pool access (lock token).
+    pub struct HeapWriteGuard<'a> {
         pub guard: MapRtGuard<'a>,
     }
 
-    /// Shared with write path — Mutex has a single guard type.
-    pub type PoolReadGuard<'a> = PoolWriteGuard<'a>;
+    pub type HeapReadGuard<'a> = HeapWriteGuard<'a>;
 
-    impl PoolWriteGuard<'_> {
-        /// Snapshot storage fields under the held lock (no nested try_lock).
-        pub fn get(&self, id: &ResourceId) -> Option<StorageRef> {
+    impl HeapWriteGuard<'_> {
+        pub fn get(&self, id: &MapIdx) -> Option<StorageRef> {
             let meta = self.guard.meta.get(*id)?;
             Some(StorageRef {
                 id: *id,
@@ -261,52 +173,24 @@ pub(crate) mod pool_access {
             })
         }
 
-        pub fn get_mut(&mut self, id: &ResourceId) -> Option<StorageMut> {
+        pub fn get_mut(&mut self, id: &MapIdx) -> Option<StorageMut> {
             let meta = self.guard.meta.get_mut(*id)?;
             Some(StorageMut {
                 id: *id,
                 kind: meta.storage.kind,
                 ptr: meta.storage.ptr,
-                value_size: meta.storage.value_size,
-                value_stride: meta.storage.value_stride,
             })
-        }
-
-        /// Iterate all map slots as storage snapshots (held-lock, no nested try_lock).
-        pub fn iter_mut(&mut self) -> impl Iterator<Item = (ResourceId, StorageMut)> + '_ {
-            self.guard.meta.iter_mut().enumerate().map(|(id, meta)| {
-                (
-                    id,
-                    StorageMut {
-                        id,
-                        kind: meta.storage.kind,
-                        ptr: meta.storage.ptr,
-                        value_size: meta.storage.value_size,
-                        value_stride: meta.storage.value_stride,
-                    },
-                )
-            })
-        }
-
-        /// Compat: former `as_ref()` / `as_mut()` returned a shim; now the guard
-        /// itself is the table view.
-        pub fn as_ref(&self) -> Option<&Self> {
-            Some(self)
-        }
-
-        pub fn as_mut(&mut self) -> Option<&mut Self> {
-            Some(self)
         }
     }
 
     pub struct StorageRef {
-        pub id: ResourceId,
-        kind: Option<MapKind>,
+        pub id: MapIdx,
+        kind: Option<MapType>,
         ptr: *const u8,
     }
 
     impl StorageRef {
-        pub fn kind(&self) -> Option<MapKind> {
+        pub fn kind(&self) -> Option<MapType> {
             self.kind
         }
 
@@ -316,24 +200,14 @@ pub(crate) mod pool_access {
     }
 
     pub struct StorageMut {
-        pub id: ResourceId,
-        kind: Option<MapKind>,
+        pub id: MapIdx,
+        kind: Option<MapType>,
         ptr: *mut u8,
-        value_size: usize,
-        value_stride: usize,
     }
 
     impl StorageMut {
-        pub fn kind(&self) -> Option<MapKind> {
+        pub fn kind(&self) -> Option<MapType> {
             self.kind
-        }
-
-        pub fn value_size(&self) -> usize {
-            self.value_size
-        }
-
-        pub fn value_stride(&self) -> usize {
-            self.value_stride
         }
 
         pub unsafe fn as_mut<T>(&mut self) -> &mut T {
@@ -341,16 +215,16 @@ pub(crate) mod pool_access {
         }
     }
 
-    pub fn try_write() -> Option<PoolWriteGuard<'static>> {
-        runtime::MAP_RT
+    pub fn try_write() -> Option<HeapWriteGuard<'static>> {
+        MAP_RT
             .try_get()
             .and_then(|lock| lock.try_lock().ok())
-            .map(|guard| PoolWriteGuard { guard })
+            .map(|guard| HeapWriteGuard { guard })
     }
 
-    pub fn try_read() -> Option<PoolReadGuard<'static>> {
+    pub fn try_read() -> Option<HeapReadGuard<'static>> {
         try_write()
     }
 }
 
-pub(crate) use pool_access::{try_read as pool_try_read, try_write as pool_try_write};
+pub(crate) use access::{try_read as heap_try_read, try_write as heap_try_write};

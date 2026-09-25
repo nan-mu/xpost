@@ -1,10 +1,10 @@
 //! XDP execution runtime. Control-plane mutation is serialized by `XDP_RT`;
 //! RX sees only the atomically published entry in `state`.
 
-mod error;
 pub(crate) mod image;
 pub(crate) mod ingress;
 pub(crate) mod map;
+mod ready;
 pub(crate) mod slot;
 mod state;
 pub mod counter;
@@ -12,7 +12,9 @@ pub(crate) mod table;
 // TODO: `pub(crate) mod faults` — sibling error counters for ELF collect / ingress / table
 // (see plan XDP ELF faults-module; not implemented this phase).
 
-pub use error::XdpError;
+pub use crate::error::{
+    XdpInitError, XdpLeaseError, XdpReleaseError, XdpSlotError, XdpSwitchError,
+};
 pub(crate) use image::XdpMeta;
 pub use image::{Complete, Incomplete, XdpBuilder, XdpLocation, XdpMaps};
 pub use crate::{RtMutex, RtMutexGuard};
@@ -28,9 +30,11 @@ use alloc::{string::String, vec::Vec};
 use core::sync::atomic::Ordering;
 
 use crate::{
-    map::{Error as MapError, MapBuilder, MapRtGuard, MapType},
+    error::{MapCheckError, MapUseError},
+    map::{MapBuilder, MapRtGuard, MapType},
     xdp::{
         map::MapLease,
+        ready::ReadyError,
         state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PRIMARY_ENTRY},
     },
 };
@@ -84,7 +88,7 @@ impl XdpRt {
         cold: impl Into<ColdRegion>,
         maps: &mut MapRtGuard<'_>,
         helper_expected: usize,
-    ) -> Result<(XdpRtGuard<'static>, Vec<ReportItem>), XdpError> {
+    ) -> Result<(XdpRtGuard<'static>, Vec<ReportItem>), XdpInitError> {
         Self::check_helper_address(helper_expected)?;
         let cold = cold.into();
         let table = EspFlashXdpTable::try_new(
@@ -117,14 +121,14 @@ impl XdpRt {
     async fn inner_init(
         mut rt: Self,
         maps: &mut MapRtGuard<'_>,
-    ) -> Result<(XdpRtGuard<'static>, Vec<ReportItem>), XdpError> {
+    ) -> Result<(XdpRtGuard<'static>, Vec<ReportItem>), XdpInitError> {
         if rt.primary == usize::MAX {
-            return Err(XdpError::NoPrimarySlot);
+            return Err(XdpInitError::NoPrimarySlot);
         }
         let _ = rt.discover_elfs();
         let report = rt.create_required_maps(maps)?;
         if XDP_RT.init(RtMutex::new(rt)).is_err() {
-            return Err(XdpError::AlreadyInitialized);
+            return Err(XdpInitError::AlreadyInitialized);
         }
         Ok((XDP_RT.get().await.lock().await, report))
     }
@@ -149,7 +153,7 @@ impl XdpRt {
     fn create_required_maps(
         &self,
         maps: &mut MapRtGuard<'_>,
-    ) -> Result<Vec<ReportItem>, XdpError> {
+    ) -> Result<Vec<ReportItem>, XdpInitError> {
         let mut report = Vec::new();
         for img in &self.images {
             report.push(ReportItem::Xdp(img.meta.name.clone()));
@@ -160,18 +164,19 @@ impl XdpRt {
                     .iter()
                     .any(|item| matches!(item, ReportItem::Map(_, n) if n == &spec.name))
                 {
-                    maps.check(spec).map_err(map_error)?;
+                    maps.check(spec)?;
                     continue;
                 }
                 match maps.find(&spec.name) {
                     Ok(_) => {
-                        maps.check(spec).map_err(map_error)?;
+                        maps.check(spec)?;
                     }
-                    Err(MapError::NotFound) => {
-                        maps.create(MapBuilder::from_meta(spec))
-                            .map_err(map_error)?;
+                    Err(MapUseError::NotFound) => {
+                        maps.create(MapBuilder::from_meta(spec))?;
                     }
-                    Err(e) => return Err(map_error(e)),
+                    Err(MapUseError::TypeMismatch) => {
+                        return Err(XdpInitError::MapCheck(MapCheckError::TypeMismatch));
+                    }
                 }
                 report.push(ReportItem::Map(spec.map_type, spec.name.clone()));
             }
@@ -180,20 +185,20 @@ impl XdpRt {
     }
 
     /// Register a validated, non-overlapping `XdpSlot` (init only).
-    fn register_slot(&mut self, slot: XdpSlot) -> Result<(), XdpError> {
+    fn register_slot(&mut self, slot: XdpSlot) -> Result<(), XdpInitError> {
         slot.validate()?;
         let end = slot
             .base()
             .checked_add(slot.len())
-            .ok_or(XdpError::SlotOverflow)?;
+            .ok_or(XdpInitError::SlotOverflow)?;
         if self.slots.iter().any(|old| {
             slot.base() < old.slot.base().saturating_add(old.slot.len()) && old.slot.base() < end
         }) {
-            return Err(XdpError::OverlappingSlots);
+            return Err(XdpInitError::OverlappingSlots);
         }
         if slot.is_primary() {
             if self.primary != usize::MAX {
-                return Err(XdpError::MultiplePrimarySlots);
+                return Err(XdpInitError::MultiplePrimarySlots);
             }
             self.primary = self.slots.len();
         }
@@ -203,7 +208,7 @@ impl XdpRt {
                 loaded_len: 0,
                 image: None,
             })
-            .map_err(|_| XdpError::TooManySlots)?;
+            .map_err(|_| XdpInitError::TooManySlots)?;
         Ok(())
     }
 
@@ -221,16 +226,17 @@ impl XdpRt {
         &mut self,
         meta: XdpMeta,
         table_id: XdpId,
-    ) -> Result<XdpId, XdpError> {
+    ) -> Result<XdpId, XdpInitError> {
         if self.leased {
-            return Err(XdpError::Leased);
+            // Boot inventory only; lease must not register metas.
+            return Err(XdpInitError::AlreadyInitialized);
         }
         if self.images.len() > table_id && self.images[table_id].table_id == table_id {
-            return Err(XdpError::DuplicateName);
+            return Err(XdpInitError::DuplicateName);
         }
         self.images
             .push(ImageRecord { meta, table_id })
-            .map_err(|_| XdpError::TooManyImages)?;
+            .map_err(|_| XdpInitError::TooManyImages)?;
         Ok(self.images.len() - 1)
     }
 
@@ -241,25 +247,25 @@ impl XdpRt {
     /// Live `helper_dispatcher` vs firmware-passed expected link address (`0` = skip).
     ///
     /// Distinct from [`XdpMeta::check_helper_address`] (meta field vs live symbol).
-    fn check_helper_address(expected: usize) -> Result<(), XdpError> {
+    fn check_helper_address(expected: usize) -> Result<(), XdpInitError> {
         if expected == 0 {
             return Ok(());
         }
         let helper = crate::helper::helper_dispatcher as *const () as usize;
         if helper != expected {
-            return Err(XdpError::LinkedAddress);
+            return Err(XdpInitError::LinkedAddress);
         }
         Ok(())
     }
 
     /// Target slot must have `len >= meta.image_len` (and image non-empty).
-    fn check_image_size(&self, meta: &XdpMeta, slot: SlotId) -> Result<(), XdpError> {
+    fn check_image_size(&self, meta: &XdpMeta, slot: SlotId) -> Result<(), ReadyError> {
         if meta.image_len == 0 {
-            return Err(XdpError::ImageEmpty);
+            return Err(ReadyError::ImageEmpty);
         }
-        let slot_state = self.slots.get(slot).ok_or(XdpError::UnknownSlot)?;
+        let slot_state = self.slots.get(slot).ok_or(ReadyError::UnknownSlot)?;
         if meta.image_len > slot_state.slot.len() {
-            return Err(XdpError::ImageTooLarge);
+            return Err(ReadyError::ImageTooLarge);
         }
         Ok(())
     }
@@ -269,19 +275,20 @@ impl XdpRt {
         &self,
         meta: &XdpMeta,
         maps: Option<&MapRtGuard<'_>>,
-    ) -> Result<(), XdpError> {
+    ) -> Result<(), ReadyError> {
         if meta.required_maps.is_empty() {
             return Ok(());
         }
         let Some(rt) = maps else {
-            return Err(XdpError::MapsRequired);
+            return Err(ReadyError::MapsRequired);
         };
         for req in &meta.required_maps {
             match rt.check(req) {
                 Ok(_) => {}
-                Err(crate::map::Error::NotFound) => return Err(XdpError::MissingMap),
-                Err(crate::map::Error::TypeMismatch) => return Err(XdpError::TypeMismatch),
-                Err(_) => return Err(XdpError::MissingMap),
+                Err(MapCheckError::NotFound) => return Err(ReadyError::MissingMap),
+                Err(MapCheckError::TypeMismatch) => {
+                    return Err(ReadyError::MapCheck(MapCheckError::TypeMismatch));
+                }
             }
         }
         Ok(())
@@ -302,26 +309,26 @@ impl XdpRt {
         &self,
         maps: Option<&MapRtGuard<'_>>,
         id: Option<XdpId>,
-    ) -> Result<(), XdpError> {
+    ) -> Result<(), ReadyError> {
         if self.primary == usize::MAX {
-            return Err(XdpError::NoPrimarySlot);
+            return Err(ReadyError::NoPrimarySlot);
         }
         let primary = self.primary;
-        let slot_state = self.slots.get(primary).ok_or(XdpError::NoPrimarySlot)?;
+        let slot_state = self.slots.get(primary).ok_or(ReadyError::NoPrimarySlot)?;
 
         let meta = match id {
-            Some(id) => &self.images.get(id).ok_or(XdpError::UnknownImage)?.meta,
+            Some(id) => &self.images.get(id).ok_or(ReadyError::UnknownImage)?.meta,
             None => {
                 if slot_state.loaded_len == 0 {
-                    return Err(XdpError::PrimaryEmpty);
+                    return Err(ReadyError::PrimaryEmpty);
                 }
                 let Some(loaded_id) = slot_state.image else {
-                    return Err(XdpError::PrimaryEmpty);
+                    return Err(ReadyError::PrimaryEmpty);
                 };
-                let meta = &self.images.get(loaded_id).ok_or(XdpError::UnknownImage)?.meta;
+                let meta = &self.images.get(loaded_id).ok_or(ReadyError::UnknownImage)?.meta;
                 match meta.location() {
                     XdpLocation::Slot { index } if index == primary => {}
-                    _ => return Err(XdpError::SlotMismatch),
+                    _ => return Err(ReadyError::SlotMismatch),
                 }
                 meta
             }
@@ -342,21 +349,21 @@ impl XdpRt {
         id: XdpId,
         slot: SlotId,
         maps: Option<&MapRtGuard<'_>>,
-    ) -> Result<(), XdpError> {
+    ) -> Result<(), XdpSwitchError> {
         if self.leased {
-            return Err(XdpError::Leased);
+            return Err(XdpSwitchError::Leased);
         }
-        let _ = self.slots.get(slot).ok_or(XdpError::UnknownSlot)?;
+        let _ = self.slots.get(slot).ok_or(XdpSwitchError::UnknownSlot)?;
 
         let prev_primary = self.primary;
         self.primary = slot;
         if let Err(e) = self.pre_lease(maps, Some(id)) {
             self.primary = prev_primary;
-            return Err(e);
+            return Err(e.into());
         }
 
         let (aot_abs, image_len, link_addr) = {
-            let image = self.images.get(id).ok_or(XdpError::UnknownImage)?;
+            let image = self.images.get(id).ok_or(XdpSwitchError::UnknownImage)?;
             match image.meta.location() {
                 XdpLocation::Table { .. } => {}
                 XdpLocation::Slot { .. } => {
@@ -370,10 +377,10 @@ impl XdpRt {
             )
         };
         let (dst, capacity, occupied) = {
-            let slot_state = self.slots.get(slot).ok_or(XdpError::UnknownSlot)?;
+            let slot_state = self.slots.get(slot).ok_or(XdpSwitchError::UnknownSlot)?;
             if slot_state.slot.base() != link_addr && link_addr != 0 {
                 self.primary = prev_primary;
-                return Err(XdpError::SlotMismatch);
+                return Err(XdpSwitchError::SlotMismatch);
             }
             (
                 slot_state.slot.base() as *mut u8,
@@ -383,32 +390,32 @@ impl XdpRt {
         };
         if occupied.is_some() && occupied != Some(id) {
             self.primary = prev_primary;
-            return Err(XdpError::SlotOccupied);
+            return Err(XdpSwitchError::SlotOccupied);
         }
         if image_len > capacity {
             self.primary = prev_primary;
-            return Err(XdpError::ImageTooLarge);
+            return Err(XdpSwitchError::ImageTooLarge);
         }
         let mut buf = [0u8; DEFAULT_IMAGE_CAPACITY];
         if image_len > buf.len() {
             self.primary = prev_primary;
-            return Err(XdpError::ScratchTooSmall);
+            return Err(XdpSwitchError::ScratchTooSmall);
         }
         if let Err(e) = self.table.read(aot_abs, &mut buf[..image_len]) {
             self.primary = prev_primary;
-            return Err(e);
+            return Err(e.into());
         }
         unsafe {
             core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, image_len);
             core::ptr::write_bytes(dst.add(image_len), 0, capacity - image_len);
         }
         Self::fence_instruction_cache();
-        let slot_state = self.slots.get_mut(slot).ok_or(XdpError::UnknownSlot)?;
+        let slot_state = self.slots.get_mut(slot).ok_or(XdpSwitchError::UnknownSlot)?;
         slot_state.loaded_len = image_len;
         slot_state.image = Some(id);
         self.images
             .get_mut(id)
-            .ok_or(XdpError::UnknownImage)?
+            .ok_or(XdpSwitchError::UnknownImage)?
             .meta
             .set_location(XdpLocation::Slot { index: slot });
         Ok(())
@@ -418,9 +425,9 @@ impl XdpRt {
     ///
     /// VMR pairs come only from the primary image's runtime meta (`aot_binds`).
     /// Pass `None` only when the leased image has no `required_maps`.
-    pub fn lease(&mut self, maps: Option<&mut MapRtGuard<'_>>) -> Result<(), XdpError> {
+    pub fn lease(&mut self, maps: Option<&mut MapRtGuard<'_>>) -> Result<(), XdpLeaseError> {
         if self.leased {
-            return Err(XdpError::Leased);
+            return Err(XdpLeaseError::Leased);
         }
         let maps_ref = maps.as_deref();
         self.pre_lease(maps_ref, None)?;
@@ -428,7 +435,7 @@ impl XdpRt {
             let slot = self
                 .slots
                 .get(self.primary)
-                .ok_or(XdpError::NoPrimarySlot)?;
+                .ok_or(XdpLeaseError::NoPrimarySlot)?;
             slot.slot.base()
         };
         self.map_lease.clear();
@@ -440,9 +447,9 @@ impl XdpRt {
                     if vma == 0 {
                         continue;
                     }
-                    if self.bind_vmr(maps, &name, vma).is_err() {
+                    if let Err(e) = self.bind_vmr(maps, &name, vma) {
                         self.rollback_map_users(maps);
-                        return Err(XdpError::MapLease);
+                        return Err(e);
                     }
                 }
                 let names: Vec<String> = self.images[id]
@@ -454,27 +461,27 @@ impl XdpRt {
                 for name in names {
                     let Ok(map_id) = maps.find(&name) else {
                         self.rollback_map_users(maps);
-                        return Err(XdpError::MissingMap);
+                        return Err(XdpLeaseError::MissingMap);
                     };
                     if !self.map_lease.refs.iter().any(|m| *m == map_id) {
-                        if maps.add_user(map_id).is_err() {
+                        if let Err(e) = maps.add_user(map_id) {
                             self.rollback_map_users(maps);
-                            return Err(XdpError::MapLease);
+                            return Err(e.into());
                         }
                         if self.map_lease.refs.push(map_id).is_err() {
                             self.rollback_map_users(maps);
-                            return Err(XdpError::MapLease);
+                            return Err(XdpLeaseError::AliasFull);
                         }
                     }
                 }
             }
             let binds = self.map_lease.vmr.alias_pairs();
             if !binds.is_empty() {
-                crate::map::set_map_aliases(binds.as_slice()).map_err(|_| XdpError::MapLease)?;
+                crate::map::set_map_aliases(binds.as_slice())?;
             }
         } else if let Some(id) = self.slots.get(self.primary).and_then(|s| s.image) {
             if !self.images[id].meta.required_maps.is_empty() {
-                return Err(XdpError::MapsRequired);
+                return Err(XdpLeaseError::MapsRequired);
             }
         }
         PRIMARY_ENTRY.store(entry, Ordering::Release);
@@ -487,14 +494,14 @@ impl XdpRt {
     pub async fn lease_async(
         &mut self,
         maps: Option<&mut MapRtGuard<'_>>,
-    ) -> Result<(), XdpError> {
+    ) -> Result<(), XdpLeaseError> {
         self.lease(maps)
     }
 
     /// Disable datapath: clear aliases, drop map users, clear VMR table.
-    pub fn release(&mut self) -> Result<(), XdpError> {
+    pub fn release(&mut self) -> Result<(), XdpReleaseError> {
         if !self.leased {
-            return Err(XdpError::NotLeased);
+            return Err(XdpReleaseError::NotLeased);
         }
         ACTIVE.store(false, Ordering::Release);
         while IN_FLIGHT.load(Ordering::Acquire) != 0 {
@@ -503,7 +510,7 @@ impl XdpRt {
         PRIMARY_ENTRY.store(0, Ordering::Release);
         crate::map::clear_map_aliases();
         for id in self.map_lease.refs.drain(..) {
-            let _ = crate::map::runtime::remove_user_sync(id);
+            let _ = crate::map::remove_user_sync(id);
         }
         self.map_lease.vmr.clear();
         self.leased = false;
@@ -515,11 +522,11 @@ impl XdpRt {
     // ═══════════════════════════════════════════
 
     /// Resolve IRAM base address to a registered slot id.
-    pub fn slot_for(&self, address: usize) -> Result<SlotId, XdpError> {
+    pub fn slot_for(&self, address: usize) -> Result<SlotId, XdpSlotError> {
         self.slots
             .iter()
             .position(|slot| slot.slot.base() == address)
-            .ok_or(XdpError::UnknownSlot)
+            .ok_or(XdpSlotError::UnknownSlot)
     }
 
     /// `fence.i` after writing executable bytes into a slot.
@@ -527,16 +534,5 @@ impl XdpRt {
         unsafe {
             core::arch::asm!("fence.i");
         }
-    }
-}
-
-fn map_error(e: MapError) -> XdpError {
-    match e {
-        MapError::TypeMismatch => XdpError::TypeMismatch,
-        MapError::AlreadyExists => XdpError::DuplicateName,
-        MapError::InvalidName => XdpError::InvalidName,
-        MapError::NotFound => XdpError::MissingMap,
-        MapError::Oom => XdpError::MapLease,
-        _ => XdpError::MapLease,
     }
 }

@@ -1,6 +1,6 @@
 //! Immutable executable-slot registration.
 
-use crate::xdp::error::XdpError;
+use crate::error::XdpInitError;
 
 #[derive(Clone, Copy)]
 pub struct XdpSlot {
@@ -37,15 +37,15 @@ impl XdpSlot {
         self.primary
     }
 
-    pub(crate) fn validate(self) -> Result<(), XdpError> {
+    pub(crate) fn validate(self) -> Result<(), XdpInitError> {
         if self.base == 0 || self.len == 0 {
-            return Err(XdpError::EmptySlot);
+            return Err(XdpInitError::EmptySlot);
         }
         if self.base & 3 != 0 || self.len & 3 != 0 {
-            return Err(XdpError::SlotAlignment);
+            return Err(XdpInitError::SlotAlignment);
         }
         if self.base.checked_add(self.len).is_none() {
-            return Err(XdpError::SlotOverflow);
+            return Err(XdpInitError::SlotOverflow);
         }
         Ok(())
     }

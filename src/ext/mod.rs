@@ -5,7 +5,7 @@
 //!
 //! | Module | Feature | Notes |
 //! |--------|---------|-------|
-//! | [`ringbuf`] | `ringbuf` | incomplete → `compile_error!` in kinds |
+//! | [`ringbuf`] | `ringbuf` | incomplete → `compile_error!` |
 //!
 //! Boot is firmware-first. Use [`crate::map::MapBuilder`] / [`crate::xdp::XdpBuilder`] directly.
 

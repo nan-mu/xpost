@@ -1,6 +1,4 @@
-//! Map kinds: HASH / ARRAY / optional RINGBUF stub.
+//! Map kinds: HASH / ARRAY.
 
 pub(crate) mod array;
 pub(crate) mod hash;
-#[cfg(feature = "ringbuf")]
-pub(crate) mod ringbuf;

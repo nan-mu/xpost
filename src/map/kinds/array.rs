@@ -1,10 +1,4 @@
 //! BPF_MAP_TYPE_ARRAY — byte storage, aligned element stride, zero-filled.
-//!
-//! Element type is opaque at runtime: callers pass `value_size` (sizeof value).
-//! Storage is a contiguous `u8` buffer of `stride * max_entries` bytes, where
-//! `stride = align_up(value_size, natural_align(value_size))`. Index `i` maps to
-//! `base + i * stride`. Registry records `value_size` (copy width) and
-//! `value_stride` (index step). Values are always zero-initialized — no init API.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
@@ -13,8 +7,9 @@ use core::ptr;
 use allocator_api2::{alloc::AllocError, boxed::Box};
 
 use crate::map::{
-    helper::ops::{MapError, MapOps},
-    runtime::pool::{HEAP_SIZE, MapKind, RawResource, ResourceId, allocator},
+    MapType,
+    heap::{HEAP_SIZE, RawResource, allocator},
+    ops::{MapOpError, MapOps},
 };
 
 /// Max single-element size (same bound as other BPF maps).
@@ -38,48 +33,20 @@ impl BpfArrayMap {
         if idx >= self.max_entries {
             return ptr::null_mut();
         }
-        // SAFETY: index in range; BPF may write value bytes through the pointer.
         unsafe { self.data.as_ptr().add(idx * self.value_stride) as *mut u8 }
     }
 
-    /// Userspace: contiguous storage (read).
     #[inline]
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
-    /// Userspace: contiguous storage (hold `POOL` write lock).
     #[inline]
     pub fn data_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
 
-    /// `bpf_for_each_map_elem` walk (retained; helper currently unsupported).
-    #[allow(dead_code)]
-    pub(super) fn for_each_elems(
-        &mut self,
-        map_arg: usize,
-        cb: extern "C" fn(usize, usize, usize, usize) -> i32,
-        callback_ctx: usize,
-    ) -> usize {
-        for idx in 0..self.max_entries {
-            let mut key = idx as u32;
-            let key_ptr = &mut key as *mut u32 as usize;
-            let val_ptr = self.elem_ptr(idx) as usize;
-            if val_ptr == 0 {
-                continue;
-            }
-            let rc = cb(map_arg, key_ptr, val_ptr, callback_ctx);
-            if rc == 1 {
-                break;
-            }
-        }
-        0
-    }
-
     /// Natural alignment for an opaque value of `value_size` bytes (no BTF).
-    ///
-    /// Largest ABI-relevant power-of-two divisor among {8,4,2,1} (RV32 max = 8).
     pub fn value_align(value_size: usize) -> usize {
         if value_size == 0 {
             return 1;
@@ -108,38 +75,37 @@ impl BpfArrayMap {
 }
 
 impl MapOps for BpfArrayMap {
-    fn lookup(&self, key: *const u8) -> Result<*mut u8, MapError> {
+    fn lookup(&self, key: *const u8) -> Result<*mut u8, MapOpError> {
         if key.is_null() {
-            return Err(MapError::InvalidArg);
+            return Err(MapOpError::InvalidArg);
         }
         let idx = unsafe { ptr::read_unaligned(key as *const u32) } as usize;
         let p = self.elem_ptr(idx);
         if p.is_null() {
-            Err(MapError::NotFound)
+            Err(MapOpError::NotFound)
         } else {
             Ok(p)
         }
     }
 
-    fn update(&mut self, key: *const u8, value: *const u8, _flags: u64) -> Result<(), MapError> {
+    fn update(&mut self, key: *const u8, value: *const u8, _flags: u64) -> Result<(), MapOpError> {
         if key.is_null() || value.is_null() {
-            return Err(MapError::InvalidArg);
+            return Err(MapOpError::InvalidArg);
         }
         let idx = unsafe { ptr::read_unaligned(key as *const u32) } as usize;
         let dst = self.elem_ptr(idx);
         if dst.is_null() {
-            return Err(MapError::InvalidArg);
+            return Err(MapOpError::InvalidArg);
         }
         unsafe { ptr::copy_nonoverlapping(value, dst, self.value_size) };
         Ok(())
     }
 
-    fn delete(&mut self, _key: *const u8) -> Result<(), MapError> {
-        Err(MapError::Unsupported)
+    fn delete(&mut self, _key: *const u8) -> Result<(), MapOpError> {
+        Err(MapOpError::Unsupported)
     }
 }
 
-/// Allocate ARRAY storage; returns `(raw, layout, value_size, stride)` for insert.
 fn alloc_array(
     value_size: usize,
     max_entries: usize,
@@ -169,40 +135,7 @@ fn alloc_array(
 }
 
 unsafe fn drop_array(ptr: *mut u8) {
-    unsafe { crate::map::runtime::pool::reclaim_talc_box::<BpfArrayMap>(ptr, "BpfArrayMap") };
-}
-
-/// Create a zero-filled ARRAY map and register it under `id`.
-///
-/// - `value_size`: sizeof(element) — struct, `u64`, `u8`, …
-/// - `max_entries`: number of slots
-/// - Storage: `value_stride(value_size) * max_entries` bytes, all `0`
-pub(crate) async fn create_array(
-    id: ResourceId,
-    value_size: usize,
-    max_entries: usize,
-) -> Result<(), AllocError> {
-    let (raw, layout, value_size, stride) = alloc_array(value_size, max_entries)?;
-    RawResource::insert(
-        id,
-        raw,
-        layout,
-        drop_array,
-        Some(MapKind::Array),
-        4,
-        value_size,
-        stride,
-    )
-    .await
-}
-
-/// Alias used by map create helpers.
-pub(crate) async fn create_bpf_array(
-    id: ResourceId,
-    value_size: usize,
-    max_entries: usize,
-) -> Result<(), AllocError> {
-    create_array(id, value_size, max_entries).await
+    unsafe { crate::map::heap::reclaim_talc_box::<BpfArrayMap>(ptr, "BpfArrayMap") };
 }
 
 pub(crate) fn alloc_array_storage(
@@ -214,131 +147,9 @@ pub(crate) fn alloc_array_storage(
         raw,
         layout,
         drop_array,
-        Some(MapKind::Array),
+        Some(MapType::Array),
         4,
         value_size,
         stride,
     ))
-}
-
-fn check(_name: &str, ok: bool, pass: &mut u32, fail: &mut u32) {
-    if ok {
-        *pass += 1;
-    } else {
-        *fail += 1;
-    }
-}
-
-/// HW selftest for the first ARRAY map in bpf.toml (when present).
-#[allow(dead_code)]
-pub(crate) fn run_selftest(pass: &mut u32, fail: &mut u32) {
-    use crate::helper::helper_dispatcher;
-    use crate::map::{BPF_ANY, helper_lookup, helper_update};
-    use crate::map::{SELFTEST_KEY_SIZE, SELFTEST_MAP_ID, SELFTEST_VALUE_SIZE};
-
-    const BPF_FUNC_FOR_EACH_MAP_ELEM: usize = 164;
-
-    let _ = (
-        SELFTEST_MAP_ID,
-        SELFTEST_VALUE_SIZE,
-        BpfArrayMap::value_stride(SELFTEST_VALUE_SIZE),
-    );
-    *pass += 1;
-
-    let key = [0u8; 4];
-    let mut val = [0u8; 64];
-    if SELFTEST_KEY_SIZE > key.len() || SELFTEST_VALUE_SIZE > val.len() {
-        check("map_update_elem", false, pass, fail);
-        return;
-    }
-    val[0] = 1;
-
-    let map = SELFTEST_MAP_ID as usize;
-    let key_ptr = key.as_ptr() as usize;
-    let val_ptr = val.as_ptr() as usize;
-
-    check(
-        "map_update_elem",
-        helper_update(map, key_ptr, val_ptr, BPF_ANY as usize) == 0,
-        pass,
-        fail,
-    );
-    let found = helper_lookup(map, key_ptr);
-    check(
-        "map_lookup_elem",
-        found != 0 && unsafe { *(found as *const u8) } == 1,
-        pass,
-        fail,
-    );
-
-    // Stride addressing: index 0 and (if present) index 1 are stride apart.
-    if SELFTEST_VALUE_SIZE > 0 {
-        let stride = BpfArrayMap::value_stride(SELFTEST_VALUE_SIZE);
-        let mut guard = match crate::map::runtime::pool::pool_try_write() {
-            Some(g) => g,
-            None => {
-                check("array_stride", false, pass, fail);
-                return;
-            }
-        };
-        let mut table = match guard.as_mut() {
-            Some(t) => t,
-            None => {
-                check("array_stride", false, pass, fail);
-                return;
-            }
-        };
-        let mut res = match table.get_mut(&SELFTEST_MAP_ID) {
-            Some(r) => r,
-            None => {
-                check("array_stride", false, pass, fail);
-                return;
-            }
-        };
-        let ok_meta = res.value_size() == SELFTEST_VALUE_SIZE && res.value_stride() == stride;
-        let value_stride = res.value_stride();
-        let m: &mut BpfArrayMap = unsafe { res.as_mut() };
-        let p0 = m.elem_ptr(0) as usize;
-        let p1 = m.elem_ptr(1) as usize;
-        let ok_addr = p0 != 0
-            && (m.max_entries < 2 || p1 == p0.wrapping_add(stride))
-            && value_stride == m.value_stride;
-        check("array_stride", ok_meta && ok_addr, pass, fail);
-    }
-
-    // for_each is unsupported: dispatcher fail-closed (usize::MAX), callback unused.
-    extern "C" fn foreach_cb(_map: usize, _key: usize, _val: usize, _ctx: usize) -> i32 {
-        0
-    }
-    let frc = helper_dispatcher(
-        BPF_FUNC_FOR_EACH_MAP_ELEM,
-        map,
-        foreach_cb as *const () as usize,
-        0,
-        0,
-        0,
-    );
-    check(
-        "for_each_map_elem_unsupported",
-        frc == usize::MAX,
-        pass,
-        fail,
-    );
-
-    use crate::map::helper_delete;
-    let del = helper_delete(map, key_ptr);
-    check(
-        "map_delete_elem_array_unsupported",
-        del == crate::map::MapError::Unsupported.errno() as usize,
-        pass,
-        fail,
-    );
-
-    // Negative: unresolved map alias must miss (null), not panic.
-    check(
-        "map_lookup_bad_alias",
-        helper_lookup(0xdead_beef, key_ptr) == 0,
-        pass,
-        fail,
-    );
 }

@@ -19,7 +19,7 @@ pub struct ErrorCounters {
     pub helper_unresolved: AtomicUsize,
     /// Helper map path: pool busy / unsupported / other map op soft-fail.
     pub helper_map: AtomicUsize,
-    /// `bind_map_symbols` skipped an unknown map name.
+    /// `bind_map_symbols` skipped an unknown map name (legacy path removed; always 0).
     pub bind_unknown: AtomicUsize,
     /// Pool `Drop` / reclaim saw misaligned or null ptr (leak path).
     pub pool_drop_misalign: AtomicUsize,

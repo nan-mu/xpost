@@ -2,7 +2,7 @@
 //!
 //! Deleted: redirect_map, tail_call, adjust_head, load/store_bytes,
 //! dynptr, xpost_evt_wake. Deferred BPF ringbuf helpers live in
-//! `map/kinds/ringbuf/` (not dispatched).
+//! Deferred BPF ringbuf helpers live in `ext/ringbuf/` (not dispatched).
 //!
 //! `xdp_adjust_tail` is supported **shrink-only** (positive delta rejected).
 

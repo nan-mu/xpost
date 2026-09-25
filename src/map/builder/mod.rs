@@ -6,15 +6,16 @@ pub use traits::{MapKey, MapValue};
 
 use alloc::{string::String, vec::Vec};
 
-use crate::map::builder::traits::layout_vec;
+use crate::{
+    error::MapCreateError,
+    map::builder::traits::layout_vec,
+};
 
 /// BPF map kind stored in [`super::MapMeta`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapType {
     Array,
     Hash,
-    #[cfg(feature = "ringbuf")]
-    Ringbuf,
 }
 
 /// Map instance spec builder (no typestate).
@@ -48,26 +49,12 @@ impl MapBuilder {
         }
     }
 
-    #[cfg(feature = "ringbuf")]
-    pub fn ringbuf() -> Self {
-        Self {
-            name: None,
-            map_type: MapType::Ringbuf,
-            key_layout: None,
-            value_layout: None,
-            len: 0,
-        }
-    }
-
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
     }
 
     /// Set key layout from a [`MapKey`] type.
-    ///
-    /// Compile-time: `FIELD_LENS` must be non-empty. Hash-only use is enforced in
-    /// [`Self::validate`] / [`MapRt::create`].
     pub fn with_key<K: MapKey>(mut self) -> Self {
         const {
             assert!(
@@ -120,26 +107,24 @@ impl MapBuilder {
     }
 
     /// Fail closed if name / capacity / type-specific layouts disagree.
-    pub(crate) fn validate(&self) -> Result<(), crate::map::runtime::Error> {
-        use crate::map::runtime::Error;
+    pub(crate) fn validate(&self) -> Result<(), MapCreateError> {
         let name = self.name.as_deref().unwrap_or("");
         // Compact ELF MapDescriptorV0 names: 1..31 ASCII bytes.
         if name.is_empty() || name.len() > 31 || !name.is_ascii() {
-            return Err(Error::InvalidName);
+            return Err(MapCreateError::InvalidName);
         }
         if self.len == 0 {
-            return Err(Error::TypeMismatch);
+            return Err(MapCreateError::TypeMismatch);
         }
         match self.map_type {
             MapType::Hash => {
-                // Hash requires key + value; reject empty layouts at create time.
                 if self
                     .key_layout
                     .as_ref()
                     .map(|l| l.is_empty())
                     .unwrap_or(true)
                 {
-                    return Err(Error::TypeMismatch);
+                    return Err(MapCreateError::TypeMismatch);
                 }
                 if self
                     .value_layout
@@ -147,12 +132,12 @@ impl MapBuilder {
                     .map(|l| l.is_empty())
                     .unwrap_or(true)
                 {
-                    return Err(Error::TypeMismatch);
+                    return Err(MapCreateError::TypeMismatch);
                 }
             }
             MapType::Array => {
                 if self.key_layout.is_some() {
-                    return Err(Error::TypeMismatch);
+                    return Err(MapCreateError::TypeMismatch);
                 }
                 if self
                     .value_layout
@@ -160,13 +145,7 @@ impl MapBuilder {
                     .map(|l| l.is_empty())
                     .unwrap_or(true)
                 {
-                    return Err(Error::TypeMismatch);
-                }
-            }
-            #[cfg(feature = "ringbuf")]
-            MapType::Ringbuf => {
-                if self.key_layout.is_some() || self.value_layout.is_some() {
-                    return Err(Error::TypeMismatch);
+                    return Err(MapCreateError::TypeMismatch);
                 }
             }
         }
