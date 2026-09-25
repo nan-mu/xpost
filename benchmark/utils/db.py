@@ -24,7 +24,8 @@ _ALLOWED_SCHEMAS = frozenset({"public", "formal"})
 
 
 def _load_env() -> None:
-    load_dotenv(_ROOT / ".env", override=False)
+    # `.env` is the analysis source of truth (formal vs public); win over shell/kernel.
+    load_dotenv(_ROOT / ".env", override=True)
 
 
 def dsn_kwargs() -> dict[str, Any]:
