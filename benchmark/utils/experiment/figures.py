@@ -1,4 +1,4 @@
-"""Figure 1 (single axes, three Y) and Figure 2 (2×3 noise diagnostics)."""
+"""Figure 1 (three bar panels) and Figure 2 (2×3 noise diagnostics)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,119 @@ import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
+# Okabe–Ito, tuned for a white paper background.
+_PPS = "#0072B2"
+_ADEV = "#D55E00"
+_CV = "#009E73"
+_INK = "#222222"
+_MUTED = "#6E6E6E"
+_FILL = "#D6E3F0"
+
+_RC = {
+    "font.family": "serif",
+    "font.serif": ["STIXGeneral", "Times New Roman", "DejaVu Serif"],
+    "mathtext.fontset": "stix",
+    "axes.unicode_minus": False,
+    "axes.linewidth": 0.7,
+    "axes.edgecolor": _INK,
+    "axes.labelcolor": _INK,
+    "xtick.color": _INK,
+    "ytick.color": _INK,
+    "text.color": _INK,
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "xtick.major.size": 3.2,
+    "ytick.major.size": 3.2,
+    "xtick.major.width": 0.7,
+    "ytick.major.width": 0.7,
+    "xtick.minor.size": 1.8,
+    "ytick.minor.size": 1.8,
+    "legend.frameon": False,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+    "savefig.dpi": 200,
+    "figure.facecolor": "white",
+    "axes.facecolor": "white",
+    "font.size": 9,
+    "axes.labelsize": 9,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "axes.titlesize": 10,
+}
+
+
+def _finite(x: float | None) -> bool:
+    return x is not None and bool(np.isfinite(x))
+
+
+def _ci_whisker(point: float | None, ci: tuple[float, float] | None) -> tuple[float, float]:
+    """Lower/upper error in the same unit as ``point``. Degenerate [0, ≈point] intervals are omitted."""
+    if not _finite(point) or ci is None or not (_finite(ci[0]) and _finite(ci[1])):
+        return 0.0, 0.0
+    lo, hi = float(ci[0]), float(ci[1])
+    y = float(point)
+    if lo <= 0.0 and hi <= y * 1.25:
+        return 0.0, 0.0
+    return max(0.0, y - lo), max(0.0, hi - y)
+
+
+def _bar_pair(
+    ax: Axes,
+    hal: float | None,
+    xdp: float | None,
+    hal_ci: tuple[float, float] | None,
+    xdp_ci: tuple[float, float] | None,
+    *,
+    ylabel: str,
+    fmt,
+    zero: bool,
+) -> None:
+    xs = (0.0, 1.0)
+    vals = [float(hal) if _finite(hal) else np.nan, float(xdp) if _finite(xdp) else np.nan]
+    err = np.array([_ci_whisker(vals[0], hal_ci), _ci_whisker(vals[1], xdp_ci)], dtype=float).T
+    ax.bar(
+        xs,
+        [0.0 if not np.isfinite(v) else v for v in vals],
+        width=0.62,
+        color=(_PPS, _ADEV),
+        yerr=err,
+        capsize=3.0,
+        error_kw={"elinewidth": 0.8, "capthick": 0.7, "ecolor": _INK},
+        zorder=2,
+    )
+    ax.set_xticks(list(xs))
+    ax.set_xticklabels(["HAL", "XDP"])
+    ax.set_ylabel(ylabel)
+    ax.tick_params(axis="x", length=0, pad=4)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    finite = [(v, e_lo, e_hi) for v, e_lo, e_hi in zip(vals, err[0], err[1]) if np.isfinite(v)]
+    if not finite:
+        ax.set_ylim(0, 1)
+        return
+    top = max(v + e_hi for v, _, e_hi in finite)
+    bot = min(v - e_lo for v, e_lo, _ in finite)
+    if zero or bot <= 0.2 * top:
+        ymin, ymax = 0.0, top * 1.28 if top > 0 else 1.0
+    else:
+        span = max(top - bot, top * 0.04)
+        ymin = bot - 0.55 * span
+        ymax = top + 0.85 * span
+    ax.set_ylim(ymin, ymax)
+    for x, v, e_hi in zip(xs, vals, err[1]):
+        if not np.isfinite(v):
+            continue
+        ax.annotate(
+            fmt(v),
+            xy=(x, v + e_hi),
+            xytext=(0, 4),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color=_INK,
+        )
+
 
 def figure1_summary(
     *,
@@ -16,226 +129,227 @@ def figure1_summary(
     xdp_mean_pps: float,
     hal_pps_points: Sequence[float] | None = None,
     xdp_pps_points: Sequence[float] | None = None,
+    hal_pps_ci: tuple[float, float] | None = None,
+    xdp_pps_ci: tuple[float, float] | None = None,
     hal_adev_1s: float | None = None,
     xdp_adev_1s: float | None = None,
+    hal_adev_points: Sequence[float] | None = None,
+    xdp_adev_points: Sequence[float] | None = None,
+    hal_adev_ci: tuple[float, float] | None = None,
+    xdp_adev_ci: tuple[float, float] | None = None,
     hal_cv: float | None = None,
     xdp_cv: float | None = None,
-    title: str = "HAL vs XDP — mean PPS / ADEV(1s) / CV",
+    hal_cv_ci: tuple[float, float] | None = None,
+    xdp_cv_ci: tuple[float, float] | None = None,
+    title: str = "HAL vs XDP",
 ) -> tuple[Figure, Axes]:
-    """One shared axes host; categories HAL/XDP only; three Y scales.
+    """Three bar panels: mean PPS, relative ADEV at 1 s, between-run CV.
 
-    Returns (fig, host_ax). Twin axes are attached to host; do not create a 1×3 grid.
+    PPS and CV include 0. ADEV does not when both values sit well above 0,
+    so a sub-percent gap stays readable. Fractions are drawn in percent.
+    CI tuples are ``(lo, hi)`` in the same unit as the bar (fraction, not percent).
     """
-    fig, host = plt.subplots(figsize=(8.5, 5.0))
-    # Keep a single host; twins share the same position.
-    ax_adev = host.twinx()
-    ax_cv = host.twinx()
-    # Park middle axis spine between the two categories (x≈0.5 in axes fraction).
-    ax_adev.spines["left"].set_position(("axes", 0.5))
-    ax_adev.spines["left"].set_visible(True)
-    ax_adev.yaxis.set_label_position("left")
-    ax_adev.yaxis.set_ticks_position("left")
-    ax_cv.spines["right"].set_position(("axes", 1.0))
-
-    cats = {"hal": 0.0, "xdp": 1.0}
-    host.set_xlim(-0.5, 1.5)
-    host.set_xticks([0.0, 1.0])
-    host.set_xticklabels(["HAL", "XDP"])
-
-    # Mean PPS — blue circles (slight left offset)
-    for name, mean, pts, dx in (
-        ("hal", hal_mean_pps, hal_pps_points, -0.08),
-        ("xdp", xdp_mean_pps, xdp_pps_points, -0.08),
-    ):
-        x = cats[name] + dx
-        if pts:
-            host.scatter(
-                [x] * len(pts),
-                pts,
-                s=18,
-                c="tab:blue",
-                alpha=0.35,
-                zorder=2,
-            )
-        if np.isfinite(mean):
-            host.scatter([x], [mean], s=70, c="tab:blue", marker="o", zorder=3, label="Mean PPS" if name == "hal" else None)
-
-    host.set_ylabel("Mean PPS (packets/s)", color="tab:blue")
-    host.tick_params(axis="y", colors="tab:blue")
-    host.set_ylim(bottom=0)
-
-    # Relative ADEV at 1 s — orange diamonds (center)
-    for name, adev, dx in (
-        ("hal", hal_adev_1s, 0.0),
-        ("xdp", xdp_adev_1s, 0.0),
-    ):
-        x = cats[name] + dx
-        if adev is None or not np.isfinite(adev):
-            host.annotate(
-                "ADEV n/a",
-                xy=(x, 0.02),
-                xycoords=("data", "axes fraction"),
-                ha="center",
-                fontsize=8,
-                color="tab:orange",
-            )
-        else:
-            # Convert to percent for the middle axis
-            ax_adev.scatter(
-                [x],
-                [100.0 * adev],
-                s=70,
-                c="tab:orange",
-                marker="D",
-                zorder=3,
-                label="Rel. ADEV @ 1 s" if name == "hal" else None,
-            )
-    ax_adev.set_ylabel("Relative ADEV at 1 s (%)", color="tab:orange")
-    ax_adev.tick_params(axis="y", colors="tab:orange")
-    ax_adev.set_ylim(bottom=0)
-
-    # CV — green squares (slight right offset)
-    for name, cv, dx in (
-        ("hal", hal_cv, 0.08),
-        ("xdp", xdp_cv, 0.08),
-    ):
-        x = cats[name] + dx
-        if cv is None or not np.isfinite(cv):
-            continue
-        ax_cv.scatter(
-            [x],
-            [100.0 * cv],
-            s=70,
-            c="tab:green",
-            marker="s",
-            zorder=3,
-            label="Between-run CV" if name == "hal" else None,
+    del hal_pps_points, xdp_pps_points, hal_adev_points, xdp_adev_points
+    with plt.rc_context(_RC):
+        fig, axes = plt.subplots(1, 3, figsize=(7.4, 3.55))
+        _bar_pair(
+            axes[0],
+            hal_mean_pps,
+            xdp_mean_pps,
+            hal_pps_ci,
+            xdp_pps_ci,
+            ylabel="Mean PPS (packets/s)",
+            fmt=lambda v: f"{v:,.0f}",
+            zero=True,
         )
-    ax_cv.set_ylabel("Between-run CV (%)", color="tab:green")
-    ax_cv.tick_params(axis="y", colors="tab:green")
-    ax_cv.set_ylim(bottom=0)
+        axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        _bar_pair(
+            axes[1],
+            None if not _finite(hal_adev_1s) else 100.0 * float(hal_adev_1s),
+            None if not _finite(xdp_adev_1s) else 100.0 * float(xdp_adev_1s),
+            None if hal_adev_ci is None else (100.0 * hal_adev_ci[0], 100.0 * hal_adev_ci[1]),
+            None if xdp_adev_ci is None else (100.0 * xdp_adev_ci[0], 100.0 * xdp_adev_ci[1]),
+            ylabel="Rel. ADEV at 1 s (%)",
+            fmt=lambda v: f"{v:.2f}",
+            zero=False,
+        )
+        _bar_pair(
+            axes[2],
+            None if not _finite(hal_cv) else 100.0 * float(hal_cv),
+            None if not _finite(xdp_cv) else 100.0 * float(xdp_cv),
+            None if hal_cv_ci is None else (100.0 * hal_cv_ci[0], 100.0 * hal_cv_ci[1]),
+            None if xdp_cv_ci is None else (100.0 * xdp_cv_ci[0], 100.0 * xdp_cv_ci[1]),
+            ylabel="Between-run CV (%)",
+            fmt=lambda v: f"{v:.2f}",
+            zero=True,
+        )
+        from matplotlib.patches import Patch
 
-    host.set_title(title)
-    # Combined legend from host only (markers already labeled once)
-    handles, labels = [], []
-    for ax in (host, ax_adev, ax_cv):
-        h, l = ax.get_legend_handles_labels()
-        handles.extend(h)
-        labels.extend(l)
-    if handles:
-        host.legend(handles, labels, loc="upper left", fontsize=8)
-
-    fig._xpost_figure1_axes = (host, ax_adev, ax_cv)  # type: ignore[attr-defined]
-    return fig, host
+        fig.legend(
+            [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
+            ["HAL", "XDP"],
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=2,
+            fontsize=8,
+            handlelength=0.9,
+            columnspacing=1.2,
+        )
+        if title:
+            fig.suptitle(title, fontsize=11, y=1.08)
+        fig.tight_layout()
+        return fig, axes[0]
 
 
 def figure1_is_single_panel(fig: Figure) -> bool:
-    """Structural check: one host position; not a 1×3 GridSpec of independent panels."""
-    axes = list(fig.axes)
-    if len(axes) < 1:
+    """True when the figure is three category panels, each labeled HAL and XDP."""
+    axes = [ax for ax in fig.axes if ax.get_visible()]
+    if len(axes) != 3:
         return False
-    # All axes should share the same bounding box (twins), not three side-by-side panels.
-    bboxes = [tuple(ax.get_position().bounds) for ax in axes]
-    # x0 and width should match for twins; reject if three distinct x0 values.
-    x0s = {round(b[0], 4) for b in bboxes}
-    widths = {round(b[2], 4) for b in bboxes}
-    if len(x0s) > 1 and len(widths) > 1:
-        # distinct panels
-        return False
-    host = axes[0]
-    ticks = list(host.get_xticks())
-    labels = [t.get_text() for t in host.get_xticklabels()]
-    if len(ticks) != 2:
-        return False
-    return labels == ["HAL", "XDP"] or set(labels) == {"HAL", "XDP"}
+    for ax in axes:
+        labels = [t.get_text() for t in ax.get_xticklabels()]
+        if labels != ["HAL", "XDP"]:
+            return False
+    return True
+
+
+def _scale_curve(
+    ax: Axes,
+    series: Mapping[float, float] | None,
+    ci: Mapping[float, tuple[float, float]] | None,
+    *,
+    ylabel: str,
+    scale: float = 1.0,
+    href: float | None = None,
+) -> None:
+    ax.set_xscale("log")
+    ax.set_xlabel(r"$\tau$ (s)")
+    ax.set_ylabel(ylabel)
+    if not series:
+        ax.text(0.5, 0.5, "no scale estimate", ha="center", va="center", transform=ax.transAxes, color=_MUTED, fontsize=8)
+        return
+    taus = np.asarray(sorted(series), dtype=float)
+    vals = np.asarray([scale * float(series[t]) for t in taus], dtype=float)
+    if ci:
+        lo, hi = [], []
+        for t in taus:
+            pair = ci.get(float(t))
+            if pair is None or not (_finite(pair[0]) and _finite(pair[1])):
+                lo.append(np.nan)
+                hi.append(np.nan)
+            else:
+                lo.append(scale * float(pair[0]))
+                hi.append(scale * float(pair[1]))
+        lo_a, hi_a = np.asarray(lo), np.asarray(hi)
+        ok = np.isfinite(lo_a) & np.isfinite(hi_a)
+        if np.any(ok):
+            ax.fill_between(taus[ok], np.maximum(lo_a[ok], 0.0), hi_a[ok], color=_PPS, alpha=0.18, linewidth=0)
+    ax.plot(taus, vals, "-o", color=_PPS, ms=4.5, lw=1.15, markeredgecolor="white", markeredgewidth=0.4)
+    if href is not None:
+        ax.axhline(href, color=_MUTED, lw=0.7, ls="--", zorder=1)
+        ax.text(
+            taus[-1],
+            href,
+            " Poisson",
+            ha="right",
+            va="bottom",
+            fontsize=7,
+            color=_MUTED,
+        )
+    ax.set_xticks(list(taus))
+    ax.set_xticklabels([f"{t:g}" for t in taus])
+    ax.tick_params(axis="x", which="minor", bottom=False)
 
 
 def figure2_noise(
     *,
     hal_adev: Mapping[float, float] | None = None,
     xdp_adev: Mapping[float, float] | None = None,
-    hal_counts: Sequence[int] | None = None,
-    xdp_counts: Sequence[int] | None = None,
+    hal_adev_ci: Mapping[float, tuple[float, float]] | None = None,
+    xdp_adev_ci: Mapping[float, tuple[float, float]] | None = None,
+    hal_counts: Sequence[float] | None = None,
+    xdp_counts: Sequence[float] | None = None,
     hal_rate_ts: Sequence[tuple[float, float]] | None = None,
     xdp_rate_ts: Sequence[tuple[float, float]] | None = None,
+    hal_af: Mapping[float, float] | None = None,
+    xdp_af: Mapping[float, float] | None = None,
+    hal_af_ci: Mapping[float, tuple[float, float]] | None = None,
+    xdp_af_ci: Mapping[float, tuple[float, float]] | None = None,
+    count_xlabel: str = "count in ~1 s window",
     model_scores: Mapping[str, Mapping[str, float]] | None = None,
-    title: str = "Noise-model diagnostics (HAL / XDP)",
+    title: str = "",
 ) -> Figure:
-    """One figure: 2 rows (HAL, XDP) × 3 cols (rates/ADEV, 1 s counts, holdout).
+    """One figure: 2 rows (HAL, XDP) × 3 cols (ADEV or rates, 1 s counts, holdout or AF).
 
-    Prefer triad ADEV when provided; else plot equal-interval rate time series
-    (`*_rate_ts` as (t_s, pps) points) so pilot runs still show data.
+    Prefer a τ-curve of relative ADEV when provided; otherwise plot equal-interval
+    rate time series. Column 3 draws holdout scores when given, else Allan factor.
     """
-    fig, axes = plt.subplots(2, 3, figsize=(11, 6.5), sharex=False)
-    variants = [
-        ("HAL", axes[0], hal_adev, hal_counts, hal_rate_ts, "hal"),
-        ("XDP", axes[1], xdp_adev, xdp_counts, xdp_rate_ts, "xdp"),
-    ]
-    for name, row, adev, counts, rate_ts, key in variants:
-        ax0, ax1, ax2 = row
-        if adev:
-            taus = sorted(adev.keys())
-            vals = [adev[t] for t in taus]
-            ax0.set_xscale("log")
-            ax0.plot(taus, vals, "o-", color="tab:blue")
-            ax0.set_xlabel("τ (s)")
-            ax0.set_ylabel(f"{name} Rel. ADEV")
-        elif rate_ts:
-            ts = [p[0] for p in rate_ts]
-            rs = [p[1] for p in rate_ts]
-            ax0.plot(ts, rs, "-", color="tab:blue", lw=1.0, alpha=0.85)
-            ax0.set_xlabel("t (s)")
-            ax0.set_ylabel(f"{name} interval PPS")
-            ax0.set_ylim(bottom=0)
-        else:
-            ax0.text(
-                0.5,
-                0.5,
-                "no rate / triad data",
-                ha="center",
-                va="center",
-                transform=ax0.transAxes,
-            )
-            ax0.set_xlabel("τ / t")
+    with plt.rc_context(_RC):
+        fig, axes = plt.subplots(2, 3, figsize=(7.6, 5.15), sharex=False)
+        rows = [
+            ("HAL", axes[0], hal_adev, hal_adev_ci, hal_counts, hal_rate_ts, hal_af, hal_af_ci, "hal"),
+            ("XDP", axes[1], xdp_adev, xdp_adev_ci, xdp_counts, xdp_rate_ts, xdp_af, xdp_af_ci, "xdp"),
+        ]
+        col_titles = ("Relative ADEV", "1 s window", "Holdout score" if model_scores else "Allan factor")
+        for name, row, adev, adev_ci, counts, rate_ts, af, af_ci, key in rows:
+            ax0, ax1, ax2 = row
+            for ax in row:
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+            if adev:
+                _scale_curve(ax0, adev, adev_ci, ylabel=f"{name}\nrel. ADEV (%)", scale=100.0)
+            elif rate_ts:
+                ts = [p[0] for p in rate_ts]
+                rs = [p[1] for p in rate_ts]
+                ax0.plot(ts, rs, "-", color=_PPS, lw=0.9, alpha=0.9)
+                ax0.set_xlabel("t (s)")
+                ax0.set_ylabel(f"{name}\ninterval PPS")
+                ax0.set_ylim(bottom=0)
+            else:
+                ax0.text(0.5, 0.5, "no rate / ADEV", ha="center", va="center", transform=ax0.transAxes, color=_MUTED, fontsize=8)
+                ax0.set_ylabel(name)
 
-        if counts is not None and len(counts) > 0:
-            ax1.hist(
-                list(counts),
-                bins=min(20, max(5, len(counts) // 3)),
-                color="tab:gray",
-                edgecolor="k",
-            )
-            ax1.set_xlabel("count in ~1 s window")
-            ax1.set_ylabel("freq")
-        else:
-            ax1.text(
-                0.5,
-                0.5,
-                "no count samples",
-                ha="center",
-                va="center",
-                transform=ax1.transAxes,
-            )
+            if counts is not None and len(counts) > 0:
+                vals = np.asarray(list(counts), dtype=float)
+                bins = min(18, max(6, int(np.sqrt(vals.size))))
+                ax1.hist(vals, bins=bins, color=_FILL, edgecolor="white", linewidth=0.6)
+                ax1.axvline(float(np.mean(vals)), color=_PPS, lw=0.9)
+                ax1.set_xlabel(count_xlabel)
+                ax1.set_ylabel("windows")
+            else:
+                ax1.text(0.5, 0.5, "no count samples", ha="center", va="center", transform=ax1.transAxes, color=_MUTED, fontsize=8)
 
-        scores = None
-        if model_scores:
-            scores = model_scores.get(key) or model_scores.get(name)
-        if scores:
-            names = list(scores.keys())
-            vals = [scores[n] for n in names]
-            ax2.bar(names, vals, color="tab:purple")
-            ax2.tick_params(axis="x", rotation=30)
-            ax2.set_ylabel("holdout loglik")
-        else:
-            ax2.text(
-                0.5,
-                0.5,
-                "model holdout n/a\n(need random triads)",
-                ha="center",
-                va="center",
-                transform=ax2.transAxes,
-            )
+            scores = None
+            if model_scores:
+                scores = model_scores.get(key) or model_scores.get(name)
+            if scores:
+                names = list(scores.keys())
+                bar_vals = [scores[n] for n in names]
+                ax2.bar(names, bar_vals, color=_PPS, width=0.72)
+                ax2.tick_params(axis="x", rotation=30)
+                ax2.set_ylabel("holdout loglik")
+                ax2.axhline(0.0, color=_MUTED, lw=0.5)
+            elif af:
+                _scale_curve(ax2, af, af_ci, ylabel="Allan factor", href=1.0)
+            else:
+                ax2.text(
+                    0.5,
+                    0.5,
+                    "model holdout\nnot identified",
+                    ha="center",
+                    va="center",
+                    transform=ax2.transAxes,
+                    color=_MUTED,
+                    fontsize=8,
+                )
+                ax2.set_xticks([])
+                ax2.set_yticks([])
+                for spine in ax2.spines.values():
+                    spine.set_visible(False)
 
-    fig.suptitle(title)
-    fig.tight_layout()
-    return fig
+        for ax, col in zip(axes[0], col_titles):
+            ax.set_title(col, fontsize=10, pad=6)
+        if title:
+            fig.suptitle(title, fontsize=11, y=1.02)
+        fig.tight_layout()
+        return fig

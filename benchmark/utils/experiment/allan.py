@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -67,6 +67,139 @@ def local_relative_adev(
         diffs = np.asarray([(x.r2 - x.r1) ** 2 for x in xs], dtype=float)
         adev = float(np.sqrt(0.5 * diffs.mean()) / mean_rate)
         out[tau] = {"adev": adev, "n": m, "reason": "ok"}
+    return out
+
+
+def overlapping_relative_adev(
+    time_ns: Sequence[int],
+    counter: Sequence[int],
+    *,
+    taus_s: Sequence[float] = (1.0, 2.0, 4.0, 8.0, 16.0),
+) -> dict[float, dict]:
+    """Overlapping two-sample relative ADEV on a nearly regular counter series.
+
+    For stride ``m`` (τ ≈ m × median Δt)::
+
+        r_i = (C_{i+m} − C_i) / (t_{i+m} − t_i)
+        A(τ) = r̄⁻¹ √( mean_i (r_{i+m} − r_i)² / 2 )
+
+    ``r̄`` is the endpoint PPS of this series. This is the fixed-cadence
+    overlapping estimator, not the random-triad local estimator.
+    A decrease, a non-positive gap, or fewer than two pairs returns ``{}``.
+    """
+    t = np.asarray(time_ns, dtype=float) / 1e9
+    c = np.asarray(counter, dtype=float)
+    n = int(min(t.size, c.size))
+    if n < 4:
+        return {}
+    t, c = t[:n], c[:n]
+    dt = np.diff(t)
+    dc = np.diff(c)
+    if np.any(dt <= 0) or np.any(dc < 0):
+        return {}
+    med = float(np.median(dt))
+    elapsed = float(t[-1] - t[0])
+    if med <= 0 or elapsed <= 0:
+        return {}
+    mean_rate = float((c[-1] - c[0]) / elapsed)
+    if mean_rate <= 0:
+        return {}
+
+    out: dict[float, dict] = {}
+    for tau in taus_s:
+        m = max(1, int(round(float(tau) / med)))
+        n_pairs = n - 2 * m
+        if n_pairs < 2:
+            continue
+        span_t = t[m:] - t[:-m]
+        if np.any(span_t <= 0):
+            continue
+        rates = (c[m:] - c[:-m]) / span_t
+        diffs = rates[m:] - rates[:-m]
+        adev = float(np.sqrt(np.mean(diffs**2) / 2.0) / mean_rate)
+        out[float(tau)] = {
+            "adev": adev,
+            "n": int(diffs.size),
+            "m": m,
+            "tau_s": m * med,
+            "reason": "ok",
+        }
+    return out
+
+
+def overlapping_allan_factor(
+    time_ns: Sequence[int],
+    counter: Sequence[int],
+    *,
+    taus_s: Sequence[float] = (1.0, 2.0, 4.0, 8.0, 16.0),
+) -> dict[float, dict]:
+    """Overlapping Allan factor. A constant-rate series is 0; Poisson is near 1.
+
+    AF(τ) = E[(K_{i+m} − K_i)²] / (2 E[K]), with K_i = C_{i+m} − C_i.
+    """
+    t = np.asarray(time_ns, dtype=float) / 1e9
+    c = np.asarray(counter, dtype=float)
+    n = int(min(t.size, c.size))
+    if n < 4:
+        return {}
+    t, c = t[:n], c[:n]
+    dt = np.diff(t)
+    dc = np.diff(c)
+    if np.any(dt <= 0) or np.any(dc < 0):
+        return {}
+    med = float(np.median(dt))
+    if med <= 0:
+        return {}
+
+    out: dict[float, dict] = {}
+    for tau in taus_s:
+        m = max(1, int(round(float(tau) / med)))
+        n_pairs = n - 2 * m
+        if n_pairs < 2:
+            continue
+        counts = c[m:] - c[:-m]
+        diffs = counts[m:] - counts[:-m]
+        ek = float(np.mean(counts))
+        if ek <= 0:
+            continue
+        out[float(tau)] = {
+            "af": float(np.mean(diffs**2) / (2.0 * ek)),
+            "n": int(diffs.size),
+            "m": m,
+            "tau_s": m * med,
+            "reason": "ok",
+        }
+    return out
+
+
+def mean_across_runs(
+    per_run: Sequence[Mapping[float, float]],
+    *,
+    alpha: float = 0.05,
+) -> dict[float, dict]:
+    """Per-τ mean and Student-t interval across runs. ``n < 2`` leaves CI open."""
+    from scipy import stats
+
+    taus: set[float] = set()
+    for row in per_run:
+        taus.update(float(k) for k in row)
+    out: dict[float, dict] = {}
+    for tau in sorted(taus):
+        vals = np.asarray(
+            [float(row[tau]) for row in per_run if tau in row and np.isfinite(row[tau])],
+            dtype=float,
+        )
+        if vals.size == 0:
+            continue
+        mean = float(vals.mean())
+        if vals.size < 2:
+            lo = hi = float("nan")
+        else:
+            half = float(stats.t.ppf(1.0 - alpha / 2.0, vals.size - 1)) * float(
+                vals.std(ddof=1) / np.sqrt(vals.size)
+            )
+            lo, hi = mean - half, mean + half
+        out[tau] = {"mean": mean, "lo": lo, "hi": hi, "n": int(vals.size), "values": vals}
     return out
 
 

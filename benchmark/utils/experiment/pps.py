@@ -87,6 +87,58 @@ def between_run_cv(pps_values: Sequence[float]) -> tuple[float, float, float]:
     return mean, sd, cv
 
 
+def mean_t_ci(
+    values: Sequence[float],
+    *,
+    alpha: float = 0.05,
+) -> tuple[float, float, float]:
+    """Return ``(mean, lo, hi)`` from a Student-t interval. ``n < 2`` → open CI."""
+    from scipy import stats
+
+    xs = np.asarray(
+        [float(x) for x in values if x is not None and np.isfinite(x)],
+        dtype=float,
+    )
+    if xs.size == 0:
+        return float("nan"), float("nan"), float("nan")
+    mean = float(xs.mean())
+    if xs.size < 2:
+        return mean, float("nan"), float("nan")
+    half = float(stats.t.ppf(1.0 - alpha / 2.0, xs.size - 1)) * float(
+        xs.std(ddof=1) / np.sqrt(xs.size)
+    )
+    return mean, mean - half, mean + half
+
+
+def cv_bootstrap_ci(
+    pps_values: Sequence[float],
+    *,
+    n_boot: int = 4000,
+    seed: int = 0,
+    alpha: float = 0.05,
+) -> tuple[float, float, float]:
+    """Return ``(cv, lo, hi)``. Percentile bootstrap; ``n < 2`` leaves CI open."""
+    xs = np.asarray(
+        [float(x) for x in pps_values if x is not None and np.isfinite(x)],
+        dtype=float,
+    )
+    mean, _, cv = between_run_cv(xs)
+    if xs.size < 2 or not np.isfinite(cv):
+        return cv, float("nan"), float("nan")
+    rng = np.random.default_rng(seed)
+    draws = rng.choice(xs, size=(n_boot, xs.size), replace=True)
+    boot_mean = draws.mean(axis=1)
+    boot_sd = draws.std(axis=1, ddof=1)
+    ok = boot_mean != 0
+    boot_cv = np.full(n_boot, np.nan)
+    boot_cv[ok] = boot_sd[ok] / boot_mean[ok]
+    boot_cv = boot_cv[np.isfinite(boot_cv)]
+    if boot_cv.size == 0:
+        return cv, float("nan"), float("nan")
+    lo, hi = np.quantile(boot_cv, [alpha / 2.0, 1.0 - alpha / 2.0])
+    return cv, float(lo), float(hi)
+
+
 def summarize_variant(runs: Sequence[RunPps]) -> dict:
     valid = [r for r in runs if r.valid and r.mean_pps is not None]
     mean, sd, cv = between_run_cv([float(r.mean_pps) for r in valid])

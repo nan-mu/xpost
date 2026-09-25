@@ -5,7 +5,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from utils.experiment.allan import allan_factor, local_relative_adev, triad_rates
+from utils.experiment.allan import (
+    allan_factor,
+    local_relative_adev,
+    overlapping_allan_factor,
+    overlapping_relative_adev,
+    triad_rates,
+)
 from utils.experiment.figures import figure1_is_single_panel, figure1_summary, figure2_noise
 from utils.experiment.models import (
     compare_models_holdout,
@@ -155,6 +161,22 @@ def test_mmpp_unidentifiable_when_small():
     assert not mmpp.identifiable
 
 
+def test_overlapping_adev_constant_rate_is_zero():
+    t = [i * 1_000_000_000 for i in range(40)]
+    c = [i * 1000 for i in range(40)]
+    out = overlapping_relative_adev(t, c, taus_s=(1.0, 2.0, 4.0))
+    assert out[1.0]["adev"] == pytest.approx(0.0, abs=1e-12)
+    assert out[1.0]["n"] >= 2
+    af = overlapping_allan_factor(t, c, taus_s=(1.0,))
+    assert af[1.0]["af"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_overlapping_adev_rejects_decrease():
+    t = [0, 1_000_000_000, 2_000_000_000, 3_000_000_000]
+    c = [0, 10, 5, 20]
+    assert overlapping_relative_adev(t, c) == {}
+
+
 def test_figure1_single_panel_two_categories():
     fig, host = figure1_summary(
         hal_mean_pps=1000.0,
@@ -167,7 +189,7 @@ def test_figure1_single_panel_two_categories():
         xdp_cv=0.04,
     )
     assert figure1_is_single_panel(fig)
-    assert len(fig.axes) == 3  # host + 2 twins, same panel
+    assert len(fig.axes) == 3
     labels = [t.get_text() for t in host.get_xticklabels()]
     assert labels == ["HAL", "XDP"]
     plt_close = __import__("matplotlib.pyplot", fromlist=["close"]).close
