@@ -1,78 +1,50 @@
-# just_drop vs just_drop_hal PPS 基准
+# benchmark（pixi）
 
-对比 **XDP ingress drop**（`examples/just_drop` + cold `just_drop.elf`）与 **HAL 应用层 drop**（`examples/just_drop_hal` + 串口 `drop on`）在同等 UDP 洪泛下的 DUT 可观测丢包吞吐。
+xpost 性能实验的分析工作区：**文字与表格在 Jupyter**，**数据只从 Postgres 现查**（`utils/`，无本地结果缓存）。
 
-主指标是 **pps**：在 blast 窗口内周期性读取串口 `OK counters … drop=`，用差分 / 墙钟时长得到吞吐。
-
-## 拓扑
+## 布局
 
 ```
-TR3000 (AF_PACKET RawTx, udp_blast ×4, 64B)
-    │  UDP → ESP:8080
-    │  TCP RPC → Mac:9240
-    ▼
-Mac xpost-agent (USB 串口独占)
-    │  counters / program / drop on
-    ▼
-ESP32-C3 STA (just_drop 或 just_drop_hal)
+benchmark/
+  pixi.toml          # 环境与 tasks
+  .env               # DB 账号（gitignore；模板见 .env.example）
+  utils/             # 通用 Python：db / 实验查询 / schema / ingest
+  experiments/       # 每个实验一个 .ipynb
+  results/           # 仅作历史种子或探针旁路产物；分析勿依赖
 ```
 
-配置嵌入 [`xpost-test/config/test.toml`](../xpost-test/config/test.toml)：`[agent].endpoint`、`target.esp_ip` / `esp_mac`、`probe.iface`。
+## 快速开始
 
-## 指标定义
+```bash
+cd benchmark
+cp .env.example .env   # 填入 PGPASSWORD 等
+pixi install
+pixi run ensure-schema
+# 若需把现有 just-drop-pps CSV 写入库（一次性）：
+pixi run ingest-pps
+pixi run lab           # 打开 experiments/just_drop_pps.ipynb
+```
 
-| 符号 | 定义 |
+`utils.db.read_sql` / `utils.pps.*` 每次直连数据库，不写 parquet/CSV 缓存。
+
+## 数据库
+
+| 变量 | 含义 |
 |------|------|
-| `overall_pps` | `(drop_end − drop_start) / blast.elapsed_secs` |
-| `interval_pps` | 相邻采样点 `(drop_i − drop_{i−1}) / (t_i − t_{i−1})` |
-| `host_pps` | TR3000 发送计数 / blast 时长（无线/CPU 上限诊断） |
+| `PGHOST` / `PGPORT` / `PGDATABASE` | 目标库 |
+| `PGUSER` / `PGPASSWORD` | 账号 |
+| `PGSCHEMA` | `public` 或 `formal` |
 
-默认：窗口 **40s**（`--smoke` → **10s**）、采样间隔 **1000ms**、轮次 **3**（smoke → **1**）。
+表（`just_drop_pps_*`）：
 
-**路径差异（刻意）**：XDP 在 Wi-Fi RX ingress 丢包，`net_rx` 应不变；HAL 包已进入 smoltcp，只在 UDP:8080 记 drop，不强制 `net_rx` 平坦。对比的是同刺激下 **drop 计数器吞吐**，不是同层成本。
+- `just_drop_pps_run` — 一次臂（`hal` / `xdp`）+ 窗口参数
+- `just_drop_pps_round` — 轮次汇总（`overall_pps`、`host_pps`、…）
+- `just_drop_pps_sample` — 周期采样时间序列
 
-## 命令
+与探针：`./probe just-drop-pps --path …`（见 [`xpost-test/README.md`](../xpost-test/README.md)）。CSV 可用 `pixi run ingest-pps` 入库。
 
-### Mac
+## 实验笔记本
 
-```bash
-# HAL 臂
-cargo xtask just_drop_hal build --release
-espflash flash --chip esp32c3 --port /dev/cu.usbmodem* \
-  examples/just_drop_hal/target/riscv32imc-unknown-none-elf/release/just_drop_hal
-cargo xtask agent --listen 192.168.110.96:9240 --no-monitor
-
-# XDP 臂（program 可由 probe 触发）
-cargo xtask just_drop build --release
-espflash flash --chip esp32c3 --port /dev/cu.usbmodem* \
-  examples/just_drop/target/riscv32imc-unknown-none-elf/release/just_drop
-# agent 同上；ELF: examples/just_drop/just_drop.elf
-```
-
-### TR3000
-
-```bash
-# 构建并 scp probe（见 xpost-test/README.md）
-./probe just-drop-pps --path hal --out /tmp/hal_pps.csv
-./probe just-drop-pps --path xdp --out /tmp/xdp_pps.csv
-
-# smoke
-./probe just-drop-pps --path hal --smoke --out /tmp/hal_smoke.csv
-./probe just-drop-pps --path xdp --smoke --no-program --out /tmp/xdp_smoke.csv
-```
-
-可选：`--window-secs N`、`--sample-interval-ms 1000`、`--rounds 3`、`--no-program`（XDP 已 lease 时跳过 program）。
-
-产物：CSV 时间序列 + 同目录 `*_summary.json`。
-
-### 绘图
-
-```bash
-# 依赖: pip install matplotlib
-python3 benchmark/scripts/plot_pps.py \
-  --hal benchmark/results/hal_pps.csv \
-  --xdp benchmark/results/xdp_pps.csv \
-  --outdir benchmark/results
-```
-
-生成 `pps_timeseries.png`、`pps_compare_bar.png`。实验记录见 [`just_drop_pps.md`](just_drop_pps.md)。
+| Notebook | 主题 |
+|----------|------|
+| [`experiments/just_drop_pps.ipynb`](experiments/just_drop_pps.ipynb) | just_drop vs just_drop_hal PPS |

@@ -94,22 +94,17 @@ Wi-Fi ingress. Serial surface matches `just_drop` (`ping` / `counters` /
 
 ### PPS A/B (`benchmark/`)
 
-TR3000 periodic `drop` sampling during UDP blast:
+Pixi + Jupyter；数据经 `utils.db` 现查 Postgres（`benchmark/.env`）：
 
 ```bash
-# Mac: flash arm + agent --listen …
-# TR3000:
-./probe just-drop-pps --path hal --out /tmp/hal_pps.csv
-./probe just-drop-pps --path xdp --out /tmp/xdp_pps.csv
-# Mac:
-python3 benchmark/scripts/plot_pps.py \
-  --hal benchmark/results/hal_pps.csv \
-  --xdp benchmark/results/xdp_pps.csv \
-  --outdir benchmark/results
+cd benchmark && pixi install && pixi run lab
+# notebook: experiments/just_drop_pps.ipynb
+# TR3000 采集：
+./probe just-drop-pps --path hal|xdp --out /tmp/….csv
+# 入库：pixi run ingest-pps（或扩展 probe 直写 PG）
 ```
 
-Docs and measured results: [`benchmark/README.md`](benchmark/README.md),
-[`benchmark/just_drop_pps.md`](benchmark/just_drop_pps.md).
+See [`benchmark/README.md`](benchmark/README.md).
 
 ## Scope
 

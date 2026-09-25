@@ -123,7 +123,7 @@ HTTP API：`POST /api/jobs`、`GET /api/jobs/:id`、`GET /api/jobs/:id/log?offse
 | `./probe rate-loss [--smoke] [--formal]` | 速率黑名单 · 丢包 | peak% × mit；事后 collect→dump | `xdp_rate_loss_*`（[`sql/xdp_rate_loss.sql`](../sql/xdp_rate_loss.sql)） |
 
 | `./probe just-drop [--formal] [--no-pg]` | just_drop ACK：clear vs drop | 两次刺激 | `xdp_ack_*` |
-| `./probe just-drop-pps --path xdp\|hal` | just_drop / just_drop_hal **PPS** | 周期读 `drop` × UDP blast | CSV（见 [`../benchmark/`](../benchmark/)） |
+| `./probe just-drop-pps --path xdp\|hal` | just_drop / just_drop_hal **PPS** | 周期读 `drop` × UDP blast | Postgres `just_drop_pps_*`（[`../benchmark/`](../benchmark/) Jupyter） |
 
 - **`--formal`**：仍连 `dbname=postgres`，写入 **schema `formal`**，开跑前 `TRUNCATE` **本命令**表族。默认写 `public`。
 - 别名：`bench` → `rate-rtt`；`bench-loss` → `wl-loss`。无子命令时打印帮助（不再默认跑 rate）。
