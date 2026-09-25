@@ -18,8 +18,17 @@ pub struct FileConfig {
     pub serve: ServeConfig,
     #[serde(default)]
     pub profiles: ProfilesConfig,
+    /// Bare `./xpost-test` (no subcommand) runs this bench.
+    #[serde(default = "default_default_bench")]
+    pub default_bench: String,
+    #[serde(default)]
+    pub just_drop_pps: JustDropPpsConfig,
     #[serde(default)]
     pub tests: Vec<TestEntry>,
+}
+
+fn default_default_bench() -> String {
+    "just-drop-pps".into()
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -57,6 +66,54 @@ pub struct ProfilesConfig {
     pub drop_xdp: Option<String>,
     #[serde(default)]
     pub firmware: Option<String>,
+    /// Profile id for just_drop firmware (+ optional xdp.elf on agent).
+    #[serde(default)]
+    pub just_drop: Option<String>,
+    /// Profile id for just_drop_hal firmware.
+    #[serde(default)]
+    pub just_drop_hal: Option<String>,
+}
+
+/// Compile-time defaults for `just-drop-pps` / bare `./xpost-test`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct JustDropPpsConfig {
+    /// When true, write schema `formal` and empty tables before the run.
+    #[serde(default = "default_true")]
+    pub formal: bool,
+    #[serde(default = "default_pps_rounds")]
+    pub rounds: usize,
+    #[serde(default)]
+    pub window_secs: Option<u64>,
+    #[serde(default = "default_sample_ms")]
+    pub sample_interval_ms: u64,
+    /// Arms in order, e.g. `["hal", "xdp"]`.
+    #[serde(default = "default_pps_arms")]
+    pub arms: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_pps_rounds() -> usize {
+    3
+}
+fn default_sample_ms() -> u64 {
+    1000
+}
+fn default_pps_arms() -> Vec<String> {
+    vec!["hal".into(), "xdp".into()]
+}
+
+impl Default for JustDropPpsConfig {
+    fn default() -> Self {
+        Self {
+            formal: true,
+            rounds: default_pps_rounds(),
+            window_secs: None,
+            sample_interval_ms: default_sample_ms(),
+            arms: default_pps_arms(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

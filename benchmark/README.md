@@ -2,12 +2,14 @@
 
 xpost 性能实验的分析工作区：**复现步骤与文字在 Jupyter**，**数据只从 Postgres 现查**（`utils/`，无本地结果缓存）。
 
+采集侧产物是 TR3000 上的 **`./xpost-test`**（编译期嵌入 `xpost-test/config/test.toml`），默认跑 `just-drop-pps`：经 Mac `xpost-agent` 烧录固件/`xdp.elf`，写入 schema **`formal`** 的 `experiment_*`（开跑前表为空）。
+
 ## 布局
 
 ```
 benchmark/
   pixi.toml              # 环境与 tasks
-  .env                   # DB 账号（gitignore；模板见 .env.example）
+  .env                   # DB 账号；PGSCHEMA=formal
   utils/                 # db / schema / ingest / experiment 分析
   just_drop_pps.ipynb    # HAL vs XDP PPS：复现流程 + 分析
   tests/                 # pytest（合成数据，不连真库）
@@ -17,13 +19,11 @@ benchmark/
 
 ```bash
 cd benchmark
-cp .env.example .env   # 填入 PGPASSWORD 等
+cp .env.example .env   # PGSCHEMA=formal
 pixi install
 pixi run ensure-schema
 pixi run lab           # 打开 just_drop_pps.ipynb
 ```
-
-笔记本开头写清采集 → 入库 → 分析步骤。探针 CSV 是临时交接文件，不进仓库。
 
 ## 数据库
 
@@ -31,28 +31,11 @@ pixi run lab           # 打开 just_drop_pps.ipynb
 |------|------|
 | `PGHOST` / `PGPORT` / `PGDATABASE` | 目标库 |
 | `PGUSER` / `PGPASSWORD` | 账号 |
-| `PGSCHEMA` | `public` 或 `formal` |
+| `PGSCHEMA` | 正式实验用 `formal` |
 
-表（规范契约）：
+表：`experiment_runs` / `counter_samples` / `sample_reads`。
 
-- `experiment_runs` — 一轮运行元数据（`pair_id`、`run_kind`、`variant`、状态）
-- `counter_samples` — 原始 `(time_ns, counter_value)` 快照
-- `sample_reads` — 串口读诊断（三点组 / `τ` / 请求—响应时刻；可空）
-
-入库：
-
-```bash
-pixi run ingest-pps -- /tmp/hal_pps.csv /tmp/hal_pps_summary.json
-pixi run ingest-pps -- /tmp/xdp_pps.csv /tmp/xdp_pps_summary.json
-```
-
-探针：`./probe just-drop-pps --path … --out /tmp/….csv`（见 [`../xpost-test/README.md`](../xpost-test/README.md)）。
-
-## 实验笔记本
-
-| Notebook | 主题 |
-|----------|------|
-| [`just_drop_pps.ipynb`](just_drop_pps.ipynb) | just_drop vs just_drop_hal PPS |
+可选旧 CSV：`pixi run ingest-pps -- <csv> <summary.json>`。
 
 ## 测试
 

@@ -1,15 +1,16 @@
-//! TR3000 probe: RAW stimulus + TC stamps + compile-time TOML config.
+//! TR3000 host harness: RAW stimulus + compile-time TOML config.
+//!
+//! Binary: `xpost-test`. Bare `./xpost-test` runs `[default_bench]` from embedded
+//! `config/test.toml` (default `just-drop-pps`).
 //!
 //! Formal benches (Postgres):
-//! - `./test all [--smoke] [--formal]` — all formal benches in order
-//! - `./test drop-xdp / drop-hal [--smoke] [--formal] [--window-secs N] [--rounds N]` — drop throughput → `xdp_drop_*`
-//! - `./test echo [--smoke] [--formal]` — XDP full-swap RTT → `xdp_echo_*`
-//! - `./test wl-rtt / wl-loss [--smoke] [--formal]` — whitelist α grid
-//! - `./test rate-rtt / rate-loss [--smoke] [--formal]` — rate-BL peak%×mit
+//! - `./xpost-test all [--smoke] [--formal]` — all formal benches in order
+//! - `./xpost-test just-drop-pps` — flash HAL/XDP profiles, sample drop → `experiment_*`
+//! - `./xpost-test drop-xdp / drop-hal / echo / …` — legacy benches
 //!
-//! `./test suite` — embedded `config/test.toml` [[tests]].
-//! `./test serve` — long-running HTTP daemon (tee child output to terminal + API).
-//! No subcommand → print help (no default bench).
+//! `./xpost-test suite` — embedded `config/test.toml` [[tests]].
+//! `./xpost-test serve` — long-running HTTP daemon.
+//! `./xpost-test --help-benches` — print CLI help without running default.
 
 mod agent;
 mod bench;
@@ -36,15 +37,15 @@ use test_report::RunReport;
 use tests::lookup;
 
 #[derive(Debug, Parser)]
-#[command(name = "probe", about = "TR3000 host probe (formal benches + suite)")]
+#[command(name = "xpost-test", about = "TR3000 host harness (formal benches + suite)")]
 struct Args {
     /// Short windows / fewer cells for smoke.
     #[arg(long, global = true)]
     smoke: bool,
-    /// Write into schema `formal` (same db `postgres`) and TRUNCATE this bench's tables before run.
+    /// Write into schema `formal` (same db `postgres`) and empty this bench's tables before run.
     #[arg(long, global = true)]
     formal: bool,
-    /// UDP blast window in seconds (overrides smoke=40s / formal=40s default).
+    /// UDP blast window in seconds (overrides smoke / embedded default).
     #[arg(long, global = true)]
     window_secs: Option<u64>,
     /// Skip Postgres ingest (stdout only).
@@ -53,17 +54,20 @@ struct Args {
     /// Skip just-drop UDP blast perf phase (functional only).
     #[arg(long, global = true)]
     no_perf: bool,
-    /// Drop bench rounds (overrides smoke=1 / formal=3 default).
+    /// Pair / round count (overrides smoke=1 / embedded default).
     #[arg(long, global = true)]
     rounds: Option<usize>,
     /// Print legacy pretty-JSON report to stdout (suite only; default: human table).
     #[arg(long)]
     json: bool,
+    /// Print CLI help without running `[default_bench]`.
+    #[arg(long)]
+    help_benches: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 enum Command {
     /// Run every formal bench in order (inherits `--smoke` / `--formal`).
     All,
@@ -88,27 +92,21 @@ enum Command {
     /// just_drop ACK path: clear vs drop XDP → `xdp_ack_*`.
     #[command(name = "just-drop")]
     JustDrop,
-    /// just_drop / just_drop_hal PPS: periodic drop sampling during UDP blast.
+    /// just_drop / just_drop_hal PPS → `experiment_*` (agent flashes each arm).
     #[command(name = "just-drop-pps")]
     JustDropPps {
-        /// Measurement arm: `xdp` (cold just_drop ELF) or `hal` (`drop on`).
+        /// Restrict to one arm. Omit → embedded `[just_drop_pps].arms`.
         #[arg(long, value_parser = ["xdp", "hal"])]
-        path: String,
-        /// Counter sample period while blasting (ms).
-        #[arg(long, default_value_t = 1000)]
+        path: Option<String>,
+        /// Counter sample period while blasting (ms). `0` → embedded default.
+        #[arg(long, default_value_t = 0)]
         sample_interval_ms: u64,
-        /// CSV output path (time series + sidecar `*_summary.json`).
-        #[arg(long, default_value = "just_drop_pps.csv")]
-        out: std::path::PathBuf,
-        /// Skip `agent program` for `--path xdp` (assume ELF already leased).
-        #[arg(long)]
-        no_program: bool,
     },
     /// Alias of `rate-rtt`.
     Bench,
     /// Alias of `wl-loss`.
     BenchLoss,
-    /// HTTP daemon: accept remote jobs, re-exec `./test <bench>`, tee logs.
+    /// HTTP daemon: accept remote jobs, re-exec `./xpost-test <bench>`, tee logs.
     Serve {
         /// Override `[serve].http_listen` from embedded config.
         #[arg(long)]
@@ -126,7 +124,34 @@ fn wall_unix_ms() -> u64 {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let quiet = match &args.command {
+    let cfg = FileConfig::embedded()?;
+
+    if args.help_benches {
+        let mut cmd = Args::command();
+        cmd.print_help()?;
+        println!();
+        return Ok(());
+    }
+
+    let command = if args.command.is_none() {
+        match cfg.default_bench.as_str() {
+            "just-drop-pps" => Some(Command::JustDropPps {
+                path: None,
+                sample_interval_ms: 0,
+            }),
+            "suite" => Some(Command::Suite),
+            "all" => Some(Command::All),
+            other => {
+                anyhow::bail!(
+                    "unknown [default_bench]={other:?}; edit config/test.toml or pass a subcommand"
+                );
+            }
+        }
+    } else {
+        args.command.clone()
+    };
+
+    let quiet = match &command {
         None | Some(Command::Suite) => false,
         Some(
             Command::All
@@ -147,27 +172,19 @@ async fn main() -> Result<()> {
     let log_default = if quiet { "warn" } else { "info" };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_default)).init();
 
-    if args.command.is_none() {
-        let mut cmd = Args::command();
-        cmd.print_help()?;
-        println!();
-        return Ok(());
-    }
-
-    if matches!(args.command, Some(Command::Serve { .. })) {
-        let Command::Serve { http_listen } = args.command.unwrap() else {
+    if matches!(command, Some(Command::Serve { .. })) {
+        let Some(Command::Serve { http_listen }) = command else {
             unreachable!();
         };
         return serve::run(http_listen).await;
     }
 
-    let cfg = FileConfig::embedded()?;
     info!(
-        "embedded config esp={} mac={} iface={}",
-        cfg.target.esp_ip, cfg.target.esp_mac, cfg.probe.iface
+        "embedded config esp={} mac={} iface={} default_bench={}",
+        cfg.target.esp_ip, cfg.target.esp_mac, cfg.probe.iface, cfg.default_bench
     );
 
-    if matches!(args.command, Some(Command::JustDrop)) {
+    if matches!(command, Some(Command::JustDrop)) {
         return bench::run_just_drop(
             &cfg,
             bench::JustDropOpts {
@@ -183,21 +200,27 @@ async fn main() -> Result<()> {
     if let Some(Command::JustDropPps {
         path,
         sample_interval_ms,
-        out,
-        no_program,
-    }) = &args.command
+    }) = &command
     {
-        let path = bench::PpsPath::parse(path)?;
+        let paths = match path {
+            Some(p) => vec![bench::PpsPath::parse(p)?],
+            None => Vec::new(),
+        };
+        let sample_ms = if *sample_interval_ms == 0 {
+            cfg.just_drop_pps.sample_interval_ms
+        } else {
+            *sample_interval_ms
+        };
         return bench::run_just_drop_pps(
             &cfg,
             bench::JustDropPpsOpts {
-                path,
+                paths,
                 smoke: args.smoke,
+                formal: args.formal || cfg.just_drop_pps.formal,
+                no_pg: args.no_pg,
                 window_secs: args.window_secs,
-                sample_interval_ms: *sample_interval_ms,
+                sample_interval_ms: sample_ms,
                 rounds: args.rounds,
-                out: out.clone(),
-                program: !no_program,
             },
         )
         .await;
@@ -211,7 +234,7 @@ async fn main() -> Result<()> {
         args.rounds,
     );
     let mut harness = open_harness(&cfg).await?;
-    match args.command {
+    match command {
         Some(Command::Serve { .. }) => unreachable!(),
         Some(Command::All) => {
             return bench::run_all_benches(&mut harness, &cfg, drop_opts).await;

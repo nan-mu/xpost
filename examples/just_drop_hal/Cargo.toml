@@ -10,6 +10,9 @@ version      = "0.1.0"
 name = "just_drop_hal"
 path = "./src/bin/main.rs"
 
+[package.metadata.espflash]
+partition_table = "partitions.csv"
+
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
 

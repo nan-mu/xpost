@@ -18,6 +18,7 @@ pub fn profile_for_bench<'a>(profiles: &'a ProfilesConfig, bench: &str) -> Optio
         "drop-xdp" => profiles.drop_xdp.as_deref(),
         "echo" | "wl-rtt" | "wl-loss" | "rate-rtt" | "rate-loss" => profiles.firmware.as_deref(),
         "drop-hal" => profiles.drop_hal.as_deref(),
+        "just-drop" | "just-drop-pps" => profiles.just_drop.as_deref(),
         _ => None,
     }
 }

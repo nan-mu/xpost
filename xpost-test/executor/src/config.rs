@@ -38,7 +38,7 @@ fn default_http_listen() -> String {
 }
 
 fn default_probe_bin() -> String {
-    "./probe".into()
+    "./xpost-test".into()
 }
 
 impl Default for ExecutorSection {

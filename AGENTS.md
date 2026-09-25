@@ -40,69 +40,44 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 
 ```bash
 cargo xtask just_drop build --release
+cargo xtask just_drop_hal build --release
 
-# Install / overwrite just_drop XDP ELF in the cold table (default just_drop.elf)
+# Mac agent (cwd = xpost/; FlashProfile uses profiles.toml + built firmware)
+cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
+
+# TR3000: single binary from xpost-test (config baked at compile time)
+cd xpost-test && cargo build -p test --release
+scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
+# on TR3000:
+./xpost-test                 # default_bench=just-drop-pps → flash HAL/XDP, formal.experiment_*
+./xpost-test --smoke
+./xpost-test just-drop-pps --path hal
+./xpost-test --help-benches
+
 cargo xtask agent program --elf examples/just_drop/just_drop.elf
-# or omit --elf (same default)
-
-# List cold-table entries
 cargo xtask agent list
-
-# Erase all XDP ELF containers in the cold table
 cargo xtask agent clear
-
 cargo xtask agent request PING
 cargo xtask agent request counters
 cargo xtask agent probe <esp-ipv4>
-
-# Long-running RPC for xpost-test / fwctl (default device session)
-cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
 ```
 
-`probe` sends one UDP datagram to port 8080 and prints `ack` or `no-ack`.
-Drop XDP should yield `no-ack` and a rising `drop` counter. `counters` is one
-`OK counters …` line (`drop`, `failed_tx`, `net_rx`, and the runtime error
-counters). `ack-dest <ipv4> <port>` points the firmware ACK at a fixed listener;
-otherwise the ACK returns to the stimulus source.
+`just-drop-pps` asks the agent to `FlashProfile` `just-drop-hal` / `just-drop` (firmware + `xdp.elf`) each arm, then samples `drop` into Postgres schema `formal`. `ERR unknown` on `drop on` means HAL firmware was not flashed.
 
-On TR3000, `./probe just-drop` runs the ACK functional path (50 stims, or 10 with
-`--smoke`) then a UDP×4 link-rate blast (`--no-perf` skips perf;
-`--window-secs` overrides 40s / smoke 10s). Use `--no-pg` to skip Postgres.
-
-Wi-Fi STA needs `WIFI_SSID` and `WIFI_PASS` (or `WIFI_PASSWORD` in
-`examples/just_drop/.env`, loaded by that crate's `build.rs`). Without them the
-UDP path stays down and serial `counters` still works.
+Wi-Fi STA needs `WIFI_SSID` / `WIFI_PASS` in `examples/just_drop/.env` and `examples/just_drop_hal/.env`.
 
 ## Control: `just_drop_hal`
 
-crates.io-only esp-hal / embassy-net / smoltcp firmware — **no** path deps into
-the xpost tree, **no** local `esp-radio` fork, **no** cold XDP / `agent program`.
-
-```bash
-cargo xtask just_drop_hal build --release
-cargo xtask agent request "drop off"   # Pass: ACK + net_rx↑
-cargo xtask agent request "drop on"    # Drop: no-ack + drop/rxcnt[17]↑
-cargo xtask agent probe <esp-ipv4>
-cargo xtask agent request counters
-cargo xtask agent request "rxcnt 17"
-```
-
-Drop is application-layer on UDP:8080 (packet already entered smoltcp), not
-Wi-Fi ingress. Serial surface matches `just_drop` (`ping` / `counters` /
-`rxcnt` / `ack-dest`); XDP error fields in `OK counters` are always 0,
-`map_lock=no-rt`. Wi-Fi creds: `examples/just_drop_hal/.env` (same keys).
+crates.io-only esp-hal / embassy-net / smoltcp — **no** path deps into xpost, **no** cold XDP. Serial: `drop on` / `drop off` / `counters` / `rxcnt`.
 
 ### PPS A/B (`benchmark/`)
 
-Pixi + Jupyter；数据经 `utils.db` 现查 Postgres（`benchmark/.env`）：
+Pixi + Jupyter；`PGSCHEMA=formal`；数据经 `utils.db` 现查：
 
 ```bash
 cd benchmark && pixi install && pixi run ensure-schema && pixi run lab
-# notebook: just_drop_pps.ipynb（内含复现流程）
-# TR3000 采集：
-./probe just-drop-pps --path hal|xdp --out /tmp/….csv
-# 入库（显式 CSV + summary，写入 experiment_*）：
-pixi run ingest-pps -- /tmp/….csv /tmp/…_summary.json
+# notebook: just_drop_pps.ipynb
+# TR3000: ./xpost-test   (writes formal.experiment_* directly)
 ```
 
 See [`benchmark/README.md`](benchmark/README.md).

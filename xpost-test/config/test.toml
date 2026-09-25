@@ -1,10 +1,19 @@
-# Compile-time probe config (embedded into the binary via include_str!).
-# Edit this file, rebuild, scp the single `test` binary to TR3000, then:
-#   ./probe serve          # HTTP daemon (remote jobs via scripts/fwctl.sh)
-#   ./probe all …          # local formal benches
-#   ./probe --json         # suite: pretty-JSON on stdout + write report_path
+# Compile-time xpost-test config (embedded into the binary via include_str!).
+# Edit this file, rebuild, scp the single `xpost-test` binary to TR3000, then:
+#   ./xpost-test                 # runs [default_bench] (just-drop-pps)
+#   ./xpost-test serve           # HTTP daemon (remote jobs via scripts/fwctl.sh)
+#   ./xpost-test suite --json    # suite: pretty-JSON on stdout + write report_path
+#   ./xpost-test --help-benches
 #
 # 本文件启用的 [[tests]].name 必须与 firmware/config.toml 的 [[tests]] 同名。
+
+default_bench = "just-drop-pps"
+
+[just_drop_pps]
+formal = true
+rounds = 3
+sample_interval_ms = 1000
+arms = ["hal", "xdp"]
 
 [probe]
 iface = "br-lan"
@@ -28,7 +37,7 @@ ban_ip = "10.0.0.1"
 tx_ip = "10.0.0.2"
 
 # Mac USB flash agent on LAN (TR3000 → Mac IP:9240, no SSH tunnel).
-# Runtime override on TR3000: XPOST_AGENT_ENDPOINT=<mac-ip>:9240 ./probe all …
+# Runtime override on TR3000: XPOST_AGENT_ENDPOINT=<mac-ip>:9240 ./xpost-test
 [agent]
 endpoint = "192.168.110.96:9240"
 
@@ -39,6 +48,8 @@ http_listen = "0.0.0.0:19081"
 drop_hal = "drop-hal"
 drop_xdp = "drop-xdp"
 firmware = "firmware"
+just_drop = "just-drop"
+just_drop_hal = "just-drop-hal"
 
 [[tests]]
 name = "test0"

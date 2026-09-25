@@ -1,6 +1,10 @@
-# TR3000 / ESP32-C3 防火墙联调探针
+# TR3000 / ESP32-C3 防火墙联调（`xpost-test`）
 
-在 **TR3000** 上用 **aya TC**（`bpf_ktime_get_ns`）打纳秒时间戳，并用 **AF_PACKET RAW** 向 ESP32-C3 STA 发送可伪造源 IP 的刺激包。配置在编译期嵌入 [`config/test.toml`](config/test.toml)。默认 `./probe` 跑 Tolay rate-BL 长测；`./probe suite` 跑 `[[tests]]` 人类表格；`./probe suite --json` 为 pretty-JSON。
+在 **TR3000** 上用 **aya TC**（`bpf_ktime_get_ns`）打纳秒时间戳，并用 **AF_PACKET RAW** 向 ESP32-C3 STA 发送可伪造源 IP 的刺激包。配置在编译期嵌入 [`config/test.toml`](config/test.toml)。产物二进制名为 **`xpost-test`**。
+
+- 默认：`./xpost-test` → `[default_bench]`（现为 `just-drop-pps`）：多轮经 Mac agent `FlashProfile` 烧录 HAL/XDP，写入 Postgres schema `formal` 的 `experiment_*`（开跑前清空）。
+- `./xpost-test suite` 跑 `[[tests]]`；`./xpost-test --help-benches` 看全部子命令。
+- `./xpost-test serve` 供 `fwctl.sh` 远程提交。
 
 人类表（`test-report`）：若 case 形如 `T0/a`，先打一行 `peers a=… b=… c=…`，再按 **STAGE × a|b|c** 汇总（列序固定字母序，裸 IP 不当主列）；否则回退旧的一行一 case。
 
@@ -123,7 +127,7 @@ HTTP API：`POST /api/jobs`、`GET /api/jobs/:id`、`GET /api/jobs/:id/log?offse
 | `./probe rate-loss [--smoke] [--formal]` | 速率黑名单 · 丢包 | peak% × mit；事后 collect→dump | `xdp_rate_loss_*`（[`sql/xdp_rate_loss.sql`](../sql/xdp_rate_loss.sql)） |
 
 | `./probe just-drop [--formal] [--no-pg]` | just_drop ACK：clear vs drop | 两次刺激 | `xdp_ack_*` |
-| `./probe just-drop-pps --path xdp\|hal` | just_drop / just_drop_hal **PPS** | 周期读 `drop` × UDP blast | Postgres `experiment_*`（[`../benchmark/just_drop_pps.ipynb`](../benchmark/just_drop_pps.ipynb)） |
+| `./xpost-test` / `just-drop-pps` | just_drop / just_drop_hal **PPS** | agent flash + 周期读 `drop` × UDP blast | `formal.experiment_*`（[`../benchmark/just_drop_pps.ipynb`](../benchmark/just_drop_pps.ipynb)） |
 
 - **`--formal`**：仍连 `dbname=postgres`，写入 **schema `formal`**，开跑前 `TRUNCATE` **本命令**表族。默认写 `public`。
 - 别名：`bench` → `rate-rtt`；`bench-loss` → `wl-loss`。无子命令时打印帮助（不再默认跑 rate）。

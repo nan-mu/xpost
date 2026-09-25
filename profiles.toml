@@ -1,3 +1,23 @@
+# Profile registry for Mac `xpost-agent` FlashProfile (paths relative to xpost/ cwd).
+
+[[profile]]
+id = "just-drop"
+path = "just_drop"
+description = "just_drop firmware + cold just_drop.elf (XDP ingress drop)"
+bin = "examples/just_drop/target/riscv32imc-unknown-none-elf/release/just_drop"
+partition_table = "examples/just_drop/partitions.csv"
+chip = "esp32c3"
+xdp_elf = "examples/just_drop/just_drop.elf"
+xdp_name = "just_drop"
+
+[[profile]]
+id = "just-drop-hal"
+path = "just_drop_hal"
+description = "just_drop_hal firmware (app-layer UDP drop; serial `drop on`)"
+bin = "examples/just_drop_hal/target/riscv32imc-unknown-none-elf/release/just_drop_hal"
+partition_table = "examples/just_drop_hal/partitions.csv"
+chip = "esp32c3"
+
 [[profile]]
 id = "drop-hal"
 path = "hal_drop"
