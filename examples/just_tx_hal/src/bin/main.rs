@@ -13,7 +13,7 @@ use portable_atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use embassy_executor::Spawner;
 use embassy_net::StackResources;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Timer, with_timeout};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
@@ -151,12 +151,15 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
             continue;
         };
         NET_RX.fetch_add(1, Ordering::Relaxed);
+        // Count on the echo path before send (parity with just_tx XDP: rxcnt
+        // bumps before XDP_TX, not after a confirmed air handoff).
+        RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
         let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
-        // Echo original payload (same bytes) back to sender / ack-dest.
-        if socket.send_to(&buf[..n], dest).await.is_ok() {
-            RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
-        } else {
-            error!("echo send failed bytes={n}");
+        // Bound TX wait so a full send queue cannot starve the next recv under blast.
+        match with_timeout(Duration::from_millis(2), socket.send_to(&buf[..n], dest)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => error!("echo send failed bytes={n}"),
+            Err(_) => {} // TX busy — already counted; drop this echo
         }
     }
 }

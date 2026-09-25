@@ -52,9 +52,8 @@ TR3000（编译期嵌入 `xpost-test/config/test.toml`）：
 cd xpost-test && cargo build -p test --release
 scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 # on TR3000 — 性能测试（formal.experiment_*）：
-./xpost-test
-./xpost-test just-drop-pps --path hal   # 可选：只跑一臂
-./xpost-test just-tx-pps                # just_tx / just_tx_hal（采样 rxcnt 17）
+./xpost-test                          # 跑 [default_bench]（现为 just-tx-pps）
+./xpost-test just-drop-pps --path hal # 可选：显式子命令 / 单臂
 ./xpost-test --help-benches
 ```
 

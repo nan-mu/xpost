@@ -30,7 +30,7 @@ pub struct FileConfig {
 }
 
 fn default_default_bench() -> String {
-    "just-drop-pps".into()
+    "just-tx-pps".into()
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

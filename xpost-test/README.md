@@ -2,7 +2,7 @@
 
 在 **TR3000** 上用 **aya TC**（`bpf_ktime_get_ns`）打纳秒时间戳，并用 **AF_PACKET RAW** 向 ESP32-C3 STA 发送可伪造源 IP 的刺激包。配置在编译期嵌入 [`config/test.toml`](config/test.toml)。产物二进制名为 **`xpost-test`**。
 
-- 默认：`./xpost-test` → `[default_bench]`（现为 `just-drop-pps`）：多轮经 Mac agent `FlashProfile` 烧录 HAL/XDP，写入 Postgres schema `formal` 的 `experiment_*`（开跑前清空）。
+- 默认：`./xpost-test` → `[default_bench]`（现为 `just-tx-pps`）：多轮经 Mac agent `FlashProfile` 烧录 HAL/XDP，写入 Postgres schema `formal` 的 `experiment_*`（开跑前只清本实验 `source_note`）。
 - `./xpost-test suite` 跑 `[[tests]]`；`./xpost-test --help-benches` 看全部子命令。
 - `./xpost-test serve` 供 `fwctl.sh` 远程提交。
 

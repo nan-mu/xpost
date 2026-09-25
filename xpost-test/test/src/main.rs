@@ -1,11 +1,11 @@
 //! TR3000 host harness: RAW stimulus + compile-time TOML config.
 //!
 //! Binary: `xpost-test`. Bare `./xpost-test` runs `[default_bench]` from embedded
-//! `config/test.toml` (default `just-drop-pps`).
+//! `config/test.toml` (see that file; currently `just-tx-pps`).
 //!
 //! Formal benches (Postgres):
-//! - `./xpost-test all [--smoke] [--formal]` — all formal benches in order
-//! - `./xpost-test just-drop-pps` — flash HAL/XDP profiles, sample drop → `experiment_*`
+//! - `./xpost-test` — whatever `[default_bench]` names (compile-time)
+//! - `./xpost-test just-drop-pps` / `just-tx-pps` — explicit override
 //! - `./xpost-test drop-xdp / drop-hal / echo / …` — legacy benches
 //!
 //! `./xpost-test suite` — embedded `config/test.toml` [[tests]].
@@ -146,6 +146,10 @@ async fn main() -> Result<()> {
     let command = if args.command.is_none() {
         match cfg.default_bench.as_str() {
             "just-drop-pps" => Some(Command::JustDropPps {
+                path: None,
+                sample_interval_ms: 0,
+            }),
+            "just-tx-pps" => Some(Command::JustTxPps {
                 path: None,
                 sample_interval_ms: 0,
             }),

@@ -263,6 +263,9 @@ impl<S: Sink> Session<S> {
             InstallOutcome::Created { offset } => (offset, new_len),
         };
         let abs = self.cold_table.base.saturating_add(rel);
+        // Reconnect before erase: after a large read_flash the ROM often returns
+        // EraseRegion Other(0x1) on the same session.
+        self.leave_download_silent();
         self.enter_download()?;
         // Clear old span when overwriting (esp. shrink) so a trailing stale ELF
         // header cannot confuse the next cold-table scan. espflash erase_region
@@ -325,7 +328,11 @@ impl<S: Sink> Session<S> {
         self.flash_firmware_inner(&firmware, img.partitions)?;
 
         if let Some(xdp) = &img.xdp {
-            // flash_firmware_inner ends with hard-reset + part-table write.
+            // flash_firmware_inner ends in download after partition-table write.
+            // Wipe the cold table so lease(0) matches this profile's xdp_name
+            // (otherwise a prior just_drop entry stays at offset 0 and just_tx appends).
+            self.leave_download_silent();
+            self.clear_xdp()?;
             self.leave_download_silent();
             self.install_xdp(xdp.name, xdp.path)?;
         }
