@@ -350,14 +350,14 @@ async fn ingest_run(
                 window_secs, sample_interval_ms,
                 started_at_utc, stopped_at_utc, status, status_reason, source_note
             ) VALUES (
-                $1::uuid, $2, $3, $4,
+                $1, $2, $3, $4,
                 $5, 8,
                 $6, $7,
                 now(), now(), 'complete', $8, 'xpost-test just-drop-pps'
             )
             "#,
             &[
-                &run_id.to_string(),
+                &run_id,
                 &pair_id,
                 &run_kind,
                 &path.as_str(),
@@ -375,11 +375,11 @@ async fn ingest_run(
             .execute(
                 r#"
                 INSERT INTO counter_samples (run_id, time_ns, counter_value)
-                VALUES ($1::uuid, $2, $3)
+                VALUES ($1, $2, $3)
                 ON CONFLICT (run_id, time_ns) DO UPDATE
                   SET counter_value = EXCLUDED.counter_value
                 "#,
-                &[&run_id.to_string(), &s.t_ns, &(s.drop as i64)],
+                &[&run_id, &s.t_ns, &(s.drop as i64)],
             )
             .await
             .context("INSERT counter_samples")?;
