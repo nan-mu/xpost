@@ -5,9 +5,9 @@
 //! - [`xdp::XdpRt`] / [`xdp::XdpBuilder`]
 //!
 //! Optional / incomplete feature surface: [`ext`] (`ringbuf`). Board codegen is
-//! **`xpost-build`**. Boot is firmware-first: [`xdp::XdpRt::init`] scans Flash
-//! Compact ELF (XDP ELF), creates required maps, then [`xdp::XdpRt::lease`]
-//! installs VMR aliases from image meta.
+//! **`xpost-build`** (firmware-side). Boot is firmware-first: [`xdp::XdpRt::init`]
+//! scans Flash Compact ELF (XDP ELF), creates required maps, then
+//! [`xdp::XdpRt::lease`] installs VMR aliases from image meta.
 //!
 //! Current hardware instantiation is ESP32-C3 (RV32IMC). No ESP-IDF, no host libc.
 
@@ -15,6 +15,11 @@
 
 extern crate alloc;
 extern crate self as xpost;
+
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    mutex::{Mutex, MutexGuard},
+};
 
 /// Wi-Fi bring-up with native-XDP `::esp_radio::wifi::Prog` attach.
 pub mod esp_radio {
@@ -28,5 +33,12 @@ pub mod helper;
 pub mod map;
 pub mod xdp;
 
-/// Board layout constants (firmware `xpost-build` sync → `OUT_DIR/mem_map.rs`).
-pub use xdp::mem_map;
+/// Shared critical-section mutex for map / XDP runtimes.
+pub type RtMutex<T> = Mutex<CriticalSectionRawMutex, T>;
+/// Guard for [`RtMutex`].
+pub type RtMutexGuard<'a, T> = MutexGuard<'a, CriticalSectionRawMutex, T>;
+
+/// Locked [`xdp::XdpRt`] (also re-exported as [`xdp::XdpRtGuard`]).
+pub type XdpRtGuard<'a> = xdp::XdpRtGuard<'a>;
+/// Locked [`map::MapRt`] (also re-exported as [`map::MapRtGuard`]).
+pub type MapRtGuard<'a> = map::MapRtGuard<'a>;

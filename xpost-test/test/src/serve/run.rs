@@ -91,7 +91,7 @@ where
 pub fn validate_bench(bench: &str) -> Result<()> {
     match bench {
         "all" | "suite" | "drop-xdp" | "drop-hal" | "echo" | "wl-rtt" | "wl-loss" | "rate-rtt"
-        | "rate-loss" | "bench" | "bench-loss" => Ok(()),
+        | "rate-loss" | "just-drop" | "just-drop-pps" | "bench" | "bench-loss" => Ok(()),
         other => bail!("unknown bench `{other}`"),
     }
 }

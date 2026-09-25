@@ -66,7 +66,7 @@ pub fn bind_map_symbols(binds: &[(&str, usize)]) -> usize {
             continue;
         }
         let Some(id) = crate::map::runtime::names::resolve_map_name(name) else {
-            crate::xdp::stats::inc_bind_unknown();
+            crate::xdp::counter::inc_bind_unknown();
             continue;
         };
         if register_map_addr(addr, id) {
@@ -240,7 +240,7 @@ pub(crate) fn with_typed_map_ref<R>(
 /// `Busy` (writer held) still returns null — same ABI as a key miss.
 pub(crate) fn helper_lookup(map: usize, key: usize) -> usize {
     let Some(id) = resolve_map_id(map) else {
-        crate::xdp::stats::inc_helper_unresolved();
+        crate::xdp::counter::inc_helper_unresolved();
         return 0;
     };
     let key = key as *const u8;

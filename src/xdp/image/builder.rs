@@ -4,7 +4,7 @@ use alloc::{format, string::String};
 
 use crate::{
     map::{MapBuilder, MapId, MapMeta, MapRt, MapType},
-    xdp::{SlotId, XdpId, XdpRt, error::XdpError, state::MAX_REQUIRED_MAPS},
+    xdp::{XdpId, XdpRt, error::XdpError, state::MAX_REQUIRED_MAPS},
 };
 
 use super::meta::{XdpLocation, XdpMeta};
@@ -88,19 +88,14 @@ impl XdpBuilder<Incomplete> {
         }
     }
 
-    /// Record a planned slot link address from codegen (`SLOT_BASES[slot]`).
+    /// Record a planned slot link address (firmware-owned IRAM base).
     ///
-    /// Returns [`XdpError::UnknownSlot`] when the index is OOB or the base is
-    /// still 0 (firmware-owned buffer — pass the real address via the ELF path).
-    pub fn with_slot(mut self, slot: SlotId) -> Result<Self, XdpError> {
-        let base = crate::xdp::mem_map::SLOT_BASES
-            .get(slot)
-            .copied()
-            .ok_or(XdpError::UnknownSlot)?;
-        if base == 0 {
-            return Err(XdpError::UnknownSlot);
+    /// Returns [`XdpError::SlotAddress`] when `link_addr` is 0 or misaligned.
+    pub fn with_slot(mut self, link_addr: usize) -> Result<Self, XdpError> {
+        if link_addr == 0 || (link_addr & 3) != 0 {
+            return Err(XdpError::SlotAddress);
         }
-        self.link_addr = base;
+        self.link_addr = link_addr;
         Ok(self)
     }
 
@@ -109,12 +104,9 @@ impl XdpBuilder<Incomplete> {
         self
     }
 
-    /// Set helper address from layout codegen (`HELPER_DISPATCHER_BASE`) when non-zero.
+    /// Set helper address from the live [`crate::helper::helper_dispatcher`] symbol.
     pub fn with_helper_address(mut self) -> Self {
-        let base = crate::xdp::mem_map::HELPER_DISPATCHER_BASE;
-        if base != 0 {
-            self.helper_address = base;
-        }
+        self.helper_address = crate::helper::helper_dispatcher as *const () as usize;
         self
     }
 
@@ -156,7 +148,7 @@ impl XdpBuilder<Incomplete> {
         if self.helper_address == 0 || (self.helper_address & 3) != 0 {
             return None;
         }
-        let expected = crate::xdp::mem_map::HELPER_DISPATCHER_BASE;
+        let expected = crate::helper::helper_dispatcher as *const () as usize;
         if expected != 0 && self.helper_address != expected {
             return None;
         }
@@ -191,7 +183,7 @@ impl XdpBuilder<Incomplete> {
         if self.helper_address == 0 {
             return Err(XdpError::HelperAddress);
         }
-        let expected = crate::xdp::mem_map::HELPER_DISPATCHER_BASE;
+        let expected = crate::helper::helper_dispatcher as *const () as usize;
         if expected != 0 && self.helper_address != expected {
             return Err(XdpError::HelperAddressMismatch);
         }
@@ -222,7 +214,7 @@ impl XdpBuilder<Complete> {
     pub fn build(self, rt: &mut XdpRt) -> Result<XdpId, XdpError> {
         let table_id = self.table_index;
         let name = self.name.ok_or(XdpError::InvalidName)?;
-        if rt.find_name(&name).is_some() {
+        if rt.find(&name).is_some() {
             return Err(XdpError::DuplicateName);
         }
         let cap = rt.table.image_capacity();

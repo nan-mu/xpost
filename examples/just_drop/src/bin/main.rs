@@ -22,7 +22,7 @@ use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use log::{error, info};
 use static_cell::StaticCell;
 use xpost::map::{HEAP_SIZE, MapRt};
-use xpost::xdp::{ReportItem, Slot, XdpLocation, XdpRt};
+use xpost::xdp::{ReportItem, Slot, XdpRt};
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -89,12 +89,22 @@ async fn main(spawner: Spawner) -> ! {
 
     let slots = [unsafe { xdp_slot.as_xdp_slot(true) }];
 
-    let (mut rt, report) = XdpRt::init(flash, &slots, just_drop::mem_map::TABLE, &mut maps)
-        .await
-        .expect("XdpRt::init");
+    let (mut rt, report) = XdpRt::init(
+        flash,
+        &slots,
+        just_drop::mem_map::TABLE,
+        &mut maps,
+        just_drop::mem_map::HELPER_DISPATCHER_BASE,
+    )
+    .await
+    .expect("XdpRt::init");
+    let n_images = report
+        .iter()
+        .filter(|i| matches!(i, ReportItem::Xdp(_)))
+        .count();
     info!(
         "xdp init ok images={} write-bin {:#x} <xdp.elf>",
-        rt.image_count(),
+        n_images,
         just_drop::mem_map::TABLE.0
     );
     for item in &report {
@@ -103,18 +113,18 @@ async fn main(spawner: Spawner) -> ! {
             ReportItem::Map(ty, name) => info!("report map {ty:?} {name}"),
         }
     }
-    // Cold image stays Pass until moved into the primary IRAM slot and leased.
+    // Cold image stays Pass until switched into the primary IRAM slot and leased.
     // Soft-fail: a stale cold ELF (wrong link_addr after BSS shift) must not panic
     // the board — leave Prog on Pass until `agent program` writes a matching image.
-    if rt.image_count() > 0 {
+    if n_images > 0 {
         let id = 0;
         let primary = 0;
-        match rt.r#move(id, XdpLocation::Slot { index: primary }) {
+        match rt.switch(id, primary, Some(&maps)) {
             Ok(()) => match rt.lease(Some(&mut maps)) {
                 Ok(()) => info!("xdp leased primary image_id={id}"),
                 Err(e) => error!("xdp lease failed: {e:?}"),
             },
-            Err(e) => error!("xdp move primary failed: {e:?} (cold image link_addr mismatch?)"),
+            Err(e) => error!("xdp switch primary failed: {e:?} (cold image link_addr mismatch?)"),
         }
     } else {
         info!("xdp cold empty; Prog Pass until program+reboot");
