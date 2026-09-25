@@ -7,12 +7,20 @@ import pandas as pd
 from utils.db import read_sql
 
 
-def load_runs(*, run_kind: str | None = None, status: str = "complete") -> pd.DataFrame:
+def load_runs(
+    *,
+    run_kind: str | None = None,
+    status: str = "complete",
+    source_note: str | None = None,
+) -> pd.DataFrame:
     clauses = ["status = %(status)s"]
     params: dict = {"status": status}
     if run_kind is not None:
         clauses.append("run_kind = %(run_kind)s")
         params["run_kind"] = run_kind
+    if source_note is not None:
+        clauses.append("source_note = %(source_note)s")
+        params["source_note"] = source_note
     where = " AND ".join(clauses)
     return read_sql(
         f"""

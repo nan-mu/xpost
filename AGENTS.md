@@ -44,7 +44,7 @@ Mac（USB 接 ESP；cwd = `xpost/`）：只需常驻 agent。收到 `FlashProfil
 cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
 ```
 
-Wi-Fi 凭据仍在 `examples/just_drop/.env` 与 `examples/just_drop_hal/.env`（`WIFI_SSID` / `WIFI_PASS`）。
+Wi-Fi 凭据仍在 `examples/just_drop/.env`、`examples/just_drop_hal/.env` 与 `examples/just_tx_hal/.env`（`WIFI_SSID` / `WIFI_PASS`）。
 
 TR3000（编译期嵌入 `xpost-test/config/test.toml`）：
 
@@ -54,6 +54,7 @@ scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 # on TR3000 — 性能测试（formal.experiment_*）：
 ./xpost-test
 ./xpost-test just-drop-pps --path hal   # 可选：只跑一臂
+./xpost-test just-tx-pps                # just_tx / just_tx_hal（采样 rxcnt 17）
 ./xpost-test --help-benches
 ```
 
@@ -67,7 +68,7 @@ scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 
 ```bash
 cd benchmark && pixi install && pixi run ensure-schema && pixi run lab
-# notebook: just_drop_pps.ipynb
+# notebook: just_drop_pps.ipynb  /  just_tx_pps.ipynb
 ```
 
 See [`benchmark/README.md`](benchmark/README.md).

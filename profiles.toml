@@ -23,6 +23,26 @@ chip = "esp32c3"
 build = ["cargo", "xtask", "just_drop_hal", "build", "--release"]
 
 [[profile]]
+id = "just-tx"
+path = "just_drop"
+description = "just_drop firmware + cold just_tx.elf (XDP MAC swap + XDP_TX)"
+bin = "examples/just_drop/target/riscv32imc-unknown-none-elf/release/just_drop"
+partition_table = "examples/just_drop/partitions.csv"
+chip = "esp32c3"
+xdp_elf = "examples/just_drop/just_tx.elf"
+xdp_name = "just_tx"
+build = ["cargo", "xtask", "just_drop", "build", "--release"]
+
+[[profile]]
+id = "just-tx-hal"
+path = "just_tx_hal"
+description = "just_tx_hal firmware (app-layer UDP echo; rxcnt[17] on send)"
+bin = "examples/just_tx_hal/target/riscv32imc-unknown-none-elf/release/just_tx_hal"
+partition_table = "examples/just_tx_hal/partitions.csv"
+chip = "esp32c3"
+build = ["cargo", "xtask", "just_tx_hal", "build", "--release"]
+
+[[profile]]
 id = "drop-hal"
 path = "hal_drop"
 description = "Pure ESP-HAL ICMP drop counter (examples/esp32c3-drop-hal)"

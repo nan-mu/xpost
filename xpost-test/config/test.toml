@@ -52,6 +52,14 @@ drop_xdp = "drop-xdp"
 firmware = "firmware"
 just_drop = "just-drop"
 just_drop_hal = "just-drop-hal"
+just_tx = "just-tx"
+just_tx_hal = "just-tx-hal"
+
+[just_tx_pps]
+formal = true
+rounds = 3
+sample_interval_ms = 1000
+arms = ["hal", "xdp"]
 
 [[tests]]
 name = "test0"

@@ -9,7 +9,8 @@ benchmark/
   pixi.toml
   .env                   # PGSCHEMA=formal
   utils/                 # db / experiment 分析
-  just_drop_pps.ipynb    # 性能复现 + 图
+  just_drop_pps.ipynb    # drop 路径性能复现 + 图
+  just_tx_pps.ipynb      # tx 路径性能复现 + 图（source_note=just-tx-pps）
   tests/
 ```
 

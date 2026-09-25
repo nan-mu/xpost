@@ -102,6 +102,16 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         sample_interval_ms: u64,
     },
+    /// just_tx / just_tx_hal PPS → `experiment_*` via `rxcnt 17` (agent flashes each arm).
+    #[command(name = "just-tx-pps")]
+    JustTxPps {
+        /// Restrict to one arm. Omit → embedded `[just_tx_pps].arms`.
+        #[arg(long, value_parser = ["xdp", "hal"])]
+        path: Option<String>,
+        /// Counter sample period while blasting (ms). `0` → embedded default.
+        #[arg(long, default_value_t = 0)]
+        sample_interval_ms: u64,
+    },
     /// Alias of `rate-rtt`.
     Bench,
     /// Alias of `wl-loss`.
@@ -164,6 +174,7 @@ async fn main() -> Result<()> {
             | Command::RateLoss
             | Command::JustDrop
             | Command::JustDropPps { .. }
+            | Command::JustTxPps { .. }
             | Command::Bench
             | Command::BenchLoss
             | Command::Serve { .. },
@@ -225,6 +236,34 @@ async fn main() -> Result<()> {
         )
         .await;
     }
+    if let Some(Command::JustTxPps {
+        path,
+        sample_interval_ms,
+    }) = &command
+    {
+        let paths = match path {
+            Some(p) => vec![bench::PpsPath::parse(p)?],
+            None => Vec::new(),
+        };
+        let sample_ms = if *sample_interval_ms == 0 {
+            cfg.just_tx_pps.sample_interval_ms
+        } else {
+            *sample_interval_ms
+        };
+        return bench::run_just_tx_pps(
+            &cfg,
+            bench::JustTxPpsOpts {
+                paths,
+                smoke: args.smoke,
+                formal: args.formal || cfg.just_tx_pps.formal,
+                no_pg: args.no_pg,
+                window_secs: args.window_secs,
+                sample_interval_ms: sample_ms,
+                rounds: args.rounds,
+            },
+        )
+        .await;
+    }
 
     let drop_opts = DropOpts::new(
         args.smoke,
@@ -269,6 +308,7 @@ async fn main() -> Result<()> {
         }
         Some(Command::JustDrop) => unreachable!("handled before harness open"),
         Some(Command::JustDropPps { .. }) => unreachable!("handled before harness open"),
+        Some(Command::JustTxPps { .. }) => unreachable!("handled before harness open"),
         Some(Command::Suite) => {}
         None => unreachable!(),
     }

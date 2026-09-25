@@ -363,6 +363,53 @@ pub async fn prepare(client: &Client, opts: PgOpts, set: TableSet) -> Result<()>
     Ok(())
 }
 
+/// Ensure `experiment_*` exist; on formal, delete only rows with `source_note = note`
+/// (does not DROP/TRUNCATE the whole PPS table family).
+pub async fn prepare_experiment_pps_note(client: &Client, opts: PgOpts, note: &str) -> Result<()> {
+    if opts.formal {
+        client
+            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {FORMAL_SCHEMA}"))
+            .await
+            .context("CREATE SCHEMA formal")?;
+        client
+            .batch_execute(&format!("SET search_path TO {FORMAL_SCHEMA}"))
+            .await
+            .context("SET search_path formal")?;
+    } else {
+        client
+            .batch_execute("SET search_path TO public")
+            .await
+            .context("SET search_path public")?;
+    }
+
+    for sql in TableSet::ExperimentPps.ensure_sql() {
+        client
+            .batch_execute(sql)
+            .await
+            .with_context(|| {
+                format!(
+                    "ensure ExperimentPps tables in {}",
+                    opts.schema()
+                )
+            })?;
+    }
+
+    if opts.formal {
+        // CASCADE from experiment_runs clears counter_samples / sample_reads.
+        let n = client
+            .execute(
+                "DELETE FROM experiment_runs WHERE source_note = $1",
+                &[&note],
+            )
+            .await
+            .context("DELETE experiment_runs by source_note")?;
+        info!(
+            "formal schema={FORMAL_SCHEMA}: deleted {n} experiment_runs with source_note={note}"
+        );
+    }
+    Ok(())
+}
+
 pub fn config_id_from_row(row: &tokio_postgres::Row) -> Result<i64> {
     if let Ok(v) = row.try_get::<_, i64>(0) {
         return Ok(v);

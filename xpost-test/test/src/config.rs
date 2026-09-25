@@ -24,6 +24,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub just_drop_pps: JustDropPpsConfig,
     #[serde(default)]
+    pub just_tx_pps: JustDropPpsConfig,
+    #[serde(default)]
     pub tests: Vec<TestEntry>,
 }
 
@@ -72,6 +74,12 @@ pub struct ProfilesConfig {
     /// Profile id for just_drop_hal firmware.
     #[serde(default)]
     pub just_drop_hal: Option<String>,
+    /// Profile id for just_tx (just_drop firmware + just_tx.elf).
+    #[serde(default)]
+    pub just_tx: Option<String>,
+    /// Profile id for just_tx_hal firmware.
+    #[serde(default)]
+    pub just_tx_hal: Option<String>,
 }
 
 /// Compile-time defaults for `just-drop-pps` / bare `./xpost-test`.
