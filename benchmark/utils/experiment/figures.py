@@ -156,49 +156,85 @@ def figure2_noise(
     xdp_adev: Mapping[float, float] | None = None,
     hal_counts: Sequence[int] | None = None,
     xdp_counts: Sequence[int] | None = None,
+    hal_rate_ts: Sequence[tuple[float, float]] | None = None,
+    xdp_rate_ts: Sequence[tuple[float, float]] | None = None,
     model_scores: Mapping[str, Mapping[str, float]] | None = None,
     title: str = "Noise-model diagnostics (HAL / XDP)",
 ) -> Figure:
-    """2 rows (HAL, XDP) × 3 cols (ADEV vs τ, count hist, holdout scores)."""
+    """One figure: 2 rows (HAL, XDP) × 3 cols (rates/ADEV, 1 s counts, holdout).
+
+    Prefer triad ADEV when provided; else plot equal-interval rate time series
+    (`*_rate_ts` as (t_s, pps) points) so pilot runs still show data.
+    """
     fig, axes = plt.subplots(2, 3, figsize=(11, 6.5), sharex=False)
     variants = [
-        ("HAL", axes[0], hal_adev, hal_counts),
-        ("XDP", axes[1], xdp_adev, xdp_counts),
+        ("HAL", axes[0], hal_adev, hal_counts, hal_rate_ts, "hal"),
+        ("XDP", axes[1], xdp_adev, xdp_counts, xdp_rate_ts, "xdp"),
     ]
-    for name, row, adev, counts in variants:
+    for name, row, adev, counts, rate_ts, key in variants:
         ax0, ax1, ax2 = row
-        ax0.set_ylabel(name)
         if adev:
             taus = sorted(adev.keys())
             vals = [adev[t] for t in taus]
             ax0.set_xscale("log")
             ax0.plot(taus, vals, "o-", color="tab:blue")
             ax0.set_xlabel("τ (s)")
-            ax0.set_ylabel("Rel. ADEV")
+            ax0.set_ylabel(f"{name} Rel. ADEV")
+        elif rate_ts:
+            ts = [p[0] for p in rate_ts]
+            rs = [p[1] for p in rate_ts]
+            ax0.plot(ts, rs, "-", color="tab:blue", lw=1.0, alpha=0.85)
+            ax0.set_xlabel("t (s)")
+            ax0.set_ylabel(f"{name} interval PPS")
+            ax0.set_ylim(bottom=0)
         else:
-            ax0.text(0.5, 0.5, "insufficient triad data", ha="center", va="center", transform=ax0.transAxes)
-            ax0.set_xlabel("τ (s)")
+            ax0.text(
+                0.5,
+                0.5,
+                "no rate / triad data",
+                ha="center",
+                va="center",
+                transform=ax0.transAxes,
+            )
+            ax0.set_xlabel("τ / t")
 
         if counts is not None and len(counts) > 0:
-            ax1.hist(list(counts), bins=min(20, max(5, len(counts) // 3)), color="tab:gray", edgecolor="k")
-            ax1.set_xlabel("count in 1 s window")
+            ax1.hist(
+                list(counts),
+                bins=min(20, max(5, len(counts) // 3)),
+                color="tab:gray",
+                edgecolor="k",
+            )
+            ax1.set_xlabel("count in ~1 s window")
+            ax1.set_ylabel("freq")
         else:
-            ax1.text(0.5, 0.5, "no count samples", ha="center", va="center", transform=ax1.transAxes)
+            ax1.text(
+                0.5,
+                0.5,
+                "no count samples",
+                ha="center",
+                va="center",
+                transform=ax1.transAxes,
+            )
 
-        if model_scores and name.lower() in {k.lower() for k in model_scores}:
-            # model_scores keyed by variant then model name → holdout ll
-            key = "hal" if name == "HAL" else "xdp"
+        scores = None
+        if model_scores:
             scores = model_scores.get(key) or model_scores.get(name)
-            if scores:
-                names = list(scores.keys())
-                vals = [scores[n] for n in names]
-                ax2.bar(names, vals, color="tab:purple")
-                ax2.tick_params(axis="x", rotation=30)
-                ax2.set_ylabel("holdout loglik")
-            else:
-                ax2.text(0.5, 0.5, "no model scores", ha="center", va="center", transform=ax2.transAxes)
+        if scores:
+            names = list(scores.keys())
+            vals = [scores[n] for n in names]
+            ax2.bar(names, vals, color="tab:purple")
+            ax2.tick_params(axis="x", rotation=30)
+            ax2.set_ylabel("holdout loglik")
         else:
-            ax2.text(0.5, 0.5, "evidence insufficient", ha="center", va="center", transform=ax2.transAxes)
+            ax2.text(
+                0.5,
+                0.5,
+                "model holdout n/a\n(need random triads)",
+                ha="center",
+                va="center",
+                transform=ax2.transAxes,
+            )
 
     fig.suptitle(title)
     fig.tight_layout()
