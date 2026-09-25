@@ -9,7 +9,7 @@ use portable_atomic::{AtomicUsize, Ordering};
 use crate::xdp::{
     ingress::{action::XdpAction, run},
     state::ACTIVE,
-    stats::inc_bad_md,
+    counter::inc_bad_md,
 };
 
 /// Process-wide XDP program mounted on esp-radio RX ingress.
