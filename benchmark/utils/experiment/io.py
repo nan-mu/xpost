@@ -36,6 +36,36 @@ def load_runs(
     )
 
 
+def load_just_tx_rtt_runs(
+    *,
+    run_kind: str | None = "pilot",
+    status: str = "complete",
+    source_note: str | None = "xpost-test just-tx-rtt",
+) -> pd.DataFrame:
+    clauses = ["status = %(status)s"]
+    params: dict = {"status": status}
+    if run_kind is not None:
+        clauses.append("run_kind = %(run_kind)s")
+        params["run_kind"] = run_kind
+    if source_note is not None:
+        clauses.append("source_note = %(source_note)s")
+        params["source_note"] = source_note
+    where = " AND ".join(clauses)
+    return read_sql(
+        f"""
+        SELECT run_id::text AS run_id, pair_id, run_kind, variant,
+               target_pps, calibrated_loss, window_secs,
+               sent, ok, loss_rate, return_pps, device_rxcnt_delta,
+               median_rtt_ms, p95_rtt_ms, mean_rtt_ms,
+               started_at_utc, stopped_at_utc, status, source_note
+        FROM just_tx_rtt_runs
+        WHERE {where}
+        ORDER BY variant, pair_id, started_at_utc
+        """,
+        params,
+    )
+
+
 def load_counter_samples(run_ids: list[str] | None = None) -> pd.DataFrame:
     if run_ids is not None and len(run_ids) == 0:
         return pd.DataFrame(columns=["run_id", "time_ns", "counter_value"])

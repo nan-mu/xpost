@@ -22,7 +22,7 @@ const UDP_HLEN: usize = 8;
 static CONFIG: Array<FilterConfig> = Array::with_max_entries(1, 0);
 
 #[map]
-static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
+static EVENTS: RingBuf = RingBuf::with_byte_size(4 * 1024 * 1024, 0);
 
 #[classifier]
 pub fn test_egress(ctx: TcContext) -> i32 {

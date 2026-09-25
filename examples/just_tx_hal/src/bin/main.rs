@@ -13,7 +13,7 @@ use portable_atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use embassy_executor::Spawner;
 use embassy_net::StackResources;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
@@ -44,10 +44,10 @@ static ACK_IP: AtomicU32 = AtomicU32::new(0);
 static ACK_PORT: AtomicU32 = AtomicU32::new(0);
 
 static NET_RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
-static UDP_RX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
-static UDP_TX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
-static UDP_RX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
-static UDP_TX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
+static UDP_RX_META: StaticCell<[PacketMetadata; 16]> = StaticCell::new();
+static UDP_TX_META: StaticCell<[PacketMetadata; 16]> = StaticCell::new();
+static UDP_RX_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
+static UDP_TX_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
 
 #[allow(
     clippy::large_stack_frames,
@@ -137,10 +137,10 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
         info!("dhcp {}", v4.address);
     }
 
-    let rx_meta = UDP_RX_META.init([PacketMetadata::EMPTY; 4]);
-    let tx_meta = UDP_TX_META.init([PacketMetadata::EMPTY; 4]);
-    let rx_buf = UDP_RX_BUF.init([0; 1536]);
-    let tx_buf = UDP_TX_BUF.init([0; 1536]);
+    let rx_meta = UDP_RX_META.init([PacketMetadata::EMPTY; 16]);
+    let tx_meta = UDP_TX_META.init([PacketMetadata::EMPTY; 16]);
+    let rx_buf = UDP_RX_BUF.init([0; 4096]);
+    let tx_buf = UDP_TX_BUF.init([0; 4096]);
     let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
     socket.bind(STIM_PORT).expect("bind stim");
     info!("udp echo listening {STIM_PORT}");
@@ -151,15 +151,14 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
             continue;
         };
         NET_RX.fetch_add(1, Ordering::Relaxed);
-        // Count on the echo path before send (parity with just_tx XDP: rxcnt
-        // bumps before XDP_TX, not after a confirmed air handoff).
-        RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
         let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
-        // Bound TX wait so a full send queue cannot starve the next recv under blast.
-        match with_timeout(Duration::from_millis(2), socket.send_to(&buf[..n], dest)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => error!("echo send failed bytes={n}"),
-            Err(_) => {} // TX busy — already counted; drop this echo
+        // Await TX fully: short with_timeout was silently dropping every echo
+        // (Wi-Fi TX often ≫ 50 ms), so TC never saw bounce and RTT stayed empty.
+        match socket.send_to(&buf[..n], dest).await {
+            Ok(()) => {
+                RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => error!("echo send failed bytes={n}"),
         }
     }
 }

@@ -1,11 +1,11 @@
 //! TR3000 host harness: RAW stimulus + compile-time TOML config.
 //!
 //! Binary: `xpost-test`. Bare `./xpost-test` runs `[default_bench]` from embedded
-//! `config/test.toml` (see that file; currently `just-tx-pps`).
+//! `config/test.toml` (see that file; currently `just-tx-rtt`).
 //!
 //! Formal benches (Postgres):
 //! - `./xpost-test` — whatever `[default_bench]` names (compile-time)
-//! - `./xpost-test just-drop-pps` / `just-tx-pps` — explicit override
+//! - `./xpost-test just-drop-pps` / `just-tx-pps` / `just-tx-rtt` — explicit override
 //! - `./xpost-test drop-xdp / drop-hal / echo / …` — legacy benches
 //!
 //! `./xpost-test suite` — embedded `config/test.toml` [[tests]].
@@ -112,6 +112,13 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         sample_interval_ms: u64,
     },
+    /// just_tx / just_tx_hal RTT at ~5% loss operating point → `just_tx_rtt_*`.
+    #[command(name = "just-tx-rtt")]
+    JustTxRtt {
+        /// Restrict to one arm. Omit → embedded `[just_tx_rtt].arms`.
+        #[arg(long, value_parser = ["xdp", "hal"])]
+        path: Option<String>,
+    },
     /// Alias of `rate-rtt`.
     Bench,
     /// Alias of `wl-loss`.
@@ -153,6 +160,7 @@ async fn main() -> Result<()> {
                 path: None,
                 sample_interval_ms: 0,
             }),
+            "just-tx-rtt" => Some(Command::JustTxRtt { path: None }),
             "suite" => Some(Command::Suite),
             "all" => Some(Command::All),
             other => {
@@ -179,6 +187,7 @@ async fn main() -> Result<()> {
             | Command::JustDrop
             | Command::JustDropPps { .. }
             | Command::JustTxPps { .. }
+            | Command::JustTxRtt { .. }
             | Command::Bench
             | Command::BenchLoss
             | Command::Serve { .. },
@@ -268,6 +277,26 @@ async fn main() -> Result<()> {
         )
         .await;
     }
+    if let Some(Command::JustTxRtt { path }) = &command {
+        let paths = match path {
+            Some(p) => vec![bench::PpsPath::parse(p)?],
+            None => Vec::new(),
+        };
+        let mut harness = open_harness(&cfg).await?;
+        return bench::run_just_tx_rtt(
+            &cfg,
+            &mut harness,
+            bench::JustTxRttOpts {
+                paths,
+                smoke: args.smoke,
+                formal: args.formal || cfg.just_tx_rtt.formal,
+                no_pg: args.no_pg,
+                window_secs: args.window_secs,
+                rounds: args.rounds,
+            },
+        )
+        .await;
+    }
 
     let drop_opts = DropOpts::new(
         args.smoke,
@@ -313,6 +342,7 @@ async fn main() -> Result<()> {
         Some(Command::JustDrop) => unreachable!("handled before harness open"),
         Some(Command::JustDropPps { .. }) => unreachable!("handled before harness open"),
         Some(Command::JustTxPps { .. }) => unreachable!("handled before harness open"),
+        Some(Command::JustTxRtt { .. }) => unreachable!("handled before harness open"),
         Some(Command::Suite) => {}
         None => unreachable!(),
     }

@@ -51,8 +51,9 @@ TR3000（编译期嵌入 `xpost-test/config/test.toml`）：
 ```bash
 cd xpost-test && cargo build -p test --release
 scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
-# on TR3000 — 性能测试（formal.experiment_*）：
-./xpost-test                          # 跑 [default_bench]（现为 just-tx-pps）
+# on TR3000 — 性能测试（formal）：
+./xpost-test                          # 跑 [default_bench]（现为 just-tx-rtt）
+./xpost-test just-tx-pps              # 满速处理 PPS → experiment_*
 ./xpost-test just-drop-pps --path hal # 可选：显式子命令 / 单臂
 ./xpost-test --help-benches
 ```
@@ -61,13 +62,16 @@ scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 
 可选手工 XDP 冷表操作：`cargo xtask agent program|list|clear|request|probe …`。
 
-### PPS A/B（`benchmark/`）
+### PPS / RTT A/B（`benchmark/`）
 
-只做**性能**分析（均值 PPS / CV / Allan·噪声模型脚手架）。采集由 `./xpost-test` 写 `formal.experiment_*`；笔记本现查，不负责烧录或功能 ACK。
+只做**性能**分析。采集由 `./xpost-test` 写 `formal.*`；笔记本现查，不负责烧录或功能 ACK。
+
+- **just-tx-rtt**（默认）：每臂标定「丢包≈5%」的最大 `target_pps`，再测 median RTT / loss / return PPS → `formal.just_tx_rtt_*`
+- **just-tx-pps** / **just-drop-pps**：满速 blast 下的处理 PPS → `formal.experiment_*`
 
 ```bash
 cd benchmark && pixi install && pixi run ensure-schema && pixi run lab
-# notebook: just_drop_pps.ipynb  /  just_tx_pps.ipynb
+# notebook: just_tx_rtt.ipynb / just_tx_pps.ipynb / just_drop_pps.ipynb
 ```
 
 See [`benchmark/README.md`](benchmark/README.md).

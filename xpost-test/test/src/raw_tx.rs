@@ -222,6 +222,37 @@ pub fn iface_mac(iface: &str) -> Result<[u8; 6]> {
     Ok(mac)
 }
 
+/// IPv4 address configured on `iface` (SIOCGIFADDR).
+pub fn iface_ipv4(iface: &str) -> Result<Ipv4Addr> {
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error()).context("socket for iface_ipv4");
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+
+    let mut ifr: libc::ifreq = unsafe { mem::zeroed() };
+    let bytes = iface.as_bytes();
+    if bytes.len() >= IFNAMSIZ {
+        bail!("iface name too long: {iface}");
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            ifr.ifr_name.as_mut_ptr() as *mut u8,
+            bytes.len(),
+        );
+    }
+    let ret = unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCGIFADDR as libc::Ioctl, &mut ifr) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error()).context("SIOCGIFADDR");
+    }
+    let addr = unsafe {
+        let sa = &ifr.ifr_ifru.ifru_addr as *const libc::sockaddr as *const libc::sockaddr_in;
+        u32::from_be((*sa).sin_addr.s_addr)
+    };
+    Ok(Ipv4Addr::from(addr))
+}
+
 pub fn build_udp_frame(
     dst_mac: &[u8; 6],
     src_mac: &[u8; 6],

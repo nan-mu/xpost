@@ -40,6 +40,8 @@ pub enum TableSet {
     Ack,
     /// HAL vs XDP PPS → `experiment_runs` / `counter_samples`.
     ExperimentPps,
+    /// just_tx RTT at ~5% loss operating point → `just_tx_rtt_*`.
+    JustTxRtt,
 }
 
 impl TableSet {
@@ -65,6 +67,9 @@ impl TableSet {
             Self::ExperimentPps => {
                 "TRUNCATE TABLE sample_reads, counter_samples, experiment_runs RESTART IDENTITY CASCADE"
             }
+            Self::JustTxRtt => {
+                "TRUNCATE TABLE just_tx_rtt_samples, just_tx_rtt_runs RESTART IDENTITY CASCADE"
+            }
         }
     }
 
@@ -76,6 +81,9 @@ impl TableSet {
             }
             Self::ExperimentPps => Some(
                 "DROP TABLE IF EXISTS sample_reads, counter_samples, experiment_runs CASCADE",
+            ),
+            Self::JustTxRtt => Some(
+                "DROP TABLE IF EXISTS just_tx_rtt_samples, just_tx_rtt_runs CASCADE",
             ),
             _ => None,
         }
@@ -301,6 +309,39 @@ impl TableSet {
                 r#"CREATE INDEX IF NOT EXISTS counter_samples_run_time
                     ON counter_samples (run_id, time_ns)"#,
             ],
+            Self::JustTxRtt => &[
+                r#"CREATE TABLE IF NOT EXISTS just_tx_rtt_runs (
+                    run_id UUID PRIMARY KEY,
+                    pair_id INTEGER NOT NULL,
+                    run_kind TEXT NOT NULL CHECK (run_kind IN ('random', 'control', 'pilot')),
+                    variant TEXT NOT NULL CHECK (variant IN ('hal', 'xdp')),
+                    target_pps DOUBLE PRECISION NOT NULL,
+                    calibrated_loss DOUBLE PRECISION,
+                    window_secs DOUBLE PRECISION,
+                    sent BIGINT NOT NULL,
+                    ok BIGINT NOT NULL,
+                    loss_rate DOUBLE PRECISION NOT NULL,
+                    return_pps DOUBLE PRECISION,
+                    device_rxcnt_delta BIGINT,
+                    median_rtt_ms DOUBLE PRECISION,
+                    p95_rtt_ms DOUBLE PRECISION,
+                    mean_rtt_ms DOUBLE PRECISION,
+                    started_at_utc TIMESTAMPTZ,
+                    stopped_at_utc TIMESTAMPTZ,
+                    status TEXT NOT NULL,
+                    source_note TEXT
+                )"#,
+                r#"CREATE TABLE IF NOT EXISTS just_tx_rtt_samples (
+                    run_id UUID NOT NULL REFERENCES just_tx_rtt_runs(run_id) ON DELETE CASCADE,
+                    seq INTEGER NOT NULL,
+                    t0 TIMESTAMPTZ NOT NULL,
+                    ok BOOLEAN NOT NULL,
+                    rtt_ms DOUBLE PRECISION,
+                    PRIMARY KEY (run_id, seq)
+                )"#,
+                r#"CREATE INDEX IF NOT EXISTS just_tx_rtt_samples_run
+                    ON just_tx_rtt_samples (run_id)"#,
+            ],
         }
     }
 }
@@ -359,6 +400,46 @@ pub async fn prepare(client: &Client, opts: PgOpts, set: TableSet) -> Result<()>
             .await
             .with_context(|| format!("TRUNCATE {:?} in {FORMAL_SCHEMA}", set))?;
         info!("formal schema={FORMAL_SCHEMA}: truncated {:?}", set);
+    }
+    Ok(())
+}
+
+/// Ensure `just_tx_rtt_*` exist; on formal, delete only rows with `source_note = note`.
+pub async fn prepare_just_tx_rtt_note(client: &Client, opts: PgOpts, note: &str) -> Result<()> {
+    if opts.formal {
+        client
+            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {FORMAL_SCHEMA}"))
+            .await
+            .context("CREATE SCHEMA formal")?;
+        client
+            .batch_execute(&format!("SET search_path TO {FORMAL_SCHEMA}"))
+            .await
+            .context("SET search_path formal")?;
+    } else {
+        client
+            .batch_execute("SET search_path TO public")
+            .await
+            .context("SET search_path public")?;
+    }
+
+    for sql in TableSet::JustTxRtt.ensure_sql() {
+        client
+            .batch_execute(sql)
+            .await
+            .with_context(|| format!("ensure JustTxRtt tables in {}", opts.schema()))?;
+    }
+
+    if opts.formal {
+        let n = client
+            .execute(
+                "DELETE FROM just_tx_rtt_runs WHERE source_note = $1",
+                &[&note],
+            )
+            .await
+            .context("DELETE just_tx_rtt_runs by source_note")?;
+        info!(
+            "formal schema={FORMAL_SCHEMA}: deleted {n} just_tx_rtt_runs with source_note={note}"
+        );
     }
     Ok(())
 }

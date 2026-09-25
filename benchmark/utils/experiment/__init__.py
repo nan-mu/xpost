@@ -8,8 +8,8 @@ from .allan import (
     overlapping_relative_adev,
     triad_rates,
 )
-from .figures import figure1_summary, figure2_noise
-from .io import load_counter_samples, load_runs, load_sample_reads
+from .figures import figure1_summary, figure1_tx_rtt, figure2_noise
+from .io import load_counter_samples, load_just_tx_rtt_runs, load_runs, load_sample_reads
 from .models import (
     FitSplit,
     ModelResult,
@@ -54,8 +54,10 @@ __all__ = [
     "detect_linear_trend",
     "simulate_poisson_counts",
     "load_runs",
+    "load_just_tx_rtt_runs",
     "load_counter_samples",
     "load_sample_reads",
     "figure1_summary",
+    "figure1_tx_rtt",
     "figure2_noise",
 ]

@@ -26,11 +26,13 @@ pub struct FileConfig {
     #[serde(default)]
     pub just_tx_pps: JustDropPpsConfig,
     #[serde(default)]
+    pub just_tx_rtt: JustDropPpsConfig,
+    #[serde(default)]
     pub tests: Vec<TestEntry>,
 }
 
 fn default_default_bench() -> String {
-    "just-tx-pps".into()
+    "just-tx-rtt".into()
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

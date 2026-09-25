@@ -1,6 +1,6 @@
 # Compile-time xpost-test config (embedded into the binary via include_str!).
 # Edit this file, rebuild, scp the single `xpost-test` binary to TR3000, then:
-#   ./xpost-test                 # runs [default_bench] (just-tx-pps, formal performance)
+#   ./xpost-test                 # runs [default_bench] (just-tx-rtt, formal performance)
 #   ./xpost-test serve           # HTTP daemon (remote jobs via scripts/fwctl.sh)
 #   ./xpost-test suite --json
 #   ./xpost-test --help-benches
@@ -9,7 +9,7 @@
 #
 # 本文件启用的 [[tests]].name 必须与 firmware/config.toml 的 [[tests]] 同名。
 
-default_bench = "just-tx-pps"
+default_bench = "just-tx-rtt"
 
 [just_drop_pps]
 formal = true
@@ -59,6 +59,12 @@ just_tx_hal = "just-tx-hal"
 formal = true
 rounds = 3
 sample_interval_ms = 1000
+arms = ["hal", "xdp"]
+
+# RTT at max TR3000 send rate with ~5% loss (calibrated per arm).
+[just_tx_rtt]
+formal = true
+rounds = 3
 arms = ["hal", "xdp"]
 
 [[tests]]

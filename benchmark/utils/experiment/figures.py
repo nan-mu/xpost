@@ -151,14 +151,19 @@ def figure1_summary(
     """
     del hal_pps_points, xdp_pps_points, hal_adev_points, xdp_adev_points
     with plt.rc_context(_RC):
-        fig, axes = plt.subplots(1, 3, figsize=(7.4, 3.55))
+        fig, axes = plt.subplots(1, 3, figsize=(7.4, 3.75))
+        panel_titles = (
+            "Mean processing PPS",
+            "Rel. ADEV at 1 s",
+            "Between-run CV",
+        )
         _bar_pair(
             axes[0],
             hal_mean_pps,
             xdp_mean_pps,
             hal_pps_ci,
             xdp_pps_ci,
-            ylabel="Mean PPS (packets/s)",
+            ylabel="packets/s",
             fmt=lambda v: f"{v:,.0f}",
             zero=True,
         )
@@ -169,7 +174,7 @@ def figure1_summary(
             None if not _finite(xdp_adev_1s) else 100.0 * float(xdp_adev_1s),
             None if hal_adev_ci is None else (100.0 * hal_adev_ci[0], 100.0 * hal_adev_ci[1]),
             None if xdp_adev_ci is None else (100.0 * xdp_adev_ci[0], 100.0 * xdp_adev_ci[1]),
-            ylabel="Rel. ADEV at 1 s (%)",
+            ylabel="%",
             fmt=lambda v: f"{v:.2f}",
             zero=False,
         )
@@ -179,25 +184,103 @@ def figure1_summary(
             None if not _finite(xdp_cv) else 100.0 * float(xdp_cv),
             None if hal_cv_ci is None else (100.0 * hal_cv_ci[0], 100.0 * hal_cv_ci[1]),
             None if xdp_cv_ci is None else (100.0 * xdp_cv_ci[0], 100.0 * xdp_cv_ci[1]),
-            ylabel="Between-run CV (%)",
+            ylabel="%",
             fmt=lambda v: f"{v:.2f}",
             zero=True,
         )
+        for ax, col in zip(axes, panel_titles):
+            ax.set_title(col, fontsize=10, pad=8)
         from matplotlib.patches import Patch
 
         fig.legend(
             [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
             ["HAL", "XDP"],
             loc="upper center",
-            bbox_to_anchor=(0.5, 1.02),
+            bbox_to_anchor=(0.5, 1.12),
             ncol=2,
             fontsize=8,
             handlelength=0.9,
             columnspacing=1.2,
         )
         if title:
-            fig.suptitle(title, fontsize=11, y=1.08)
-        fig.tight_layout()
+            fig.suptitle(title, fontsize=11, y=1.18)
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
+        return fig, axes[0]
+
+
+def figure1_tx_rtt(
+    *,
+    hal_median_rtt_ms: float | None,
+    xdp_median_rtt_ms: float | None,
+    hal_rtt_ci: tuple[float, float] | None = None,
+    xdp_rtt_ci: tuple[float, float] | None = None,
+    hal_loss: float | None = None,
+    xdp_loss: float | None = None,
+    hal_loss_ci: tuple[float, float] | None = None,
+    xdp_loss_ci: tuple[float, float] | None = None,
+    hal_return_pps: float | None = None,
+    xdp_return_pps: float | None = None,
+    hal_pps_ci: tuple[float, float] | None = None,
+    xdp_pps_ci: tuple[float, float] | None = None,
+    title: str = "just_tx RTT @ ~5% loss",
+) -> tuple[Figure, Axes]:
+    """Three panels: median RTT, loss rate, return PPS. Titles sit above each subplot."""
+    with plt.rc_context(_RC):
+        fig, axes = plt.subplots(1, 3, figsize=(7.4, 3.75))
+        panel_titles = (
+            "Median RTT",
+            "Loss rate",
+            "Return PPS",
+        )
+        _bar_pair(
+            axes[0],
+            hal_median_rtt_ms,
+            xdp_median_rtt_ms,
+            hal_rtt_ci,
+            xdp_rtt_ci,
+            ylabel="ms",
+            fmt=lambda v: f"{v:.2f}",
+            zero=True,
+        )
+        _bar_pair(
+            axes[1],
+            None if not _finite(hal_loss) else 100.0 * float(hal_loss),
+            None if not _finite(xdp_loss) else 100.0 * float(xdp_loss),
+            None if hal_loss_ci is None else (100.0 * hal_loss_ci[0], 100.0 * hal_loss_ci[1]),
+            None if xdp_loss_ci is None else (100.0 * xdp_loss_ci[0], 100.0 * xdp_loss_ci[1]),
+            ylabel="%",
+            fmt=lambda v: f"{v:.1f}",
+            zero=True,
+        )
+        axes[1].axhline(5.0, color=_MUTED, lw=0.7, ls="--", zorder=1)
+        _bar_pair(
+            axes[2],
+            hal_return_pps,
+            xdp_return_pps,
+            hal_pps_ci,
+            xdp_pps_ci,
+            ylabel="packets/s",
+            fmt=lambda v: f"{v:,.0f}",
+            zero=True,
+        )
+        axes[2].yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        for ax, col in zip(axes, panel_titles):
+            ax.set_title(col, fontsize=10, pad=8)
+        from matplotlib.patches import Patch
+
+        fig.legend(
+            [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
+            ["HAL", "XDP"],
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.12),
+            ncol=2,
+            fontsize=8,
+            handlelength=0.9,
+            columnspacing=1.2,
+        )
+        if title:
+            fig.suptitle(title, fontsize=11, y=1.18)
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
         return fig, axes[0]
 
 
