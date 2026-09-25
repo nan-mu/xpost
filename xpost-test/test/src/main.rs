@@ -39,8 +39,8 @@ use tests::lookup;
 #[derive(Debug, Parser)]
 #[command(name = "xpost-test", about = "TR3000 host harness (formal benches + suite)")]
 struct Args {
-    /// Short windows / fewer cells for smoke.
-    #[arg(long, global = true)]
+    /// DEBUG only: short windows / fewer pairs. Not used in formal performance runs.
+    #[arg(long, global = true, hide = true)]
     smoke: bool,
     /// Write into schema `formal` (same db `postgres`) and empty this bench's tables before run.
     #[arg(long, global = true)]

@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -47,6 +48,9 @@ struct ProfileEntry {
     xdp_elf: Option<String>,
     #[serde(default)]
     xdp_name: Option<String>,
+    /// Optional argv relative to workspace root, run before flash (e.g. cargo xtask … build).
+    #[serde(default)]
+    build: Option<Vec<String>>,
 }
 
 struct State {
@@ -117,8 +121,12 @@ fn load_profiles(root: &Path) -> Result<Vec<ProfileEntry>> {
 }
 
 fn handle_conn(mut stream: TcpStream, state: &Mutex<State>) -> Result<()> {
+    // Build + flash can take many minutes on a cold toolchain.
     stream
-        .set_read_timeout(Some(Duration::from_secs(300)))
+        .set_read_timeout(Some(Duration::from_secs(1200)))
+        .ok();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(1200)))
         .ok();
     let mut hdr = [0u8; 8];
     stream
@@ -279,24 +287,64 @@ fn decode_flash_profile_id(body: &[u8]) -> Result<&str> {
     bail!("missing profile_id")
 }
 
+fn run_profile_build(root: &Path, entry: &ProfileEntry) -> Result<()> {
+    let Some(argv) = entry.build.as_ref() else {
+        return Ok(());
+    };
+    if argv.is_empty() {
+        return Ok(());
+    }
+    let (prog, args) = argv.split_first().unwrap();
+    eprintln!(
+        "xpost-agent build profile `{}`: {} {}",
+        entry.id,
+        prog,
+        args.join(" ")
+    );
+    let status = Command::new(prog)
+        .args(args)
+        .current_dir(root)
+        .status()
+        .with_context(|| format!("spawn build for profile `{}`", entry.id))?;
+    if !status.success() {
+        bail!(
+            "build failed for profile `{}` (status={status}): {} {}",
+            entry.id,
+            prog,
+            args.join(" ")
+        );
+    }
+    Ok(())
+}
+
 fn flash_profile(body: &[u8], state: &Mutex<State>) -> Result<String> {
     let id = decode_flash_profile_id(body)?;
-    let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
-    let entry = g
-        .profiles
-        .iter()
-        .find(|p| p.id == id)
-        .cloned()
-        .with_context(|| format!("unknown profile `{id}`"))?;
-    let firmware = g.root.join(&entry.bin);
-    let partitions = g.root.join(&entry.partition_table);
+    let (root, entry) = {
+        let g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
+        let entry = g
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .with_context(|| format!("unknown profile `{id}`"))?;
+        (g.root.clone(), entry)
+    };
+
+    // Compile outside the session lock so build logs are visible and USB stays free until flash.
+    run_profile_build(&root, &entry)?;
+
+    let firmware = root.join(&entry.bin);
+    let partitions = root.join(&entry.partition_table);
     if !firmware.is_file() {
-        bail!("firmware not found: {}", firmware.display());
+        bail!(
+            "firmware not found after build: {} (profile `{id}`)",
+            firmware.display()
+        );
     }
     if !partitions.is_file() {
         bail!("partitions not found: {}", partitions.display());
     }
-    let xdp_path = entry.xdp_elf.as_ref().map(|p| g.root.join(p));
+    let xdp_path = entry.xdp_elf.as_ref().map(|p| root.join(p));
     if let Some(ref xp) = xdp_path {
         if !xp.is_file() {
             bail!("xdp elf not found: {}", xp.display());
@@ -310,6 +358,8 @@ fn flash_profile(body: &[u8], state: &Mutex<State>) -> Result<String> {
         ),
         _ => None,
     };
+
+    let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
     g.session.cold_table = JUST_DROP_TABLE;
     g.session.image_capacity = JUST_DROP_TABLE.image_capacity;
     let xdp = match (&xdp_name_owned, &xdp_path) {

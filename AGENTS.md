@@ -38,46 +38,36 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 
 ## Commands
 
+Mac（USB 接 ESP；cwd = `xpost/`）：只需常驻 agent。收到 `FlashProfile` 时按 `profiles.toml` 的 `build` 编译再烧录。
+
 ```bash
-cargo xtask just_drop build --release
-cargo xtask just_drop_hal build --release
-
-# Mac agent (cwd = xpost/; FlashProfile uses profiles.toml + built firmware)
 cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
-
-# TR3000: single binary from xpost-test (config baked at compile time)
-cd xpost-test && cargo build -p test --release
-scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
-# on TR3000:
-./xpost-test                 # default_bench=just-drop-pps → flash HAL/XDP, formal.experiment_*
-./xpost-test --smoke
-./xpost-test just-drop-pps --path hal
-./xpost-test --help-benches
-
-cargo xtask agent program --elf examples/just_drop/just_drop.elf
-cargo xtask agent list
-cargo xtask agent clear
-cargo xtask agent request PING
-cargo xtask agent request counters
-cargo xtask agent probe <esp-ipv4>
 ```
 
-`just-drop-pps` asks the agent to `FlashProfile` `just-drop-hal` / `just-drop` (firmware + `xdp.elf`) each arm, then samples `drop` into Postgres schema `formal`. `ERR unknown` on `drop on` means HAL firmware was not flashed.
+Wi-Fi 凭据仍在 `examples/just_drop/.env` 与 `examples/just_drop_hal/.env`（`WIFI_SSID` / `WIFI_PASS`）。
 
-Wi-Fi STA needs `WIFI_SSID` / `WIFI_PASS` in `examples/just_drop/.env` and `examples/just_drop_hal/.env`.
+TR3000（编译期嵌入 `xpost-test/config/test.toml`）：
 
-## Control: `just_drop_hal`
+```bash
+cd xpost-test && cargo build -p test --release
+scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
+# on TR3000 — 性能测试（formal.experiment_*）：
+./xpost-test
+./xpost-test just-drop-pps --path hal   # 可选：只跑一臂
+./xpost-test --help-benches
+```
 
-crates.io-only esp-hal / embassy-net / smoltcp — **no** path deps into xpost, **no** cold XDP. Serial: `drop on` / `drop off` / `counters` / `rxcnt`.
+`--smoke` 仅开发调试（隐藏 flag），正式性能采集不要使用。
 
-### PPS A/B (`benchmark/`)
+可选手工 XDP 冷表操作：`cargo xtask agent program|list|clear|request|probe …`。
 
-Pixi + Jupyter；`PGSCHEMA=formal`；数据经 `utils.db` 现查：
+### PPS A/B（`benchmark/`）
+
+只做**性能**分析（均值 PPS / CV / Allan·噪声模型脚手架）。采集由 `./xpost-test` 写 `formal.experiment_*`；笔记本现查，不负责烧录或功能 ACK。
 
 ```bash
 cd benchmark && pixi install && pixi run ensure-schema && pixi run lab
 # notebook: just_drop_pps.ipynb
-# TR3000: ./xpost-test   (writes formal.experiment_* directly)
 ```
 
 See [`benchmark/README.md`](benchmark/README.md).

@@ -1,9 +1,11 @@
 # Compile-time xpost-test config (embedded into the binary via include_str!).
 # Edit this file, rebuild, scp the single `xpost-test` binary to TR3000, then:
-#   ./xpost-test                 # runs [default_bench] (just-drop-pps)
+#   ./xpost-test                 # runs [default_bench] (just-drop-pps, formal performance)
 #   ./xpost-test serve           # HTTP daemon (remote jobs via scripts/fwctl.sh)
-#   ./xpost-test suite --json    # suite: pretty-JSON on stdout + write report_path
+#   ./xpost-test suite --json
 #   ./xpost-test --help-benches
+# Mac side only needs: cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
+# (--smoke is DEBUG-only / hidden; do not use for formal performance runs)
 #
 # 本文件启用的 [[tests]].name 必须与 firmware/config.toml 的 [[tests]] 同名。
 

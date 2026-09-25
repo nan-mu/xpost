@@ -1,4 +1,6 @@
-# Profile registry for Mac `xpost-agent` FlashProfile (paths relative to xpost/ cwd).
+# Profile registry for Mac `xpost-agent` FlashProfile (paths relative to xpost/).
+# `build` is argv run from XPOST_ROOT before flash so Mac only needs:
+#   cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
 
 [[profile]]
 id = "just-drop"
@@ -9,6 +11,7 @@ partition_table = "examples/just_drop/partitions.csv"
 chip = "esp32c3"
 xdp_elf = "examples/just_drop/just_drop.elf"
 xdp_name = "just_drop"
+build = ["cargo", "xtask", "just_drop", "build", "--release"]
 
 [[profile]]
 id = "just-drop-hal"
@@ -17,6 +20,7 @@ description = "just_drop_hal firmware (app-layer UDP drop; serial `drop on`)"
 bin = "examples/just_drop_hal/target/riscv32imc-unknown-none-elf/release/just_drop_hal"
 partition_table = "examples/just_drop_hal/partitions.csv"
 chip = "esp32c3"
+build = ["cargo", "xtask", "just_drop_hal", "build", "--release"]
 
 [[profile]]
 id = "drop-hal"
