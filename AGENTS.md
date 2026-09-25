@@ -97,11 +97,12 @@ Wi-Fi ingress. Serial surface matches `just_drop` (`ping` / `counters` /
 Pixi + Jupyter；数据经 `utils.db` 现查 Postgres（`benchmark/.env`）：
 
 ```bash
-cd benchmark && pixi install && pixi run lab
-# notebook: experiments/just_drop_pps.ipynb
+cd benchmark && pixi install && pixi run ensure-schema && pixi run lab
+# notebook: just_drop_pps.ipynb（内含复现流程）
 # TR3000 采集：
 ./probe just-drop-pps --path hal|xdp --out /tmp/….csv
-# 入库：pixi run ingest-pps（或扩展 probe 直写 PG）
+# 入库（显式 CSV + summary，写入 experiment_*）：
+pixi run ingest-pps -- /tmp/….csv /tmp/…_summary.json
 ```
 
 See [`benchmark/README.md`](benchmark/README.md).

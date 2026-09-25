@@ -10,14 +10,18 @@ python = "3.12.*"
 
 [pypi-dependencies]
 pandas = "*"
+numpy = "*"
+scipy = "*"
 matplotlib = "*"
 jupyterlab = "*"
 ipykernel = "*"
 python-dotenv = "*"
 psycopg = { version = ">=3", extras = ["binary"] }
 sqlalchemy = "*"
+pytest = "*"
 
 [tasks]
 lab = "jupyter lab"
 ingest-pps = { cmd = "python -m utils.ingest_pps", cwd = "." }
 ensure-schema = { cmd = "python -m utils.ensure_schema", cwd = "." }
+test = { cmd = "python -m pytest tests -q", cwd = "." }

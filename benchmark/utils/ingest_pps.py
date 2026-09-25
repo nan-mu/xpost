@@ -1,11 +1,15 @@
-"""One-shot: load legacy CSV/JSON under results/ into just_drop_pps_* (Postgres).
+"""Ingest probe CSV + sidecar summary into experiment_* (pilot runs).
 
-Notebooks must read via utils.db — this script only seeds the DB.
+Usage:
+  python -m utils.ingest_pps /tmp/hal_pps.csv /tmp/hal_pps_summary.json
+  python -m utils.ingest_pps /tmp/xdp_pps.csv /tmp/xdp_pps_summary.json [--pair-id N]
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import uuid
 from pathlib import Path
 
 import pandas as pd
@@ -13,96 +17,125 @@ import pandas as pd
 from utils.db import connect, dsn_summary
 from utils.ensure_schema import main as ensure_schema
 
-_ROOT = Path(__file__).resolve().parents[1]
-_RESULTS = _ROOT / "results"
+
+def _ns(t_s: float) -> int:
+    return int(round(float(t_s) * 1_000_000_000))
 
 
-def _ingest_path(conn, path: str, csv_path: Path, summary_path: Path) -> int:
+def ingest_csv(
+    conn,
+    csv_path: Path,
+    summary_path: Path,
+    *,
+    pair_id: int = 0,
+    replace_note: str | None = None,
+) -> list[uuid.UUID]:
+    """Load one probe CSV+JSON into experiment_runs / counter_samples as pilot.
+
+    Each CSV round becomes one run_id. Re-import with the same source_note
+    deletes prior pilot rows that share that note before insert.
+    """
     summary = json.loads(summary_path.read_text())
     samples = pd.read_csv(csv_path)
-    samples = samples[samples["path"] == path]
+    path = str(summary.get("path") or samples["path"].iloc[0]).lower()
+    if path not in ("hal", "xdp"):
+        raise ValueError(f"variant must be hal|xdp, got {path!r}")
 
+    note = replace_note or f"pilot from {csv_path.name}"
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO just_drop_pps_run
-                (path, window_secs, sample_interval_ms, note)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id
+            DELETE FROM experiment_runs
+            WHERE run_kind = 'pilot' AND source_note = %s
             """,
-            (
-                path,
-                int(summary["window_secs"]),
-                int(summary["sample_interval_ms"]),
-                f"seed from {csv_path.name}",
-            ),
+            (note,),
         )
-        run_id = cur.fetchone()[0]
 
-        for detail in summary["rounds_detail"]:
-            rnd = int(detail["round"])
+        run_ids: list[uuid.UUID] = []
+        rounds = sorted(int(r) for r in samples["round"].unique())
+        for rnd in rounds:
+            sub = samples[samples["round"] == rnd].sort_values("t_s")
+            if sub.empty:
+                continue
+            detail = next(
+                (d for d in summary.get("rounds_detail", []) if int(d["round"]) == rnd),
+                {},
+            )
+            run_id = uuid.uuid4()
             cur.execute(
                 """
-                INSERT INTO just_drop_pps_round (
-                    run_id, round, overall_pps, interval_pps_mean, interval_pps_std,
-                    host_pps, drop_delta, net_rx_delta, elapsed_secs
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                RETURNING id
+                INSERT INTO experiment_runs (
+                    run_id, pair_id, run_kind, variant,
+                    sender_target_pps, udp_payload_bytes,
+                    window_secs, sample_interval_ms,
+                    started_at_utc, status, status_reason, source_note,
+                    firmware_sha256
+                ) VALUES (
+                    %s, %s, 'pilot', %s,
+                    %s, 8,
+                    %s, %s,
+                    now(), 'complete', %s, %s,
+                    %s
+                )
                 """,
                 (
                     run_id,
-                    rnd,
-                    float(detail["overall_pps"]),
-                    float(detail["interval_pps_mean"]),
-                    float(detail["interval_pps_std"]),
-                    float(detail["host_pps"]),
-                    int(detail["drop_delta"]),
-                    int(detail["net_rx_delta"]),
-                    float(detail["elapsed_secs"]),
+                    pair_id if pair_id else rnd,
+                    path,
+                    int(summary.get("sender_target_pps") or 0) or None,
+                    float(summary.get("window_secs") or 0) or None,
+                    int(summary.get("sample_interval_ms") or 0) or None,
+                    f"round={rnd} overall_pps={detail.get('overall_pps')}",
+                    note,
+                    summary.get("firmware_sha256"),
                 ),
             )
-            round_id = cur.fetchone()[0]
-            sub = samples[samples["round"] == rnd]
+            t0 = float(sub["t_s"].iloc[0])
             for _, row in sub.iterrows():
                 cur.execute(
                     """
-                    INSERT INTO just_drop_pps_sample (
-                        round_id, t_s, drop_count, net_rx, host_tx_end,
-                        interval_pps, overall_pps_so_far
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    INSERT INTO counter_samples (run_id, time_ns, counter_value)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (run_id, time_ns) DO UPDATE
+                      SET counter_value = EXCLUDED.counter_value
                     """,
-                    (
-                        round_id,
-                        float(row["t_s"]),
-                        int(row["drop"]),
-                        int(row["net_rx"]),
-                        int(row["host_tx_end"]),
-                        float(row["interval_pps"]),
-                        float(row["overall_pps_so_far"]),
-                    ),
+                    (run_id, _ns(float(row["t_s"]) - t0), int(row["drop"])),
                 )
-    return run_id
+            run_ids.append(run_id)
+    return run_ids
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    p = argparse.ArgumentParser(description="Ingest just-drop-pps CSV into experiment_*")
+    p.add_argument("csv", type=Path, help="probe CSV path")
+    p.add_argument("summary", type=Path, help="sidecar *_summary.json path")
+    p.add_argument("--pair-id", type=int, default=0, help="pair_id (default: use round)")
+    p.add_argument(
+        "--note",
+        default=None,
+        help="source_note for replace; default 'pilot from <csv name>'",
+    )
+    args = p.parse_args(argv)
+
     ensure_schema()
     print(f"ingest-pps → {dsn_summary()}")
-    pairs = [
-        ("hal", _RESULTS / "hal_pps.csv", _RESULTS / "hal_pps_summary.json"),
-        ("xdp", _RESULTS / "xdp_pps.csv", _RESULTS / "xdp_pps_summary.json"),
-    ]
+    if not args.csv.exists():
+        raise SystemExit(f"missing csv {args.csv}")
+    if not args.summary.exists():
+        raise SystemExit(f"missing summary {args.summary}")
+
     with connect() as conn:
-        # Idempotent-ish: delete prior seed runs for these paths with same note prefix
-        conn.execute(
-            "DELETE FROM just_drop_pps_run WHERE note LIKE 'seed from %_pps.csv'"
+        ids = ingest_csv(
+            conn,
+            args.csv,
+            args.summary,
+            pair_id=args.pair_id,
+            replace_note=args.note,
         )
-        for path, csv_p, sum_p in pairs:
-            if not csv_p.exists() or not sum_p.exists():
-                raise SystemExit(f"missing {csv_p} or {sum_p}")
-            run_id = _ingest_path(conn, path, csv_p, sum_p)
-            print(f"  path={path} run_id={run_id}")
         conn.commit()
-    print("ok")
+    for rid in ids:
+        print(f"  run_id={rid}")
+    print(f"ok: {len(ids)} pilot run(s)")
 
 
 if __name__ == "__main__":
