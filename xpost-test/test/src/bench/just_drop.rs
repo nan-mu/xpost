@@ -19,7 +19,7 @@ use crate::raw_tx::{RawTx, iface_mac};
 
 const STIM_PORT: u16 = 8080;
 /// Functional stims per phase — large vs ambient Wi-Fi noise.
-const STIM_N: u32 = 50;
+const STIM_N: u32 = 200;
 /// Quiet window to estimate ambient `drop` rate before asserting stim signal.
 const QUIET: Duration = Duration::from_secs(2);
 /// Drain after fire-and-forget burst before reading counters / rxcnt.
