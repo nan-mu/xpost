@@ -284,6 +284,8 @@ impl Harness {
 
     pub async fn reset_state(&self) {
         self.pending.lock().await.clear();
+        // Let the ringbuf pump drop late events for cleared seqs before the next window.
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     /// How many pending seqs already have an echo or bounce stamp.
@@ -653,14 +655,13 @@ async fn event_loop(
 
 async fn handle_event(pending: &Mutex<HashMap<u64, Pending>>, ev: StampEvent) {
     let mut map = pending.lock().await;
+    // Only stamp seqs the userspace side registered. Late events after `reset_state`
+    // must not re-insert entries (that bloated the map and starved the ringbuf reader).
+    let Some(entry) = map.get_mut(&ev.seq) else {
+        return;
+    };
     match ev.kind {
         KIND_STIM_EGRESS => {
-            let entry = map.entry(ev.seq).or_insert_with(|| Pending {
-                t0: None,
-                t_echo: None,
-                t_bounce: None,
-                notify: Arc::new(Notify::new()),
-            });
             debug!("event stim_egress seq={} t0_ns={}", ev.seq, ev.ktime_ns);
             entry.t0 = Some(Sighting {
                 ktime_ns: ev.ktime_ns,
@@ -669,12 +670,6 @@ async fn handle_event(pending: &Mutex<HashMap<u64, Pending>>, ev: StampEvent) {
             entry.notify.notify_waiters();
         }
         KIND_BOUNCE_INGRESS => {
-            let entry = map.entry(ev.seq).or_insert_with(|| Pending {
-                t0: None,
-                t_echo: None,
-                t_bounce: None,
-                notify: Arc::new(Notify::new()),
-            });
             debug!(
                 "event bounce_ingress seq={} t_bounce_ns={}",
                 ev.seq, ev.ktime_ns
@@ -686,12 +681,6 @@ async fn handle_event(pending: &Mutex<HashMap<u64, Pending>>, ev: StampEvent) {
             entry.notify.notify_waiters();
         }
         KIND_ECHO_INGRESS => {
-            let entry = map.entry(ev.seq).or_insert_with(|| Pending {
-                t0: None,
-                t_echo: None,
-                t_bounce: None,
-                notify: Arc::new(Notify::new()),
-            });
             debug!(
                 "event echo_ingress seq={} sport={} t1_ns={}",
                 ev.seq, ev.udp_sport, ev.ktime_ns

@@ -1,8 +1,8 @@
-//! `xpost-test just-tx-rtt` — calibrate max TR3000 send rate at ~5% loss, then measure RTT.
+//! `xpost-test just-tx-rtt` — shared send-rate sweep (loss / return PPS) then RTT at ~5% loss.
 //!
-//! Arms: `hal` (`just-tx-hal`, TC echo) and `xdp` (`just-tx`, TC MAC-swap bounce).
-//! Each stimulus carries `FWSTIM`+seq; pairing is by seq. Formal writes `just_tx_rtt_*`
-//! and deletes only this bench's `source_note` rows.
+//! Arms: `hal` (`just-tx-hal`) and `xdp` (`just-tx`). Same `SWEEP_PPS` grid for both.
+//! Formal writes `just_tx_rtt_*` with `phase` = `sweep` | `operating`; deletes only this
+//! bench's `source_note` rows.
 
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant, SystemTime};
@@ -25,16 +25,25 @@ const REBOOT_SETTLE: Duration = Duration::from_secs(35);
 const FLASH_IDLE: Duration = Duration::from_secs(300);
 const PERF_WINDOW: Duration = Duration::from_secs(20);
 const PERF_SMOKE_WINDOW: Duration = Duration::from_secs(5);
-const CAL_WINDOW: Duration = Duration::from_secs(8);
-const CAL_SMOKE_WINDOW: Duration = Duration::from_secs(3);
+const SWEEP_WINDOW: Duration = Duration::from_secs(8);
+const SWEEP_SMOKE_WINDOW: Duration = Duration::from_secs(4);
+const WARMUP: Duration = Duration::from_secs(1);
+const COOLDOWN: Duration = Duration::from_secs(2);
 const DRAIN: Duration = Duration::from_millis(1000);
-const REPLY_WAIT: Duration = Duration::from_millis(250);
 const TARGET_LOSS: f64 = 0.05;
-const LOSS_LO: f64 = 0.035;
+const LOSS_LO: f64 = 0.04;
 const LOSS_HI: f64 = 0.07;
-const CAL_ITERS: usize = 6;
 const RX_READY_TRIES: usize = 40;
 const RX_READY_BURST: u32 = 64;
+
+/// Shared TR3000 send-rate grid (pps) for HAL and XDP.
+const SWEEP_PPS: &[f64] = &[
+    80.0, 160.0, 240.0, 320.0, 400.0, 480.0, 560.0, 720.0, 960.0, 1200.0,
+];
+const SWEEP_SMOKE_PPS: &[f64] = &[160.0, 320.0, 480.0, 720.0];
+
+const PHASE_SWEEP: &str = "sweep";
+const PHASE_OPERATING: &str = "operating";
 
 pub struct JustTxRttOpts {
     pub paths: Vec<PpsPath>,
@@ -43,19 +52,6 @@ pub struct JustTxRttOpts {
     pub no_pg: bool,
     pub window_secs: Option<u64>,
     pub rounds: Option<usize>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum ReplyKind {
-    /// MAC-swap XDP_TX *or* HAL UDP:8080 echo-back — both hit TC `bounce_ingress`
-    /// (`sport==echo_port && dport!=reply_port`, or L2-only bounce).
-    Bounce,
-}
-
-impl ReplyKind {
-    fn for_path(_path: PpsPath) -> Self {
-        Self::Bounce
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -78,7 +74,23 @@ struct WindowStats {
     p95_rtt_ms: Option<f64>,
     mean_rtt_ms: Option<f64>,
     return_pps: f64,
-    elapsed_secs: f64,
+    n_t0: u64,
+}
+
+impl WindowStats {
+    fn t0_frac(&self) -> f64 {
+        if self.sent == 0 {
+            0.0
+        } else {
+            self.n_t0 as f64 / self.sent as f64
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OpPoint {
+    target_pps: f64,
+    loss: f64,
 }
 
 pub async fn run_just_tx_rtt(
@@ -106,7 +118,7 @@ pub async fn run_just_tx_rtt(
         bail!("just-tx-rtt: no arms (set [just_tx_rtt].arms or --path)");
     }
 
-    let window = opts
+    let op_window = opts
         .window_secs
         .map(Duration::from_secs)
         .or_else(|| cfg.just_tx_rtt.window_secs.map(Duration::from_secs))
@@ -115,23 +127,30 @@ pub async fn run_just_tx_rtt(
         } else {
             PERF_WINDOW
         });
-    let cal_window = if opts.smoke {
-        CAL_SMOKE_WINDOW
+    let sweep_window = if opts.smoke {
+        SWEEP_SMOKE_WINDOW
     } else {
-        CAL_WINDOW
+        SWEEP_WINDOW
     };
+    let sweep_trials = if opts.smoke { 1 } else { 3 };
     let rounds = opts.rounds.unwrap_or(if opts.smoke {
         1
     } else {
         cfg.just_tx_rtt.rounds.max(1)
     });
+    let grid: &[f64] = if opts.smoke {
+        SWEEP_SMOKE_PPS
+    } else {
+        SWEEP_PPS
+    };
     let formal = opts.formal || cfg.just_tx_rtt.formal;
 
     eprintln!(
-        "just-tx-rtt arms={:?} agent={endpoint} esp={esp_s} window={}s cal={}s pairs={rounds} target_loss={:.0}% formal={formal} pg={}",
+        "just-tx-rtt arms={:?} agent={endpoint} esp={esp_s} sweep_grid={:?} sweep_trials={sweep_trials} sweep_win={}s op_win={}s op_pairs={rounds} target_loss={:.0}% formal={formal} pg={}",
         paths.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
-        window.as_secs(),
-        cal_window.as_secs(),
+        grid.iter().map(|x| *x as i64).collect::<Vec<_>>(),
+        sweep_window.as_secs(),
+        op_window.as_secs(),
         100.0 * TARGET_LOSS,
         !opts.no_pg
     );
@@ -147,214 +166,178 @@ pub async fn run_just_tx_rtt(
 
     let spoof = crate::raw_tx::iface_ipv4(&cfg.probe.iface)
         .unwrap_or_else(|_| gen_lan_ip(cfg.target.esp_ip, &[cfg.target.esp_ip]));
-    eprintln!("  stim_src={spoof} (iface {} IPv4 preferred for HAL ARP)", cfg.probe.iface);
+    eprintln!(
+        "  stim_src={spoof} (iface {} IPv4 preferred for HAL ARP)",
+        cfg.probe.iface
+    );
 
     for path in &paths {
-        let rate = calibrate_arm(cfg, &agent, harness, *path, spoof, cal_window).await?;
+        let op = sweep_arm(
+            cfg,
+            &agent,
+            harness,
+            *path,
+            spoof,
+            grid,
+            sweep_trials,
+            sweep_window,
+            pg.as_mut(),
+        )
+        .await?;
         eprintln!(
-            "  arm {}: calibrated target_pps={:.0} loss={:.2}% (band {:.0}%–{:.0}%)",
+            "  arm {}: operating target_pps={:.0} sweep_loss_med={:.2}% (band {:.0}%–{:.0}%)",
             path.as_str(),
-            rate.target_pps,
-            100.0 * rate.loss,
+            op.target_pps,
+            100.0 * op.loss,
             100.0 * LOSS_LO,
             100.0 * LOSS_HI
         );
 
         for pair_id in 1..=rounds {
             eprintln!(
-                "  —— {} pair {pair_id}/{rounds} @ {:.0} pps ——",
+                "  —— {} operating pair {pair_id}/{rounds} @ {:.0} pps ——",
                 path.as_str(),
-                rate.target_pps
+                op.target_pps
             );
-            run_measure_arm(
-                cfg,
-                &agent,
-                harness,
-                *path,
-                spoof,
-                pair_id as i32,
-                rate.target_pps,
-                rate.loss,
-                window,
-                pg.as_mut(),
-            )
-            .await?;
+            if pair_id > 1 {
+                ensure_alive(cfg, &agent, *path, spoof).await?;
+            }
+            let stats =
+                probe_window(harness, &agent, *path, spoof, op.target_pps, op_window).await?;
+            log_window(*path, pair_id, &stats);
+            if let Some(client) = pg.as_mut() {
+                ingest_run(
+                    client,
+                    *path,
+                    pair_id as i32,
+                    PHASE_OPERATING,
+                    op.target_pps,
+                    op.loss,
+                    op_window,
+                    &stats,
+                    /*write_samples*/ true,
+                )
+                .await?;
+            }
+            harness.reset_state().await;
         }
     }
 
-    eprintln!("just-tx-rtt done pairs={rounds} arms={}", paths.len());
+    eprintln!("just-tx-rtt done arms={} op_pairs={rounds}", paths.len());
     Ok(())
 }
 
-struct CalResult {
-    target_pps: f64,
-    loss: f64,
-}
-
-async fn calibrate_arm(
+async fn sweep_arm(
     cfg: &FileConfig,
     agent: &AgentClient,
     harness: &mut Harness,
     path: PpsPath,
     spoof: Ipv4Addr,
-    cal_window: Duration,
-) -> Result<CalResult> {
+    grid: &[f64],
+    trials: usize,
+    window: Duration,
+    mut pg: Option<&mut Client>,
+) -> Result<OpPoint> {
     flash_and_ready(cfg, agent, path, spoof).await?;
 
-    let (lo_pps, hi_pps) = match path {
-        PpsPath::Hal => (30.0, 800.0),
-        PpsPath::Xdp => (200.0, 8_000.0),
-    };
-
-    // Coarse log-ish grid (loss vs rate is noisy / non-monotonic on Wi-Fi).
-    let mut grid = Vec::new();
-    let mut x = lo_pps;
-    while x <= hi_pps * 1.001 {
-        grid.push(x);
-        x *= 1.45;
-    }
-    if grid.last().copied().unwrap_or(0.0) < hi_pps {
-        grid.push(hi_pps);
-    }
-
-    let mut best: Option<CalResult> = None;
-    for (i, &pps) in grid.iter().enumerate() {
-        let mut losses = Vec::new();
-        let mut last_stats = None;
-        for _ in 0..2 {
-            let stats = probe_window(harness, agent, path, spoof, pps, cal_window).await?;
-            losses.push(stats.loss);
-            last_stats = Some(stats);
-            harness.reset_state().await;
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        losses.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let loss = losses[losses.len() / 2];
-        let stats = last_stats.unwrap();
-        eprintln!(
-            "    cal_grid{i}: target={pps:.0} sent≈{} loss_med={:.2}% (trials {:?}) median_rtt={:?}",
-            stats.sent,
-            100.0 * loss,
-            losses
-                .iter()
-                .map(|l| format!("{:.1}%", 100.0 * l))
-                .collect::<Vec<_>>(),
-            stats.median_rtt_ms
-        );
-        consider_cal(&mut best, pps, loss);
-    }
-
-    // Local refine around best.
-    if let Some(b) = best.as_ref() {
-        let center = b.target_pps;
-        for (i, factor) in [0.75, 0.9, 1.1, 1.25].iter().enumerate() {
-            let pps = (center * factor).clamp(lo_pps, hi_pps);
-            let stats = probe_window(harness, agent, path, spoof, pps, cal_window).await?;
+    let mut medians: Vec<(f64, f64)> = Vec::new(); // (pps, median_loss)
+    for &pps in grid {
+        let mut losses = Vec::with_capacity(trials);
+        for trial in 1..=trials {
+            let mut stats = probe_window(harness, agent, path, spoof, pps, window).await?;
+            if stats.sent > 0 && stats.t0_frac() < 0.5 {
+                eprintln!(
+                    "    sweep_retry_t0: pps={pps:.0} trial={trial} t0_frac={:.2}",
+                    stats.t0_frac()
+                );
+                harness.reset_state().await;
+                tokio::time::sleep(COOLDOWN).await;
+                stats = probe_window(harness, agent, path, spoof, pps, window).await?;
+            }
             eprintln!(
-                "    cal_ref{i}: target={pps:.0} sent={} ok={} loss={:.2}% median_rtt={:?}",
+                "    sweep {} pps={pps:.0} trial={trial}/{trials}: sent={} ok={} loss={:.2}% return_pps={:.0} median_rtt={:?}",
+                path.as_str(),
                 stats.sent,
                 stats.ok,
                 100.0 * stats.loss,
+                stats.return_pps,
                 stats.median_rtt_ms
             );
-            consider_cal(&mut best, pps, stats.loss);
+            losses.push(stats.loss);
+            if let Some(client) = pg.as_mut() {
+                ingest_run(
+                    client,
+                    path,
+                    trial as i32,
+                    PHASE_SWEEP,
+                    pps,
+                    stats.loss,
+                    window,
+                    &stats,
+                    /*write_samples*/ false,
+                )
+                .await?;
+            }
             harness.reset_state().await;
+            tokio::time::sleep(COOLDOWN).await;
         }
-    }
-
-    let Some(mut best) = best else {
-        bail!("calibration produced no samples for {}", path.as_str());
-    };
-
-    // Confirm: one more window at the chosen rate; if outside band, walk neighbors.
-    for attempt in 0..4 {
-        let stats = probe_window(harness, agent, path, spoof, best.target_pps, cal_window).await?;
+        let med = median_f64(&mut losses).unwrap_or(1.0);
+        medians.push((pps, med));
         eprintln!(
-            "    cal_confirm{attempt}: target={:.0} sent={} ok={} loss={:.2}%",
-            best.target_pps,
-            stats.sent,
-            stats.ok,
-            100.0 * stats.loss
+            "    sweep {} pps={pps:.0} loss_med={:.2}%",
+            path.as_str(),
+            100.0 * med
         );
-        best.loss = stats.loss;
-        if (LOSS_LO..=LOSS_HI).contains(&stats.loss) {
-            break;
-        }
-        // Nudge: too much loss → slow down; too little → speed up.
-        let factor = if stats.loss > LOSS_HI { 0.85 } else { 1.15 };
-        best.target_pps = (best.target_pps * factor).clamp(lo_pps, hi_pps);
-        harness.reset_state().await;
     }
 
-    if !(LOSS_LO..=LOSS_HI).contains(&best.loss) {
+    Ok(pick_operating_point(&medians))
+}
+
+fn pick_operating_point(medians: &[(f64, f64)]) -> OpPoint {
+    let mut best: Option<OpPoint> = None;
+    for &(pps, loss) in medians {
+        let cand = OpPoint {
+            target_pps: pps,
+            loss,
+        };
+        let better = match best {
+            None => true,
+            Some(b) => {
+                let c_in = (LOSS_LO..=LOSS_HI).contains(&cand.loss);
+                let b_in = (LOSS_LO..=LOSS_HI).contains(&b.loss);
+                if c_in && b_in {
+                    cand.target_pps > b.target_pps
+                } else if c_in {
+                    true
+                } else if b_in {
+                    false
+                } else {
+                    (cand.loss - TARGET_LOSS).abs() < (b.loss - TARGET_LOSS).abs()
+                }
+            }
+        };
+        if better {
+            best = Some(cand);
+        }
+    }
+    let op = best.unwrap_or(OpPoint {
+        target_pps: medians.first().map(|x| x.0).unwrap_or(80.0),
+        loss: 1.0,
+    });
+    if !(LOSS_LO..=LOSS_HI).contains(&op.loss) {
         eprintln!(
-            "    WARN: calibrated loss {:.2}% outside [{:.0}%,{:.0}%]; using closest",
-            100.0 * best.loss,
+            "    WARN: operating loss {:.2}% outside [{:.0}%,{:.0}%]; closest to 5%",
+            100.0 * op.loss,
             100.0 * LOSS_LO,
             100.0 * LOSS_HI
         );
     }
-    let _ = CAL_ITERS;
-    Ok(best)
+    op
 }
 
-fn consider_cal(best: &mut Option<CalResult>, target_pps: f64, loss: f64) {
-    // Prefer in-band; among those, max pps. Else closest to TARGET_LOSS.
-    let cand = CalResult { target_pps, loss };
-    let better = match best {
-        None => true,
-        Some(b) => {
-            let c_in = (LOSS_LO..=LOSS_HI).contains(&cand.loss);
-            let b_in = (LOSS_LO..=LOSS_HI).contains(&b.loss);
-            if c_in && b_in {
-                cand.target_pps > b.target_pps
-            } else if c_in {
-                true
-            } else if b_in {
-                false
-            } else {
-                (cand.loss - TARGET_LOSS).abs() < (b.loss - TARGET_LOSS).abs()
-            }
-        }
-    };
-    if better {
-        *best = Some(cand);
-    }
-}
-
-async fn run_measure_arm(
-    cfg: &FileConfig,
-    agent: &AgentClient,
-    harness: &mut Harness,
-    path: PpsPath,
-    spoof: Ipv4Addr,
-    pair_id: i32,
-    target_pps: f64,
-    cal_loss: f64,
-    window: Duration,
-    pg: Option<&mut Client>,
-) -> Result<()> {
-    // Re-flash only on pair 1 for this arm was already done in calibrate.
-    // Subsequent pairs: keep DUT warm; still ping-check.
-    if pair_id > 1 {
-        for i in 0..10 {
-            match agent.request("ping").await {
-                Ok(m) if m.contains("OK ping") => break,
-                Ok(m) => eprintln!("    ping try{i}: {m}"),
-                Err(e) => eprintln!("    ping try{i}: {e:#}"),
-            }
-            if i == 9 {
-                // DUT wedged — reflash.
-                flash_and_ready(cfg, agent, path, spoof).await?;
-                break;
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-    }
-
-    let stats = probe_window(harness, agent, path, spoof, target_pps, window).await?;
+fn log_window(path: PpsPath, pair_id: usize, stats: &WindowStats) {
     eprintln!(
-        "    {} pair={pair_id}: sent={} ok={} loss={:.2}% return_pps={:.0} median_rtt_ms={:?} p95={:?} rxcntΔ={} host_ok={}",
+        "    {} pair={pair_id}: sent={} ok={} loss={:.2}% return_pps={:.0} median_rtt_ms={:?} p95={:?} rxcntΔ={}",
         path.as_str(),
         stats.sent,
         stats.ok,
@@ -362,28 +345,40 @@ async fn run_measure_arm(
         stats.return_pps,
         stats.median_rtt_ms,
         stats.p95_rtt_ms,
-        stats.device_rxcnt_delta,
-        stats.ok
+        stats.device_rxcnt_delta
     );
-
-    // Dual-check: device may see background UDP; allow small slack.
     let slack = (stats.sent / 50).max(8);
     if stats.device_rxcnt_delta + 2 < stats.ok {
         eprintln!(
-            "    WARN: device rxcntΔ={} < host ok={} (unexpected)",
+            "    WARN: device rxcntΔ={} < host ok={}",
             stats.device_rxcnt_delta, stats.ok
         );
     } else if stats.device_rxcnt_delta > stats.ok + slack {
         eprintln!(
-            "    WARN: device rxcntΔ={} ≫ host ok={} (background UDP or TX-before-ACK)",
+            "    WARN: device rxcntΔ={} ≫ host ok={}",
             stats.device_rxcnt_delta, stats.ok
         );
     }
+}
 
-    if let Some(client) = pg {
-        ingest_run(client, path, pair_id, target_pps, cal_loss, window, &stats).await?;
+async fn ensure_alive(
+    cfg: &FileConfig,
+    agent: &AgentClient,
+    path: PpsPath,
+    spoof: Ipv4Addr,
+) -> Result<()> {
+    for i in 0..10 {
+        match agent.request("ping").await {
+            Ok(m) if m.contains("OK ping") => return Ok(()),
+            Ok(m) => eprintln!("    ping try{i}: {m}"),
+            Err(e) => eprintln!("    ping try{i}: {e:#}"),
+        }
+        if i == 9 {
+            flash_and_ready(cfg, agent, path, spoof).await?;
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    harness.reset_state().await;
     Ok(())
 }
 
@@ -434,11 +429,28 @@ async fn probe_window(
     target_pps: f64,
     window: Duration,
 ) -> Result<WindowStats> {
-    let kind = ReplyKind::for_path(path);
+    let _ = path;
     let pps = target_pps.max(1.0);
     let interval = Duration::from_secs_f64(1.0 / pps);
-    let before = parse_rxcnt(&agent.request(&format!("rxcnt {IPPROTO_UDP}")).await?)?;
 
+    if !WARMUP.is_zero() {
+        harness.reset_state().await;
+        let warm_deadline = Instant::now() + WARMUP;
+        let mut next = Instant::now();
+        while Instant::now() < warm_deadline {
+            let now = Instant::now();
+            if now < next {
+                tokio::time::sleep(next.saturating_duration_since(now)).await;
+            }
+            let seq = harness.alloc_seq();
+            let _ = harness.send_stimulus(spoof, None, seq).await;
+            next += interval;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        harness.reset_state().await;
+    }
+
+    let before = parse_rxcnt(&agent.request(&format!("rxcnt {IPPROTO_UDP}")).await?)?;
     harness.reset_state().await;
     let start = Instant::now();
     let deadline = start + window;
@@ -499,8 +511,6 @@ async fn probe_window(
             ok,
             rtt_ms,
         });
-        // Bound wait was already drained; leftover pending cleared by take_seq.
-        let _ = REPLY_WAIT;
     }
 
     let after = parse_rxcnt(&agent.request(&format!("rxcnt {IPPROTO_UDP}")).await?)?;
@@ -513,7 +523,7 @@ async fn probe_window(
     let elapsed = start.elapsed().as_secs_f64().max(1e-6);
     if ok_n == 0 && sent > 0 {
         eprintln!(
-            "    diag: sent={sent} t0={n_t0} t1={n_t1} rxcntΔ={} kind={kind:?}",
+            "    diag: sent={sent} t0={n_t0} t1={n_t1} rxcntΔ={}",
             after.saturating_sub(before)
         );
     }
@@ -532,7 +542,7 @@ async fn probe_window(
             Some(rtts.iter().sum::<f64>() / rtts.len() as f64)
         },
         return_pps: ok_n as f64 / elapsed,
-        elapsed_secs: elapsed,
+        n_t0,
     })
 }
 
@@ -543,6 +553,10 @@ fn percentile(v: &mut [f64], p: f64) -> Option<f64> {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let idx = ((v.len() as f64 - 1.0) * p).round() as usize;
     Some(v[idx.min(v.len() - 1)])
+}
+
+fn median_f64(v: &mut [f64]) -> Option<f64> {
+    percentile(v, 0.50)
 }
 
 async fn wait_rx_ready(
@@ -591,10 +605,12 @@ async fn ingest_run(
     client: &Client,
     path: PpsPath,
     pair_id: i32,
+    phase: &str,
     target_pps: f64,
     cal_loss: f64,
     window: Duration,
     stats: &WindowStats,
+    write_samples: bool,
 ) -> Result<()> {
     let run_id = Uuid::new_v4();
     let started = stats
@@ -606,22 +622,23 @@ async fn ingest_run(
     client
         .execute(
             r#"INSERT INTO just_tx_rtt_runs (
-                run_id, pair_id, run_kind, variant,
+                run_id, pair_id, run_kind, variant, phase,
                 target_pps, calibrated_loss, window_secs,
                 sent, ok, loss_rate, return_pps,
                 device_rxcnt_delta, median_rtt_ms, p95_rtt_ms, mean_rtt_ms,
                 started_at_utc, stopped_at_utc, status, source_note
             ) VALUES (
-                $1,$2,'pilot',$3,
-                $4,$5,$6,
-                $7,$8,$9,$10,
-                $11,$12,$13,$14,
-                $15,$16,'complete',$17
+                $1,$2,'pilot',$3,$4,
+                $5,$6,$7,
+                $8,$9,$10,$11,
+                $12,$13,$14,$15,
+                $16,$17,'complete',$18
             )"#,
             &[
                 &run_id,
                 &pair_id,
                 &path.as_str(),
+                &phase,
                 &target_pps,
                 &cal_loss,
                 &(window.as_secs_f64()),
@@ -641,20 +658,22 @@ async fn ingest_run(
         .await
         .context("INSERT just_tx_rtt_runs")?;
 
-    for chunk in stats.samples.chunks(512) {
-        let ids: Vec<Uuid> = chunk.iter().map(|_| run_id).collect();
-        let seqs: Vec<i32> = chunk.iter().map(|s| s.seq_i).collect();
-        let t0s: Vec<SystemTime> = chunk.iter().map(|s| s.t0).collect();
-        let oks: Vec<bool> = chunk.iter().map(|s| s.ok).collect();
-        let rtts: Vec<Option<f64>> = chunk.iter().map(|s| s.rtt_ms).collect();
-        client
-            .execute(
-                r#"INSERT INTO just_tx_rtt_samples (run_id, seq, t0, ok, rtt_ms)
-                   SELECT * FROM UNNEST($1::uuid[], $2::int[], $3::timestamptz[], $4::bool[], $5::float8[])"#,
-                &[&ids, &seqs, &t0s, &oks, &rtts],
-            )
-            .await
-            .context("INSERT just_tx_rtt_samples")?;
+    if write_samples {
+        for chunk in stats.samples.chunks(512) {
+            let ids: Vec<Uuid> = chunk.iter().map(|_| run_id).collect();
+            let seqs: Vec<i32> = chunk.iter().map(|s| s.seq_i).collect();
+            let t0s: Vec<SystemTime> = chunk.iter().map(|s| s.t0).collect();
+            let oks: Vec<bool> = chunk.iter().map(|s| s.ok).collect();
+            let rtts: Vec<Option<f64>> = chunk.iter().map(|s| s.rtt_ms).collect();
+            client
+                .execute(
+                    r#"INSERT INTO just_tx_rtt_samples (run_id, seq, t0, ok, rtt_ms)
+                       SELECT * FROM UNNEST($1::uuid[], $2::int[], $3::timestamptz[], $4::bool[], $5::float8[])"#,
+                    &[&ids, &seqs, &t0s, &oks, &rtts],
+                )
+                .await
+                .context("INSERT just_tx_rtt_samples")?;
+        }
     }
     Ok(())
 }

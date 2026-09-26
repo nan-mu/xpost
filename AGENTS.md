@@ -66,7 +66,7 @@ scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 
 只做**性能**分析。采集由 `./xpost-test` 写 `formal.*`；笔记本现查，不负责烧录或功能 ACK。
 
-- **just-tx-rtt**（默认）：每臂标定「丢包≈5%」的最大 `target_pps`，再测 median RTT / loss / return PPS → `formal.just_tx_rtt_*`
+- **just-tx-rtt**（默认）：同一 `target_pps` 网格扫丢包 / return PPS（`phase=sweep`），再在约 5% 丢包工作点测 RTT（`phase=operating`）→ `formal.just_tx_rtt_*`；笔记 `just_tx_rtt.ipynb`
 - **just-tx-pps** / **just-drop-pps**：满速 blast 下的处理 PPS → `formal.experiment_*`
 
 ```bash

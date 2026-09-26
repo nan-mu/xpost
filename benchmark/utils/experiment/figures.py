@@ -151,7 +151,7 @@ def figure1_summary(
     """
     del hal_pps_points, xdp_pps_points, hal_adev_points, xdp_adev_points
     with plt.rc_context(_RC):
-        fig, axes = plt.subplots(1, 3, figsize=(7.4, 3.75))
+        fig, axes = plt.subplots(1, 3, figsize=(7.6, 4.1))
         panel_titles = (
             "Mean processing PPS",
             "Rel. ADEV at 1 s",
@@ -188,23 +188,24 @@ def figure1_summary(
             fmt=lambda v: f"{v:.2f}",
             zero=True,
         )
+        # Column headers sit directly above each panel (not a shared legend row).
         for ax, col in zip(axes, panel_titles):
-            ax.set_title(col, fontsize=10, pad=8)
+            ax.set_title(col, fontsize=10, pad=10, loc="center")
         from matplotlib.patches import Patch
 
         fig.legend(
             [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
             ["HAL", "XDP"],
             loc="upper center",
-            bbox_to_anchor=(0.5, 1.12),
+            bbox_to_anchor=(0.5, 1.02),
             ncol=2,
             fontsize=8,
             handlelength=0.9,
             columnspacing=1.2,
         )
         if title:
-            fig.suptitle(title, fontsize=11, y=1.18)
-        fig.tight_layout(rect=(0, 0, 1, 0.92))
+            fig.suptitle(title, fontsize=11, y=1.08)
+        fig.tight_layout(rect=(0, 0, 1, 0.90))
         return fig, axes[0]
 
 
@@ -224,64 +225,174 @@ def figure1_tx_rtt(
     xdp_pps_ci: tuple[float, float] | None = None,
     title: str = "just_tx RTT @ ~5% loss",
 ) -> tuple[Figure, Axes]:
-    """Three panels: median RTT, loss rate, return PPS. Titles sit above each subplot."""
+    """Kept for import compat; unused by just_tx_rtt.ipynb."""
+    del hal_loss, xdp_loss, hal_loss_ci, xdp_loss_ci, hal_return_pps, xdp_return_pps, hal_pps_ci, xdp_pps_ci
+    return figure_tx_pps_mean(
+        hal_mean_pps=float(hal_median_rtt_ms or 0.0),
+        xdp_mean_pps=float(xdp_median_rtt_ms or 0.0),
+        hal_pps_ci=hal_rtt_ci,
+        xdp_pps_ci=xdp_rtt_ci,
+        title=title,
+        ylabel="ms",
+        fmt=lambda v: f"{v:.2f}",
+    )
+
+
+def figure_tx_pps_mean(
+    *,
+    hal_mean_pps: float,
+    xdp_mean_pps: float,
+    hal_pps_ci: tuple[float, float] | None = None,
+    xdp_pps_ci: tuple[float, float] | None = None,
+    title: str = "just_tx HAL vs XDP",
+    ylabel: str = "packets/s",
+    fmt=None,
+) -> tuple[Figure, Axes]:
+    """Single panel: mean processing PPS (just_tx_pps notebook)."""
+    if fmt is None:
+        fmt = lambda v: f"{v:,.0f}"
     with plt.rc_context(_RC):
-        fig, axes = plt.subplots(1, 3, figsize=(7.4, 3.75))
-        panel_titles = (
-            "Median RTT",
-            "Loss rate",
-            "Return PPS",
-        )
+        fig, ax = plt.subplots(1, 1, figsize=(3.6, 3.6))
         _bar_pair(
-            axes[0],
-            hal_median_rtt_ms,
-            xdp_median_rtt_ms,
-            hal_rtt_ci,
-            xdp_rtt_ci,
-            ylabel="ms",
-            fmt=lambda v: f"{v:.2f}",
-            zero=True,
-        )
-        _bar_pair(
-            axes[1],
-            None if not _finite(hal_loss) else 100.0 * float(hal_loss),
-            None if not _finite(xdp_loss) else 100.0 * float(xdp_loss),
-            None if hal_loss_ci is None else (100.0 * hal_loss_ci[0], 100.0 * hal_loss_ci[1]),
-            None if xdp_loss_ci is None else (100.0 * xdp_loss_ci[0], 100.0 * xdp_loss_ci[1]),
-            ylabel="%",
-            fmt=lambda v: f"{v:.1f}",
-            zero=True,
-        )
-        axes[1].axhline(5.0, color=_MUTED, lw=0.7, ls="--", zorder=1)
-        _bar_pair(
-            axes[2],
-            hal_return_pps,
-            xdp_return_pps,
+            ax,
+            hal_mean_pps,
+            xdp_mean_pps,
             hal_pps_ci,
             xdp_pps_ci,
-            ylabel="packets/s",
-            fmt=lambda v: f"{v:,.0f}",
+            ylabel=ylabel,
+            fmt=fmt,
             zero=True,
         )
-        axes[2].yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}"))
-        for ax, col in zip(axes, panel_titles):
-            ax.set_title(col, fontsize=10, pad=8)
+        if ylabel == "packets/s":
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}"))
         from matplotlib.patches import Patch
 
         fig.legend(
             [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
             ["HAL", "XDP"],
             loc="upper center",
-            bbox_to_anchor=(0.5, 1.12),
+            bbox_to_anchor=(0.5, 1.02),
             ncol=2,
             fontsize=8,
             handlelength=0.9,
             columnspacing=1.2,
         )
         if title:
-            fig.suptitle(title, fontsize=11, y=1.18)
+            fig.suptitle(title, fontsize=11, y=1.08)
         fig.tight_layout(rect=(0, 0, 1, 0.92))
-        return fig, axes[0]
+        return fig, ax
+
+
+def figure_tx_rtt_loss_vs_rate(
+    *,
+    rates_pps: Sequence[float],
+    hal_loss: Sequence[float | None],
+    xdp_loss: Sequence[float | None],
+    title: str = "Loss vs send rate",
+) -> tuple[Figure, Axes]:
+    """Grouped bars: loss rate at each shared TR3000 send rate."""
+    with plt.rc_context(_RC):
+        fig, ax = plt.subplots(figsize=(7.6, 3.6))
+        xs = np.arange(len(rates_pps), dtype=float)
+        width = 0.38
+        hal_y = [np.nan if v is None or not np.isfinite(v) else 100.0 * float(v) for v in hal_loss]
+        xdp_y = [np.nan if v is None or not np.isfinite(v) else 100.0 * float(v) for v in xdp_loss]
+        ax.bar(xs - width / 2, [0.0 if not np.isfinite(v) else v for v in hal_y], width=width, color=_PPS, zorder=2)
+        ax.bar(xs + width / 2, [0.0 if not np.isfinite(v) else v for v in xdp_y], width=width, color=_ADEV, zorder=2)
+        ax.axhline(5.0, color=_MUTED, lw=0.7, ls="--", zorder=1)
+        ax.set_xticks(list(xs))
+        ax.set_xticklabels([f"{int(r)}" for r in rates_pps])
+        ax.set_xlabel("TR3000 send rate (pps)")
+        ax.set_ylabel("loss (%)")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        from matplotlib.patches import Patch
+
+        ax.legend(
+            [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
+            ["HAL", "XDP"],
+            loc="upper left",
+            fontsize=8,
+            frameon=False,
+        )
+        if title:
+            ax.set_title(title, fontsize=10, pad=8)
+        ymax = max([v for v in hal_y + xdp_y if np.isfinite(v)] + [5.0])
+        ax.set_ylim(0, ymax * 1.2 if ymax > 0 else 1.0)
+        fig.tight_layout()
+        return fig, ax
+
+
+def figure_tx_rtt_boxplot(
+    *,
+    hal_rtts_ms: Sequence[float],
+    xdp_rtts_ms: Sequence[float],
+    hal_label: str,
+    xdp_label: str,
+    title: str = "RTT @ ~5% loss operating point",
+) -> tuple[Figure, Axes]:
+    """Boxplot of paired RTT samples at each arm's ~5% loss send rate."""
+    with plt.rc_context(_RC):
+        fig, ax = plt.subplots(figsize=(5.2, 3.8))
+        data = [list(hal_rtts_ms), list(xdp_rtts_ms)]
+        bp = ax.boxplot(
+            data,
+            tick_labels=["HAL", "XDP"],
+            patch_artist=True,
+            widths=0.55,
+            showfliers=False,
+        )
+        for patch, color in zip(bp["boxes"], (_PPS, _ADEV)):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.85)
+            patch.set_edgecolor(_INK)
+        for key in ("whiskers", "caps", "medians"):
+            for line in bp[key]:
+                line.set_color(_INK)
+                line.set_linewidth(0.8)
+        ax.set_ylabel("RTT (ms)")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        from matplotlib.patches import Patch
+
+        ax.legend(
+            [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
+            [hal_label, xdp_label],
+            loc="upper right",
+            fontsize=8,
+            frameon=False,
+        )
+        if title:
+            ax.set_title(title, fontsize=10, pad=8)
+        fig.tight_layout()
+        return fig, ax
+
+
+def figure_tx_rtt_return_pps(
+    *,
+    rates_pps: Sequence[float],
+    hal_return_pps: Sequence[float | None],
+    xdp_return_pps: Sequence[float | None],
+    title: str = "Return PPS vs send rate",
+) -> tuple[Figure, Axes]:
+    """Lines: host-side paired return PPS at each send rate."""
+    with plt.rc_context(_RC):
+        fig, ax = plt.subplots(figsize=(7.6, 3.6))
+        rates = list(rates_pps)
+        hal_y = [np.nan if v is None or not np.isfinite(v) else float(v) for v in hal_return_pps]
+        xdp_y = [np.nan if v is None or not np.isfinite(v) else float(v) for v in xdp_return_pps]
+        ax.plot(rates, hal_y, "o-", color=_PPS, lw=1.2, ms=4.5, label="HAL")
+        ax.plot(rates, xdp_y, "s-", color=_ADEV, lw=1.2, ms=4.5, label="XDP")
+        ax.set_xlabel("TR3000 send rate (pps)")
+        ax.set_ylabel("return PPS")
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.legend(loc="upper left", fontsize=8, frameon=False)
+        if title:
+            ax.set_title(title, fontsize=10, pad=8)
+        fig.tight_layout()
+        return fig, ax
 
 
 def figure1_is_single_panel(fig: Figure) -> bool:

@@ -8,8 +8,22 @@ from .allan import (
     overlapping_relative_adev,
     triad_rates,
 )
-from .figures import figure1_summary, figure1_tx_rtt, figure2_noise
-from .io import load_counter_samples, load_just_tx_rtt_runs, load_runs, load_sample_reads
+from .figures import (
+    figure1_summary,
+    figure1_tx_rtt,
+    figure2_noise,
+    figure_tx_pps_mean,
+    figure_tx_rtt_boxplot,
+    figure_tx_rtt_loss_vs_rate,
+    figure_tx_rtt_return_pps,
+)
+from .io import (
+    load_counter_samples,
+    load_just_tx_rtt_runs,
+    load_just_tx_rtt_samples,
+    load_runs,
+    load_sample_reads,
+)
 from .models import (
     FitSplit,
     ModelResult,
@@ -55,9 +69,14 @@ __all__ = [
     "simulate_poisson_counts",
     "load_runs",
     "load_just_tx_rtt_runs",
+    "load_just_tx_rtt_samples",
     "load_counter_samples",
     "load_sample_reads",
     "figure1_summary",
     "figure1_tx_rtt",
+    "figure_tx_pps_mean",
+    "figure_tx_rtt_loss_vs_rate",
+    "figure_tx_rtt_boxplot",
+    "figure_tx_rtt_return_pps",
     "figure2_noise",
 ]

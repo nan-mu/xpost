@@ -315,6 +315,8 @@ impl TableSet {
                     pair_id INTEGER NOT NULL,
                     run_kind TEXT NOT NULL CHECK (run_kind IN ('random', 'control', 'pilot')),
                     variant TEXT NOT NULL CHECK (variant IN ('hal', 'xdp')),
+                    phase TEXT NOT NULL DEFAULT 'operating'
+                        CHECK (phase IN ('sweep', 'operating')),
                     target_pps DOUBLE PRECISION NOT NULL,
                     calibrated_loss DOUBLE PRECISION,
                     window_secs DOUBLE PRECISION,
@@ -331,6 +333,8 @@ impl TableSet {
                     status TEXT NOT NULL,
                     source_note TEXT
                 )"#,
+                r#"ALTER TABLE just_tx_rtt_runs
+                    ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'operating'"#,
                 r#"CREATE TABLE IF NOT EXISTS just_tx_rtt_samples (
                     run_id UUID NOT NULL REFERENCES just_tx_rtt_runs(run_id) ON DELETE CASCADE,
                     seq INTEGER NOT NULL,
