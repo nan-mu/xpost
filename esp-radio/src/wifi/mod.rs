@@ -126,7 +126,19 @@ pub(crate) mod xdp_tx;
 
 #[cfg(feature = "xdp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "xdp")))]
+pub mod xdp_prof;
+
+#[cfg(feature = "xdp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "xdp")))]
 pub use xdp::{Action, NoopProg, Prog, attach_prog};
+
+#[cfg(feature = "xdp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "xdp")))]
+pub use xdp_tx::{
+    TX_KICK as XDP_TX_KICK, TxStats as XdpTxStats, clear_stats as xdp_tx_clear_stats,
+    drain_batch as xdp_tx_drain_batch, in_flight as xdp_tx_in_flight, pending_len as xdp_tx_pending,
+    stats as xdp_tx_stats,
+};
 
 pub(crate) mod os_adapter;
 pub(crate) mod state;
@@ -1128,12 +1140,16 @@ fn xdp_dispatch(
     queue: &NonReentrantMutex<VecDeque<PacketBuffer>>,
     wake: impl FnOnce(),
 ) -> Option<esp_err_t> {
+    let _span = xdp_prof::Span::enter(xdp_prof::Site::WifiRxDispatch);
     if buffer.is_null() || len == 0 {
         return None;
     }
     let frame = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), len as usize) };
     let prog = xdp::current();
-    let (action, window) = prog.run(frame);
+    let (action, window) = {
+        let _run = xdp_prof::Span::enter(xdp_prof::Site::XdpRun);
+        prog.run(frame)
+    };
     match action {
         Action::Pass => {
             let win_len = window.len();
