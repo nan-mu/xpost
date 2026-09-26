@@ -35,10 +35,12 @@ pub enum TableSet {
     RateRtt,
     RateLoss,
     Ack,
-    /// HAL vs XDP PPS → `experiment_runs` / `counter_samples`.
-    ExperimentPps,
-    /// just_tx RTT at ~5% loss operating point → `just_tx_rtt_*`.
-    JustTxRtt,
+    /// Formal `just_tx` → `just_tx_config` / `just_tx_data`.
+    JustTx,
+    /// Formal `just_drop` → `just_drop_config` / `just_drop_data`.
+    JustDrop,
+    /// Debug `dev` → `dev_config` / `dev_data` (never formal-DROP).
+    Dev,
 }
 
 impl TableSet {
@@ -61,33 +63,47 @@ impl TableSet {
             Self::Ack => {
                 "TRUNCATE TABLE xdp_ack_trial, xdp_ack_config RESTART IDENTITY CASCADE"
             }
-            Self::ExperimentPps => {
-                "TRUNCATE TABLE sample_reads, counter_samples, experiment_runs RESTART IDENTITY CASCADE"
+            Self::JustTx => {
+                "TRUNCATE TABLE just_tx_data, just_tx_config RESTART IDENTITY CASCADE"
             }
-            Self::JustTxRtt => {
-                "TRUNCATE TABLE just_tx_rtt_samples, just_tx_rtt_runs RESTART IDENTITY CASCADE"
+            Self::JustDrop => {
+                "TRUNCATE TABLE just_drop_data, just_drop_config RESTART IDENTITY CASCADE"
             }
+            Self::Dev => "",
         }
     }
 
-    /// `formal` only: drop tables so `ensure_sql` can recreate current schema (no migrations).
+    /// `formal` only: drop same-named tables so `ensure_*` recreates empty current schema.
+    /// `Dev` never recreates — console-only debug, no tables.
     fn recreate_sql(self) -> Option<&'static str> {
         match self {
             Self::Drop => {
                 Some("DROP TABLE IF EXISTS xdp_drop_rxcnt, xdp_drop_round, xdp_drop_config CASCADE")
             }
-            Self::ExperimentPps => Some(
-                "DROP TABLE IF EXISTS sample_reads, counter_samples, experiment_runs CASCADE",
-            ),
-            Self::JustTxRtt => Some(
-                "DROP TABLE IF EXISTS just_tx_rtt_samples, just_tx_rtt_runs CASCADE",
-            ),
+            Self::JustTx => {
+                Some("DROP TABLE IF EXISTS just_tx_data, just_tx_config CASCADE")
+            }
+            Self::JustDrop => {
+                Some("DROP TABLE IF EXISTS just_drop_data, just_drop_config CASCADE")
+            }
+            Self::Dev => None,
+            _ => None,
+        }
+    }
+
+    /// just_tx / just_drop DDL (`xpost-test/sql/*.sql`).
+    fn ensure_batch(self) -> Option<&'static str> {
+        match self {
+            Self::JustTx => Some(include_str!("../../../sql/just_tx.sql")),
+            Self::JustDrop => Some(include_str!("../../../sql/just_drop.sql")),
+            Self::Dev => None,
             _ => None,
         }
     }
 
     fn ensure_sql(self) -> &'static [&'static str] {
         match self {
+            Self::JustTx | Self::JustDrop | Self::Dev => &[],
             Self::Echo => &[
                 r#"CREATE TABLE IF NOT EXISTS xdp_echo_config (
                     id bigserial PRIMARY KEY,
@@ -267,83 +283,24 @@ impl TableSet {
                 r#"ALTER TABLE xdp_ack_config ADD COLUMN IF NOT EXISTS stim_n integer NOT NULL DEFAULT 1"#,
                 r#"ALTER TABLE xdp_ack_trial ADD COLUMN IF NOT EXISTS ack_count integer NOT NULL DEFAULT 0"#,
             ],
-            Self::ExperimentPps => &[
-                r#"CREATE TABLE IF NOT EXISTS experiment_runs (
-                    run_id UUID PRIMARY KEY,
-                    pair_id INTEGER NOT NULL,
-                    run_kind TEXT NOT NULL CHECK (run_kind IN ('random', 'control', 'pilot')),
-                    variant TEXT NOT NULL CHECK (variant IN ('hal', 'xdp')),
-                    firmware_sha256 TEXT,
-                    elf_sha256 TEXT,
-                    sender_target_pps BIGINT,
-                    udp_payload_bytes INTEGER NOT NULL DEFAULT 8,
-                    sample_seed BIGINT,
-                    window_secs DOUBLE PRECISION,
-                    sample_interval_ms INTEGER,
-                    started_at_utc TIMESTAMPTZ,
-                    stopped_at_utc TIMESTAMPTZ,
-                    status TEXT NOT NULL,
-                    status_reason TEXT,
-                    source_note TEXT
-                )"#,
-                r#"CREATE TABLE IF NOT EXISTS counter_samples (
-                    run_id UUID NOT NULL REFERENCES experiment_runs(run_id) ON DELETE CASCADE,
-                    time_ns BIGINT NOT NULL,
-                    counter_value BIGINT NOT NULL,
-                    PRIMARY KEY (run_id, time_ns)
-                )"#,
-                r#"CREATE TABLE IF NOT EXISTS sample_reads (
-                    run_id UUID NOT NULL REFERENCES experiment_runs(run_id) ON DELETE CASCADE,
-                    sample_id INTEGER NOT NULL,
-                    triad_id INTEGER,
-                    tau_s DOUBLE PRECISION,
-                    t_req_ns BIGINT,
-                    t_resp_ns BIGINT,
-                    counter_value BIGINT,
-                    valid BOOLEAN NOT NULL DEFAULT TRUE,
-                    PRIMARY KEY (run_id, sample_id)
-                )"#,
-                r#"CREATE INDEX IF NOT EXISTS counter_samples_run_time
-                    ON counter_samples (run_id, time_ns)"#,
-            ],
-            Self::JustTxRtt => &[
-                r#"CREATE TABLE IF NOT EXISTS just_tx_rtt_runs (
-                    run_id UUID PRIMARY KEY,
-                    pair_id INTEGER NOT NULL,
-                    run_kind TEXT NOT NULL CHECK (run_kind IN ('random', 'control', 'pilot')),
-                    variant TEXT NOT NULL CHECK (variant IN ('hal', 'xdp')),
-                    phase TEXT NOT NULL DEFAULT 'operating'
-                        CHECK (phase IN ('sweep', 'operating')),
-                    target_pps DOUBLE PRECISION NOT NULL,
-                    calibrated_loss DOUBLE PRECISION,
-                    window_secs DOUBLE PRECISION,
-                    sent BIGINT NOT NULL,
-                    ok BIGINT NOT NULL,
-                    loss_rate DOUBLE PRECISION NOT NULL,
-                    return_pps DOUBLE PRECISION,
-                    device_rxcnt_delta BIGINT,
-                    median_rtt_ms DOUBLE PRECISION,
-                    p95_rtt_ms DOUBLE PRECISION,
-                    mean_rtt_ms DOUBLE PRECISION,
-                    started_at_utc TIMESTAMPTZ,
-                    stopped_at_utc TIMESTAMPTZ,
-                    status TEXT NOT NULL,
-                    source_note TEXT
-                )"#,
-                r#"ALTER TABLE just_tx_rtt_runs
-                    ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'operating'"#,
-                r#"CREATE TABLE IF NOT EXISTS just_tx_rtt_samples (
-                    run_id UUID NOT NULL REFERENCES just_tx_rtt_runs(run_id) ON DELETE CASCADE,
-                    seq INTEGER NOT NULL,
-                    t0 TIMESTAMPTZ NOT NULL,
-                    ok BOOLEAN NOT NULL,
-                    rtt_ms DOUBLE PRECISION,
-                    PRIMARY KEY (run_id, seq)
-                )"#,
-                r#"CREATE INDEX IF NOT EXISTS just_tx_rtt_samples_run
-                    ON just_tx_rtt_samples (run_id)"#,
-            ],
         }
+    }
+
+    async fn apply_ensure(self, client: &Client, schema: &str) -> Result<()> {
+        if let Some(batch) = self.ensure_batch() {
+            client
+                .batch_execute(batch)
+                .await
+                .with_context(|| format!("ensure {:?} DDL batch in {schema}", self))?;
+            return Ok(());
+        }
+        for sql in self.ensure_sql() {
+            client
+                .batch_execute(sql)
+                .await
+                .with_context(|| format!("ensure tables {:?} in {schema}", self))?;
+        }
+        Ok(())
     }
 }
 
@@ -395,107 +352,13 @@ pub async fn prepare(client: &Client, opts: PgOpts, set: TableSet) -> Result<()>
             .context("SET search_path public")?;
     }
 
-    for sql in set.ensure_sql() {
-        client
-            .batch_execute(sql)
-            .await
-            .with_context(|| format!("ensure tables {:?} in {}", set, opts.schema()))?;
-    }
+    set.apply_ensure(client, opts.schema()).await?;
     if opts.formal && set.recreate_sql().is_none() {
         client
             .batch_execute(set.truncate_sql())
             .await
             .with_context(|| format!("TRUNCATE {:?} in {formal_schema}", set))?;
         info!("formal schema={formal_schema}: truncated {:?}", set);
-    }
-    Ok(())
-}
-
-/// Ensure `just_tx_rtt_*` exist; on formal, delete only rows with `source_note = note`.
-pub async fn prepare_just_tx_rtt_note(client: &Client, opts: PgOpts, note: &str) -> Result<()> {
-    let formal_schema = config::postgres().formal_schema.as_str();
-    if opts.formal {
-        client
-            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {formal_schema}"))
-            .await
-            .context("CREATE SCHEMA formal")?;
-        client
-            .batch_execute(&format!("SET search_path TO {formal_schema}"))
-            .await
-            .context("SET search_path formal")?;
-    } else {
-        client
-            .batch_execute("SET search_path TO public")
-            .await
-            .context("SET search_path public")?;
-    }
-
-    for sql in TableSet::JustTxRtt.ensure_sql() {
-        client
-            .batch_execute(sql)
-            .await
-            .with_context(|| format!("ensure JustTxRtt tables in {}", opts.schema()))?;
-    }
-
-    if opts.formal {
-        let n = client
-            .execute(
-                "DELETE FROM just_tx_rtt_runs WHERE source_note = $1",
-                &[&note],
-            )
-            .await
-            .context("DELETE just_tx_rtt_runs by source_note")?;
-        info!(
-            "formal schema={formal_schema}: deleted {n} just_tx_rtt_runs with source_note={note}"
-        );
-    }
-    Ok(())
-}
-
-/// Ensure `experiment_*` exist; on formal, delete only rows with `source_note = note`
-/// (does not DROP/TRUNCATE the whole PPS table family).
-pub async fn prepare_experiment_pps_note(client: &Client, opts: PgOpts, note: &str) -> Result<()> {
-    let formal_schema = config::postgres().formal_schema.as_str();
-    if opts.formal {
-        client
-            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {formal_schema}"))
-            .await
-            .context("CREATE SCHEMA formal")?;
-        client
-            .batch_execute(&format!("SET search_path TO {formal_schema}"))
-            .await
-            .context("SET search_path formal")?;
-    } else {
-        client
-            .batch_execute("SET search_path TO public")
-            .await
-            .context("SET search_path public")?;
-    }
-
-    for sql in TableSet::ExperimentPps.ensure_sql() {
-        client
-            .batch_execute(sql)
-            .await
-            .with_context(|| {
-                format!(
-                    "ensure ExperimentPps tables in {}",
-                    opts.schema()
-                )
-            })?;
-    }
-
-    if opts.formal {
-        // CASCADE from experiment_runs clears counter_samples / sample_reads.
-        let n = client
-            .execute(
-                "DELETE FROM experiment_runs WHERE source_note = $1",
-                &[&note],
-            )
-            .await
-            .context("DELETE experiment_runs by source_note")?;
-        info!(
-            "formal schema={formal_schema}: deleted {n} experiment_runs with source_note={note}"
-        );
     }
     Ok(())
 }

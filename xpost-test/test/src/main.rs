@@ -87,39 +87,26 @@ enum Command {
     /// just_drop ACK path: clear vs drop XDP → `xdp_ack_*`.
     #[command(name = "just-drop")]
     JustDrop,
-    /// Formal `just_drop` experiment (PPS A/B). Same as `run = ["just_drop"]`.
+    /// Formal `just_drop` experiment. Same as `run = ["just_drop"]`.
     #[command(name = "just_drop")]
-    JustDropExp,
-    /// Formal `just_tx` experiment (PPS then RTT). Same as `run = ["just_tx"]`.
+    JustDropExp {
+        /// Restrict to one arm. Omit → embedded `just_drop.toml` arms.
+        #[arg(long, value_parser = ["xdp", "hal"])]
+        path: Option<String>,
+        /// Counter sample period while blasting (ms). `0` → embedded default.
+        #[arg(long, default_value_t = 0)]
+        sample_interval_ms: u64,
+    },
+    /// Formal `just_tx` experiment. Same as `run = ["just_tx"]`.
     #[command(name = "just_tx")]
-    JustTxExp,
-    /// just_drop / just_drop_hal PPS → `experiment_*` (agent flashes each arm).
-    #[command(name = "just-drop-pps")]
-    JustDropPps {
-        /// Restrict to one arm. Omit → embedded `[just_drop].pps.arms`.
-        #[arg(long, value_parser = ["xdp", "hal"])]
-        path: Option<String>,
-        /// Counter sample period while blasting (ms). `0` → embedded default.
-        #[arg(long, default_value_t = 0)]
-        sample_interval_ms: u64,
-    },
-    /// just_tx / just_tx_hal PPS → `experiment_*` via `rxcnt 17` (agent flashes each arm).
-    #[command(name = "just-tx-pps")]
-    JustTxPps {
-        /// Restrict to one arm. Omit → embedded `[just_tx].pps.arms`.
-        #[arg(long, value_parser = ["xdp", "hal"])]
-        path: Option<String>,
-        /// Counter sample period while blasting (ms). `0` → embedded default.
-        #[arg(long, default_value_t = 0)]
-        sample_interval_ms: u64,
-    },
-    /// just_tx / just_tx_hal RTT at ~5% loss operating point → `just_tx_rtt_*`.
-    #[command(name = "just-tx-rtt")]
-    JustTxRtt {
-        /// Restrict to one arm. Omit → embedded `[just_tx].rtt.arms`.
+    JustTxExp {
+        /// Restrict to one arm. Omit → embedded `just_tx.toml` arms.
         #[arg(long, value_parser = ["xdp", "hal"])]
         path: Option<String>,
     },
+    /// Hardcoded XDP TX debug: 240/480/720/1200 × 1 trial → `dev_*`.
+    #[command(name = "dev")]
+    DevExp,
     /// Alias of `rate-rtt`.
     Bench,
     /// Alias of `wl-loss`.
@@ -140,23 +127,19 @@ fn wall_unix_ms() -> u64 {
 }
 
 /// Expand a `default.toml` `run` entry into one or more dispatch commands.
-/// Experiments are atomic: `just_tx` always runs PPS then RTT.
 fn commands_for_run_entry(name: &str) -> Result<Vec<Command>> {
     Ok(match name {
-        "just_tx" => vec![
-            Command::JustTxPps {
-                path: None,
-                sample_interval_ms: 0,
-            },
-            Command::JustTxRtt { path: None },
-        ],
-        "just_drop" => vec![Command::JustDropPps {
+        "just_tx" => vec![Command::JustTxExp {
+            path: None,
+        }],
+        "just_drop" => vec![Command::JustDropExp {
             path: None,
             sample_interval_ms: 0,
         }],
+        "dev" => vec![Command::DevExp],
         "suite" => vec![Command::Suite],
         other => anyhow::bail!(
-            "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop (see config/README.md)"
+            "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / dev (see config/README.md)"
         ),
     })
 }
@@ -224,18 +207,6 @@ async fn main() -> Result<()> {
 }
 
 async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Result<()> {
-    if matches!(command, Command::JustTxExp) {
-        for cmd in commands_for_run_entry("just_tx")? {
-            Box::pin(dispatch_command(cfg, args, cmd)).await?;
-        }
-        return Ok(());
-    }
-    if matches!(command, Command::JustDropExp) {
-        for cmd in commands_for_run_entry("just_drop")? {
-            Box::pin(dispatch_command(cfg, args, cmd)).await?;
-        }
-        return Ok(());
-    }
     if matches!(command, Command::JustDrop) {
         return bench::run_just_drop(
             cfg,
@@ -249,7 +220,7 @@ async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Re
         )
         .await;
     }
-    if let Command::JustDropPps {
+    if let Command::JustDropExp {
         path,
         sample_interval_ms,
     } = &command
@@ -259,7 +230,7 @@ async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Re
             None => Vec::new(),
         };
         let sample_ms = if *sample_interval_ms == 0 {
-            cfg.just_drop_pps.sample_interval_ms
+            cfg.just_drop.sample_interval_ms
         } else {
             *sample_interval_ms
         };
@@ -268,7 +239,7 @@ async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Re
             bench::JustDropPpsOpts {
                 paths,
                 smoke: args.smoke,
-                formal: args.formal || cfg.just_drop_pps.formal,
+                formal: args.formal || cfg.just_drop.formal,
                 no_pg: args.no_pg,
                 window_secs: args.window_secs,
                 sample_interval_ms: sample_ms,
@@ -277,50 +248,40 @@ async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Re
         )
         .await;
     }
-    if let Command::JustTxPps {
-        path,
-        sample_interval_ms,
-    } = &command
-    {
-        let paths = match path {
-            Some(p) => vec![bench::PpsPath::parse(p)?],
-            None => Vec::new(),
-        };
-        let sample_ms = if *sample_interval_ms == 0 {
-            cfg.just_tx_pps.sample_interval_ms
-        } else {
-            *sample_interval_ms
-        };
-        return bench::run_just_tx_pps(
-            cfg,
-            bench::JustTxPpsOpts {
-                paths,
-                smoke: args.smoke,
-                formal: args.formal || cfg.just_tx_pps.formal,
-                no_pg: args.no_pg,
-                window_secs: args.window_secs,
-                sample_interval_ms: sample_ms,
-                rounds: args.rounds,
-            },
-        )
-        .await;
-    }
-    if let Command::JustTxRtt { path } = &command {
+    if let Command::JustTxExp { path } = &command {
         let paths = match path {
             Some(p) => vec![bench::PpsPath::parse(p)?],
             None => Vec::new(),
         };
         let mut harness = open_harness(cfg).await?;
-        return bench::run_just_tx_rtt(
+        return bench::run_just_tx(
             cfg,
             &mut harness,
-            bench::JustTxRttOpts {
+            bench::JustTxOpts {
                 paths,
                 smoke: args.smoke,
-                formal: args.formal || cfg.just_tx_rtt.formal,
+                formal: args.formal || cfg.just_tx.formal,
                 no_pg: args.no_pg,
                 window_secs: args.window_secs,
                 rounds: args.rounds,
+                tables: bench::pg_dsn::TableSet::JustTx,
+            },
+        )
+        .await;
+    }
+    if let Command::DevExp = &command {
+        let mut harness = open_harness(cfg).await?;
+        return bench::run_just_tx(
+            cfg,
+            &mut harness,
+            bench::JustTxOpts {
+                paths: Vec::new(), // ignored — hardcoded XDP
+                smoke: false,
+                formal: false,
+                no_pg: true, // console-only; never touch Postgres
+                window_secs: None,
+                rounds: None,
+                tables: bench::pg_dsn::TableSet::Dev,
             },
         )
         .await;
@@ -368,11 +329,11 @@ async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Re
             return bench::run_rate_loss(&mut harness, args.smoke, args.formal).await;
         }
         Command::JustDrop
-        | Command::JustDropExp
-        | Command::JustTxExp
-        | Command::JustDropPps { .. }
-        | Command::JustTxPps { .. }
-        | Command::JustTxRtt { .. } => unreachable!("handled earlier"),
+        | Command::JustDropExp { .. }
+        | Command::JustTxExp { .. }
+        | Command::DevExp => {
+            unreachable!("handled earlier")
+        }
         Command::Suite => {}
     }
     let report = run_all(cfg, &mut harness).await?;

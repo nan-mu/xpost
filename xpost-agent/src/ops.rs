@@ -70,6 +70,35 @@ pub fn get_status() -> String {
     "idle".into()
 }
 
+const READY_NEEDLE: &str = "xpost ready";
+
+fn clear_dut_ready(g: &mut AgentState) {
+    g.dut_ready = false;
+    g.dut_ready_line = None;
+}
+
+fn note_uart_lines(g: &mut AgentState, lines: &[String]) {
+    for line in lines {
+        if line.contains(READY_NEEDLE) {
+            g.dut_ready = true;
+            g.dut_ready_line = Some(line.clone());
+        }
+    }
+}
+
+/// Drain pending UART and report DUT boot readiness (`ready …` or `booting`).
+pub fn dut_status(state: &Mutex<AgentState>) -> Result<String> {
+    let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
+    let lines = g.session.drain_uart().context("drain_uart")?;
+    note_uart_lines(&mut g, &lines);
+    if g.dut_ready {
+        let line = g.dut_ready_line.as_deref().unwrap_or(READY_NEEDLE);
+        Ok(format!("ready {line}"))
+    } else {
+        Ok("booting".into())
+    }
+}
+
 pub fn flash_profile(state: &Mutex<AgentState>, profile_id: &str, peer: &str) -> Result<String> {
     with_log(peer, "FlashProfile", &format!("profile=`{profile_id}`"), false, state, || {
         flash_profile_inner(state, profile_id, peer)
@@ -144,6 +173,7 @@ fn flash_profile_inner(state: &Mutex<AgentState>, id: &str, peer: &str) -> Resul
     }
 
     let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
+    clear_dut_ready(&mut g);
     g.session.cold_table = JUST_DROP_TABLE;
     g.session.image_capacity = JUST_DROP_TABLE.image_capacity;
     let xdp = match (&xdp_name_owned, &xdp_path) {
@@ -238,6 +268,7 @@ pub fn program(state: &Mutex<AgentState>, elf: &str, peer: &str) -> Result<Strin
             .with_context(|| format!("parse name from {}", path.display()))?;
         let sz = file_size(&path).unwrap_or(0);
         let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
+        clear_dut_ready(&mut g);
         g.session.cold_table = JUST_DROP_TABLE;
         g.session.image_capacity = JUST_DROP_TABLE.image_capacity;
         let outcome = g
@@ -267,6 +298,7 @@ pub fn program(state: &Mutex<AgentState>, elf: &str, peer: &str) -> Result<Strin
 pub fn clear_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     with_log(peer, "Clear", "", false, state, || {
         let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
+        clear_dut_ready(&mut g);
         g.session.cold_table = JUST_DROP_TABLE;
         g.session.clear_xdp().context("clear_xdp")?;
         g.session.reset_to_app().context("reset_to_app after clear")?;
@@ -315,6 +347,37 @@ pub fn request(state: &Mutex<AgentState>, cmd: &str, peer: &str) -> Result<Strin
             .request_timeout(cmd, Duration::from_secs(5))
             .with_context(|| format!("request `{cmd}`"))
     })
+}
+
+/// Return sink transcript lines whose host timestamp falls in `[since_unix_ms, until_unix_ms]`.
+///
+/// Also drains pending UART into the sink first so late `tsflow` lines are visible.
+pub fn serial_window(
+    state: &Mutex<AgentState>,
+    since_unix_ms: u64,
+    until_unix_ms: u64,
+    peer: &str,
+) -> Result<String> {
+    use std::time::{Duration, UNIX_EPOCH};
+    with_log(
+        peer,
+        "SerialWindow",
+        &format!("ms={since_unix_ms}..{until_unix_ms}"),
+        false,
+        state,
+        || {
+            let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
+            let _ = g.session.drain_uart();
+            let since = UNIX_EPOCH + Duration::from_millis(since_unix_ms);
+            let until = UNIX_EPOCH + Duration::from_millis(until_unix_ms);
+            let lines = g.session.serial_window(since, until);
+            Ok(format!(
+                "OK serial_window n={} since_ms={since_unix_ms} until_ms={until_unix_ms}\n{}",
+                lines.len(),
+                lines.join("\n")
+            ))
+        },
+    )
 }
 
 pub fn probe(esp: &str, port: u16, peer: &str) -> Result<String> {

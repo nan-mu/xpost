@@ -1,14 +1,7 @@
 # just_tx / just_tx_hal experiment knobs (compile-time embed).
-# Selected as a whole via default.toml `run = ["just_tx"]` (PPS + RTT fixed in code).
+# Selected via default.toml `run = ["just_tx"]` (per-packet path fixed in code).
 # See config/README.md.
 
-[pps]
-formal = true
-rounds = 3
-sample_interval_ms = 1000
-arms = ["hal", "xdp"]
-
-[rtt]
 formal = true
 rounds = 3
 arms = ["hal", "xdp"]

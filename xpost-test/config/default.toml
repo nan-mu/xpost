@@ -6,14 +6,13 @@
 # Mac side: cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
 # Agent HTTP: /health, /v1/* (harness), /mcp (Cursor MCP). endpoint = host:port (http:// inferred).
 #
-# Experiment knobs (rounds / arms / formal): just_tx.toml / just_drop.toml.
-# What each experiment *does* is fixed in code — see config/README.md.
+# Experiment knobs: just_tx.toml / just_drop.toml only (formal).
+# Debug: run = ["dev"] — hardcoded in code, no knobs file.
 
 version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
-# One experiment:  run = ["just_tx"]
-# Both formal A/B: run = ["just_drop", "just_tx"]
+# Formal: just_tx / just_drop. Fast debug: dev (own tables, hardcoded).
 run = ["just_tx"]
 
 [postgres]

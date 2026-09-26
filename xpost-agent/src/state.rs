@@ -39,6 +39,9 @@ pub struct AgentState {
     pub profiles: Vec<ProfileEntry>,
     pub root: PathBuf,
     pub last_noisy_log: Option<Instant>,
+    /// Latched after UART shows `xpost ready`; cleared on flash / reset_to_app.
+    pub dut_ready: bool,
+    pub dut_ready_line: Option<String>,
 }
 
 pub type SharedState = Arc<Mutex<AgentState>>;
@@ -74,6 +77,8 @@ pub fn open(port: Option<&Path>, log: &Path) -> Result<SharedState> {
         profiles,
         root,
         last_noisy_log: None,
+        dut_ready: false,
+        dut_ready_line: None,
     })))
 }
 

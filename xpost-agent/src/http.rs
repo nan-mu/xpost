@@ -79,6 +79,14 @@ struct ProbeBurstBody {
     count: u32,
 }
 
+#[derive(Deserialize)]
+struct SerialWindowBody {
+    /// Inclusive start, unix epoch milliseconds (host clock).
+    since_unix_ms: u64,
+    /// Inclusive end, unix epoch milliseconds (host clock).
+    until_unix_ms: u64,
+}
+
 fn default_probe_port() -> u16 {
     8080
 }
@@ -112,12 +120,14 @@ async fn serve_async(addr: &str, port: Option<&Path>, log: &Path) -> Result<()> 
 
     let v1 = Router::new()
         .route("/status", get(v1_status))
+        .route("/dut_status", get(v1_dut_status))
         .route("/flash_profile", post(v1_flash_profile))
         .route("/program", post(v1_program))
         .route("/clear", post(v1_clear))
         .route("/list", get(v1_list))
         .route("/counters", post(v1_counters))
         .route("/request", post(v1_request))
+        .route("/serial_window", post(v1_serial_window))
         .route("/probe", post(v1_probe))
         .route("/probe_burst", post(v1_probe_burst))
         .with_state(app_state);
@@ -135,7 +145,7 @@ async fn serve_async(addr: &str, port: Option<&Path>, log: &Path) -> Result<()> 
         .await
         .with_context(|| format!("bind {addr}"))?;
     eprintln!(
-        "[{}] xpost-agent HTTP {addr}  (/health /v1/* /mcp)",
+        "[{}] xpost-agent HTTP {addr}  (/health /v1/* /mcp incl. /v1/dut_status)",
         ts()
     );
     serve(listener, app).await.context("axum serve")?;
@@ -148,6 +158,11 @@ async fn health() -> Json<ApiResp> {
 
 async fn v1_status() -> Json<ApiResp> {
     Json(ApiResp::ok(ops::get_status()))
+}
+
+async fn v1_dut_status(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::dut_status(shared.as_ref())).await
 }
 
 async fn run_blocking<F>(f: F) -> Json<ApiResp>
@@ -195,6 +210,16 @@ async fn v1_request(State(st): State<AppState>, Json(body): Json<RequestBody>) -
     let shared = st.shared.clone();
     let cmd = body.cmd;
     run_blocking(move || ops::request(shared.as_ref(), &cmd, "http")).await
+}
+
+async fn v1_serial_window(
+    State(st): State<AppState>,
+    Json(body): Json<SerialWindowBody>,
+) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    let since = body.since_unix_ms;
+    let until = body.until_unix_ms;
+    run_blocking(move || ops::serial_window(shared.as_ref(), since, until, "http")).await
 }
 
 async fn v1_probe(Json(body): Json<ProbeBody>) -> Json<ApiResp> {
