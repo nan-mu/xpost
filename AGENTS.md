@@ -65,7 +65,8 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 - `config/default.toml`：`run = [...]`（跑哪些**实验**）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`、版本与 profiles
 - `config/just_tx.toml`：正式 just_tx 轮次、臂、formal
 - `config/just_drop.toml`：正式 just_drop 同上
-- 调试 XDP TX：`run = ["dev"]`（硬编码：XDP × 240/480/720/1200 × 1×4s；**无 DB**，看 TR3000/`agent` 控制台）
+- 调试 XDP TX：`run = ["dev"]`（硬编码：XDP × 240/480/720/1200 × 1×4s；**无 DB**；固件每 100 包打 `tsflow`；agent `POST /v1/serial_window`）
+- Agent HTTP：`/health`、`/v1/*`（含 `/v1/serial_window`）、`/mcp`
 - 实验步骤固定在代码里：见 [`xpost-test/config/README.md`](xpost-test/config/README.md)
 
 只跑正式 just_tx：`run = ["just_tx"]`。一次跑全部 formal A/B：`run = ["just_drop", "just_tx"]`。
