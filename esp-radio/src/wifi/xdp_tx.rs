@@ -62,7 +62,7 @@ pub struct TxStats {
     pub pending: u32,
     /// High-water pending depth.
     pub pending_peak: u32,
-    /// Successful handoffs awaiting `netstack_free`.
+    /// Successful handoffs awaiting `tx_done`.
     pub in_flight: u32,
     /// High-water in-flight count.
     pub in_flight_peak: u32,
@@ -221,10 +221,16 @@ pub fn drain_batch(max: usize) -> usize {
     try_drain(max)
 }
 
-/// Wi-Fi finished an air TX — continue the queue.
+/// Wi-Fi finished an air TX — credit in-flight and wake the batch task.
+///
+/// Do **not** call `tx_by_ref` here: this runs inside the Wi-Fi TX-done
+/// callback and re-entering the blob hangs the chip. `netstack_ref`/`free`
+/// are not observed on this path; in-flight is OK → `tx_done`.
 pub(crate) fn on_tx_done() {
-    let n = drain_batch(4);
-    if n > 0 || pending_len() > 0 {
+    let _ = TX_IN_FLIGHT.fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
+        Some(x.saturating_sub(1))
+    });
+    if pending_len() > 0 {
         kick();
     }
 }
@@ -234,7 +240,7 @@ pub fn pending_len() -> usize {
     PENDING_LEN.load(Ordering::Acquire)
 }
 
-/// Successful handoffs not yet freed by Wi-Fi.
+/// Successful handoffs not yet completed by `tx_done`.
 pub fn in_flight() -> usize {
     TX_IN_FLIGHT.load(Ordering::Acquire)
 }
@@ -453,6 +459,7 @@ fn try_drain(budget: usize) -> usize {
             super::xdp::current().count_failed_tx_wifi(rc);
             STAT_DRAIN_FAIL.fetch_add(1, Ordering::Relaxed);
         } else {
+            // Handoff accepted: credit until `on_tx_done` (netstack_* never fire here).
             TX_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
             note_inflight_peak();
             STAT_DRAIN_OK.fetch_add(1, Ordering::Relaxed);
@@ -474,9 +481,6 @@ unsafe extern "C" fn netstack_ref(token: *mut c_void) {
 unsafe extern "C" fn netstack_free(token: *mut c_void) {
     if let Some(token) = token_from_raw(token) {
         token.release();
-        let _ = TX_IN_FLIGHT.fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
-            Some(x.saturating_sub(1))
-        });
         kick();
     } else {
         error!("xdp: Wi-Fi released an unknown TX token");
