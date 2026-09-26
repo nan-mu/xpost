@@ -27,6 +27,9 @@ fn load_dotenv() {
         match key {
             "WIFI_SSID" => println!("cargo:rustc-env=WIFI_SSID={val}"),
             "WIFI_PASS" | "WIFI_PASSWORD" => println!("cargo:rustc-env=WIFI_PASS={val}"),
+            "STA_IP" => println!("cargo:rustc-env=STA_IP={val}"),
+            "STA_GW" => println!("cargo:rustc-env=STA_GW={val}"),
+            "STA_PREFIX" => println!("cargo:rustc-env=STA_PREFIX={val}"),
             _ => {}
         }
     }

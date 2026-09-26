@@ -12,7 +12,8 @@ mod table;
 
 pub use error::{Error, Result};
 pub use event::{
-    Chip, Dir, Event, FlashPhase, Image, IoData, Kind, Mode, SessionWhy, XdpImage,
+    Chip, Dir, Event, FlashPhase, FlashTarget, Image, IoData, IoRole, Kind, Mode, SessionWhy,
+    XdpImage,
 };
 pub use session::Session;
 pub use sink::{FileSink, Sink, StdoutSink, VecSink};

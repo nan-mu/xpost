@@ -13,7 +13,7 @@ use alloc::string::ToString;
 use portable_atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use embassy_executor::Spawner;
-use embassy_net::StackResources;
+use embassy_net::{Ipv4Address, Ipv4Cidr, StackResources, StaticConfigV4};
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
@@ -144,6 +144,9 @@ async fn main(spawner: Spawner) -> ! {
         map_lock_status(),
     );
 
+    // XDP only enqueues; this task owns when/how many frames to tx_by_ref.
+    spawner.spawn(xdp_tx_batch_task().unwrap());
+
     match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
         (Some(ssid), Some(pass)) if !ssid.is_empty() => {
             let station = esp_radio::wifi::Config::Station(
@@ -156,7 +159,7 @@ async fn main(spawner: Spawner) -> ! {
                 .expect("wifi set_config");
             let seed = 0xC3C3_5A5A;
             let resources = NET_RESOURCES.init(StackResources::new());
-            let net_config = embassy_net::Config::dhcpv4(Default::default());
+            let net_config = static_ipv4_config();
             let (stack, runner) =
                 embassy_net::new(interfaces.station, net_config, resources, seed);
             spawner.spawn(net_task(runner).unwrap());
@@ -171,6 +174,28 @@ async fn main(spawner: Spawner) -> ! {
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn xdp_tx_batch_task() {
+    /// Frames per drain wake — amortize handoff vs one-packet-one-call.
+    const BATCH: usize = 8;
+    info!("xdp_tx batch task up batch={BATCH}");
+    loop {
+        esp_radio::wifi::XDP_TX_KICK.wait().await;
+        loop {
+            let sent = esp_radio::wifi::xdp_tx_drain_batch(BATCH);
+            let pending = esp_radio::wifi::xdp_tx_pending();
+            if pending == 0 {
+                break;
+            }
+            if sent == 0 {
+                // NO_MEM / empty drain while work remains — yield to Wi-Fi.
+                Timer::after(Duration::from_millis(1)).await;
+            }
+            // Keep draining while the kick coalesced more enqueues.
+        }
     }
 }
 
@@ -201,7 +226,7 @@ async fn net_task(
 async fn udp_task(stack: embassy_net::Stack<'static>) {
     stack.wait_config_up().await;
     if let Some(v4) = stack.config_v4() {
-        info!("dhcp {}", v4.address);
+        info!("ipv4 {}", v4.address);
     }
 
     let rx_meta = UDP_RX_META.init([PacketMetadata::EMPTY; 4]);
@@ -256,6 +281,16 @@ fn dispatch_serial(line: &str) {
     } else if line.eq_ignore_ascii_case("counters") || line.eq_ignore_ascii_case("report counters")
     {
         print_counters();
+    } else if line.eq_ignore_ascii_case("txstats") {
+        print_txstats();
+    } else if line.eq_ignore_ascii_case("prof") || line.eq_ignore_ascii_case("flame") {
+        print_flame_spans();
+    } else if line.eq_ignore_ascii_case("pchits") {
+        print_pc_hits();
+    } else if line.eq_ignore_ascii_case("prof clear") {
+        esp_radio::wifi::xdp_prof::clear_all();
+        esp_radio::wifi::xdp_tx_clear_stats();
+        esp_println::println!("OK prof clear");
     } else if let Some(rest) = strip_cmd(line, "rxcnt") {
         print_rxcnt(rest);
     } else if let Some(rest) = strip_cmd(line, "ack-dest") {
@@ -284,10 +319,16 @@ fn map_lock_status() -> &'static str {
 
 fn print_counters() {
     let e = xpost::xdp::ERRORS.snapshot();
+    let p = &xpost::esp_radio::XDP_PROG;
+    let t = esp_radio::wifi::xdp_tx_stats();
     esp_println::println!(
-        "OK counters drop={} failed_tx={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={}",
-        xpost::esp_radio::XDP_PROG.drop_count(),
-        xpost::esp_radio::XDP_PROG.failed_tx_count(),
+        "OK counters drop={} failed_tx={} tx_bad_buf={} tx_token={} tx_wifi={} tx_wifi_rc={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={} tx_enq={} tx_pend={} tx_inflight={} tx_drain_ok={} tx_nomem_rq={} tx_nomem_drop={}",
+        p.drop_count(),
+        p.failed_tx_count(),
+        p.failed_tx_bad_buf_count(),
+        p.failed_tx_token_count(),
+        p.failed_tx_wifi_count(),
+        p.failed_tx_wifi_last_rc(),
         NET_RX.load(Ordering::Relaxed),
         e.inactive_skip,
         e.reentry,
@@ -298,7 +339,58 @@ fn print_counters() {
         e.bind_unknown,
         e.pool_drop_misalign,
         map_lock_status(),
+        t.enqueued,
+        t.pending,
+        t.in_flight,
+        t.drain_ok,
+        t.drain_nomem_requeue,
+        t.drain_nomem_drop,
     );
+}
+
+fn print_txstats() {
+    let t = esp_radio::wifi::xdp_tx_stats();
+    esp_println::println!(
+        "OK txstats enq={} enq_fail_tok={} drain_ok={} nomem_rq={} nomem_drop={} drain_fail={} drain_calls={} kicks={} pend={} pend_peak={} inflight={} inflight_peak={}",
+        t.enqueued,
+        t.enqueue_fail_token,
+        t.drain_ok,
+        t.drain_nomem_requeue,
+        t.drain_nomem_drop,
+        t.drain_fail_other,
+        t.drain_calls,
+        t.kicks,
+        t.pending,
+        t.pending_peak,
+        t.in_flight,
+        t.in_flight_peak,
+    );
+}
+
+/// Brendan Gregg folded stacks — paste into speedscope / flamegraph.pl.
+fn print_flame_spans() {
+    esp_println::println!("OK flame begin");
+    for s in esp_radio::wifi::xdp_prof::snapshot_spans() {
+        if s.cycles == 0 && s.entries == 0 {
+            continue;
+        }
+        esp_println::println!("{} {}", s.folded, s.cycles);
+    }
+    esp_println::println!("OK flame end");
+}
+
+fn print_pc_hits() {
+    let mut buf = [esp_radio::wifi::xdp_prof::PcHit { pc: 0, hits: 0 }; 256];
+    let n = esp_radio::wifi::xdp_prof::snapshot_pc_hits(&mut buf);
+    esp_println::println!(
+        "OK pchits n={} samples={} overflow={}",
+        n,
+        esp_radio::wifi::xdp_prof::pc_samples(),
+        esp_radio::wifi::xdp_prof::pc_overflow(),
+    );
+    for h in buf.iter().take(n) {
+        esp_println::println!("pc=0x{:08x} hits={}", h.pc, h.hits);
+    }
 }
 
 fn print_rxcnt(rest: &str) {
@@ -345,6 +437,38 @@ fn parse_ack_dest(rest: &str) -> Option<(u32, u16)> {
         return None;
     }
     Some((ip, port))
+}
+
+fn static_ipv4_config() -> embassy_net::Config {
+    let ip = option_env!("STA_IP").unwrap_or("192.168.110.106");
+    let gw = option_env!("STA_GW").unwrap_or("192.168.110.1");
+    let prefix: u8 = option_env!("STA_PREFIX")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(24);
+    let address = parse_v4(ip).unwrap_or_else(|| {
+        panic!("STA_IP invalid: {ip}");
+    });
+    let gateway = parse_v4(gw).unwrap_or_else(|| {
+        panic!("STA_GW invalid: {gw}");
+    });
+    let addr = Ipv4Address::new(
+        (address >> 24) as u8,
+        (address >> 16) as u8,
+        (address >> 8) as u8,
+        address as u8,
+    );
+    let gw_addr = Ipv4Address::new(
+        (gateway >> 24) as u8,
+        (gateway >> 16) as u8,
+        (gateway >> 8) as u8,
+        gateway as u8,
+    );
+    info!("sta static {ip}/{prefix} gw={gw}");
+    embassy_net::Config::ipv4_static(StaticConfigV4 {
+        address: Ipv4Cidr::new(addr, prefix),
+        gateway: Some(gw_addr),
+        dns_servers: Default::default(),
+    })
 }
 
 fn parse_v4(s: &str) -> Option<u32> {

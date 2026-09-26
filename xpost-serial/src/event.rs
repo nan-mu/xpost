@@ -43,8 +43,8 @@ impl SessionWhy {
                 format!("open {port} {baud} chip={chip}")
             }
             Self::Close => "close".into(),
-            Self::ResetToApp => "reset_to_app".into(),
-            Self::ResetToDownload => "reset_to_download".into(),
+            Self::ResetToApp => "reset → app".into(),
+            Self::ResetToDownload => "reset → download".into(),
             Self::ModeSwitch => "mode_switch".into(),
         }
     }
@@ -68,11 +68,56 @@ impl fmt::Display for FlashPhase {
     }
 }
 
+/// What is being flashed / erased (drives transcript tags).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FlashTarget {
+    /// Application firmware ELF (via esp-idf image format).
+    Firmware,
+    /// Partition table at 0x8000.
+    PartitionTable,
+    /// Cold-region XDP ELF container.
+    Xdp { name: String },
+    /// Erase cold table span.
+    ColdErase,
+    /// Generic `write_bin` (unspecified payload).
+    Bin,
+}
+
+impl FlashTarget {
+    fn tag(&self) -> &'static str {
+        match self {
+            Self::Firmware => "fw",
+            Self::PartitionTable => "part",
+            Self::Xdp { .. } => "xdp",
+            Self::ColdErase => "erase",
+            Self::Bin => "bin",
+        }
+    }
+
+    fn detail(&self) -> String {
+        match self {
+            Self::Xdp { name } => format!(" name={name}"),
+            _ => String::new(),
+        }
+    }
+}
+
 /// Host perspective: Tx = bytes written toward the MCU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
     Tx,
     Rx,
+}
+
+/// UART / command line role in the transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IoRole {
+    /// Host issued a serial App-mode command.
+    CmdTx,
+    /// MCU reply that completes an outstanding command (`OK ` / `ERR `).
+    CmdRx,
+    /// MCU-initiated line (boot / log), captured from UART — not a cmd reply.
+    UartRx,
 }
 
 /// Line-oriented I/O payload (prototype: lines only).
@@ -90,13 +135,14 @@ pub enum Kind {
         why: SessionWhy,
     },
     Flash {
+        target: FlashTarget,
         phase: FlashPhase,
         addr: Option<u32>,
         len: u32,
         done: u32,
     },
     Io {
-        dir: Dir,
+        role: IoRole,
         data: IoData,
     },
     Error {
@@ -118,15 +164,27 @@ impl Event {
     pub fn transcript_line(&self) -> String {
         match &self.kind {
             Kind::Io {
-                dir: Dir::Tx,
+                role: IoRole::CmdTx,
                 data: IoData::Line(s),
-            } => format!("> {s}"),
+            } => format!("[cmd] → {s}"),
             Kind::Io {
-                dir: Dir::Rx,
+                role: IoRole::CmdRx,
                 data: IoData::Line(s),
-            } => s.clone(),
-            Kind::Session { why, .. } => format!("--- {} ---", why.label()),
+            } => format!("[cmd] ← {s}"),
+            Kind::Io {
+                role: IoRole::UartRx,
+                data: IoData::Line(s),
+            } => format!("[uart] {s}"),
+            Kind::Session { why, from, to } => match why {
+                SessionWhy::ResetToApp | SessionWhy::ResetToDownload => {
+                    format!("[reset] {} ({} → {})", why.label(), from, to)
+                }
+                SessionWhy::Open { .. } | SessionWhy::Close | SessionWhy::ModeSwitch => {
+                    format!("[session] {} ({} → {})", why.label(), from, to)
+                }
+            },
             Kind::Flash {
+                target,
                 phase,
                 addr,
                 len,
@@ -135,9 +193,14 @@ impl Event {
                 let addr = addr
                     .map(|a| format!("{a:#x}"))
                     .unwrap_or_else(|| "-".into());
-                format!("--- flash {phase} addr={addr} {done}/{len} ---")
+                format!(
+                    "[{}] {}{} addr={addr} {done}/{len}",
+                    target.tag(),
+                    phase,
+                    target.detail()
+                )
             }
-            Kind::Error { ctx, msg } => format!("--- error: {ctx}: {msg} ---"),
+            Kind::Error { ctx, msg } => format!("[err] {ctx}: {msg}"),
         }
     }
 }

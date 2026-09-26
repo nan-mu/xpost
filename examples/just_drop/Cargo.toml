@@ -42,9 +42,9 @@ esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c3", "log-04"] }
 log                    = "0.4.27"
 
 embassy-net = { version = "0.9.1", features = [
-  "dhcpv4",
   "log",
   "medium-ethernet",
+  "proto-ipv4",
   "tcp",
   "udp",
 ] }
