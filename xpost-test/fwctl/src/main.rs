@@ -9,8 +9,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::time::sleep;
 
@@ -139,7 +137,7 @@ async fn main() -> Result<()> {
 }
 
 async fn ensure_agent(endpoint: &str) -> Result<()> {
-    if tcp_probe(endpoint).await.is_ok() {
+    if http_health(endpoint).await.is_ok() {
         eprintln!("agent reachable at {endpoint}");
         return Ok(());
     }
@@ -158,7 +156,7 @@ async fn ensure_agent(endpoint: &str) -> Result<()> {
 
     for _ in 0..180 {
         sleep(Duration::from_secs(1)).await;
-        if tcp_probe(endpoint).await.is_ok() {
+        if http_health(endpoint).await.is_ok() {
             eprintln!("agent ready at {endpoint}");
             return Ok(());
         }
@@ -167,17 +165,43 @@ async fn ensure_agent(endpoint: &str) -> Result<()> {
 }
 
 fn agent_listen_addr(endpoint: &str) -> String {
-    let host = endpoint.rsplit_once(':').map(|(h, _)| h).unwrap_or("0.0.0.0");
+    let host = endpoint
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or("0.0.0.0");
     match host {
         "127.0.0.1" | "localhost" => "127.0.0.1:9240".into(),
-        _ => format!("0.0.0.0:{}", endpoint.rsplit_once(':').map(|(_, p)| p).unwrap_or("9240")),
+        _ => {
+            let port = endpoint
+                .rsplit_once(':')
+                .map(|(_, p)| p.trim_end_matches('/'))
+                .unwrap_or("9240");
+            format!("0.0.0.0:{port}")
+        }
     }
 }
 
-async fn tcp_probe(endpoint: &str) -> Result<()> {
-    let mut stream = TcpStream::connect(endpoint).await?;
-    stream.shutdown().await.ok();
-    Ok(())
+async fn http_health(endpoint: &str) -> Result<()> {
+    let base = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.trim_end_matches('/').to_string()
+    } else {
+        format!("http://{}", endpoint.trim_end_matches('/'))
+    };
+    let url = format!("{base}/health");
+    tokio::task::spawn_blocking(move || {
+        let resp = ureq::get(&url)
+            .timeout(Duration::from_secs(2))
+            .call()
+            .with_context(|| format!("GET {url}"))?;
+        if !(200..300).contains(&resp.status()) {
+            bail!("health HTTP {}", resp.status());
+        }
+        Ok(())
+    })
+    .await
+    .context("join health probe")?
 }
 
 fn xpost_root() -> PathBuf {

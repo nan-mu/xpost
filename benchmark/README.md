@@ -17,7 +17,7 @@ benchmark/
 ## 快速开始
 
 ```bash
-# Mac（另开终端）
+# Mac（另开终端；HTTP /health /v1/* /mcp）
 cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
 
 # TR3000

@@ -4,6 +4,7 @@
 # No env vars, no CLI flags. Edit this file to choose which benches run.
 #
 # Mac side: cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
+# Agent HTTP: /health, /v1/* (harness), /mcp (Cursor MCP). endpoint = host:port (http:// inferred).
 #
 # Experiment knobs live in just_tx.toml / just_drop.toml.
 # Suite [[tests]].name must match firmware/config.toml [[tests]] names.

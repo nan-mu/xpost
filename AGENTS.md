@@ -29,6 +29,8 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 - **`xpost-agent/`** (crate `xpost-agent`): CLI. Dispatch stays `cargo xtask agent …`
   (`--manifest-path xpost-agent/Cargo.toml`). Agent uses `xpost-elf` to read the
   program name from the XDP ELF, then calls `Session::install_xdp(name, path)`.
+  Long-running mode (`--listen`) serves HTTP JSON `/v1/*` and MCP `/mcp` on one
+  port (shared USB session).
 - **`xpost-test/`**: experiment director. It decides the scenario (load drop or not,
   send a stimulus, expect `ack` or `no-ack`, then read counters). It calls
   `xpost-agent` / `xpost-serial`; it does not own the USB session itself while
@@ -40,10 +42,13 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 
 Mac（USB 接 ESP；cwd = `xpost/`）：只需常驻 agent。收到 `FlashProfile` 时按 `profiles.toml` 的 `build` 编译再烧录。
 
+HTTP：`/health`、`/v1/*`（harness）、`/mcp`（Cursor Streamable HTTP MCP）。
+
 ```bash
 cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
 ```
 
+Cursor MCP 示例 URL：`http://127.0.0.1:9240/mcp`。
 Wi-Fi 凭据仍在 `examples/just_drop/.env`、`examples/just_drop_hal/.env` 与 `examples/just_tx_hal/.env`（`WIFI_SSID` / `WIFI_PASS`）。
 
 TR3000（编译期嵌入 `xpost-test/config/`：`default.toml` + `just_tx.toml` + `just_drop.toml`）：

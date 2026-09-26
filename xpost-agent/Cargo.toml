@@ -15,9 +15,19 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4.5", features = ["derive"] }
+rmcp = { version = "3.4", default-features = false, features = [
+  "server",
+  "macros",
+  "transport-streamable-http-server",
+] }
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 toml = "0.8"
+tower-http = { version = "0.6", features = ["timeout"] }
 xpost-serial = { path = "../xpost-serial" }
 
 [profile.release]

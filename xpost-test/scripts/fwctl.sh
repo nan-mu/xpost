@@ -27,21 +27,28 @@ Examples:
 EOF
 }
 
-tcp_probe() {
-  (echo >/dev/tcp/"${1%:*}"/"${1#*:}") >/dev/null 2>&1
+http_health() {
+  local base="$1"
+  case "$base" in
+    http://*|https://*) ;;
+    *) base="http://$base" ;;
+  esac
+  curl -fsS --max-time 2 "${base%/}/health" >/dev/null
 }
 
 ensure_agent() {
-  if tcp_probe "$AGENT_ENDPOINT"; then
+  if http_health "$AGENT_ENDPOINT"; then
     echo "agent reachable at $AGENT_ENDPOINT" >&2
     return 0
   fi
-  local listen="0.0.0.0:${AGENT_ENDPOINT##*:}"
+  local port="${AGENT_ENDPOINT##*:}"
+  port="${port%%/*}"
+  local listen="0.0.0.0:${port}"
   echo "starting xpost agent on $listen …" >&2
   (cd "$XPOST_ROOT" && cargo xtask agent --listen "$listen" --no-monitor) &
   for _ in $(seq 1 180); do
     sleep 1
-    if tcp_probe "$AGENT_ENDPOINT"; then
+    if http_health "$AGENT_ENDPOINT"; then
       echo "agent ready at $AGENT_ENDPOINT" >&2
       return 0
     fi

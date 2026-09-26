@@ -1,7 +1,7 @@
 # Profile registry for Mac `xpost-agent` FlashProfile (paths relative to xpost/).
 # `build` is argv run from XPOST_ROOT before flash so Mac only needs:
 #   cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
-
+# (HTTP /v1/flash_profile + /mcp on that port)
 [[profile]]
 id = "just-drop"
 path = "just_drop"

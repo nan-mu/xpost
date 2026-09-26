@@ -1,6 +1,10 @@
-//! CLI front-end for [`xpost_serial`]. One-shot commands or a long-running listen RPC.
+//! CLI front-end for [`xpost_serial`]. One-shot commands or a long-running HTTP/MCP server.
 
-mod listen;
+mod http;
+mod mcp;
+mod ops;
+mod state;
+mod util;
 
 use std::io::ErrorKind;
 use std::net::UdpSocket;
@@ -30,7 +34,7 @@ struct Cli {
     #[arg(long, global = true, default_value = DEFAULT_LOG)]
     log: PathBuf,
 
-    /// Bind TCP RPC (program / clear / counters / probe). Mutually exclusive with subcommands.
+    /// Bind HTTP server (`/health`, `/v1/*`, `/mcp`). Mutually exclusive with subcommands.
     #[arg(long)]
     listen: Option<String>,
 
@@ -127,7 +131,7 @@ fn run() -> Result<()> {
         if cli.cmd.is_some() {
             bail!("--listen cannot be combined with a subcommand");
         }
-        return listen::serve(addr, cli.port.as_deref(), &cli.log);
+        return http::serve_http(addr, cli.port.as_deref(), &cli.log);
     }
     let Some(cmd) = cli.cmd else {
         bail!("subcommand required (or pass --listen ADDR)");

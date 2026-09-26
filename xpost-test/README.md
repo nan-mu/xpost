@@ -98,12 +98,12 @@ Mac scripts/fwctl.sh  --HTTP-->  TR3000 ./probe serve (:19081)
                                         |
                                         +-- re-exec ./probe <bench> (tee → 终端 + API log)
                                         |
-                                        +-- FlashProfile --> Mac xpost-agent (:9240) --> ESP32-C3
+                                        +-- HTTP /v1/flash_profile --> Mac xpost-agent (:9240) --> ESP32-C3
 ```
 
 | 组件 | 位置 | 启动 |
 |------|------|------|
-| `xpost-agent` | Mac（USB 接 ESP） | `cd xpost && cargo xtask agent`（或 `fwctl.sh` 自动拉起） |
+| `xpost-agent` | Mac（USB 接 ESP） | `cd xpost && cargo xtask agent --listen 0.0.0.0:9240 --no-monitor`（或 `fwctl.sh` 自动拉起；另有 `/mcp`） |
 | `test serve` | TR3000 | `./probe serve`（HTTP `[serve].http_listen`，默认 `0.0.0.0:19081`） |
 | `test <bench>` | TR3000（serve 子进程或手工） | `./probe all\|drop-xdp\|… [--smoke] [--formal]` |
 
