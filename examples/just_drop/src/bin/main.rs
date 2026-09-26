@@ -13,7 +13,7 @@ use alloc::string::ToString;
 use portable_atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use embassy_executor::Spawner;
-use embassy_net::StackResources;
+use embassy_net::{Ipv4Address, Ipv4Cidr, StackResources, StaticConfigV4};
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
@@ -156,7 +156,7 @@ async fn main(spawner: Spawner) -> ! {
                 .expect("wifi set_config");
             let seed = 0xC3C3_5A5A;
             let resources = NET_RESOURCES.init(StackResources::new());
-            let net_config = embassy_net::Config::dhcpv4(Default::default());
+            let net_config = static_ipv4_config();
             let (stack, runner) =
                 embassy_net::new(interfaces.station, net_config, resources, seed);
             spawner.spawn(net_task(runner).unwrap());
@@ -201,7 +201,7 @@ async fn net_task(
 async fn udp_task(stack: embassy_net::Stack<'static>) {
     stack.wait_config_up().await;
     if let Some(v4) = stack.config_v4() {
-        info!("dhcp {}", v4.address);
+        info!("ipv4 {}", v4.address);
     }
 
     let rx_meta = UDP_RX_META.init([PacketMetadata::EMPTY; 4]);
@@ -284,10 +284,15 @@ fn map_lock_status() -> &'static str {
 
 fn print_counters() {
     let e = xpost::xdp::ERRORS.snapshot();
+    let p = &xpost::esp_radio::XDP_PROG;
     esp_println::println!(
-        "OK counters drop={} failed_tx={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={}",
-        xpost::esp_radio::XDP_PROG.drop_count(),
-        xpost::esp_radio::XDP_PROG.failed_tx_count(),
+        "OK counters drop={} failed_tx={} tx_bad_buf={} tx_token={} tx_wifi={} tx_wifi_rc={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={}",
+        p.drop_count(),
+        p.failed_tx_count(),
+        p.failed_tx_bad_buf_count(),
+        p.failed_tx_token_count(),
+        p.failed_tx_wifi_count(),
+        p.failed_tx_wifi_last_rc(),
         NET_RX.load(Ordering::Relaxed),
         e.inactive_skip,
         e.reentry,
@@ -345,6 +350,38 @@ fn parse_ack_dest(rest: &str) -> Option<(u32, u16)> {
         return None;
     }
     Some((ip, port))
+}
+
+fn static_ipv4_config() -> embassy_net::Config {
+    let ip = option_env!("STA_IP").unwrap_or("192.168.110.106");
+    let gw = option_env!("STA_GW").unwrap_or("192.168.110.1");
+    let prefix: u8 = option_env!("STA_PREFIX")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(24);
+    let address = parse_v4(ip).unwrap_or_else(|| {
+        panic!("STA_IP invalid: {ip}");
+    });
+    let gateway = parse_v4(gw).unwrap_or_else(|| {
+        panic!("STA_GW invalid: {gw}");
+    });
+    let addr = Ipv4Address::new(
+        (address >> 24) as u8,
+        (address >> 16) as u8,
+        (address >> 8) as u8,
+        address as u8,
+    );
+    let gw_addr = Ipv4Address::new(
+        (gateway >> 24) as u8,
+        (gateway >> 16) as u8,
+        (gateway >> 8) as u8,
+        gateway as u8,
+    );
+    info!("sta static {ip}/{prefix} gw={gw}");
+    embassy_net::Config::ipv4_static(StaticConfigV4 {
+        address: Ipv4Cidr::new(addr, prefix),
+        gateway: Some(gw_addr),
+        dns_servers: Default::default(),
+    })
 }
 
 fn parse_v4(s: &str) -> Option<u32> {

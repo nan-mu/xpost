@@ -20,7 +20,8 @@ use serialport::{SerialPort, SerialPortType, UsbPortInfo};
 
 use crate::error::{Error, Result};
 use crate::event::{
-    Chip, Dir, Event, FlashPhase, Image, IoData, Kind, Mode, SessionWhy, port_label,
+    Chip, Event, FlashPhase, FlashTarget, Image, IoData, IoRole, Kind, Mode, SessionWhy,
+    port_label,
 };
 use crate::sink::Sink;
 use crate::table::{
@@ -38,6 +39,7 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 struct SinkProgress<'a, S: Sink> {
     sink: &'a S,
     seq: &'a AtomicU64,
+    target: FlashTarget,
     addr: u32,
     phase: FlashPhase,
     total: u32,
@@ -50,6 +52,7 @@ impl<'a, S: Sink> SinkProgress<'a, S> {
             seq,
             ts: SystemTime::now(),
             kind: Kind::Flash {
+                target: self.target.clone(),
                 phase: self.phase,
                 addr: Some(self.addr),
                 len: self.total,
@@ -173,14 +176,21 @@ impl<S: Sink> Session<S> {
             });
         }
         self.enter_download()?;
-        self.write_bin_on_flasher(addr, &data)?;
+        self.write_bin_on_flasher(addr, &data, FlashTarget::Bin)?;
         Ok(())
     }
 
     /// Read the cold table and list packed XDP ELF entries (name / relative offset / len).
+    ///
+    /// Always returns the session to App mode (read uses download); otherwise
+    /// subsequent `request` / `counters` fail with `not in app mode`.
     pub fn list_xdp(&mut self) -> Result<Vec<XdpEntry>> {
-        let bytes = self.read_cold_table()?;
-        list_entries(&bytes)
+        let result = (|| {
+            let bytes = self.read_cold_table()?;
+            list_entries(&bytes)
+        })();
+        self.reset_to_app()?;
+        result
     }
 
     /// Erase the entire cold table (all packed XDP ELF containers).
@@ -200,6 +210,7 @@ impl<S: Sink> Session<S> {
                 seq,
                 ts: SystemTime::now(),
                 kind: Kind::Flash {
+                    target: FlashTarget::ColdErase,
                     phase: FlashPhase::Writing,
                     addr: Some(abs),
                     len,
@@ -217,6 +228,7 @@ impl<S: Sink> Session<S> {
                 seq,
                 ts: SystemTime::now(),
                 kind: Kind::Flash {
+                    target: FlashTarget::ColdErase,
                     phase: FlashPhase::Verified,
                     addr: Some(abs),
                     len,
@@ -279,7 +291,13 @@ impl<S: Sink> Session<S> {
             let flasher = self.flasher.as_mut().ok_or(Error::Closed)?;
             flasher.erase_region(abs, erase_len)?;
         }
-        self.write_bin_on_flasher(abs, &data)?;
+        self.write_bin_on_flasher(
+            abs,
+            &data,
+            FlashTarget::Xdp {
+                name: name.to_string(),
+            },
+        )?;
         Ok(outcome)
     }
 
@@ -292,6 +310,9 @@ impl<S: Sink> Session<S> {
             let progress = SinkProgress {
                 sink: &self.sink,
                 seq: &self.seq,
+                target: FlashTarget::Xdp {
+                    name: "(cold-table)".into(),
+                },
                 addr: abs,
                 phase: FlashPhase::Reading,
                 total: len,
@@ -371,7 +392,7 @@ impl<S: Sink> Session<S> {
         }
         self.ensure_app_reader()?;
         let line = cmd.trim_end_matches(['\r', '\n']);
-        self.emit_io(Dir::Tx, line.to_string());
+        self.emit_io(IoRole::CmdTx, line.to_string());
         {
             let app = self.app.as_mut().ok_or(Error::Closed)?;
             let mut w = app.writer.lock().map_err(|_| Error::Msg("writer lock".into()))?;
@@ -389,10 +410,12 @@ impl<S: Sink> Session<S> {
             let app = self.app.as_mut().ok_or(Error::Closed)?;
             match app.rx.recv_timeout(remaining) {
                 Ok(AppRx::Line(rx)) => {
-                    self.emit_io(Dir::Rx, rx.clone());
                     if is_reply_line(&rx) {
+                        self.emit_io(IoRole::CmdRx, rx.clone());
                         return Ok(rx);
                     }
+                    // MCU-initiated traffic interleaved while waiting for the reply.
+                    self.emit_io(IoRole::UartRx, rx);
                 }
                 Ok(AppRx::Died(msg)) => {
                     self.emit_error("request", msg.clone());
@@ -412,12 +435,13 @@ impl<S: Sink> Session<S> {
 
     // —— internals ——
 
-    fn write_bin_on_flasher(&mut self, addr: u32, data: &[u8]) -> Result<()> {
+    fn write_bin_on_flasher(&mut self, addr: u32, data: &[u8], target: FlashTarget) -> Result<()> {
         let len = data.len() as u32;
         {
             let mut progress = SinkProgress {
                 sink: &self.sink,
                 seq: &self.seq,
+                target: target.clone(),
                 addr,
                 phase: FlashPhase::Writing,
                 total: len,
@@ -436,6 +460,7 @@ impl<S: Sink> Session<S> {
             let progress = SinkProgress {
                 sink: &self.sink,
                 seq: &self.seq,
+                target: target.clone(),
                 addr,
                 phase: FlashPhase::Reading,
                 total: len,
@@ -480,6 +505,7 @@ impl<S: Sink> Session<S> {
             seq,
             ts: SystemTime::now(),
             kind: Kind::Flash {
+                target,
                 phase: FlashPhase::Verified,
                 addr: Some(addr),
                 len,
@@ -511,6 +537,7 @@ impl<S: Sink> Session<S> {
             seq,
             ts: SystemTime::now(),
             kind: Kind::Flash {
+                target: FlashTarget::Firmware,
                 phase: FlashPhase::Writing,
                 addr: Some(0x10000),
                 len: total,
@@ -526,7 +553,8 @@ impl<S: Sink> Session<S> {
             seq,
             ts: SystemTime::now(),
             kind: Kind::Flash {
-                phase: FlashPhase::Writing,
+                target: FlashTarget::Firmware,
+                phase: FlashPhase::Verified,
                 addr: Some(0x10000),
                 len: total,
                 done: total,
@@ -536,7 +564,11 @@ impl<S: Sink> Session<S> {
         // Overwrite default partition table with board CSV (incl. xdp @ 0x310000).
         self.leave_download_silent();
         self.enter_download()?;
-        self.write_bin_on_flasher(crate::partitions::PART_TABLE_OFFSET, &part_bin)?;
+        self.write_bin_on_flasher(
+            crate::partitions::PART_TABLE_OFFSET,
+            &part_bin,
+            FlashTarget::PartitionTable,
+        )?;
         Ok(())
     }
 
@@ -608,13 +640,13 @@ impl<S: Sink> Session<S> {
         });
     }
 
-    fn emit_io(&self, dir: Dir, line: String) {
+    fn emit_io(&self, role: IoRole, line: String) {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         self.sink.emit(Event {
             seq,
             ts: SystemTime::now(),
             kind: Kind::Io {
-                dir,
+                role,
                 data: IoData::Line(line),
             },
         });
@@ -806,29 +838,32 @@ mod tests {
             },
         });
         emit(Kind::Flash {
+            target: FlashTarget::Xdp {
+                name: "just_drop".into(),
+            },
             phase: FlashPhase::Writing,
             addr: Some(0x310000),
             len: 10,
             done: 10,
         });
         emit(Kind::Io {
-            dir: Dir::Tx,
+            role: IoRole::CmdTx,
             data: IoData::Line("PING".into()),
         });
         emit(Kind::Io {
-            dir: Dir::Rx,
+            role: IoRole::UartRx,
             data: IoData::Line("INFO boot".into()),
         });
         emit(Kind::Io {
-            dir: Dir::Rx,
+            role: IoRole::CmdRx,
             data: IoData::Line("OK PING".into()),
         });
         let lines = sink.transcript();
-        assert_eq!(lines[0], "--- open /dev/tty 115200 chip=esp32c3 ---");
-        assert!(lines[1].contains("writing"));
-        assert_eq!(lines[2], "> PING");
-        assert_eq!(lines[3], "INFO boot");
-        assert_eq!(lines[4], "OK PING");
+        assert!(lines[0].starts_with("[session] open "));
+        assert!(lines[1].starts_with("[xdp] writing name=just_drop "));
+        assert_eq!(lines[2], "[cmd] → PING");
+        assert_eq!(lines[3], "[uart] INFO boot");
+        assert_eq!(lines[4], "[cmd] ← OK PING");
         let ev = sink.events();
         for (i, e) in ev.iter().enumerate() {
             assert_eq!(e.seq, i as u64);

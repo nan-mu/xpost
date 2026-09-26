@@ -52,7 +52,7 @@
 //! [`new`] / Wi-Fi start. With the feature enabled, STA/AP RX callbacks always
 //! call [`Prog::run`]. Actions: Pass (enqueue returned window), Drop (free +
 //! [`Prog::count_drop`]), and Tx (zero-copy same-iface handoff; failure frees +
-//! [`Prog::count_failed_tx`]).
+//! [`Prog::count_failed_tx_token`] / [`Prog::count_failed_tx_wifi`] / …).
 //!
 //! Default prog is [`NoopProg`] (always Pass) until attach. Attach is one-shot
 //! ([`embassy_sync::once_lock::OnceLock`]); a second call fails and keeps the
@@ -1170,8 +1170,11 @@ fn xdp_dispatch(
             Some(include::ESP_OK as esp_err_t)
         }
         Action::Tx => {
-            if !xdp_tx::transmit(ifx, window, eb) {
-                prog.count_failed_tx();
+            match xdp_tx::transmit(ifx, window, eb) {
+                xdp_tx::TxOutcome::Ok => {}
+                xdp_tx::TxOutcome::FailBadBuf => prog.count_failed_tx_bad_buf(),
+                xdp_tx::TxOutcome::FailToken => prog.count_failed_tx_token(),
+                xdp_tx::TxOutcome::FailWifi(rc) => prog.count_failed_tx_wifi(rc),
             }
             Some(include::ESP_OK as esp_err_t)
         }

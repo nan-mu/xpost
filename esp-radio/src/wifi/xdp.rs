@@ -24,13 +24,10 @@
 //! | Event | Driver |
 //! |-------|--------|
 //! | Drop path freed `eb` | [`Prog::count_drop`] once |
-//! | Tx handoff failed and `eb` freed | [`Prog::count_failed_tx`] once |
+//! | Tx failed: null/`empty` window | [`Prog::count_failed_tx_bad_buf`] |
+//! | Tx failed: token pool exhausted | [`Prog::count_failed_tx_token`] |
+//! | Tx failed: `tx_by_ref` non-OK | [`Prog::count_failed_tx_wifi`] |
 //! | Tx handoff succeeded (`esp_wifi_internal_tx_by_ref` == OK) | no counter |
-//!
-//! # Tx failure conditions
-//!
-//! Null `eb`, empty window, ownership-token exhaustion, or non-OK
-//! `esp_wifi_internal_tx_by_ref`.
 //!
 //! Netstack callbacks are registered in `wifi_init`; failure aborts init.
 //!
@@ -68,9 +65,14 @@ pub trait Prog: Send + Sync {
     /// Called once after the driver frees `eb` on the Drop path.
     fn count_drop(&self);
 
-    /// Called once after a Tx attempt fails and `eb` has been freed (or
-    /// handoff failed such that the ownership protocol will free it).
-    fn count_failed_tx(&self);
+    /// Tx failed: null `eb` or empty window (buffer freed).
+    fn count_failed_tx_bad_buf(&self);
+
+    /// Tx failed: ownership-token pool exhausted (buffer freed).
+    fn count_failed_tx_token(&self);
+
+    /// Tx failed: `esp_wifi_internal_tx_by_ref` returned `rc` ≠ OK.
+    fn count_failed_tx_wifi(&self, rc: i32);
 }
 
 /// Default prog: always Pass the full frame; counters are no-ops.
@@ -86,7 +88,13 @@ impl Prog for NoopProg {
     fn count_drop(&self) {}
 
     #[inline]
-    fn count_failed_tx(&self) {}
+    fn count_failed_tx_bad_buf(&self) {}
+
+    #[inline]
+    fn count_failed_tx_token(&self) {}
+
+    #[inline]
+    fn count_failed_tx_wifi(&self, _rc: i32) {}
 }
 
 static NOOP: NoopProg = NoopProg;

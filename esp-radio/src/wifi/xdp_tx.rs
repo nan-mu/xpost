@@ -15,6 +15,18 @@ const TX_TOKEN_SLOT_EMPTY: usize = 0;
 const TX_TOKEN_SLOT_OWNED: usize = 1;
 const TX_TOKEN_SLOT_RELEASING: usize = 2;
 
+/// Result of [`transmit`]: success or which failure arm freed/`will free` `eb`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TxOutcome {
+    Ok,
+    /// `eb` was null or `window` empty (buffer freed by caller path).
+    FailBadBuf,
+    /// All [`TX_TOKEN_CAPACITY`] ownership slots busy.
+    FailToken,
+    /// `esp_wifi_internal_tx_by_ref` returned non-OK (`rc` preserved).
+    FailWifi(i32),
+}
+
 /// Stable handle passed as `netstack_buf`; does not contain packet data.
 #[repr(C)]
 struct RxBufferOwnership {
@@ -108,32 +120,32 @@ pub(crate) fn arm_zero_copy() -> i32 {
 }
 
 /// Transmit `window` without copying. Consumes RX ownership of `eb` on every path.
-///
-/// Returns `true` on successful handoff (`esp_wifi_internal_tx_by_ref` == OK).
-/// On `false`, `eb` has already been freed (or was null).
-pub(crate) fn transmit(ifx: u32, window: &mut [u8], eb: *mut c_void) -> bool {
-    // `claim_token` rejects null `eb`; empty window / token exhaustion share
-    // the free path. Callbacks are required by `wifi_init` (`arm_zero_copy`).
-    if !window.is_empty()
-        && let Some(token) = claim_token(eb)
-    {
-        let rc = unsafe {
-            include::esp_wifi_internal_tx_by_ref(
-                ifx,
-                window.as_mut_ptr().cast(),
-                window.len(),
-                (token as *const RxBufferOwnership).cast_mut().cast(),
-            )
-        };
-        // Drop the RX callback's reference; TX holds its own via netstack_ref.
-        // On handoff failure Wi-Fi should balance any ref it took; this release
-        // frees `eb` when refs hit 0.
-        token.release();
-        return rc == include::ESP_OK as i32;
+pub(crate) fn transmit(ifx: u32, window: &mut [u8], eb: *mut c_void) -> TxOutcome {
+    if eb.is_null() || window.is_empty() {
+        super::xdp::free_rx_buffer(eb);
+        return TxOutcome::FailBadBuf;
     }
-
-    super::xdp::free_rx_buffer(eb);
-    false
+    let Some(token) = claim_token(eb) else {
+        super::xdp::free_rx_buffer(eb);
+        return TxOutcome::FailToken;
+    };
+    let rc = unsafe {
+        include::esp_wifi_internal_tx_by_ref(
+            ifx,
+            window.as_mut_ptr().cast(),
+            window.len(),
+            (token as *const RxBufferOwnership).cast_mut().cast(),
+        )
+    };
+    // Drop the RX callback's reference; TX holds its own via netstack_ref.
+    // On handoff failure Wi-Fi should balance any ref it took; this release
+    // frees `eb` when refs hit 0.
+    token.release();
+    if rc == include::ESP_OK as i32 {
+        TxOutcome::Ok
+    } else {
+        TxOutcome::FailWifi(rc)
+    }
 }
 
 fn claim_token(eb: *mut c_void) -> Option<&'static RxBufferOwnership> {
