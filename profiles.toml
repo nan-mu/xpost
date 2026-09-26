@@ -36,7 +36,7 @@ build = ["cargo", "xtask", "just_drop", "build", "--release"]
 [[profile]]
 id = "just-tx-hal"
 path = "just_tx_hal"
-description = "just_tx_hal firmware (app-layer UDP echo; rxcnt[17] on send)"
+description = "just_tx_hal firmware (app-layer UDP echo; rxcnt[17] on recv)"
 bin = "examples/just_tx_hal/target/riscv32imc-unknown-none-elf/release/just_tx_hal"
 partition_table = "examples/just_tx_hal/partitions.csv"
 chip = "esp32c3"

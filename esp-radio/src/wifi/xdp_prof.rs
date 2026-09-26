@@ -21,11 +21,11 @@ use portable_atomic::{AtomicU32, AtomicU64, Ordering};
 pub enum Site {
     /// `Prog::run` / leased image execution.
     XdpRun = 0,
-    /// Claim token + enqueue only (no `tx_by_ref`).
+    /// Claim token + prepare TX (pre-`tx_by_ref`).
     TxEnqueue = 1,
-    /// One `esp_wifi_internal_tx_by_ref` attempt inside a batch drain.
+    /// One `esp_wifi_internal_tx_by_ref` call.
     TxDrainOne = 2,
-    /// Whole `drain_batch` call.
+    /// Unused (batch path removed); retained for span index stability.
     TxDrainBatch = 3,
     /// STA/AP RX callback XDP dispatch (Pass/Drop/Tx decision).
     WifiRxDispatch = 4,

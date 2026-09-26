@@ -37,7 +37,7 @@ const IPPROTO_UDP: u32 = 17;
 
 /// Packets that reached the UDP socket (always, before echo).
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
-/// Per-ipproto counters; UDP (17) increments on successful echo send.
+/// Per-ipproto counters; UDP (17) increments on recv (aligns with XDP just_tx rxcnt).
 static RXCNT: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 /// Optional fixed ACK destination (host order). Zero address → reply to the sender.
 static ACK_IP: AtomicU32 = AtomicU32::new(0);
@@ -144,6 +144,11 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
     let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
     socket.bind(STIM_PORT).expect("bind stim");
     info!("udp echo listening {STIM_PORT}");
+    if let Some(v4) = stack.config_v4() {
+        esp_println::println!("xpost ready ipv4={} port={STIM_PORT}", v4.address);
+    } else {
+        esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
+    }
 
     let mut buf = [0u8; 256];
     loop {
@@ -151,14 +156,12 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
             continue;
         };
         NET_RX.fetch_add(1, Ordering::Relaxed);
+        RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
         let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
         // Await TX fully: short with_timeout was silently dropping every echo
         // (Wi-Fi TX often ≫ 50 ms), so TC never saw bounce and RTT stayed empty.
-        match socket.send_to(&buf[..n], dest).await {
-            Ok(()) => {
-                RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
-            }
-            Err(_) => error!("echo send failed bytes={n}"),
+        if socket.send_to(&buf[..n], dest).await.is_err() {
+            error!("echo send failed bytes={n}");
         }
     }
 }

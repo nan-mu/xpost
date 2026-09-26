@@ -135,8 +135,9 @@ pub use xdp::{Action, NoopProg, Prog, attach_prog};
 #[cfg(feature = "xdp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "xdp")))]
 pub use xdp_tx::{
-    TX_KICK as XDP_TX_KICK, TxStats as XdpTxStats, clear_stats as xdp_tx_clear_stats,
-    drain_batch as xdp_tx_drain_batch, in_flight as xdp_tx_in_flight, pending_len as xdp_tx_pending,
+    TxEvKind as XdpTxEvKind, TxLogEntry as XdpTxLogEntry, TxStats as XdpTxStats,
+    clear_stats as xdp_tx_clear_stats, drain_batch as xdp_tx_drain_batch,
+    in_flight as xdp_tx_in_flight, pending_len as xdp_tx_pending, snapshot_log as xdp_tx_log,
     stats as xdp_tx_stats,
 };
 

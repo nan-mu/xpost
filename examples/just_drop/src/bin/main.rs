@@ -134,18 +134,21 @@ async fn main(spawner: Spawner) -> ! {
     drop(maps);
     info!("map_rt unlocked (RX helpers can proceed)");
 
-    let (mut controller, interfaces) =
-        xpost::esp_radio::new(peripherals.WIFI, Default::default())
-            .expect("Failed to initialize Wi-Fi controller");
+    // Default dynamic_tx/rx=32 matches prior inflight_peak=32 NO_MEM wall; raise for XDP_TX.
+    let wifi_cfg = esp_radio::wifi::ControllerConfig::default()
+        .with_dynamic_tx_buf_num(64)
+        .with_dynamic_rx_buf_num(64)
+        .with_tx_queue_size(16);
+    let (mut controller, interfaces) = xpost::esp_radio::new(peripherals.WIFI, wifi_cfg)
+        .expect("Failed to initialize Wi-Fi controller");
     info!(
-        "wifi+xdp attached drop={} failed_tx={} map_lock={}",
+        "wifi+xdp attached drop={} failed_tx={} map_lock={} tx_dyn=64 rx_dyn=64",
         xpost::esp_radio::XDP_PROG.drop_count(),
         xpost::esp_radio::XDP_PROG.failed_tx_count(),
         map_lock_status(),
     );
 
-    // XDP only enqueues; this task owns when/how many frames to tx_by_ref.
-    spawner.spawn(xdp_tx_batch_task().unwrap());
+    // XDP TX is immediate `tx_by_ref` on the RX path (no batch task).
 
     match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
         (Some(ssid), Some(pass)) if !ssid.is_empty() => {
@@ -174,28 +177,6 @@ async fn main(spawner: Spawner) -> ! {
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
-    }
-}
-
-#[embassy_executor::task]
-async fn xdp_tx_batch_task() {
-    /// Frames per drain wake — amortize handoff vs one-packet-one-call.
-    const BATCH: usize = 8;
-    info!("xdp_tx batch task up batch={BATCH}");
-    loop {
-        esp_radio::wifi::XDP_TX_KICK.wait().await;
-        loop {
-            let sent = esp_radio::wifi::xdp_tx_drain_batch(BATCH);
-            let pending = esp_radio::wifi::xdp_tx_pending();
-            if pending == 0 {
-                break;
-            }
-            if sent == 0 {
-                // NO_MEM / empty drain while work remains — yield to Wi-Fi.
-                Timer::after(Duration::from_millis(1)).await;
-            }
-            // Keep draining while the kick coalesced more enqueues.
-        }
     }
 }
 
@@ -236,6 +217,11 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
     let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
     socket.bind(STIM_PORT).expect("bind stim");
     info!("udp ack listening {STIM_PORT}");
+    if let Some(v4) = stack.config_v4() {
+        esp_println::println!("xpost ready ipv4={} port={STIM_PORT}", v4.address);
+    } else {
+        esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
+    }
 
     let mut buf = [0u8; 256];
     loop {
@@ -283,6 +269,13 @@ fn dispatch_serial(line: &str) {
         print_counters();
     } else if line.eq_ignore_ascii_case("txstats") {
         print_txstats();
+    } else if line.eq_ignore_ascii_case("txlog") {
+        print_txlog();
+    } else if line.eq_ignore_ascii_case("txlogv") {
+        print_txlogv();
+    } else if line.eq_ignore_ascii_case("tx clear") || line.eq_ignore_ascii_case("txstats clear") {
+        esp_radio::wifi::xdp_tx_clear_stats();
+        esp_println::println!("OK tx clear");
     } else if line.eq_ignore_ascii_case("prof") || line.eq_ignore_ascii_case("flame") {
         print_flame_spans();
     } else if line.eq_ignore_ascii_case("pchits") {
@@ -322,7 +315,7 @@ fn print_counters() {
     let p = &xpost::esp_radio::XDP_PROG;
     let t = esp_radio::wifi::xdp_tx_stats();
     esp_println::println!(
-        "OK counters drop={} failed_tx={} tx_bad_buf={} tx_token={} tx_wifi={} tx_wifi_rc={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={} tx_enq={} tx_pend={} tx_inflight={} tx_drain_ok={} tx_nomem_rq={} tx_nomem_drop={}",
+        "OK counters drop={} failed_tx={} tx_bad_buf={} tx_token={} tx_wifi={} tx_wifi_rc={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={} tx_enq={} tx_pend={} tx_inflight={} tx_drain_ok={} tx_nomem_rq={} tx_nomem_drop={} tx_nomem_drop_idle={} tx_nomem_drop_rqfail={} tx_enq_claim={} tx_enq_ring={} tx_skip_stale={} tx_drain_busy={} tx_done={} tx_last_rc={} tx_log_drop={}",
         p.drop_count(),
         p.failed_tx_count(),
         p.failed_tx_bad_buf_count(),
@@ -345,26 +338,87 @@ fn print_counters() {
         t.drain_ok,
         t.drain_nomem_requeue,
         t.drain_nomem_drop,
+        t.drain_nomem_drop_idle,
+        t.drain_nomem_drop_rq_fail,
+        t.enqueue_fail_claim,
+        t.enqueue_fail_ring,
+        t.drain_skip_stale,
+        t.drain_busy,
+        t.tx_done,
+        t.last_drain_rc,
+        t.log_dropped,
     );
 }
 
 fn print_txstats() {
     let t = esp_radio::wifi::xdp_tx_stats();
     esp_println::println!(
-        "OK txstats enq={} enq_fail_tok={} drain_ok={} nomem_rq={} nomem_drop={} drain_fail={} drain_calls={} kicks={} pend={} pend_peak={} inflight={} inflight_peak={}",
+        "OK txstats enq={} enq_claim={} enq_ring={} drain_ok={} nomem_rq={} nomem_drop={} nomem_drop_idle={} nomem_drop_rqfail={} drain_fail={} last_rc={} skip_stale={} drain_busy={} drain_calls={} kicks={} tx_done={} pend={} pend_peak={} inflight={} inflight_peak={} log_drop={} flow_samples={}",
         t.enqueued,
-        t.enqueue_fail_token,
+        t.enqueue_fail_claim,
+        t.enqueue_fail_ring,
         t.drain_ok,
         t.drain_nomem_requeue,
         t.drain_nomem_drop,
+        t.drain_nomem_drop_idle,
+        t.drain_nomem_drop_rq_fail,
         t.drain_fail_other,
+        t.last_drain_rc,
+        t.drain_skip_stale,
+        t.drain_busy,
         t.drain_calls,
         t.kicks,
+        t.tx_done,
         t.pending,
         t.pending_peak,
         t.in_flight,
         t.in_flight_peak,
+        t.log_dropped,
+        t.flow_samples,
     );
+}
+
+fn print_txlog() {
+    let mut buf = [esp_radio::wifi::XdpTxLogEntry::default(); 32];
+    let n = esp_radio::wifi::xdp_tx_log(&mut buf);
+    let t = esp_radio::wifi::xdp_tx_stats();
+    // Single OK line so agent `request` captures the ring (first OK wins).
+    esp_println::print!("OK txlog n={n} dropped={}", t.log_dropped);
+    for e in buf.iter().take(n) {
+        let kind = esp_radio::wifi::XdpTxEvKind::from_u8(e.kind)
+            .map(|k| k.as_str())
+            .unwrap_or("?");
+        esp_println::print!(
+            " | us={} kind={} pend={} infl={} rc={}",
+            e.t_us,
+            kind,
+            e.pending,
+            e.inflight,
+            e.rc
+        );
+    }
+    esp_println::println!();
+}
+
+fn print_txlogv() {
+    let mut buf = [esp_radio::wifi::XdpTxLogEntry::default(); 32];
+    let n = esp_radio::wifi::xdp_tx_log(&mut buf);
+    let t = esp_radio::wifi::xdp_tx_stats();
+    esp_println::println!("OK txlogv begin n={n} dropped={}", t.log_dropped);
+    for e in buf.iter().take(n) {
+        let kind = esp_radio::wifi::XdpTxEvKind::from_u8(e.kind)
+            .map(|k| k.as_str())
+            .unwrap_or("?");
+        esp_println::println!(
+            "us={} kind={} pend={} infl={} rc={}",
+            e.t_us,
+            kind,
+            e.pending,
+            e.inflight,
+            e.rc
+        );
+    }
+    esp_println::println!("OK txlogv end");
 }
 
 /// Brendan Gregg folded stacks — paste into speedscope / flamegraph.pl.
