@@ -66,12 +66,13 @@ scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 
 只做**性能**分析。采集由 `./xpost-test` 写 `formal.*`；笔记本现查，不负责烧录或功能 ACK。
 
-- **just-tx-rtt**（默认）：同一 `target_pps` 网格扫丢包 / return PPS（`phase=sweep`），再在约 5% 丢包工作点测 RTT（`phase=operating`）→ `formal.just_tx_rtt_*`；笔记 `just_tx_rtt.ipynb`
+- **just-tx-rtt**（默认）：同一 `target_pps` 网格扫丢包 / return PPS（`phase=sweep`），再在约 5% 丢包工作点测 RTT（`phase=operating`）→ `formal.just_tx_rtt_*`
 - **just-tx-pps** / **just-drop-pps**：满速 blast 下的处理 PPS → `formal.experiment_*`
+- 笔记：`just_tx.ipynb`（RTT + 处理 PPS）、`just_drop.ipynb`（drop 处理 PPS）
 
 ```bash
 cd benchmark && pixi install && pixi run ensure-schema && pixi run lab
-# notebook: just_tx_rtt.ipynb / just_tx_pps.ipynb / just_drop_pps.ipynb
+# notebook: just_tx.ipynb / just_drop.ipynb
 ```
 
 See [`benchmark/README.md`](benchmark/README.md).

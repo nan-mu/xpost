@@ -225,7 +225,7 @@ def figure1_tx_rtt(
     xdp_pps_ci: tuple[float, float] | None = None,
     title: str = "just_tx RTT @ ~5% loss",
 ) -> tuple[Figure, Axes]:
-    """Kept for import compat; unused by just_tx_rtt.ipynb."""
+    """Kept for import compat; unused by just_tx.ipynb RTT cells."""
     del hal_loss, xdp_loss, hal_loss_ci, xdp_loss_ci, hal_return_pps, xdp_return_pps, hal_pps_ci, xdp_pps_ci
     return figure_tx_pps_mean(
         hal_mean_pps=float(hal_median_rtt_ms or 0.0),

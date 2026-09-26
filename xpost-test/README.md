@@ -127,8 +127,8 @@ HTTP API：`POST /api/jobs`、`GET /api/jobs/:id`、`GET /api/jobs/:id/log?offse
 | `./probe rate-loss [--smoke] [--formal]` | 速率黑名单 · 丢包 | peak% × mit；事后 collect→dump | `xdp_rate_loss_*`（[`sql/xdp_rate_loss.sql`](../sql/xdp_rate_loss.sql)） |
 
 | `./probe just-drop [--formal] [--no-pg]` | just_drop ACK：clear vs drop | 两次刺激 | `xdp_ack_*` |
-| `./xpost-test` / `just-drop-pps` | just_drop / just_drop_hal **PPS** | agent flash + 周期读 `drop` × UDP blast | `formal.experiment_*`（[`../benchmark/just_drop_pps.ipynb`](../benchmark/just_drop_pps.ipynb)） |
-| `./xpost-test`（`[default_bench]=just-tx-pps`） | just_tx / just_tx_hal **PPS** | agent flash + 周期读 `rxcnt 17` × UDP blast | `formal.experiment_*` `source_note=xpost-test just-tx-pps`（[`../benchmark/just_tx_pps.ipynb`](../benchmark/just_tx_pps.ipynb)） |
+| `./xpost-test` / `just-drop-pps` | just_drop / just_drop_hal **PPS** | agent flash + 周期读 `drop` × UDP blast | `formal.experiment_*`（[`../benchmark/just_drop.ipynb`](../benchmark/just_drop.ipynb)） |
+| `./xpost-test`（`[default_bench]=just-tx-pps`） | just_tx / just_tx_hal **PPS** | agent flash + 周期读 `rxcnt 17` × UDP blast | `formal.experiment_*` `source_note=xpost-test just-tx-pps`（[`../benchmark/just_tx.ipynb`](../benchmark/just_tx.ipynb)） |
 
 - **`--formal`**：仍连 `dbname=postgres`，写入 **schema `formal`**，开跑前 `TRUNCATE` **本命令**表族。默认写 `public`。
 - 别名：`bench` → `rate-rtt`；`bench-loss` → `wl-loss`。无子命令时打印帮助（不再默认跑 rate）。
