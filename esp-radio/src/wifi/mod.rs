@@ -1202,6 +1202,9 @@ unsafe extern "C" fn esp_wifi_tx_done_cb(
 
     decrement_inflight_counter();
 
+    #[cfg(feature = "xdp")]
+    xdp_tx::on_tx_done();
+
     embassy::TRANSMIT_WAKER.wake();
 }
 
