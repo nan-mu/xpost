@@ -145,6 +145,8 @@ static PENDING: [AtomicU8; TX_TOKEN_CAPACITY] =
 static PENDING_HEAD: AtomicUsize = AtomicUsize::new(0);
 static PENDING_LEN: AtomicUsize = AtomicUsize::new(0);
 static DRAINING: AtomicBool = AtomicBool::new(false);
+/// Successful `tx_by_ref` handoffs not yet `netstack_free`'d.
+static TX_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 /// Register netstack ref/free callbacks used by `esp_wifi_internal_tx_by_ref`.
 ///
@@ -272,19 +274,55 @@ fn try_drain(budget: usize) {
                 )
             }
         };
+        if rc == include::ESP_ERR_NO_MEM as i32 {
+            // Retry later only if something is already on the air — otherwise
+            // we would pin RX buffers forever with no tx_done to unblock us.
+            if TX_IN_FLIGHT.load(Ordering::Acquire) > 0 && enqueue_front(idx) {
+                break;
+            }
+            token.drain_rc.store(rc as u32, Ordering::Release);
+            token.queued.store(false, Ordering::Release);
+            token.release();
+            super::xdp::current().count_failed_tx_wifi(rc);
+            break;
+        }
         token.drain_rc.store(rc as u32, Ordering::Release);
         token.queued.store(false, Ordering::Release);
         // Drop the queue/RX reference; TX holds its own via netstack_ref on OK.
         token.release();
         if rc != include::ESP_OK as i32 {
             super::xdp::current().count_failed_tx_wifi(rc);
-            // Give the Wi-Fi task CPU to reclaim TX slots before more handoffs.
-            if rc == include::ESP_ERR_NO_MEM as i32 {
-                break;
-            }
+        } else {
+            TX_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
         }
     }
     DRAINING.store(false, Ordering::Release);
+}
+
+fn enqueue_front(idx: u8) -> bool {
+    loop {
+        let len = PENDING_LEN.load(Ordering::Acquire);
+        if len >= TX_TOKEN_CAPACITY {
+            return false;
+        }
+        if PENDING_LEN
+            .compare_exchange(len, len + 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            continue;
+        }
+        let head = PENDING_HEAD.load(Ordering::Acquire);
+        let new_head = (head + TX_TOKEN_CAPACITY - 1) % TX_TOKEN_CAPACITY;
+        if PENDING_HEAD
+            .compare_exchange(head, new_head, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            PENDING_LEN.fetch_sub(1, Ordering::AcqRel);
+            continue;
+        }
+        PENDING[new_head].store(idx + 1, Ordering::Release);
+        return true;
+    }
 }
 
 unsafe extern "C" fn netstack_ref(token: *mut c_void) {
@@ -298,6 +336,9 @@ unsafe extern "C" fn netstack_ref(token: *mut c_void) {
 unsafe extern "C" fn netstack_free(token: *mut c_void) {
     if let Some(token) = token_from_raw(token) {
         token.release();
+        TX_IN_FLIGHT.fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
+            Some(x.saturating_sub(1))
+        }).ok();
         // Do not drain here: `tx_by_ref` from inside netstack_free can re-enter
         // the Wi-Fi blob. `on_tx_done` / the next RX `transmit` continue the queue.
     } else {
