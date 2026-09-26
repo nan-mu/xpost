@@ -1,6 +1,6 @@
 # just_drop / just_drop_hal experiment knobs (compile-time embed).
-# Bench: just-drop-pps (满速处理 PPS → experiment_*).
-# Select via default.toml `run = [...]`.
+# Selected as a whole via default.toml `run = ["just_drop"]` (PPS fixed in code).
+# See config/README.md.
 
 [pps]
 formal = true

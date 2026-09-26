@@ -1,20 +1,20 @@
 # Compile-time xpost-test defaults (embedded via include_str!).
 # TR3000 formal path: rebuild, scp binary, then always:
 #   ./xpost-test
-# No env vars, no CLI flags. Edit this file to choose which benches run.
+# No env vars, no CLI flags. Edit `run` to choose which experiments run.
 #
 # Mac side: cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
 # Agent HTTP: /health, /v1/* (harness), /mcp (Cursor MCP). endpoint = host:port (http:// inferred).
 #
-# Experiment knobs live in just_tx.toml / just_drop.toml.
-# Suite [[tests]].name must match firmware/config.toml [[tests]] names.
+# Experiment knobs (rounds / arms / formal): just_tx.toml / just_drop.toml.
+# What each experiment *does* is fixed in code — see config/README.md.
 
 version = "1"
 
-# Ordered benches for bare `./xpost-test`.
-# One experiment:  run = ["just-tx-rtt"]
-# All formal A/B:  run = ["just-drop-pps", "just-tx-pps", "just-tx-rtt"]
-run = ["just-tx-rtt"]
+# Ordered experiments for bare `./xpost-test`.
+# One experiment:  run = ["just_tx"]
+# Both formal A/B: run = ["just_drop", "just_tx"]
+run = ["just_tx"]
 
 [postgres]
 host = "192.168.110.96"
@@ -56,16 +56,3 @@ just_drop = "just-drop"
 just_drop_hal = "just-drop-hal"
 just_tx = "just-tx"
 just_tx_hal = "just-tx-hal"
-
-[[tests]]
-name = "test0"
-enabled = true
-
-[[tests.cases]]
-id = "drop"
-src_ip = "10.0.0.1"
-
-[[tests.cases]]
-id = "tx"
-src_ip = "10.0.0.2"
-expect_bounce = true

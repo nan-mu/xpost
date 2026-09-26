@@ -1,6 +1,6 @@
 # just_tx / just_tx_hal experiment knobs (compile-time embed).
-# Benches: just-tx-pps (满速处理 PPS), just-tx-rtt (扫速丢包 + ~5% 工作点 RTT).
-# Select via default.toml `run = [...]`.
+# Selected as a whole via default.toml `run = ["just_tx"]` (PPS + RTT fixed in code).
+# See config/README.md.
 
 [pps]
 formal = true

@@ -62,11 +62,12 @@ scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 ./xpost-test
 ```
 
-- `config/default.toml`：`run = [...]`（跑哪些 bench）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`、版本与 profiles
+- `config/default.toml`：`run = [...]`（跑哪些**实验**）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`、版本与 profiles
 - `config/just_tx.toml`：`[pps]` / `[rtt]` 轮次、臂、formal
 - `config/just_drop.toml`：`[pps]` 同上
+- 实验步骤固定在代码里：见 [`xpost-test/config/README.md`](xpost-test/config/README.md)
 
-只跑一个实验：`run = ["just-tx-rtt"]`。一次跑全部 formal A/B：`run = ["just-drop-pps", "just-tx-pps", "just-tx-rtt"]`。
+只跑一个实验：`run = ["just_tx"]`。一次跑全部 formal A/B：`run = ["just_drop", "just_tx"]`。
 
 可选手工 XDP 冷表操作：`cargo xtask agent program|list|clear|request|probe …`。
 
@@ -74,8 +75,8 @@ scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 
 只做**性能**分析。采集由 TR3000 上 `./xpost-test` 写 `formal.*`；笔记本现查，不负责烧录或功能 ACK。
 
-- **just-tx-rtt**（`default.toml` 当前 `run`）：同一 `target_pps` 网格扫丢包 / return PPS（`phase=sweep`），再在约 5% 丢包工作点测 RTT（`phase=operating`）→ `formal.just_tx_rtt_*`
-- **just-tx-pps** / **just-drop-pps**：满速 blast 下的处理 PPS → `formal.experiment_*`
+- **`just_tx`**（`default.toml` 当前 `run`）：先满速处理 PPS → `formal.experiment_*`；再同一 `target_pps` 网格扫丢包 / return PPS（`phase=sweep`），约 5% 丢包工作点测 RTT（`phase=operating`）→ `formal.just_tx_rtt_*`
+- **`just_drop`**：满速 blast 下的处理 PPS → `formal.experiment_*`
 - 笔记：`just_tx.ipynb`（RTT + 处理 PPS）、`just_drop.ipynb`（drop 处理 PPS）
 
 ```bash

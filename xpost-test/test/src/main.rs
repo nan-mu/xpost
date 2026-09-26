@@ -3,8 +3,9 @@
 //! Binary: `xpost-test`. Formal path on TR3000 is always bare:
 //!   ./xpost-test
 //! which runs `default.toml` `run = [...]` (no env, no flags).
+//! `run` names whole experiments (`just_tx`, `just_drop`); steps are fixed in code.
 //! Experiment knobs: `config/just_tx.toml`, `config/just_drop.toml`.
-//! Shared DUT / agent / postgres: `config/default.toml`.
+//! Shared DUT / agent / postgres: `config/default.toml`. See `config/README.md`.
 
 mod agent;
 mod bench;
@@ -65,7 +66,7 @@ struct Args {
 enum Command {
     /// Run every formal bench in order (inherits `--smoke` / `--formal`).
     All,
-    /// Run embedded `config/default.toml` [[tests]] (former default).
+    /// Run fixed functional suite (`test0`; not selected via `run`).
     Suite,
     /// 丢包实验 XDP path via profile boot → `xdp_drop_*` (`path=xdp_drop`).
     #[command(name = "drop-xdp")]
@@ -86,6 +87,12 @@ enum Command {
     /// just_drop ACK path: clear vs drop XDP → `xdp_ack_*`.
     #[command(name = "just-drop")]
     JustDrop,
+    /// Formal `just_drop` experiment (PPS A/B). Same as `run = ["just_drop"]`.
+    #[command(name = "just_drop")]
+    JustDropExp,
+    /// Formal `just_tx` experiment (PPS then RTT). Same as `run = ["just_tx"]`.
+    #[command(name = "just_tx")]
+    JustTxExp,
     /// just_drop / just_drop_hal PPS → `experiment_*` (agent flashes each arm).
     #[command(name = "just-drop-pps")]
     JustDropPps {
@@ -132,29 +139,24 @@ fn wall_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn command_from_name(name: &str) -> Result<Command> {
+/// Expand a `default.toml` `run` entry into one or more dispatch commands.
+/// Experiments are atomic: `just_tx` always runs PPS then RTT.
+fn commands_for_run_entry(name: &str) -> Result<Vec<Command>> {
     Ok(match name {
-        "just-drop-pps" => Command::JustDropPps {
+        "just_tx" => vec![
+            Command::JustTxPps {
+                path: None,
+                sample_interval_ms: 0,
+            },
+            Command::JustTxRtt { path: None },
+        ],
+        "just_drop" => vec![Command::JustDropPps {
             path: None,
             sample_interval_ms: 0,
-        },
-        "just-tx-pps" => Command::JustTxPps {
-            path: None,
-            sample_interval_ms: 0,
-        },
-        "just-tx-rtt" => Command::JustTxRtt { path: None },
-        "just-drop" => Command::JustDrop,
-        "suite" => Command::Suite,
-        "all" => Command::All,
-        "drop-xdp" => Command::DropXdp,
-        "drop-hal" => Command::DropHal,
-        "echo" => Command::Echo,
-        "wl-rtt" => Command::WlRtt,
-        "wl-loss" => Command::WlLoss,
-        "rate-rtt" => Command::RateRtt,
-        "rate-loss" => Command::RateLoss,
+        }],
+        "suite" => vec![Command::Suite],
         other => anyhow::bail!(
-            "unknown bench {other:?} in default.toml `run`; edit config/default.toml"
+            "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop (see config/README.md)"
         ),
     })
 }
@@ -178,10 +180,11 @@ async fn main() -> Result<()> {
 
     // Formal TR3000 path: no subcommand → execute `run` list from default.toml.
     if args.command.is_none() {
-        let quiet = cfg
-            .run
-            .iter()
-            .all(|n| command_from_name(n).map(|c| is_quiet_command(&c)).unwrap_or(true));
+        let mut expanded = Vec::new();
+        for name in &cfg.run {
+            expanded.extend(commands_for_run_entry(name)?);
+        }
+        let quiet = expanded.iter().all(is_quiet_command);
         let log_default = if quiet { "warn" } else { "info" };
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_default))
             .init();
@@ -190,8 +193,10 @@ async fn main() -> Result<()> {
             cfg.version, cfg.target.esp_ip, cfg.target.esp_mac, cfg.probe.iface, cfg.run
         );
         for name in &cfg.run {
-            info!("run bench {name}");
-            dispatch_command(&cfg, &args, command_from_name(name)?).await?;
+            info!("run experiment {name}");
+            for cmd in commands_for_run_entry(name)? {
+                dispatch_command(&cfg, &args, cmd).await?;
+            }
         }
         return Ok(());
     }
@@ -219,6 +224,18 @@ async fn main() -> Result<()> {
 }
 
 async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Result<()> {
+    if matches!(command, Command::JustTxExp) {
+        for cmd in commands_for_run_entry("just_tx")? {
+            Box::pin(dispatch_command(cfg, args, cmd)).await?;
+        }
+        return Ok(());
+    }
+    if matches!(command, Command::JustDropExp) {
+        for cmd in commands_for_run_entry("just_drop")? {
+            Box::pin(dispatch_command(cfg, args, cmd)).await?;
+        }
+        return Ok(());
+    }
     if matches!(command, Command::JustDrop) {
         return bench::run_just_drop(
             cfg,
@@ -351,6 +368,8 @@ async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Re
             return bench::run_rate_loss(&mut harness, args.smoke, args.formal).await;
         }
         Command::JustDrop
+        | Command::JustDropExp
+        | Command::JustTxExp
         | Command::JustDropPps { .. }
         | Command::JustTxPps { .. }
         | Command::JustTxRtt { .. } => unreachable!("handled earlier"),

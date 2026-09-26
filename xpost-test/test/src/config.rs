@@ -55,7 +55,31 @@ fn default_version() -> String {
 }
 
 fn default_run() -> Vec<String> {
-    vec!["just-tx-rtt".into()]
+    vec!["just_tx".into()]
+}
+
+/// Fixed functional suite for `./xpost-test suite` (not selected via `run`).
+fn default_suite_tests() -> Vec<TestEntry> {
+    vec![TestEntry {
+        name: "test0".into(),
+        enabled: true,
+        cases: vec![
+            CaseConfig {
+                id: "drop".into(),
+                src_ip: Ipv4Addr::new(10, 0, 0, 1),
+                dst_ip: None,
+                expect_echo: false,
+                expect_bounce: false,
+            },
+            CaseConfig {
+                id: "tx".into(),
+                src_ip: Ipv4Addr::new(10, 0, 0, 2),
+                dst_ip: None,
+                expect_echo: false,
+                expect_bounce: true,
+            },
+        ],
+    }]
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -261,8 +285,6 @@ struct DefaultFile {
     serve: ServeConfig,
     #[serde(default)]
     profiles: ProfilesConfig,
-    #[serde(default)]
-    tests: Vec<TestEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -301,7 +323,7 @@ impl FileConfig {
             just_drop_pps: drop.pps,
             just_tx_pps: tx.pps,
             just_tx_rtt: tx.rtt,
-            tests: def.tests,
+            tests: default_suite_tests(),
         };
         cfg.validate()?;
         Ok(cfg)
@@ -309,7 +331,20 @@ impl FileConfig {
 
     fn validate(&self) -> Result<()> {
         if self.run.is_empty() {
-            bail!("default.toml `run` must list at least one bench");
+            bail!("default.toml `run` must list at least one experiment");
+        }
+        for name in &self.run {
+            match name.as_str() {
+                "just_tx" | "just_drop" | "suite" => {}
+                "just-tx" | "just-drop" | "just-tx-pps" | "just-tx-rtt" | "just-drop-pps" => {
+                    bail!(
+                        "default.toml `run` entry {name:?} is not an experiment name; use just_tx / just_drop (see config/README.md)"
+                    )
+                }
+                other => bail!(
+                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop (see config/README.md)"
+                ),
+            }
         }
         if self.probe.iface.is_empty() {
             bail!("probe.iface must be set");
@@ -320,22 +355,6 @@ impl FileConfig {
         parse_mac(&self.target.esp_mac).context("dut.esp_mac")?;
         if let Some(ref m) = self.probe.src_mac {
             parse_mac(m).context("probe.src_mac")?;
-        }
-        if self.tests.is_empty() {
-            bail!("at least one [[tests]] entry required");
-        }
-        for t in &self.tests {
-            if t.name.is_empty() {
-                bail!("tests.name must be non-empty");
-            }
-            if t.enabled && t.cases.is_empty() {
-                bail!("enabled test '{}' has no cases", t.name);
-            }
-            for c in &t.cases {
-                if c.id.is_empty() {
-                    bail!("case id must be non-empty in test '{}'", t.name);
-                }
-            }
         }
         Ok(())
     }

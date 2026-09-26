@@ -2,8 +2,8 @@
 
 在 **TR3000** 上用 **aya TC**（`bpf_ktime_get_ns`）打纳秒时间戳，并用 **AF_PACKET RAW** 向 ESP32-C3 STA 发送可伪造源 IP 的刺激包。配置在编译期嵌入 [`config/default.toml`](config/default.toml) + [`just_tx.toml`](config/just_tx.toml) + [`just_drop.toml`](config/just_drop.toml)。产物二进制名为 **`xpost-test`**。
 
-- 正式路径：**永远** `./xpost-test`（无环境变量、无 CLI 参数）。`default.toml` 的 `run = [...]` 决定跑哪些 bench；实验旋钮在 `just_*.toml`。
-- `./xpost-test suite` 跑 `[[tests]]`；`./xpost-test --help-benches` 看全部子命令。
+- 正式路径：**永远** `./xpost-test`（无环境变量、无 CLI 参数）。`default.toml` 的 `run = [...]` 决定跑哪些**实验**（`just_tx` / `just_drop`）；步骤固定，见 [`config/README.md`](config/README.md)。旋钮在 `just_*.toml`。
+- `./xpost-test suite` 跑固定 `test0`；`./xpost-test --help-benches` 看全部子命令。
 - `./xpost-test serve` 供 `fwctl.sh` 远程提交。
 
 人类表（`test-report`）：若 case 形如 `T0/a`，先打一行 `peers a=… b=… c=…`，再按 **STAGE × a|b|c** 汇总（列序固定字母序，裸 IP 不当主列）；否则回退旧的一行一 case。
@@ -70,7 +70,7 @@ Mac Mini / TR3000 / ESP 同网段
 | S6 | COPY 2号位→A | E | B | B |
 | S7 | READBACK 1/2 号位 | 长度对齐嵌入 AOT | | |
 
-`b_ip` 来自 `[[tests.cases]].src_ip`（须与固件 `fw_rules` seed 一致）；`a_ip`/`c_ip`/`ctrl_src` 运行时同网段生成。schema：[`proto/map_crud_op.proto`](../proto/map_crud_op.proto)、[`proto/hot_load_op.proto`](../proto/hot_load_op.proto)。
+`b_ip` 来自 suite 固定 case / 固件 `fw_rules` seed；`a_ip`/`c_ip`/`ctrl_src` 运行时同网段生成。schema：[`proto/map_crud_op.proto`](../proto/map_crud_op.proto)、[`proto/hot_load_op.proto`](../proto/hot_load_op.proto)。
 
 ## `hot_load_ctrl` 判定
 
@@ -127,8 +127,8 @@ HTTP API：`POST /api/jobs`、`GET /api/jobs/:id`、`GET /api/jobs/:id/log?offse
 | `./probe rate-loss [--smoke] [--formal]` | 速率黑名单 · 丢包 | peak% × mit；事后 collect→dump | `xdp_rate_loss_*`（[`sql/xdp_rate_loss.sql`](../sql/xdp_rate_loss.sql)） |
 
 | `./probe just-drop [--formal] [--no-pg]` | just_drop ACK：clear vs drop | 两次刺激 | `xdp_ack_*` |
-| `./xpost-test` / `just-drop-pps` in `run` | just_drop / just_drop_hal **PPS** | agent flash + 周期读 `drop` × UDP blast | `formal.experiment_*`（[`../benchmark/just_drop.ipynb`](../benchmark/just_drop.ipynb)） |
-| `./xpost-test` / `just-tx-pps` in `run` | just_tx / just_tx_hal **PPS** | agent flash + 周期读 `rxcnt 17` × UDP blast | `formal.experiment_*` `source_note=xpost-test just-tx-pps`（[`../benchmark/just_tx.ipynb`](../benchmark/just_tx.ipynb)） |
+| `./xpost-test` / `run = ["just_drop"]` | just_drop / just_drop_hal **PPS** | agent flash + 周期读 `drop` × UDP blast | `formal.experiment_*`（[`../benchmark/just_drop.ipynb`](../benchmark/just_drop.ipynb)） |
+| `./xpost-test` / `run = ["just_tx"]` | just_tx：**PPS + 扫速/RTT** | PPS（`rxcnt 17`）→ sweep → ~5% RTT | `formal.experiment_*` + `formal.just_tx_rtt_*`（[`../benchmark/just_tx.ipynb`](../benchmark/just_tx.ipynb)） |
 
 - **`--formal`**：仍连 `dbname=postgres`，写入 **schema `formal`**，开跑前 `TRUNCATE` **本命令**表族。默认写 `public`。
 - 别名：`bench` → `rate-rtt`；`bench-loss` → `wl-loss`。无子命令时打印帮助（不再默认跑 rate）。
@@ -219,7 +219,7 @@ ip link
 
 ## 配置（编译期）
 
-编辑 [`config/default.toml`](config/default.toml)：`probe.iface`、`dut.esp_ip`、`dut.esp_mac`、以及要跑的 `run` / `[[tests]]`（`enabled = false` 可跳过）。改完后重新编译再 scp。
+编辑 [`config/default.toml`](config/default.toml)：`probe.iface`、`dut.esp_ip`、`dut.esp_mac`、以及要跑的 `run`（见 [`config/README.md`](config/README.md)）。改完后重新编译再 scp。
 
 ## 编译
 
@@ -263,4 +263,4 @@ cat /tmp/test-report.json
 
 1. 在 `test/src/tests/` 新增实现 `ProbeTest` 的类型。
 2. 在 `tests/mod.rs` 的 `registry()` 注册。
-3. 在 `config/default.toml` 增加 `[[tests]]` 与 cases，然后重编。
+3. 在 `config.rs` 的 `default_suite_tests()` 挂上固定 suite 入口，然后重编。
