@@ -172,6 +172,8 @@ impl Default for BenchPpsConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProbeConfig {
     pub iface: String,
     #[serde(default = "default_pair_timeout_ms")]
     pub pair_timeout_ms: u64,
