@@ -1,9 +1,9 @@
-//! Embedded executor + agent settings from `config/test.toml`.
+//! Embedded executor + agent settings from `config/default.toml`.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-pub const EMBEDDED_CONFIG_TOML: &str = include_str!("../../config/test.toml");
+pub const EMBEDDED_CONFIG_TOML: &str = include_str!("../../config/default.toml");
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExecutorConfig {
@@ -53,7 +53,7 @@ impl Default for ExecutorSection {
 
 impl ExecutorConfig {
     pub fn embedded() -> Result<Self> {
-        toml::from_str(EMBEDDED_CONFIG_TOML).context("parse embedded test.toml")
+        toml::from_str(EMBEDDED_CONFIG_TOML).context("parse embedded default.toml")
     }
 
     pub fn agent_endpoint(&self) -> String {

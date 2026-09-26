@@ -51,7 +51,7 @@ pub async fn ensure_profile(
     agent.flash_profile(&profile_id).await.with_context(|| {
         format!(
             "FlashProfile {profile_id} (check Mac `cargo xtask agent`, \
-                 LAN route to agent, or set XPOST_AGENT_ENDPOINT=<mac-ip>:9240)"
+                 LAN route to agent, or set [agent].endpoint in config/default.toml)"
         )
     })?;
     agent

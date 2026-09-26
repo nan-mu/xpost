@@ -1,8 +1,8 @@
-//! Defaults from embedded `config/test.toml`.
+//! Defaults from embedded `config/default.toml`.
 
 use serde::Deserialize;
 
-const EMBEDDED: &str = include_str!("../../config/test.toml");
+const EMBEDDED: &str = include_str!("../../config/default.toml");
 
 #[derive(Debug, Deserialize)]
 struct Root {
@@ -17,7 +17,7 @@ struct AgentSection {
 }
 
 pub fn embedded_agent_endpoint() -> String {
-    let root: Root = toml::from_str(EMBEDDED).expect("parse embedded test.toml");
+    let root: Root = toml::from_str(EMBEDDED).expect("parse embedded default.toml");
     if root.agent.endpoint.is_empty() {
         "127.0.0.1:9240".into()
     } else {

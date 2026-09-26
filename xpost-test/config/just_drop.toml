@@ -1,0 +1,9 @@
+# just_drop / just_drop_hal experiment knobs (compile-time embed).
+# Bench: just-drop-pps (满速处理 PPS → experiment_*).
+# Select via default.toml `run = [...]`.
+
+[pps]
+formal = true
+rounds = 3
+sample_interval_ms = 1000
+arms = ["hal", "xdp"]

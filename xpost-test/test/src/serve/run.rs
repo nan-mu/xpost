@@ -14,7 +14,7 @@ use super::jobs::Jobs;
 pub async fn run_test_job(
     jobs: &Jobs,
     job_id: u64,
-    agent_endpoint: Option<&str>,
+    _agent_endpoint: Option<&str>,
     log: JobLog,
 ) -> Result<()> {
     let job = jobs.get(job_id).await.context("job vanished")?;
@@ -35,9 +35,6 @@ pub async fn run_test_job(
     }
     if job.formal {
         cmd.arg("--formal");
-    }
-    if let Some(ep) = agent_endpoint.filter(|s| !s.is_empty()) {
-        cmd.env("XPOST_AGENT_ENDPOINT", ep);
     }
 
     let mut child = cmd

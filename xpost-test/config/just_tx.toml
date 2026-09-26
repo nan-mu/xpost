@@ -1,0 +1,14 @@
+# just_tx / just_tx_hal experiment knobs (compile-time embed).
+# Benches: just-tx-pps (满速处理 PPS), just-tx-rtt (扫速丢包 + ~5% 工作点 RTT).
+# Select via default.toml `run = [...]`.
+
+[pps]
+formal = true
+rounds = 3
+sample_interval_ms = 1000
+arms = ["hal", "xdp"]
+
+[rtt]
+formal = true
+rounds = 3
+arms = ["hal", "xdp"]

@@ -53,7 +53,7 @@ pub async fn run_just_drop(cfg: &FileConfig, opts: JustDropOpts) -> Result<()> {
     let endpoint = cfg
         .agent
         .resolved_endpoint()
-        .context("just-drop needs [agent].endpoint or XPOST_AGENT_ENDPOINT")?;
+        .context("just-drop needs [agent].endpoint in config/default.toml")?;
     let agent = AgentClient::new(endpoint.clone());
     let esp = cfg.target.esp_ip.to_string();
     let elf = std::env::var("XPOST_JUST_DROP_ELF").unwrap_or_else(|_| DEFAULT_ELF.into());

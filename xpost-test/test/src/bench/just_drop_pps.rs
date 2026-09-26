@@ -1,7 +1,7 @@
 //! `xpost-test just-drop-pps` — flash profile per arm, sample `drop` during UDP blast → `experiment_*`.
 //!
 //! Arms: `hal` (`just-drop-hal` + `drop on`) and `xdp` (`just-drop` profile includes xdp.elf).
-//! Formal: schema `formal`, ensure tables, empty before run. Default compile-time arms in `test.toml`.
+//! Formal: schema `formal`, ensure tables, empty before run. Arms from `config/just_drop.toml`.
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -75,7 +75,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
     let endpoint = cfg
         .agent
         .resolved_endpoint()
-        .context("just-drop-pps needs [agent].endpoint or XPOST_AGENT_ENDPOINT")?;
+        .context("just-drop-pps needs [agent].endpoint in config/default.toml")?;
     let agent = AgentClient::new(endpoint.clone());
     let esp_s = cfg.target.esp_ip.to_string();
 

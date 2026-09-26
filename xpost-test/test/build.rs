@@ -65,7 +65,9 @@ fn generate_tail_call_assets(out_dir: &PathBuf) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    println!("cargo:rerun-if-changed=../config/test.toml");
+    println!("cargo:rerun-if-changed=../config/default.toml");
+    println!("cargo:rerun-if-changed=../config/just_tx.toml");
+    println!("cargo:rerun-if-changed=../config/just_drop.toml");
     println!("cargo:rerun-if-changed=src/generated/hot_a_bpf.rs");
     println!("cargo:rerun-if-changed=src/generated/tail_call_bpf.rs");
 

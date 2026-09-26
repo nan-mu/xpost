@@ -46,27 +46,30 @@ cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
 
 Wi-Fi 凭据仍在 `examples/just_drop/.env`、`examples/just_drop_hal/.env` 与 `examples/just_tx_hal/.env`（`WIFI_SSID` / `WIFI_PASS`）。
 
-TR3000（编译期嵌入 `xpost-test/config/test.toml`）：
+TR3000（编译期嵌入 `xpost-test/config/`：`default.toml` + `just_tx.toml` + `just_drop.toml`）：
+
+**正式性能测试永远只跑无参二进制**——不要环境变量、不要子命令、不要 `--formal` / `--path`。改实验：改 TOML → 重编 → scp → `./xpost-test`。
 
 ```bash
 cd xpost-test && cargo build -p test --release
 scp target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
-# on TR3000 — 性能测试（formal）：
-./xpost-test                          # 跑 [default_bench]（现为 just-tx-rtt）
-./xpost-test just-tx-pps              # 满速处理 PPS → experiment_*
-./xpost-test just-drop-pps --path hal # 可选：显式子命令 / 单臂
-./xpost-test --help-benches
+# on TR3000:
+./xpost-test
 ```
 
-`--smoke` 仅开发调试（隐藏 flag），正式性能采集不要使用。
+- `config/default.toml`：`run = [...]`（跑哪些 bench）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`、版本与 profiles
+- `config/just_tx.toml`：`[pps]` / `[rtt]` 轮次、臂、formal
+- `config/just_drop.toml`：`[pps]` 同上
+
+只跑一个实验：`run = ["just-tx-rtt"]`。一次跑全部 formal A/B：`run = ["just-drop-pps", "just-tx-pps", "just-tx-rtt"]`。
 
 可选手工 XDP 冷表操作：`cargo xtask agent program|list|clear|request|probe …`。
 
 ### PPS / RTT A/B（`benchmark/`）
 
-只做**性能**分析。采集由 `./xpost-test` 写 `formal.*`；笔记本现查，不负责烧录或功能 ACK。
+只做**性能**分析。采集由 TR3000 上 `./xpost-test` 写 `formal.*`；笔记本现查，不负责烧录或功能 ACK。
 
-- **just-tx-rtt**（默认）：同一 `target_pps` 网格扫丢包 / return PPS（`phase=sweep`），再在约 5% 丢包工作点测 RTT（`phase=operating`）→ `formal.just_tx_rtt_*`
+- **just-tx-rtt**（`default.toml` 当前 `run`）：同一 `target_pps` 网格扫丢包 / return PPS（`phase=sweep`），再在约 5% 丢包工作点测 RTT（`phase=operating`）→ `formal.just_tx_rtt_*`
 - **just-tx-pps** / **just-drop-pps**：满速 blast 下的处理 PPS → `formal.experiment_*`
 - 笔记：`just_tx.ipynb`（RTT + 处理 PPS）、`just_drop.ipynb`（drop 处理 PPS）
 

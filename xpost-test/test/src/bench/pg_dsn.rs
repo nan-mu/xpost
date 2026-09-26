@@ -1,16 +1,11 @@
-//! Shared Postgres DSN: always `dbname=postgres`.
-//! `--formal` → schema `formal` (CREATE IF NOT EXISTS + search_path); else `public`.
+//! Shared Postgres DSN from compile-time `config/default.toml` `[postgres]`.
+//! `formal` → `[postgres].formal_schema` (CREATE IF NOT EXISTS + search_path); else `public`.
 
 use anyhow::{Context, Result};
 use log::info;
 use tokio_postgres::{Client, NoTls};
 
-const HOST: &str = "192.168.110.96";
-const PORT: u16 = 5432;
-const USER: &str = "nan";
-const PASS: &str = "22332233";
-const DBNAME: &str = "postgres";
-const FORMAL_SCHEMA: &str = "formal";
+use crate::config;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PgOpts {
@@ -19,13 +14,15 @@ pub struct PgOpts {
 
 impl PgOpts {
     pub fn schema(self) -> &'static str {
-        if self.formal { FORMAL_SCHEMA } else { "public" }
+        if self.formal {
+            config::postgres().formal_schema.as_str()
+        } else {
+            "public"
+        }
     }
 
     pub fn dsn(self) -> String {
-        format!(
-            "host={HOST} port={PORT} dbname={DBNAME} user={USER} password={PASS} connect_timeout=10 sslmode=disable"
-        )
+        config::postgres().dsn()
     }
 }
 
@@ -351,39 +348,45 @@ impl TableSet {
 }
 
 pub async fn connect(opts: PgOpts) -> Result<Client> {
+    let pg = config::postgres();
     let dsn = opts.dsn();
     let (client, conn) = tokio_postgres::connect(&dsn, NoTls)
         .await
-        .with_context(|| format!("postgres connect db={DBNAME}"))?;
+        .with_context(|| format!("postgres connect db={}", pg.dbname))?;
     tokio::spawn(async move {
         if let Err(e) = conn.await {
             log::warn!("postgres connection closed: {e}");
         }
     });
     info!(
-        "postgres connected {HOST}:{PORT} db={DBNAME} schema={} user={USER} formal={}",
+        "postgres connected {}:{} db={} schema={} user={} formal={}",
+        pg.host,
+        pg.port,
+        pg.dbname,
         opts.schema(),
+        pg.user,
         opts.formal
     );
     Ok(client)
 }
 
 pub async fn prepare(client: &Client, opts: PgOpts, set: TableSet) -> Result<()> {
+    let formal_schema = config::postgres().formal_schema.as_str();
     if opts.formal {
         client
-            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {FORMAL_SCHEMA}"))
+            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {formal_schema}"))
             .await
             .context("CREATE SCHEMA formal")?;
         client
-            .batch_execute(&format!("SET search_path TO {FORMAL_SCHEMA}"))
+            .batch_execute(&format!("SET search_path TO {formal_schema}"))
             .await
             .context("SET search_path formal")?;
         if let Some(sql) = set.recreate_sql() {
             client
                 .batch_execute(sql)
                 .await
-                .with_context(|| format!("recreate tables {:?} in {FORMAL_SCHEMA}", set))?;
-            info!("formal schema={FORMAL_SCHEMA}: recreated {:?} tables", set);
+                .with_context(|| format!("recreate tables {:?} in {formal_schema}", set))?;
+            info!("formal schema={formal_schema}: recreated {:?} tables", set);
         }
     } else {
         client
@@ -402,21 +405,22 @@ pub async fn prepare(client: &Client, opts: PgOpts, set: TableSet) -> Result<()>
         client
             .batch_execute(set.truncate_sql())
             .await
-            .with_context(|| format!("TRUNCATE {:?} in {FORMAL_SCHEMA}", set))?;
-        info!("formal schema={FORMAL_SCHEMA}: truncated {:?}", set);
+            .with_context(|| format!("TRUNCATE {:?} in {formal_schema}", set))?;
+        info!("formal schema={formal_schema}: truncated {:?}", set);
     }
     Ok(())
 }
 
 /// Ensure `just_tx_rtt_*` exist; on formal, delete only rows with `source_note = note`.
 pub async fn prepare_just_tx_rtt_note(client: &Client, opts: PgOpts, note: &str) -> Result<()> {
+    let formal_schema = config::postgres().formal_schema.as_str();
     if opts.formal {
         client
-            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {FORMAL_SCHEMA}"))
+            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {formal_schema}"))
             .await
             .context("CREATE SCHEMA formal")?;
         client
-            .batch_execute(&format!("SET search_path TO {FORMAL_SCHEMA}"))
+            .batch_execute(&format!("SET search_path TO {formal_schema}"))
             .await
             .context("SET search_path formal")?;
     } else {
@@ -442,7 +446,7 @@ pub async fn prepare_just_tx_rtt_note(client: &Client, opts: PgOpts, note: &str)
             .await
             .context("DELETE just_tx_rtt_runs by source_note")?;
         info!(
-            "formal schema={FORMAL_SCHEMA}: deleted {n} just_tx_rtt_runs with source_note={note}"
+            "formal schema={formal_schema}: deleted {n} just_tx_rtt_runs with source_note={note}"
         );
     }
     Ok(())
@@ -451,13 +455,14 @@ pub async fn prepare_just_tx_rtt_note(client: &Client, opts: PgOpts, note: &str)
 /// Ensure `experiment_*` exist; on formal, delete only rows with `source_note = note`
 /// (does not DROP/TRUNCATE the whole PPS table family).
 pub async fn prepare_experiment_pps_note(client: &Client, opts: PgOpts, note: &str) -> Result<()> {
+    let formal_schema = config::postgres().formal_schema.as_str();
     if opts.formal {
         client
-            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {FORMAL_SCHEMA}"))
+            .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {formal_schema}"))
             .await
             .context("CREATE SCHEMA formal")?;
         client
-            .batch_execute(&format!("SET search_path TO {FORMAL_SCHEMA}"))
+            .batch_execute(&format!("SET search_path TO {formal_schema}"))
             .await
             .context("SET search_path formal")?;
     } else {
@@ -489,7 +494,7 @@ pub async fn prepare_experiment_pps_note(client: &Client, opts: PgOpts, note: &s
             .await
             .context("DELETE experiment_runs by source_note")?;
         info!(
-            "formal schema={FORMAL_SCHEMA}: deleted {n} experiment_runs with source_note={note}"
+            "formal schema={formal_schema}: deleted {n} experiment_runs with source_note={note}"
         );
     }
     Ok(())

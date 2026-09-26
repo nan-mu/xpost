@@ -101,7 +101,7 @@ pub async fn run_just_tx_rtt(
     let endpoint = cfg
         .agent
         .resolved_endpoint()
-        .context("just-tx-rtt needs [agent].endpoint or XPOST_AGENT_ENDPOINT")?;
+        .context("just-tx-rtt needs [agent].endpoint in config/default.toml")?;
     let agent = AgentClient::new(endpoint.clone());
     let esp_s = cfg.target.esp_ip.to_string();
 

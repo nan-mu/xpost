@@ -1,4 +1,4 @@
-"""CREATE IF NOT EXISTS for experiment_* tables (PPS contract)."""
+"""CREATE IF NOT EXISTS for experiment_* and just_tx_rtt_* tables."""
 
 from __future__ import annotations
 
@@ -50,6 +50,49 @@ DDL = [
     CREATE INDEX IF NOT EXISTS counter_samples_run_time
         ON counter_samples (run_id, time_ns)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS just_tx_rtt_runs (
+        run_id UUID PRIMARY KEY,
+        pair_id INTEGER NOT NULL,
+        run_kind TEXT NOT NULL CHECK (run_kind IN ('random', 'control', 'pilot')),
+        variant TEXT NOT NULL CHECK (variant IN ('hal', 'xdp')),
+        phase TEXT NOT NULL DEFAULT 'operating'
+            CHECK (phase IN ('sweep', 'operating')),
+        target_pps DOUBLE PRECISION NOT NULL,
+        calibrated_loss DOUBLE PRECISION,
+        window_secs DOUBLE PRECISION,
+        sent BIGINT NOT NULL,
+        ok BIGINT NOT NULL,
+        loss_rate DOUBLE PRECISION NOT NULL,
+        return_pps DOUBLE PRECISION,
+        device_rxcnt_delta BIGINT,
+        median_rtt_ms DOUBLE PRECISION,
+        p95_rtt_ms DOUBLE PRECISION,
+        mean_rtt_ms DOUBLE PRECISION,
+        started_at_utc TIMESTAMPTZ,
+        stopped_at_utc TIMESTAMPTZ,
+        status TEXT NOT NULL,
+        source_note TEXT
+    )
+    """,
+    """
+    ALTER TABLE just_tx_rtt_runs
+        ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'operating'
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS just_tx_rtt_samples (
+        run_id UUID NOT NULL REFERENCES just_tx_rtt_runs(run_id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        t0 TIMESTAMPTZ NOT NULL,
+        ok BOOLEAN NOT NULL,
+        rtt_ms DOUBLE PRECISION,
+        PRIMARY KEY (run_id, seq)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS just_tx_rtt_samples_run
+        ON just_tx_rtt_samples (run_id)
+    """,
 ]
 
 
@@ -62,7 +105,7 @@ def main() -> None:
         for stmt in DDL:
             conn.execute(stmt)
         conn.commit()
-    print("ok: experiment_runs / counter_samples / sample_reads")
+    print("ok: experiment_* / just_tx_rtt_*")
 
 
 if __name__ == "__main__":

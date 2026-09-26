@@ -1,16 +1,10 @@
 //! TR3000 host harness: RAW stimulus + compile-time TOML config.
 //!
-//! Binary: `xpost-test`. Bare `./xpost-test` runs `[default_bench]` from embedded
-//! `config/test.toml` (see that file; currently `just-tx-rtt`).
-//!
-//! Formal benches (Postgres):
-//! - `./xpost-test` — whatever `[default_bench]` names (compile-time)
-//! - `./xpost-test just-drop-pps` / `just-tx-pps` / `just-tx-rtt` — explicit override
-//! - `./xpost-test drop-xdp / drop-hal / echo / …` — legacy benches
-//!
-//! `./xpost-test suite` — embedded `config/test.toml` [[tests]].
-//! `./xpost-test serve` — long-running HTTP daemon.
-//! `./xpost-test --help-benches` — print CLI help without running default.
+//! Binary: `xpost-test`. Formal path on TR3000 is always bare:
+//!   ./xpost-test
+//! which runs `default.toml` `run = [...]` (no env, no flags).
+//! Experiment knobs: `config/just_tx.toml`, `config/just_drop.toml`.
+//! Shared DUT / agent / postgres: `config/default.toml`.
 
 mod agent;
 mod bench;
@@ -29,7 +23,7 @@ use std::{
 use anyhow::{Context, Result};
 use bench::drop_common::DropOpts;
 use clap::{CommandFactory, Parser, Subcommand};
-use config::{FileConfig, format_mac};
+use config::{FileConfig, format_mac, install_postgres};
 use harness::Harness;
 use log::{debug, info, warn};
 use raw_tx::{RawTx, iface_mac};
@@ -43,24 +37,24 @@ struct Args {
     #[arg(long, global = true, hide = true)]
     smoke: bool,
     /// Write into schema `formal` (same db `postgres`) and empty this bench's tables before run.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     formal: bool,
     /// UDP blast window in seconds (overrides smoke / embedded default).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     window_secs: Option<u64>,
     /// Skip Postgres ingest (stdout only).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     no_pg: bool,
     /// Skip just-drop UDP blast perf phase (functional only).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     no_perf: bool,
     /// Pair / round count (overrides smoke=1 / embedded default).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     rounds: Option<usize>,
     /// Print legacy pretty-JSON report to stdout (suite only; default: human table).
     #[arg(long)]
     json: bool,
-    /// Print CLI help without running `[default_bench]`.
+    /// Print CLI help without running `default.toml` `run`.
     #[arg(long)]
     help_benches: bool,
     #[command(subcommand)]
@@ -71,7 +65,7 @@ struct Args {
 enum Command {
     /// Run every formal bench in order (inherits `--smoke` / `--formal`).
     All,
-    /// Run embedded `config/test.toml` [[tests]] (former default).
+    /// Run embedded `config/default.toml` [[tests]] (former default).
     Suite,
     /// 丢包实验 XDP path via profile boot → `xdp_drop_*` (`path=xdp_drop`).
     #[command(name = "drop-xdp")]
@@ -95,7 +89,7 @@ enum Command {
     /// just_drop / just_drop_hal PPS → `experiment_*` (agent flashes each arm).
     #[command(name = "just-drop-pps")]
     JustDropPps {
-        /// Restrict to one arm. Omit → embedded `[just_drop_pps].arms`.
+        /// Restrict to one arm. Omit → embedded `[just_drop].pps.arms`.
         #[arg(long, value_parser = ["xdp", "hal"])]
         path: Option<String>,
         /// Counter sample period while blasting (ms). `0` → embedded default.
@@ -105,7 +99,7 @@ enum Command {
     /// just_tx / just_tx_hal PPS → `experiment_*` via `rxcnt 17` (agent flashes each arm).
     #[command(name = "just-tx-pps")]
     JustTxPps {
-        /// Restrict to one arm. Omit → embedded `[just_tx_pps].arms`.
+        /// Restrict to one arm. Omit → embedded `[just_tx].pps.arms`.
         #[arg(long, value_parser = ["xdp", "hal"])]
         path: Option<String>,
         /// Counter sample period while blasting (ms). `0` → embedded default.
@@ -115,7 +109,7 @@ enum Command {
     /// just_tx / just_tx_hal RTT at ~5% loss operating point → `just_tx_rtt_*`.
     #[command(name = "just-tx-rtt")]
     JustTxRtt {
-        /// Restrict to one arm. Omit → embedded `[just_tx_rtt].arms`.
+        /// Restrict to one arm. Omit → embedded `[just_tx].rtt.arms`.
         #[arg(long, value_parser = ["xdp", "hal"])]
         path: Option<String>,
     },
@@ -138,10 +132,42 @@ fn wall_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn command_from_name(name: &str) -> Result<Command> {
+    Ok(match name {
+        "just-drop-pps" => Command::JustDropPps {
+            path: None,
+            sample_interval_ms: 0,
+        },
+        "just-tx-pps" => Command::JustTxPps {
+            path: None,
+            sample_interval_ms: 0,
+        },
+        "just-tx-rtt" => Command::JustTxRtt { path: None },
+        "just-drop" => Command::JustDrop,
+        "suite" => Command::Suite,
+        "all" => Command::All,
+        "drop-xdp" => Command::DropXdp,
+        "drop-hal" => Command::DropHal,
+        "echo" => Command::Echo,
+        "wl-rtt" => Command::WlRtt,
+        "wl-loss" => Command::WlLoss,
+        "rate-rtt" => Command::RateRtt,
+        "rate-loss" => Command::RateLoss,
+        other => anyhow::bail!(
+            "unknown bench {other:?} in default.toml `run`; edit config/default.toml"
+        ),
+    })
+}
+
+fn is_quiet_command(command: &Command) -> bool {
+    !matches!(command, Command::Suite)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     let cfg = FileConfig::embedded()?;
+    install_postgres(cfg.postgres.clone());
 
     if args.help_benches {
         let mut cmd = Args::command();
@@ -150,67 +176,52 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let command = if args.command.is_none() {
-        match cfg.default_bench.as_str() {
-            "just-drop-pps" => Some(Command::JustDropPps {
-                path: None,
-                sample_interval_ms: 0,
-            }),
-            "just-tx-pps" => Some(Command::JustTxPps {
-                path: None,
-                sample_interval_ms: 0,
-            }),
-            "just-tx-rtt" => Some(Command::JustTxRtt { path: None }),
-            "suite" => Some(Command::Suite),
-            "all" => Some(Command::All),
-            other => {
-                anyhow::bail!(
-                    "unknown [default_bench]={other:?}; edit config/test.toml or pass a subcommand"
-                );
-            }
+    // Formal TR3000 path: no subcommand → execute `run` list from default.toml.
+    if args.command.is_none() {
+        let quiet = cfg
+            .run
+            .iter()
+            .all(|n| command_from_name(n).map(|c| is_quiet_command(&c)).unwrap_or(true));
+        let log_default = if quiet { "warn" } else { "info" };
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_default))
+            .init();
+        info!(
+            "embedded config v={} esp={} mac={} iface={} run={:?}",
+            cfg.version, cfg.target.esp_ip, cfg.target.esp_mac, cfg.probe.iface, cfg.run
+        );
+        for name in &cfg.run {
+            info!("run bench {name}");
+            dispatch_command(&cfg, &args, command_from_name(name)?).await?;
         }
-    } else {
-        args.command.clone()
-    };
+        return Ok(());
+    }
 
-    let quiet = match &command {
-        None | Some(Command::Suite) => false,
-        Some(
-            Command::All
-            | Command::DropXdp
-            | Command::DropHal
-            | Command::Echo
-            | Command::WlRtt
-            | Command::WlLoss
-            | Command::RateRtt
-            | Command::RateLoss
-            | Command::JustDrop
-            | Command::JustDropPps { .. }
-            | Command::JustTxPps { .. }
-            | Command::JustTxRtt { .. }
-            | Command::Bench
-            | Command::BenchLoss
-            | Command::Serve { .. },
-        ) => true,
+    let command = args.command.clone().expect("subcommand present");
+    let log_default = if is_quiet_command(&command) {
+        "warn"
+    } else {
+        "info"
     };
-    let log_default = if quiet { "warn" } else { "info" };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_default)).init();
 
-    if matches!(command, Some(Command::Serve { .. })) {
-        let Some(Command::Serve { http_listen }) = command else {
+    if matches!(command, Command::Serve { .. }) {
+        let Command::Serve { http_listen } = command else {
             unreachable!();
         };
         return serve::run(http_listen).await;
     }
 
     info!(
-        "embedded config esp={} mac={} iface={} default_bench={}",
-        cfg.target.esp_ip, cfg.target.esp_mac, cfg.probe.iface, cfg.default_bench
+        "embedded config v={} esp={} mac={} iface={} run={:?}",
+        cfg.version, cfg.target.esp_ip, cfg.target.esp_mac, cfg.probe.iface, cfg.run
     );
+    dispatch_command(&cfg, &args, command).await
+}
 
-    if matches!(command, Some(Command::JustDrop)) {
+async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Result<()> {
+    if matches!(command, Command::JustDrop) {
         return bench::run_just_drop(
-            &cfg,
+            cfg,
             bench::JustDropOpts {
                 formal: args.formal,
                 no_pg: args.no_pg,
@@ -221,10 +232,10 @@ async fn main() -> Result<()> {
         )
         .await;
     }
-    if let Some(Command::JustDropPps {
+    if let Command::JustDropPps {
         path,
         sample_interval_ms,
-    }) = &command
+    } = &command
     {
         let paths = match path {
             Some(p) => vec![bench::PpsPath::parse(p)?],
@@ -236,7 +247,7 @@ async fn main() -> Result<()> {
             *sample_interval_ms
         };
         return bench::run_just_drop_pps(
-            &cfg,
+            cfg,
             bench::JustDropPpsOpts {
                 paths,
                 smoke: args.smoke,
@@ -249,10 +260,10 @@ async fn main() -> Result<()> {
         )
         .await;
     }
-    if let Some(Command::JustTxPps {
+    if let Command::JustTxPps {
         path,
         sample_interval_ms,
-    }) = &command
+    } = &command
     {
         let paths = match path {
             Some(p) => vec![bench::PpsPath::parse(p)?],
@@ -264,7 +275,7 @@ async fn main() -> Result<()> {
             *sample_interval_ms
         };
         return bench::run_just_tx_pps(
-            &cfg,
+            cfg,
             bench::JustTxPpsOpts {
                 paths,
                 smoke: args.smoke,
@@ -277,14 +288,14 @@ async fn main() -> Result<()> {
         )
         .await;
     }
-    if let Some(Command::JustTxRtt { path }) = &command {
+    if let Command::JustTxRtt { path } = &command {
         let paths = match path {
             Some(p) => vec![bench::PpsPath::parse(p)?],
             None => Vec::new(),
         };
-        let mut harness = open_harness(&cfg).await?;
+        let mut harness = open_harness(cfg).await?;
         return bench::run_just_tx_rtt(
-            &cfg,
+            cfg,
             &mut harness,
             bench::JustTxRttOpts {
                 paths,
@@ -305,48 +316,47 @@ async fn main() -> Result<()> {
         args.window_secs,
         args.rounds,
     );
-    let mut harness = open_harness(&cfg).await?;
+    let mut harness = open_harness(cfg).await?;
     match command {
-        Some(Command::Serve { .. }) => unreachable!(),
-        Some(Command::All) => {
-            return bench::run_all_benches(&mut harness, &cfg, drop_opts).await;
+        Command::Serve { .. } => unreachable!(),
+        Command::All => {
+            return bench::run_all_benches(&mut harness, cfg, drop_opts).await;
         }
-        Some(Command::DropXdp) => {
-            ensure_bench_profile(&harness, &cfg, "drop-xdp").await?;
+        Command::DropXdp => {
+            ensure_bench_profile(&harness, cfg, "drop-xdp").await?;
             return bench::run_drop_xdp(&mut harness, drop_opts).await;
         }
-        Some(Command::DropHal) => {
-            ensure_bench_profile(&harness, &cfg, "drop-hal").await?;
+        Command::DropHal => {
+            ensure_bench_profile(&harness, cfg, "drop-hal").await?;
             return bench::run_drop_hal(&mut harness, drop_opts).await;
         }
-        Some(Command::Echo) => {
-            ensure_bench_profile(&harness, &cfg, "echo").await?;
+        Command::Echo => {
+            ensure_bench_profile(&harness, cfg, "echo").await?;
             return bench::run_echo(&mut harness, args.smoke, args.formal).await;
         }
-        Some(Command::WlRtt) => {
-            ensure_bench_profile(&harness, &cfg, "wl-rtt").await?;
+        Command::WlRtt => {
+            ensure_bench_profile(&harness, cfg, "wl-rtt").await?;
             return bench::run_wl_rtt(&mut harness, args.smoke, args.formal).await;
         }
-        Some(Command::WlLoss) | Some(Command::BenchLoss) => {
-            ensure_bench_profile(&harness, &cfg, "wl-loss").await?;
+        Command::WlLoss | Command::BenchLoss => {
+            ensure_bench_profile(&harness, cfg, "wl-loss").await?;
             return bench::run_wl_loss(&mut harness, args.smoke, args.formal).await;
         }
-        Some(Command::RateRtt) | Some(Command::Bench) => {
-            ensure_bench_profile(&harness, &cfg, "rate-rtt").await?;
+        Command::RateRtt | Command::Bench => {
+            ensure_bench_profile(&harness, cfg, "rate-rtt").await?;
             return bench::run_rate_rtt(&mut harness, args.smoke, args.formal).await;
         }
-        Some(Command::RateLoss) => {
-            ensure_bench_profile(&harness, &cfg, "rate-loss").await?;
+        Command::RateLoss => {
+            ensure_bench_profile(&harness, cfg, "rate-loss").await?;
             return bench::run_rate_loss(&mut harness, args.smoke, args.formal).await;
         }
-        Some(Command::JustDrop) => unreachable!("handled before harness open"),
-        Some(Command::JustDropPps { .. }) => unreachable!("handled before harness open"),
-        Some(Command::JustTxPps { .. }) => unreachable!("handled before harness open"),
-        Some(Command::JustTxRtt { .. }) => unreachable!("handled before harness open"),
-        Some(Command::Suite) => {}
-        None => unreachable!(),
+        Command::JustDrop
+        | Command::JustDropPps { .. }
+        | Command::JustTxPps { .. }
+        | Command::JustTxRtt { .. } => unreachable!("handled earlier"),
+        Command::Suite => {}
     }
-    let report = run_all(&cfg, &mut harness).await?;
+    let report = run_all(cfg, &mut harness).await?;
 
     if args.json {
         let json = serde_json::to_string_pretty(&report)?;
@@ -389,7 +399,7 @@ async fn open_harness(cfg: &FileConfig) -> Result<Harness> {
 
     if cfg.target.stim_sport == cfg.target.reply_port {
         anyhow::bail!(
-            "target.stim_sport ({}) must differ from reply_port (fw_hash bounce TC)",
+            "dut.stim_sport ({}) must differ from reply_port (fw_hash bounce TC)",
             cfg.target.stim_sport
         );
     }

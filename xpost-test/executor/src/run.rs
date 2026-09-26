@@ -33,9 +33,6 @@ pub async fn run_test_job(jobs: &Jobs, job_id: u64, cfg: &ExecutorConfig, log: J
     if job.formal {
         cmd.arg("--formal");
     }
-    if !cfg.agent.endpoint.is_empty() {
-        cmd.env("XPOST_AGENT_ENDPOINT", &cfg.agent.endpoint);
-    }
 
     let mut child = cmd
         .stdout(Stdio::piped())

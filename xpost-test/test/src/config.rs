@@ -1,16 +1,38 @@
-//! TOML configuration for the probe binary (compile-time embed + optional parse helpers).
+//! Compile-time TOML: `config/default.toml` + `just_tx.toml` + `just_drop.toml`.
 
-use std::{net::Ipv4Addr, str::FromStr};
+use std::{net::Ipv4Addr, str::FromStr, sync::OnceLock};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-/// Baked-in config from [`config/test.toml`](../../config/test.toml).
-pub const EMBEDDED_CONFIG_TOML: &str = include_str!("../../config/test.toml");
+const EMBEDDED_DEFAULT: &str = include_str!("../../config/default.toml");
+const EMBEDDED_JUST_TX: &str = include_str!("../../config/just_tx.toml");
+const EMBEDDED_JUST_DROP: &str = include_str!("../../config/just_drop.toml");
+
+static POSTGRES: OnceLock<PostgresConfig> = OnceLock::new();
+
+/// Install Postgres settings from embedded config (call once at process start).
+pub fn install_postgres(cfg: PostgresConfig) {
+    let _ = POSTGRES.set(cfg);
+}
+
+/// Compile-time Postgres DSN pieces (after [`install_postgres`]).
+pub fn postgres() -> &'static PostgresConfig {
+    POSTGRES
+        .get()
+        .expect("postgres config: call install_postgres after FileConfig::embedded")
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FileConfig {
+    #[serde(default = "default_version")]
+    pub version: String,
+    /// Ordered benches for bare `./xpost-test`.
+    #[serde(default = "default_run")]
+    pub run: Vec<String>,
+    pub postgres: PostgresConfig,
     pub probe: ProbeConfig,
+    #[serde(rename = "dut")]
     pub target: TargetConfig,
     #[serde(default)]
     pub agent: AgentConfig,
@@ -18,21 +40,54 @@ pub struct FileConfig {
     pub serve: ServeConfig,
     #[serde(default)]
     pub profiles: ProfilesConfig,
-    /// Bare `./xpost-test` (no subcommand) runs this bench.
-    #[serde(default = "default_default_bench")]
-    pub default_bench: String,
     #[serde(default)]
-    pub just_drop_pps: JustDropPpsConfig,
+    pub just_drop_pps: BenchPpsConfig,
     #[serde(default)]
-    pub just_tx_pps: JustDropPpsConfig,
+    pub just_tx_pps: BenchPpsConfig,
     #[serde(default)]
-    pub just_tx_rtt: JustDropPpsConfig,
+    pub just_tx_rtt: BenchPpsConfig,
     #[serde(default)]
     pub tests: Vec<TestEntry>,
 }
 
-fn default_default_bench() -> String {
-    "just-tx-rtt".into()
+fn default_version() -> String {
+    "0".into()
+}
+
+fn default_run() -> Vec<String> {
+    vec!["just-tx-rtt".into()]
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PostgresConfig {
+    pub host: String,
+    #[serde(default = "default_pg_port")]
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    #[serde(default = "default_pg_dbname")]
+    pub dbname: String,
+    #[serde(default = "default_formal_schema")]
+    pub formal_schema: String,
+}
+
+fn default_pg_port() -> u16 {
+    5432
+}
+fn default_pg_dbname() -> String {
+    "postgres".into()
+}
+fn default_formal_schema() -> String {
+    "formal".into()
+}
+
+impl PostgresConfig {
+    pub fn dsn(&self) -> String {
+        format!(
+            "host={} port={} dbname={} user={} password={} connect_timeout=10 sslmode=disable",
+            self.host, self.port, self.dbname, self.user, self.password
+        )
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -43,12 +98,9 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
-    /// Mac agent address: `XPOST_AGENT_ENDPOINT` env overrides embedded `[agent].endpoint`.
+    /// Embedded `[agent].endpoint` only (no env override on TR3000).
     pub fn resolved_endpoint(&self) -> Option<String> {
-        std::env::var("XPOST_AGENT_ENDPOINT")
-            .ok()
-            .or_else(|| self.endpoint.clone())
-            .filter(|s| !s.is_empty())
+        self.endpoint.clone().filter(|s| !s.is_empty())
     }
 }
 
@@ -70,24 +122,19 @@ pub struct ProfilesConfig {
     pub drop_xdp: Option<String>,
     #[serde(default)]
     pub firmware: Option<String>,
-    /// Profile id for just_drop firmware (+ optional xdp.elf on agent).
     #[serde(default)]
     pub just_drop: Option<String>,
-    /// Profile id for just_drop_hal firmware.
     #[serde(default)]
     pub just_drop_hal: Option<String>,
-    /// Profile id for just_tx (just_drop firmware + just_tx.elf).
     #[serde(default)]
     pub just_tx: Option<String>,
-    /// Profile id for just_tx_hal firmware.
     #[serde(default)]
     pub just_tx_hal: Option<String>,
 }
 
-/// Compile-time defaults for `just-drop-pps` / bare `./xpost-test`.
+/// Shared knobs for PPS / RTT arms (rounds, formal, …).
 #[derive(Debug, Clone, Deserialize)]
-pub struct JustDropPpsConfig {
-    /// When true, write schema `formal` and empty tables before the run.
+pub struct BenchPpsConfig {
     #[serde(default = "default_true")]
     pub formal: bool,
     #[serde(default = "default_pps_rounds")]
@@ -96,7 +143,6 @@ pub struct JustDropPpsConfig {
     pub window_secs: Option<u64>,
     #[serde(default = "default_sample_ms")]
     pub sample_interval_ms: u64,
-    /// Arms in order, e.g. `["hal", "xdp"]`.
     #[serde(default = "default_pps_arms")]
     pub arms: Vec<String>,
 }
@@ -114,7 +160,7 @@ fn default_pps_arms() -> Vec<String> {
     vec!["hal".into(), "xdp".into()]
 }
 
-impl Default for JustDropPpsConfig {
+impl Default for BenchPpsConfig {
     fn default() -> Self {
         Self {
             formal: true,
@@ -126,14 +172,11 @@ impl Default for JustDropPpsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProbeConfig {
     pub iface: String,
     #[serde(default = "default_pair_timeout_ms")]
     pub pair_timeout_ms: u64,
     #[serde(default = "default_report_path")]
     pub report_path: String,
-    /// Optional override for Ethernet source MAC (aa:bb:...).
     #[serde(default)]
     pub src_mac: Option<String>,
 }
@@ -149,7 +192,6 @@ fn default_report_path() -> String {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TargetConfig {
     pub esp_ip: Ipv4Addr,
-    /// VIP (A) for XDP L2 bounce tests; optional when only running firewall_echo.
     #[serde(default)]
     pub vip_ip: Option<Ipv4Addr>,
     pub esp_mac: String,
@@ -157,11 +199,8 @@ pub struct TargetConfig {
     pub echo_port: u16,
     #[serde(default = "default_reply_port")]
     pub reply_port: u16,
-    /// RAW stimulus UDP source port. Must differ from `reply_port`: `fw_hash_bounce`
-    /// swaps ports, and TC classifies bounce as `sport==echo && dport!=reply`.
     #[serde(default = "default_stim_sport")]
     pub stim_sport: u16,
-    /// UDP control port for MapCrudOp / HotLoadOp.
     #[serde(default = "default_ctrl_port")]
     pub ctrl_port: u16,
 }
@@ -169,15 +208,12 @@ pub struct TargetConfig {
 fn default_echo_port() -> u16 {
     8080
 }
-
 fn default_reply_port() -> u16 {
     18080
 }
-
 fn default_stim_sport() -> u16 {
     18081
 }
-
 fn default_ctrl_port() -> u16 {
     8081
 }
@@ -199,28 +235,87 @@ fn default_enabled() -> bool {
 pub struct CaseConfig {
     pub id: String,
     pub src_ip: Ipv4Addr,
-    /// Stimulus destination; omit to use `target.esp_ip` (B / STA).
     #[serde(default)]
     pub dst_ip: Option<Ipv4Addr>,
-    /// Firewall / STA path: expect `FWSTIM`+seq echo on reply_port.
     #[serde(default)]
     pub expect_echo: bool,
-    /// VIP path: expect same `FWSTIM`+seq payload bounced (XDP TX).
     #[serde(default)]
     pub expect_bounce: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct DefaultFile {
+    #[serde(default = "default_version")]
+    version: String,
+    #[serde(default = "default_run")]
+    run: Vec<String>,
+    postgres: PostgresConfig,
+    probe: ProbeConfig,
+    #[serde(rename = "dut")]
+    target: TargetConfig,
+    #[serde(default)]
+    agent: AgentConfig,
+    #[serde(default)]
+    serve: ServeConfig,
+    #[serde(default)]
+    profiles: ProfilesConfig,
+    #[serde(default)]
+    tests: Vec<TestEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JustTxFile {
+    #[serde(default)]
+    pps: BenchPpsConfig,
+    #[serde(default)]
+    rtt: BenchPpsConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct JustDropFile {
+    #[serde(default)]
+    pps: BenchPpsConfig,
+}
+
 impl FileConfig {
-    /// Load the TOML embedded at compile time.
+    /// Load and merge the three compile-time TOMLs.
     pub fn embedded() -> Result<Self> {
-        Self::from_str(EMBEDDED_CONFIG_TOML).context("parse embedded config/test.toml")
+        let def: DefaultFile =
+            toml::from_str(EMBEDDED_DEFAULT).context("parse config/default.toml")?;
+        let tx: JustTxFile =
+            toml::from_str(EMBEDDED_JUST_TX).context("parse config/just_tx.toml")?;
+        let drop: JustDropFile =
+            toml::from_str(EMBEDDED_JUST_DROP).context("parse config/just_drop.toml")?;
+
+        let cfg = Self {
+            version: def.version,
+            run: def.run,
+            postgres: def.postgres,
+            probe: def.probe,
+            target: def.target,
+            agent: def.agent,
+            serve: def.serve,
+            profiles: def.profiles,
+            just_drop_pps: drop.pps,
+            just_tx_pps: tx.pps,
+            just_tx_rtt: tx.rtt,
+            tests: def.tests,
+        };
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     fn validate(&self) -> Result<()> {
+        if self.run.is_empty() {
+            bail!("default.toml `run` must list at least one bench");
+        }
         if self.probe.iface.is_empty() {
             bail!("probe.iface must be set");
         }
-        parse_mac(&self.target.esp_mac).context("target.esp_mac")?;
+        if self.postgres.host.is_empty() {
+            bail!("postgres.host must be set");
+        }
+        parse_mac(&self.target.esp_mac).context("dut.esp_mac")?;
         if let Some(ref m) = self.probe.src_mac {
             parse_mac(m).context("probe.src_mac")?;
         }
@@ -286,9 +381,7 @@ pub fn format_mac(mac: &[u8; 6]) -> String {
 impl FromStr for FileConfig {
     type Err = anyhow::Error;
 
-    fn from_str(s: &str) -> Result<Self> {
-        let cfg: Self = toml::from_str(s)?;
-        cfg.validate()?;
-        Ok(cfg)
+    fn from_str(_s: &str) -> Result<Self> {
+        bail!("FileConfig::from_str removed; use FileConfig::embedded()")
     }
 }
