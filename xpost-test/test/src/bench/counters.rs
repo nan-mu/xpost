@@ -42,8 +42,11 @@ fn parse_value(v: &str) -> Value {
     Value::String(v.to_string())
 }
 
+/// Instantaneous gauges — store the post-window absolute value, not a delta.
+const GAUGE_KEYS: &[&str] = &["tx_pend", "tx_inflight", "tx_last_rc", "map_lock"];
+
 /// Keys whose value changed between `before` and `after`. Unchanged keys omitted.
-/// Numeric keys store `after - before`; strings store `after`.
+/// Counters store `after - before`; gauges / strings store `after`.
 /// Missing-on-one-side counts as a change (uses the present side's value, or `null`).
 pub fn counters_delta(before: &CounterMap, after: &CounterMap) -> Value {
     let mut obj = Map::new();
@@ -58,6 +61,14 @@ pub fn counters_delta(before: &CounterMap, after: &CounterMap) -> Value {
         let b = before.get(*k);
         let a = after.get(*k);
         if b == a {
+            continue;
+        }
+        if GAUGE_KEYS.contains(k) {
+            if let Some(v) = a {
+                obj.insert((*k).to_string(), v.clone());
+            } else {
+                obj.insert((*k).to_string(), Value::Null);
+            }
             continue;
         }
         match (b.and_then(Value::as_i64), a) {

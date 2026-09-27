@@ -357,7 +357,7 @@ fn print_counters() {
     let p = &xpost::esp_radio::XDP_PROG;
     let t = esp_radio::wifi::xdp_tx_stats();
     esp_println::println!(
-        "OK counters drop={} failed_tx={} tx_bad_buf={} tx_token={} tx_wifi={} tx_wifi_rc={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={} tx_enq={} tx_pend={} tx_inflight={} tx_drain_ok={} tx_nomem_wait={} tx_cap_wait={} tx_enq_claim={} tx_enq_ring={} tx_done={} tx_done_fail={} tx_grp_src={} tx_last_rc={}",
+        "OK counters drop={} failed_tx={} tx_bad_buf={} tx_token={} tx_wifi={} tx_wifi_rc={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={} tx_enq={} tx_pend={} tx_inflight={} tx_drain_ok={} tx_nomem_wait={} tx_cap_wait={} tx_enq_claim={} tx_enq_ring={} tx_done={} tx_done_fail={} tx_grp_src={} tx_ns_ref={} tx_ns_free={} tx_no_retain={} tx_last_rc={}",
         p.drop_count(),
         p.failed_tx_count(),
         p.failed_tx_bad_buf_count(),
@@ -385,6 +385,9 @@ fn print_counters() {
         t.tx_done,
         t.tx_done_fail,
         t.grp_src,
+        t.netstack_ref,
+        t.netstack_free,
+        t.no_retain,
         t.last_drain_rc,
     );
 }
@@ -392,7 +395,7 @@ fn print_counters() {
 fn print_txstats() {
     let t = esp_radio::wifi::xdp_tx_stats();
     esp_println::println!(
-        "OK txstats enq={} enq_claim={} enq_ring={} drain_ok={} nomem_wait={} cap_wait={} drain_fail={} last_rc={} polls={} kicks={} tx_done={} pend={} pend_peak={} inflight={} inflight_peak={} cap={} flow_samples={} done_fail={} block_max_us={} block_gt10ms={} block_gt100ms={} grp_src={}",
+        "OK txstats enq={} enq_claim={} enq_ring={} drain_ok={} nomem_wait={} cap_wait={} drain_fail={} last_rc={} polls={} kicks={} tx_done={} pend={} pend_peak={} inflight={} inflight_peak={} cap={} flow_samples={} done_fail={} block_max_us={} block_gt10ms={} block_gt100ms={} grp_src={} ns_ref={} ns_free={} no_retain={}",
         t.enqueued,
         t.enqueue_fail_claim,
         t.enqueue_fail_ring,
@@ -415,6 +418,9 @@ fn print_txstats() {
         t.block_gt10ms,
         t.block_gt100ms,
         t.grp_src,
+        t.netstack_ref,
+        t.netstack_free,
+        t.no_retain,
     );
 }
 

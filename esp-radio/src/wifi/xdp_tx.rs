@@ -5,8 +5,13 @@
 //!   re-entering the blob from its own RX callback stalls its TX engine.
 //! - Board TX task ([`poll`]): hands ring frames to `esp_wifi_internal_tx_by_ref`
 //!   while driver in-flight < [`set_inflight_cap`]. On cap / `NO_MEM` it stops and
-//!   waits for `tx_done` (which re-signals [`TX_KICK`]); no busy retry.
+//!   waits for a kick (`netstack_free` / `tx_done`); no busy retry.
 //! - Ring full at RX → tail drop (RX buffer freed immediately).
+//!
+//! Pin budget: each queued or in-flight zero-copy frame holds a ~1.7 KB RX
+//! buffer. `RING_CAP + inflight_cap` must leave heap headroom for the Wi-Fi
+//! driver to keep allocating RX descriptors — otherwise frames never reach
+//! [`transmit`] and show up only as host `sent - tx_enq` loss.
 
 #![allow(missing_docs)]
 
@@ -20,17 +25,18 @@ use super::xdp_prof::{self, Site, Span};
 use crate::sys::include;
 
 /// Token pool == ring capacity: a claimed token is always either queued or being handed off.
-const TX_TOKEN_CAPACITY: usize = 64;
+/// Keep small: every slot pins an RX buffer until drain (or tail-drop free).
+const TX_TOKEN_CAPACITY: usize = 16;
 const RING_CAP: usize = TX_TOKEN_CAPACITY;
 const TX_TOKEN_SLOT_EMPTY: usize = 0;
 const TX_TOKEN_SLOT_OWNED: usize = 1;
 const TX_TOKEN_SLOT_RELEASING: usize = 2;
 /// Print one full flow timestamp line every N handoffs (only while `tsflow on`).
 const FLOW_SAMPLE_EVERY: u32 = 100;
-/// Default max frames inside the Wi-Fi driver (handed off, no `tx_done` yet).
-/// Queue in the driver (per-frame-sized TX copies), not in held ~1.7 KB RX buffers;
-/// set to the board's `dynamic_tx_buf_num` so `NO_MEM` is the real backpressure.
-const DEFAULT_INFLIGHT_CAP: usize = 128;
+/// Max XDP frames handed to the driver and not yet released via `netstack_free`
+/// (or the no-retain `tx_done` fallback). Sized for RX pin headroom, not
+/// `dynamic_tx_buf_num` (128): zero-copy keeps the RX buffer until free.
+const DEFAULT_INFLIGHT_CAP: usize = 32;
 
 /// Signaled on RX enqueue and on every `tx_done`; the board TX task waits on it.
 pub static TX_KICK: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -88,6 +94,11 @@ pub struct TxStats {
     pub block_gt100ms: u32,
     /// XDP_TX frames whose (post-program) source MAC is a group address.
     pub grp_src: u32,
+    /// `netstack_ref` / `netstack_free` callbacks (zero-copy retain path).
+    pub netstack_ref: u32,
+    pub netstack_free: u32,
+    /// Handoffs where the driver did not retain; inflight cleared on `tx_done`.
+    pub no_retain: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +180,11 @@ static STAT_BLOCK_GT10MS: AtomicU32 = AtomicU32::new(0);
 static STAT_BLOCK_GT100MS: AtomicU32 = AtomicU32::new(0);
 static TSFLOW_ON: AtomicBool = AtomicBool::new(false);
 static STAT_GRP_SRC: AtomicU32 = AtomicU32::new(0);
+static STAT_NETSTACK_REF: AtomicU32 = AtomicU32::new(0);
+static STAT_NETSTACK_FREE: AtomicU32 = AtomicU32::new(0);
+static STAT_NO_RETAIN: AtomicU32 = AtomicU32::new(0);
+/// Outstanding handoffs that must clear via `tx_done` (driver skipped retain).
+static TX_NEED_DONE: AtomicUsize = AtomicUsize::new(0);
 static INFLIGHT_CAP: AtomicUsize = AtomicUsize::new(DEFAULT_INFLIGHT_CAP);
 
 static TX_LOG_KIND: [AtomicU8; TX_LOG_CAP] = [const { AtomicU8::new(0) }; TX_LOG_CAP];
@@ -354,9 +370,17 @@ pub fn poll() -> TxPoll {
         note_block_end();
         ring_pop();
         if rc == include::ESP_OK as i32 {
+            // Driver should have called `netstack_ref` inside `tx_by_ref`.
+            let retained = token.refs.load(Ordering::Acquire) >= 2;
             TX_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
             note_inflight_peak();
             STAT_DRAIN_OK.fetch_add(1, Ordering::Relaxed);
+            if retained {
+                // Clear inflight in `netstack_free` (XDP-only; ignores smoltcp TX).
+            } else {
+                STAT_NO_RETAIN.fetch_add(1, Ordering::Relaxed);
+                TX_NEED_DONE.fetch_add(1, Ordering::AcqRel);
+            }
             if flow {
                 let t1 = now_us();
                 LAST_HANDOFF_US.store(t1, Ordering::Relaxed);
@@ -372,15 +396,27 @@ pub fn poll() -> TxPoll {
 }
 
 /// Wi-Fi finished an air TX. Do not call `tx_by_ref` here.
+///
+/// Inflight for retained zero-copy frames is cleared in [`netstack_free`].
+/// This callback only clears the no-retain fallback and re-kicks the TX task —
+/// never decrement for every global `tx_done` (smoltcp ACKs would steal slots).
 #[esp_hal::ram]
 pub(crate) fn on_tx_done(ok: bool) {
     STAT_TX_DONE.fetch_add(1, Ordering::Relaxed);
     if !ok {
         STAT_TX_DONE_FAIL.fetch_add(1, Ordering::Relaxed);
     }
-    let _ = TX_IN_FLIGHT.fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
-        Some(x.saturating_sub(1))
-    });
+    if TX_NEED_DONE
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n > 0).then_some(n - 1)
+        })
+        .is_ok()
+    {
+        // No-retain handoff: driver never called `netstack_free`.
+        let _ = TX_IN_FLIGHT.fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
+            Some(x.saturating_sub(1))
+        });
+    }
     TX_KICK.signal(());
     if TSFLOW_ON.load(Ordering::Relaxed) {
         let n = TX_DONE_SAMPLE.fetch_add(1, Ordering::Relaxed);
@@ -389,6 +425,13 @@ pub(crate) fn on_tx_done(ok: bool) {
             warn!("tsflow_done n={n} us_air={air} infl={}", in_flight());
         }
     }
+}
+
+fn clear_one_inflight() {
+    let _ = TX_IN_FLIGHT.fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
+        Some(x.saturating_sub(1))
+    });
+    TX_KICK.signal(());
 }
 
 pub fn pending_len() -> usize {
@@ -443,6 +486,9 @@ pub fn stats() -> TxStats {
         block_gt10ms: STAT_BLOCK_GT10MS.load(Ordering::Relaxed),
         block_gt100ms: STAT_BLOCK_GT100MS.load(Ordering::Relaxed),
         grp_src: STAT_GRP_SRC.load(Ordering::Relaxed),
+        netstack_ref: STAT_NETSTACK_REF.load(Ordering::Relaxed),
+        netstack_free: STAT_NETSTACK_FREE.load(Ordering::Relaxed),
+        no_retain: STAT_NO_RETAIN.load(Ordering::Relaxed),
     }
 }
 
@@ -491,9 +537,13 @@ pub fn clear_stats() {
         &STAT_BLOCK_GT10MS,
         &STAT_BLOCK_GT100MS,
         &STAT_GRP_SRC,
+        &STAT_NETSTACK_REF,
+        &STAT_NETSTACK_FREE,
+        &STAT_NO_RETAIN,
     ] {
         a.store(0, Ordering::Relaxed);
     }
+    TX_NEED_DONE.store(0, Ordering::Relaxed);
     for i in 0..TX_LOG_CAP {
         TX_LOG_KIND[i].store(0, Ordering::Relaxed);
         TX_LOG_PEND[i].store(0, Ordering::Relaxed);
@@ -644,6 +694,7 @@ fn token_from_raw(token: *mut c_void) -> Option<&'static RxBufferOwnership> {
 }
 
 unsafe extern "C" fn netstack_ref(token: *mut c_void) {
+    STAT_NETSTACK_REF.fetch_add(1, Ordering::Relaxed);
     if let Some(token) = token_from_raw(token) {
         token.retain_tx();
     } else {
@@ -652,7 +703,10 @@ unsafe extern "C" fn netstack_ref(token: *mut c_void) {
 }
 
 unsafe extern "C" fn netstack_free(token: *mut c_void) {
+    STAT_NETSTACK_FREE.fetch_add(1, Ordering::Relaxed);
     if let Some(token) = token_from_raw(token) {
+        // XDP-only completion: do not couple to global `tx_done` (smoltcp).
+        clear_one_inflight();
         token.release();
     } else {
         error!("xdp: Wi-Fi freed an unknown TX token");

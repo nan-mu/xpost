@@ -48,10 +48,12 @@ const SWEEP_PPS: &[f64] = &[
     400.0, 800.0, 1200.0, 1600.0, 2000.0, 2400.0, 2800.0, 3200.0, 3600.0, 4000.0,
 ];
 const SWEEP_SMOKE_PPS: &[f64] = &[400.0, 1200.0, 2400.0, 4000.0];
-/// Hardcoded `dev` grid — XDP TX debug (add `Hal` for a same-grid A/B).
-const DEV_PATHS: &[PpsPath] = &[PpsPath::Xdp];
-const DEV_PPS: &[f64] = &[800.0, 1600.0, 2800.0, 4000.0];
+/// Hardcoded `dev` grid — XDP vs HAL at the rates that showed formal regressions.
+const DEV_PATHS: &[PpsPath] = &[PpsPath::Xdp, PpsPath::Hal];
+const DEV_PPS: &[f64] = &[800.0, 1200.0, 1600.0, 2000.0];
 const DEV_SWEEP_WINDOW: Duration = Duration::from_secs(8);
+/// XDP `txcap` per trial (firmware default is 32; repeat for variance).
+const DEV_TXCAPS: &[usize] = &[32, 32, 32];
 
 pub struct JustTxOpts {
     pub paths: Vec<PpsPath>,
@@ -141,11 +143,11 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     }
 
     let (grid, sweep_window, sweep_trials, rounds, op_window) = if is_dev {
-        // Hardcoded: 4 rates × 1 trial × 8s window; no operating rounds.
+        // Hardcoded: rates × one window per DEV_TXCAPS entry; no operating rounds.
         (
             DEV_PPS,
             DEV_SWEEP_WINDOW,
-            1usize,
+            DEV_TXCAPS.len(),
             0usize,
             Duration::from_secs(0),
         )
@@ -314,6 +316,13 @@ async fn run_arm_round(
     for &pps in grid {
         let mut losses = Vec::with_capacity(trials);
         for trial in 1..=trials {
+            if is_dev && path == PpsPath::Xdp {
+                let cap = DEV_TXCAPS[(trial - 1) % DEV_TXCAPS.len()];
+                match agent.request(&format!("txcap {cap}")).await {
+                    Ok(line) => ui.permanent(&format!("    dev {line}")),
+                    Err(e) => ui.permanent(&format!("    txcap {cap} FAIL {e:#}")),
+                }
+            }
             let stats = match probe_window(
                 harness,
                 agent,
