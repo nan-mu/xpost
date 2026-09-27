@@ -38,10 +38,13 @@ const TX_TOKEN_SLOT_OWNED: usize = 1;
 const TX_TOKEN_SLOT_RELEASING: usize = 2;
 /// Print one full flow timestamp line every N handoffs (only while `tsflow on`).
 const FLOW_SAMPLE_EVERY: u32 = 100;
-/// Soft in-flight gate. Non-zero bounds driver queue depth for RTT
-/// (`cap / pps` queueing). `0` = gate off (NO_MEM-only; can fill all 128 TX
-/// bufs and recreate 100ms+ tails). Keep small; NO_MEM remains the hard stop.
-const DEFAULT_INFLIGHT_CAP: usize = 16;
+/// Soft in-flight gate. Bounds driver queue depth for RTT (`cap/pps` queueing).
+/// `0` disables the gate (can fill all 128 TX bufs → 100ms+ tails). Default 32
+/// balances long-window loss vs p90 RTT; NO_MEM remains the hard stop.
+const DEFAULT_INFLIGHT_CAP: usize = 32;
+/// If blocked (soft-cap / NO_MEM) longer than this, drop the software ring so
+/// HOL frames do not pin RX or inflate RTT after the stall clears.
+const BLOCK_FLUSH_US: u32 = 15_000;
 
 /// Signaled on RX enqueue and on every `tx_done`; the board TX task waits on it.
 pub static TX_KICK: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -104,6 +107,8 @@ pub struct TxStats {
     pub netstack_free: u32,
     /// Handoffs where the driver did not retain; inflight cleared on `tx_done`.
     pub no_retain: u32,
+    /// Pending ring frames dropped after a prolonged block.
+    pub flush_pending: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,6 +193,7 @@ static STAT_GRP_SRC: AtomicU32 = AtomicU32::new(0);
 static STAT_NETSTACK_REF: AtomicU32 = AtomicU32::new(0);
 static STAT_NETSTACK_FREE: AtomicU32 = AtomicU32::new(0);
 static STAT_NO_RETAIN: AtomicU32 = AtomicU32::new(0);
+static STAT_FLUSH: AtomicU32 = AtomicU32::new(0);
 /// Outstanding handoffs that must clear via `tx_done` (driver skipped retain).
 static TX_NEED_DONE: AtomicUsize = AtomicUsize::new(0);
 static INFLIGHT_CAP: AtomicUsize = AtomicUsize::new(DEFAULT_INFLIGHT_CAP);
@@ -342,11 +348,12 @@ pub fn poll() -> TxPoll {
         let Some(idx) = ring_peek() else {
             return TxPoll::Idle;
         };
-        // Soft cap (`txcap N`): off when 0. Prefer NO_MEM — see DEFAULT_INFLIGHT_CAP.
+        // Soft cap (`txcap N`): off when 0. Prefer a modest default — see DEFAULT_INFLIGHT_CAP.
         let soft_cap = INFLIGHT_CAP.load(Ordering::Relaxed);
         if soft_cap > 0 && TX_IN_FLIGHT.load(Ordering::Acquire) >= soft_cap {
             STAT_CAP_WAIT.fetch_add(1, Ordering::Relaxed);
             note_block_start();
+            maybe_flush_stale_pending();
             return TxPoll::Blocked;
         }
         let token = &TX_TOKENS[idx as usize];
@@ -378,6 +385,7 @@ pub fn poll() -> TxPoll {
             STAT_LAST_DRAIN_RC.store(rc as u32, Ordering::Relaxed);
             push_log(TxEvKind::NomemRq, rc);
             note_block_start();
+            maybe_flush_stale_pending();
             return TxPoll::Blocked;
         }
         note_block_end();
@@ -511,6 +519,7 @@ pub fn stats() -> TxStats {
         netstack_ref: STAT_NETSTACK_REF.load(Ordering::Relaxed),
         netstack_free: STAT_NETSTACK_FREE.load(Ordering::Relaxed),
         no_retain: STAT_NO_RETAIN.load(Ordering::Relaxed),
+        flush_pending: STAT_FLUSH.load(Ordering::Relaxed),
     }
 }
 
@@ -562,6 +571,7 @@ pub fn clear_stats() {
         &STAT_NETSTACK_REF,
         &STAT_NETSTACK_FREE,
         &STAT_NO_RETAIN,
+        &STAT_FLUSH,
     ] {
         a.store(0, Ordering::Relaxed);
     }
@@ -632,6 +642,25 @@ fn note_peak(stat: &AtomicU32, n: u32) {
 
 fn note_block_start() {
     let _ = BLOCK_SINCE_US.compare_exchange(0, now_us().max(1), Ordering::Relaxed, Ordering::Relaxed);
+}
+
+fn maybe_flush_stale_pending() {
+    let since = BLOCK_SINCE_US.load(Ordering::Relaxed);
+    if since == 0 {
+        return;
+    }
+    if now_us().wrapping_sub(since) < BLOCK_FLUSH_US {
+        return;
+    }
+    flush_pending_ring();
+}
+
+fn flush_pending_ring() {
+    while let Some(idx) = ring_peek() {
+        ring_pop();
+        TX_TOKENS[idx as usize].release();
+        STAT_FLUSH.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn note_block_end() {

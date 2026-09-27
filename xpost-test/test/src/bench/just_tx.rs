@@ -52,8 +52,8 @@ const SWEEP_SMOKE_PPS: &[f64] = &[400.0, 1200.0, 2400.0, 4000.0];
 const DEV_PATHS: &[PpsPath] = &[PpsPath::Xdp, PpsPath::Hal];
 const DEV_PPS: &[f64] = &[800.0, 1200.0];
 const DEV_SWEEP_WINDOW: Duration = Duration::from_secs(20);
-/// Soft-cap 16 (RTT bound); three long trials for median vs HAL.
-const DEV_TXCAPS: &[usize] = &[16, 16, 16];
+/// Soft-cap 32 + ring flush; three long trials for median vs HAL.
+const DEV_TXCAPS: &[usize] = &[32, 32, 32];
 
 pub struct JustTxOpts {
     pub paths: Vec<PpsPath>,
