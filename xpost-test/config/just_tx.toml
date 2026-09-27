@@ -3,5 +3,6 @@
 # See config/README.md.
 
 formal = true
-rounds = 3
+# Operating-point repeats after sweep (sweep itself uses 5 trials + stall retries in code).
+rounds = 5
 arms = ["hal", "xdp"]

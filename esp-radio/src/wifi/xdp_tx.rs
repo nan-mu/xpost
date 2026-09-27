@@ -610,23 +610,9 @@ fn maybe_tsflow(t_enq: u32, t0: u32, t1: u32) {
     );
 }
 
-fn push_log(kind: TxEvKind, rc: i32) {
-    let infl = in_flight().min(u8::MAX as usize) as u8;
-    let pend = pending_len().min(u8::MAX as usize) as u8;
-    let slot = TX_LOG_W.fetch_add(1, Ordering::AcqRel) % TX_LOG_CAP;
-    let prev_n = TX_LOG_N.load(Ordering::Relaxed);
-    if prev_n >= TX_LOG_CAP {
-        STAT_LOG_DROPPED.fetch_add(1, Ordering::Relaxed);
-    } else {
-        let _ = TX_LOG_N.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-            Some((n + 1).min(TX_LOG_CAP))
-        });
-    }
-    TX_LOG_T_US[slot].store(now_us(), Ordering::Relaxed);
-    TX_LOG_KIND[slot].store(kind as u8, Ordering::Relaxed);
-    TX_LOG_PEND[slot].store(pend, Ordering::Relaxed);
-    TX_LOG_INFL[slot].store(infl, Ordering::Relaxed);
-    TX_LOG_RC[slot].store(rc as u32, Ordering::Relaxed);
+fn push_log(_kind: TxEvKind, _rc: i32) {
+    // Hot-path ring log disabled: under loss it ran every reject and contended
+    // with USB serial / Wi-Fi timing. Counters remain; use `txlog` only if re-enabled.
 }
 
 fn note_peak(stat: &AtomicU32, n: u32) {

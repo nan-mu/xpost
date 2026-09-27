@@ -65,7 +65,9 @@ static UDP_TX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    esp_println::logger::init_logger_from_env();
+    // Quiet USB: info/trace during XDP_TX stress contends with the agent session
+    // and shows up as host send gaps (formal: 80–145 ms) that poison loss medians.
+    esp_println::logger::init_logger(log::LevelFilter::Error);
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);

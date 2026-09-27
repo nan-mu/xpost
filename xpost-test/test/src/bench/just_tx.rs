@@ -34,13 +34,16 @@ const PERF_SMOKE_WINDOW: Duration = Duration::from_secs(5);
 const SWEEP_WINDOW: Duration = Duration::from_secs(12);
 const SWEEP_SMOKE_WINDOW: Duration = Duration::from_secs(4);
 const WARMUP: Duration = Duration::from_secs(1);
-const COOLDOWN: Duration = Duration::from_secs(2);
+const COOLDOWN: Duration = Duration::from_secs(3);
 const DRAIN: Duration = Duration::from_millis(1000);
 const TARGET_LOSS: f64 = 0.05;
 const LOSS_LO: f64 = 0.04;
 const LOSS_HI: f64 = 0.07;
 const RX_READY_TRIES: usize = 40;
 const RX_READY_BURST: u32 = 64;
+/// Formal sweep: more trials + host-stall retries (DB: XDP loss_std≫HAL when max_gap≫15ms).
+const SWEEP_TRIALS: usize = 5;
+const SWEEP_STALL_RETRIES: usize = 2;
 
 /// Shared TR3000 send-rate grid (pps) for HAL and XDP.
 /// Ceiling 4000 ≈ XDP ~50% loss (hping3 calib); step = ceiling/10.
@@ -93,6 +96,10 @@ struct WindowStats {
     n_t0: u64,
     /// Counter delta for this window only (changed keys).
     counters: JsonValue,
+    /// Max wall-clock gap between consecutive successful sends.
+    max_send_gap: Duration,
+    /// Pacing fell behind schedule (would have burst-caught-up under old logic).
+    host_stalled: bool,
 }
 
 impl WindowStats {
@@ -103,6 +110,18 @@ impl WindowStats {
             self.n_t0 as f64 / self.sent as f64
         }
     }
+
+    fn max_send_gap_ms(&self) -> f64 {
+        self.max_send_gap.as_secs_f64() * 1e3
+    }
+}
+
+/// Gap above this marks the window as host-interfered (USB/scheduler), not DUT loss.
+fn host_stall_thresh(pps: f64) -> Duration {
+    let period = Duration::from_secs_f64(1.0 / pps.max(1.0));
+    (period.saturating_mul(8))
+        .max(Duration::from_millis(15))
+        .min(Duration::from_millis(40))
 }
 
 #[derive(Clone, Copy)]
@@ -166,7 +185,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         } else {
             SWEEP_WINDOW
         };
-        let sweep_trials = if opts.smoke { 1 } else { 3 };
+        let sweep_trials = if opts.smoke { 1 } else { SWEEP_TRIALS };
         let rounds = opts.rounds.unwrap_or(if opts.smoke {
             1
         } else {
@@ -323,7 +342,7 @@ async fn run_arm_round(
                     Err(e) => ui.permanent(&format!("    txcap {cap} FAIL {e:#}")),
                 }
             }
-            let stats = match probe_window(
+            let stats = match probe_sweep_trial(
                 harness,
                 agent,
                 ui,
@@ -332,33 +351,11 @@ async fn run_arm_round(
                 spoof,
                 pps,
                 sweep_window,
+                is_dev,
             )
             .await
             {
-                Ok(mut stats) => {
-                    if stats.sent > 0 && stats.t0_frac() < 0.5 {
-                        ui.permanent(&format!(
-                            "    sweep_retry_t0: pps={pps:.0} trial={trial} t0_frac={:.2}",
-                            stats.t0_frac()
-                        ));
-                        harness.reset_state().await;
-                        tokio::time::sleep(COOLDOWN).await;
-                        eta.add_fixed(WARMUP + sweep_window + DRAIN + COOLDOWN);
-                        ui.set_eta(&eta.fmt());
-                        stats = probe_window(
-                            harness,
-                            agent,
-                            ui,
-                            eta,
-                            path,
-                            spoof,
-                            pps,
-                            sweep_window,
-                        )
-                        .await?;
-                    }
-                    stats
-                }
+                Ok(stats) => stats,
                 Err(e) if is_dev => {
                     // High-rate XDP_TX can hang the DUT; reflash and continue next rate.
                     ui.permanent(&format!(
@@ -376,11 +373,13 @@ async fn run_arm_round(
                 Err(e) => return Err(e),
             };
             ui.permanent(&format!(
-                "    sweep {} pps={pps:.0} trial={trial}/{trials}: sent={} ok={} loss={:.2}%",
+                "    sweep {} pps={pps:.0} trial={trial}/{trials}: sent={} ok={} loss={:.2}% max_gap={:.1}ms{}",
                 path.as_str(),
                 stats.sent,
                 stats.ok,
                 100.0 * stats.loss,
+                stats.max_send_gap_ms(),
+                if stats.host_stalled { " HOST_STALL" } else { "" },
             ));
             if is_dev {
                 let mut rtt_ms: Vec<f64> = stats
@@ -404,24 +403,6 @@ async fn run_arm_round(
                     pct(1.0)
                 ));
                 ui.permanent(&format!("      countersΔ {}", stats.counters));
-                match agent.request("txstats").await {
-                    Ok(line) => ui.permanent(&format!("      {line}")),
-                    Err(e) => ui.permanent(&format!("      txstats FAIL {e:#}")),
-                }
-                let until = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                let since = until.saturating_sub(sweep_window.as_millis() as u64 + 5_000);
-                match agent.serial_window(since, until).await {
-                    Ok(msg) => {
-                        for line in msg.lines().filter(|l| l.contains("tsflow")) {
-                            ui.permanent(&format!("      {line}"));
-                        }
-                    }
-                    Err(e) => ui.permanent(&format!("      serial_window FAIL {e:#}")),
-                }
-                let _ = agent.request("tx clear").await;
             }
             losses.push(stats.loss);
             if let Some(client) = pg.as_mut() {
@@ -535,12 +516,14 @@ fn pick_operating_point(medians: &[(f64, f64)]) -> OpPoint {
 
 fn log_window(ui: &RoundUi, path: PpsPath, pair_id: usize, stats: &WindowStats) {
     ui.permanent(&format!(
-        "    {} pair={pair_id}: sent={} ok={} loss={:.2}% rxcntΔ={}",
+        "    {} pair={pair_id}: sent={} ok={} loss={:.2}% rxcntΔ={} max_gap={:.1}ms{}",
         path.as_str(),
         stats.sent,
         stats.ok,
         100.0 * stats.loss,
-        stats.device_rxcnt_delta
+        stats.device_rxcnt_delta,
+        stats.max_send_gap_ms(),
+        if stats.host_stalled { " HOST_STALL" } else { "" },
     ));
     let slack = (stats.sent / 50).max(8);
     if stats.device_rxcnt_delta + 2 < stats.ok {
@@ -640,6 +623,70 @@ async fn flash_and_ready(
     Ok(())
 }
 
+/// One sweep trial: retry on t0 starvation / host send stalls; keep cleanest attempt.
+async fn probe_sweep_trial(
+    harness: &mut Harness,
+    agent: &AgentClient,
+    ui: &RoundUi,
+    eta: &BudgetEta,
+    path: PpsPath,
+    spoof: Ipv4Addr,
+    pps: f64,
+    sweep_window: Duration,
+    is_dev: bool,
+) -> Result<WindowStats> {
+    let mut best: Option<WindowStats> = None;
+    let attempts = if is_dev {
+        1
+    } else {
+        1 + SWEEP_STALL_RETRIES
+    };
+    for attempt in 0..attempts {
+        let mut stats = probe_window(harness, agent, ui, eta, path, spoof, pps, sweep_window).await?;
+        if stats.sent > 0 && stats.t0_frac() < 0.5 {
+            ui.permanent(&format!(
+                "    sweep_retry_t0: pps={pps:.0} attempt={} t0_frac={:.2}",
+                attempt + 1,
+                stats.t0_frac()
+            ));
+            harness.reset_state().await;
+            tokio::time::sleep(COOLDOWN).await;
+            stats = probe_window(harness, agent, ui, eta, path, spoof, pps, sweep_window).await?;
+        }
+        let replace = match &best {
+            None => true,
+            Some(b) => {
+                (!stats.host_stalled && b.host_stalled)
+                    || (stats.host_stalled == b.host_stalled
+                        && stats.max_send_gap < b.max_send_gap)
+            }
+        };
+        if replace {
+            best = Some(stats.clone());
+        }
+        if !stats.host_stalled {
+            return Ok(stats);
+        }
+        if attempt + 1 < attempts {
+            ui.permanent(&format!(
+                "    sweep_retry_host_stall: pps={pps:.0} attempt={} max_gap={:.1}ms",
+                attempt + 1,
+                stats.max_send_gap_ms()
+            ));
+            harness.reset_state().await;
+            tokio::time::sleep(COOLDOWN).await;
+        }
+    }
+    let stats = best.expect("at least one attempt");
+    if stats.host_stalled {
+        ui.permanent(&format!(
+            "    WARN: keeping stalled window pps={pps:.0} max_gap={:.1}ms after {attempts} attempts",
+            stats.max_send_gap_ms()
+        ));
+    }
+    Ok(stats)
+}
+
 async fn probe_window(
     harness: &mut Harness,
     agent: &AgentClient,
@@ -652,19 +699,21 @@ async fn probe_window(
 ) -> Result<WindowStats> {
     let pps = target_pps.max(1.0);
     let interval = Duration::from_secs_f64(1.0 / pps);
+    let stall_thresh = host_stall_thresh(pps);
 
     if !WARMUP.is_zero() {
         harness.reset_state().await;
         let warm_deadline = Instant::now() + WARMUP;
-        let mut next = Instant::now();
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
         while Instant::now() < warm_deadline {
-            let now = Instant::now();
-            if now < next {
-                tokio::time::sleep(next.saturating_duration_since(now)).await;
+            ticker.tick().await;
+            if Instant::now() >= warm_deadline {
+                break;
             }
             let seq = harness.alloc_seq();
             let _ = harness.send_stimulus(spoof, None, seq).await;
-            next += interval;
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         harness.reset_state().await;
@@ -676,25 +725,39 @@ async fn probe_window(
     let started_at = SystemTime::now();
     let start = Instant::now();
     let deadline = start + window;
-    let mut next = start;
     let mut seqs: Vec<(u64, SystemTime)> = Vec::new();
     let mut last_paint = Instant::now() - Duration::from_secs(1);
+    let mut last_tx: Option<Instant> = None;
+    let mut max_send_gap = Duration::ZERO;
+    let mut host_stalled = false;
     let expect = (pps * window.as_secs_f64()).max(1.0);
 
+    // Delay (not Burst): late ticks skip catch-up; avoids 80–180ms gap → burst pairs.
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await;
+
     while Instant::now() < deadline {
-        let now = Instant::now();
-        if now < next {
-            tokio::time::sleep(next.saturating_duration_since(now)).await;
-        }
+        ticker.tick().await;
         if Instant::now() >= deadline {
             break;
         }
         let seq = harness.alloc_seq();
+        let t_mono = Instant::now();
         let t_wall = SystemTime::now();
+        if let Some(prev) = last_tx {
+            let gap = t_mono.saturating_duration_since(prev);
+            if gap > max_send_gap {
+                max_send_gap = gap;
+            }
+            if gap > stall_thresh {
+                host_stalled = true;
+            }
+        }
         if harness.send_stimulus(spoof, None, seq).await.is_ok() {
             seqs.push((seq, t_wall));
+            last_tx = Some(t_mono);
         }
-        next += interval;
 
         if last_paint.elapsed() >= Duration::from_millis(100) {
             let sent = seqs.len() as f64;
@@ -779,6 +842,8 @@ async fn probe_window(
         device_rxcnt_delta: after.saturating_sub(before),
         n_t0,
         counters: counters::counters_delta(&counters_before, &counters_after),
+        max_send_gap,
+        host_stalled,
     })
 }
 
