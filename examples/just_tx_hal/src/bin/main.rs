@@ -76,13 +76,16 @@ async fn main(spawner: Spawner) -> ! {
 
     // Must match examples/just_drop (A/B fairness): dynamic TX/RX at ESP-IDF max.
     // AMPDU TX off: its BA session stalls TX ~1.07 s under ping-pong load.
+    // Embassy frame queues (HAL-only; XDP_TX bypasses them): defaults 5/3 drop under burst.
     let wifi_cfg = esp_radio::wifi::ControllerConfig::default()
         .with_dynamic_tx_buf_num(128)
         .with_dynamic_rx_buf_num(1024)
-        .with_ampdu_tx_enable(false);
+        .with_ampdu_tx_enable(false)
+        .with_rx_queue_size(32)
+        .with_tx_queue_size(16);
     let (mut controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, wifi_cfg)
         .expect("Failed to initialize Wi-Fi controller");
-    info!("wifi ready (crates.io esp-radio; no xpost) tx_dyn=128 rx_dyn=1024");
+    info!("wifi ready (crates.io esp-radio; no xpost) tx_dyn=128 rx_dyn=1024 rx_q=32 tx_q=16");
 
     match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
         (Some(ssid), Some(pass)) if !ssid.is_empty() => {
