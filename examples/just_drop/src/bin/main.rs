@@ -72,6 +72,8 @@ async fn main(spawner: Spawner) -> ! {
     let flash = peripherals.FLASH;
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
+    // Wi-Fi dynamic RX/TX buffers come from this heap; must match examples/just_tx_hal.
+    esp_alloc::heap_allocator!(size: 64 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -134,21 +136,23 @@ async fn main(spawner: Spawner) -> ! {
     drop(maps);
     info!("map_rt unlocked (RX helpers can proceed)");
 
-    // Default dynamic_tx/rx=32 matches prior inflight_peak=32 NO_MEM wall; raise for XDP_TX.
+    // Must match examples/just_tx_hal (A/B fairness): dynamic TX/RX at ESP-IDF max.
+    // AMPDU TX off: its BA session stalls TX ~1.07 s under ping-pong load.
     let wifi_cfg = esp_radio::wifi::ControllerConfig::default()
-        .with_dynamic_tx_buf_num(64)
-        .with_dynamic_rx_buf_num(64)
-        .with_tx_queue_size(16);
+        .with_dynamic_tx_buf_num(128)
+        .with_dynamic_rx_buf_num(1024)
+        .with_ampdu_tx_enable(false);
     let (mut controller, interfaces) = xpost::esp_radio::new(peripherals.WIFI, wifi_cfg)
         .expect("Failed to initialize Wi-Fi controller");
     info!(
-        "wifi+xdp attached drop={} failed_tx={} map_lock={} tx_dyn=64 rx_dyn=64",
+        "wifi+xdp attached drop={} failed_tx={} map_lock={} tx_dyn=128 rx_dyn=1024",
         xpost::esp_radio::XDP_PROG.drop_count(),
         xpost::esp_radio::XDP_PROG.failed_tx_count(),
         map_lock_status(),
     );
 
-    // XDP TX is immediate `tx_by_ref` on the RX path (no batch task).
+    // XDP only enqueues from the Wi-Fi RX callback; this task owns tx_by_ref.
+    spawner.spawn(xdp_tx_task().unwrap());
 
     match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
         (Some(ssid), Some(pass)) if !ssid.is_empty() => {
@@ -177,6 +181,22 @@ async fn main(spawner: Spawner) -> ! {
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn xdp_tx_task() {
+    use embassy_futures::select::select;
+    use esp_radio::wifi::{XDP_TX_KICK, XdpTxPoll, xdp_tx_in_flight, xdp_tx_poll};
+    loop {
+        match xdp_tx_poll() {
+            XdpTxPoll::Idle => XDP_TX_KICK.wait().await,
+            // tx_done re-kicks; the timer only covers NO_MEM with nothing in flight.
+            XdpTxPoll::Blocked if xdp_tx_in_flight() > 0 => XDP_TX_KICK.wait().await,
+            XdpTxPoll::Blocked => {
+                select(XDP_TX_KICK.wait(), Timer::after(Duration::from_millis(1))).await;
+            }
+        }
     }
 }
 
@@ -276,10 +296,32 @@ fn dispatch_serial(line: &str) {
     } else if line.eq_ignore_ascii_case("tx clear") || line.eq_ignore_ascii_case("txstats clear") {
         esp_radio::wifi::xdp_tx_clear_stats();
         esp_println::println!("OK tx clear");
+    } else if line.eq_ignore_ascii_case("heap") {
+        esp_println::println!(
+            "OK heap used={} free={}",
+            esp_alloc::HEAP.used(),
+            esp_alloc::HEAP.free()
+        );
+    } else if let Some(rest) = strip_cmd(line, "txcap") {
+        match rest.trim().parse::<usize>() {
+            Ok(n) if n > 0 => {
+                esp_radio::wifi::xdp_tx_set_inflight_cap(n);
+                esp_println::println!("OK txcap {n}");
+            }
+            _ => esp_println::println!("ERR txcap <n>"),
+        }
+    } else if let Some(rest) = strip_cmd(line, "tsflow") {
+        let on = rest.trim().eq_ignore_ascii_case("on");
+        esp_radio::wifi::xdp_tx_set_tsflow(on);
+        esp_println::println!("OK tsflow {}", if on { "on" } else { "off" });
     } else if line.eq_ignore_ascii_case("prof") || line.eq_ignore_ascii_case("flame") {
         print_flame_spans();
     } else if line.eq_ignore_ascii_case("pchits") {
         print_pc_hits();
+    } else if line.eq_ignore_ascii_case("prof on") || line.eq_ignore_ascii_case("prof off") {
+        let on = line.eq_ignore_ascii_case("prof on");
+        esp_radio::wifi::xdp_prof::set_enabled(on);
+        esp_println::println!("OK prof {}", if on { "on" } else { "off" });
     } else if line.eq_ignore_ascii_case("prof clear") {
         esp_radio::wifi::xdp_prof::clear_all();
         esp_radio::wifi::xdp_tx_clear_stats();
@@ -315,7 +357,7 @@ fn print_counters() {
     let p = &xpost::esp_radio::XDP_PROG;
     let t = esp_radio::wifi::xdp_tx_stats();
     esp_println::println!(
-        "OK counters drop={} failed_tx={} tx_bad_buf={} tx_token={} tx_wifi={} tx_wifi_rc={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={} tx_enq={} tx_pend={} tx_inflight={} tx_drain_ok={} tx_nomem_rq={} tx_nomem_drop={} tx_nomem_drop_idle={} tx_nomem_drop_rqfail={} tx_enq_claim={} tx_enq_ring={} tx_skip_stale={} tx_drain_busy={} tx_done={} tx_last_rc={} tx_log_drop={}",
+        "OK counters drop={} failed_tx={} tx_bad_buf={} tx_token={} tx_wifi={} tx_wifi_rc={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={} tx_enq={} tx_pend={} tx_inflight={} tx_drain_ok={} tx_nomem_wait={} tx_cap_wait={} tx_enq_claim={} tx_enq_ring={} tx_done={} tx_done_fail={} tx_grp_src={} tx_last_rc={}",
         p.drop_count(),
         p.failed_tx_count(),
         p.failed_tx_bad_buf_count(),
@@ -337,35 +379,28 @@ fn print_counters() {
         t.in_flight,
         t.drain_ok,
         t.drain_nomem_requeue,
-        t.drain_nomem_drop,
-        t.drain_nomem_drop_idle,
-        t.drain_nomem_drop_rq_fail,
+        t.drain_busy,
         t.enqueue_fail_claim,
         t.enqueue_fail_ring,
-        t.drain_skip_stale,
-        t.drain_busy,
         t.tx_done,
+        t.tx_done_fail,
+        t.grp_src,
         t.last_drain_rc,
-        t.log_dropped,
     );
 }
 
 fn print_txstats() {
     let t = esp_radio::wifi::xdp_tx_stats();
     esp_println::println!(
-        "OK txstats enq={} enq_claim={} enq_ring={} drain_ok={} nomem_rq={} nomem_drop={} nomem_drop_idle={} nomem_drop_rqfail={} drain_fail={} last_rc={} skip_stale={} drain_busy={} drain_calls={} kicks={} tx_done={} pend={} pend_peak={} inflight={} inflight_peak={} log_drop={} flow_samples={}",
+        "OK txstats enq={} enq_claim={} enq_ring={} drain_ok={} nomem_wait={} cap_wait={} drain_fail={} last_rc={} polls={} kicks={} tx_done={} pend={} pend_peak={} inflight={} inflight_peak={} cap={} flow_samples={} done_fail={} block_max_us={} block_gt10ms={} block_gt100ms={} grp_src={}",
         t.enqueued,
         t.enqueue_fail_claim,
         t.enqueue_fail_ring,
         t.drain_ok,
         t.drain_nomem_requeue,
-        t.drain_nomem_drop,
-        t.drain_nomem_drop_idle,
-        t.drain_nomem_drop_rq_fail,
+        t.drain_busy,
         t.drain_fail_other,
         t.last_drain_rc,
-        t.drain_skip_stale,
-        t.drain_busy,
         t.drain_calls,
         t.kicks,
         t.tx_done,
@@ -373,8 +408,13 @@ fn print_txstats() {
         t.pending_peak,
         t.in_flight,
         t.in_flight_peak,
-        t.log_dropped,
+        t.inflight_cap,
         t.flow_samples,
+        t.tx_done_fail,
+        t.block_max_us,
+        t.block_gt10ms,
+        t.block_gt100ms,
+        t.grp_src,
     );
 }
 
@@ -423,14 +463,15 @@ fn print_txlogv() {
 
 /// Brendan Gregg folded stacks — paste into speedscope / flamegraph.pl.
 fn print_flame_spans() {
-    esp_println::println!("OK flame begin");
+    // Single OK line so agent `request` captures every span.
+    esp_println::print!("OK flame");
     for s in esp_radio::wifi::xdp_prof::snapshot_spans() {
         if s.cycles == 0 && s.entries == 0 {
             continue;
         }
-        esp_println::println!("{} {}", s.folded, s.cycles);
+        esp_println::print!(" | {} {} n={}", s.folded, s.cycles, s.entries);
     }
-    esp_println::println!("OK flame end");
+    esp_println::println!();
 }
 
 fn print_pc_hits() {

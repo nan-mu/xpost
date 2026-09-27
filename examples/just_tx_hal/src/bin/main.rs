@@ -61,6 +61,8 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
+    // Wi-Fi dynamic RX/TX buffers come from this heap; must match examples/just_drop.
+    esp_alloc::heap_allocator!(size: 64 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -72,10 +74,15 @@ async fn main(spawner: Spawner) -> ! {
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
     spawner.spawn(serial_task(usb_rx).unwrap());
 
-    let (mut controller, interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, Default::default())
-            .expect("Failed to initialize Wi-Fi controller");
-    info!("wifi ready (crates.io esp-radio; no xpost)");
+    // Must match examples/just_drop (A/B fairness): dynamic TX/RX at ESP-IDF max.
+    // AMPDU TX off: its BA session stalls TX ~1.07 s under ping-pong load.
+    let wifi_cfg = esp_radio::wifi::ControllerConfig::default()
+        .with_dynamic_tx_buf_num(128)
+        .with_dynamic_rx_buf_num(1024)
+        .with_ampdu_tx_enable(false);
+    let (mut controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, wifi_cfg)
+        .expect("Failed to initialize Wi-Fi controller");
+    info!("wifi ready (crates.io esp-radio; no xpost) tx_dyn=128 rx_dyn=1024");
 
     match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
         (Some(ssid), Some(pass)) if !ssid.is_empty() => {
