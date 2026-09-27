@@ -38,14 +38,10 @@ const TX_TOKEN_SLOT_OWNED: usize = 1;
 const TX_TOKEN_SLOT_RELEASING: usize = 2;
 /// Print one full flow timestamp line every N handoffs (only while `tsflow on`).
 const FLOW_SAMPLE_EVERY: u32 = 100;
-/// Max XDP frames we *optionally* treat as in-flight for diagnostics / soft cap.
-/// `0` = gate off: backpressure is solely `ESP_ERR_NO_MEM` from `tx_by_ref`.
-///
-/// A non-zero soft cap driven by global `tx_done` was the main source of
-/// multi-100ms RTT tails and long-window stalls (smoltcp dones steal slots;
-/// races leak slots). With `netstack_ref` never firing the driver has already
-/// copied, so `NO_MEM` is the real descriptor limit.
-const DEFAULT_INFLIGHT_CAP: usize = 0;
+/// Soft in-flight gate. Non-zero bounds driver queue depth for RTT
+/// (`cap / pps` queueing). `0` = gate off (NO_MEM-only; can fill all 128 TX
+/// bufs and recreate 100ms+ tails). Keep small; NO_MEM remains the hard stop.
+const DEFAULT_INFLIGHT_CAP: usize = 16;
 
 /// Signaled on RX enqueue and on every `tx_done`; the board TX task waits on it.
 pub static TX_KICK: Signal<CriticalSectionRawMutex, ()> = Signal::new();
