@@ -187,14 +187,19 @@ async fn main(spawner: Spawner) -> ! {
 #[embassy_executor::task]
 async fn xdp_tx_task() {
     use embassy_futures::select::select;
-    use esp_radio::wifi::{XDP_TX_KICK, XdpTxPoll, xdp_tx_in_flight, xdp_tx_poll};
+    use esp_radio::wifi::{XDP_TX_KICK, XdpTxPoll, xdp_tx_poll};
     loop {
         match xdp_tx_poll() {
             XdpTxPoll::Idle => XDP_TX_KICK.wait().await,
-            // tx_done re-kicks; the timer only covers NO_MEM with nothing in flight.
-            XdpTxPoll::Blocked if xdp_tx_in_flight() > 0 => XDP_TX_KICK.wait().await,
+            // Always arm a short watchdog: missed `tx_done` kicks (or NO_MEM with
+            // a stuck inflight count) must not park the drain task indefinitely —
+            // that is what turns brief air stalls into 0.5–1 s RTT tails.
             XdpTxPoll::Blocked => {
-                select(XDP_TX_KICK.wait(), Timer::after(Duration::from_millis(1))).await;
+                select(
+                    XDP_TX_KICK.wait(),
+                    Timer::after(Duration::from_micros(500)),
+                )
+                .await;
             }
         }
     }
@@ -304,7 +309,7 @@ fn dispatch_serial(line: &str) {
         );
     } else if let Some(rest) = strip_cmd(line, "txcap") {
         match rest.trim().parse::<usize>() {
-            Ok(n) if n > 0 => {
+            Ok(n) => {
                 esp_radio::wifi::xdp_tx_set_inflight_cap(n);
                 esp_println::println!("OK txcap {n}");
             }

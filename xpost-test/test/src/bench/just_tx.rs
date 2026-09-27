@@ -48,12 +48,12 @@ const SWEEP_PPS: &[f64] = &[
     400.0, 800.0, 1200.0, 1600.0, 2000.0, 2400.0, 2800.0, 3200.0, 3600.0, 4000.0,
 ];
 const SWEEP_SMOKE_PPS: &[f64] = &[400.0, 1200.0, 2400.0, 4000.0];
-/// Hardcoded `dev` grid — XDP vs HAL at the rates that showed formal regressions.
+/// Hardcoded `dev` grid — longer windows at the rates formal still loses to HAL.
 const DEV_PATHS: &[PpsPath] = &[PpsPath::Xdp, PpsPath::Hal];
-const DEV_PPS: &[f64] = &[800.0, 1200.0, 1600.0, 2000.0];
-const DEV_SWEEP_WINDOW: Duration = Duration::from_secs(8);
-/// XDP `txcap` per trial (firmware default is 128; repeat for variance).
-const DEV_TXCAPS: &[usize] = &[128, 128, 128];
+const DEV_PPS: &[f64] = &[800.0, 1200.0];
+const DEV_SWEEP_WINDOW: Duration = Duration::from_secs(20);
+/// Firmware default soft-cap is 0 (NO_MEM-only); three long trials for median.
+const DEV_TXCAPS: &[usize] = &[0, 0, 0];
 
 pub struct JustTxOpts {
     pub paths: Vec<PpsPath>,

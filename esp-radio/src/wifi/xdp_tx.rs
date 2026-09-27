@@ -27,18 +27,25 @@ use crate::sys::include;
 /// Token pool == ring capacity: a claimed token is always either queued or being handed off.
 /// Every queued slot pins an RX buffer until drain (or tail-drop free). With the
 /// current blob `netstack_ref` never fires, so in-flight handoffs do **not** keep
-/// the RX buffer — only the ring does. Keep this below ~heap/1.7KB headroom.
-const TX_TOKEN_CAPACITY: usize = 32;
+/// the RX buffer — only the ring does.
+///
+/// Keep this small: deep pending + inflight turns air jitter into multi-100ms RTT
+/// tails and HOL stalls that show up as loss under longer windows.
+const TX_TOKEN_CAPACITY: usize = 16;
 const RING_CAP: usize = TX_TOKEN_CAPACITY;
 const TX_TOKEN_SLOT_EMPTY: usize = 0;
 const TX_TOKEN_SLOT_OWNED: usize = 1;
 const TX_TOKEN_SLOT_RELEASING: usize = 2;
 /// Print one full flow timestamp line every N handoffs (only while `tsflow on`).
 const FLOW_SAMPLE_EVERY: u32 = 100;
-/// Max XDP frames handed to the driver and not yet cleared via `netstack_free`
-/// (or the no-retain `tx_done` fallback). Matches `dynamic_tx_buf_num`: without
-/// retain, this bounds TX descriptors, not RX pins.
-const DEFAULT_INFLIGHT_CAP: usize = 128;
+/// Max XDP frames we *optionally* treat as in-flight for diagnostics / soft cap.
+/// `0` = gate off: backpressure is solely `ESP_ERR_NO_MEM` from `tx_by_ref`.
+///
+/// A non-zero soft cap driven by global `tx_done` was the main source of
+/// multi-100ms RTT tails and long-window stalls (smoltcp dones steal slots;
+/// races leak slots). With `netstack_ref` never firing the driver has already
+/// copied, so `NO_MEM` is the real descriptor limit.
+const DEFAULT_INFLIGHT_CAP: usize = 0;
 
 /// Signaled on RX enqueue and on every `tx_done`; the board TX task waits on it.
 pub static TX_KICK: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -332,14 +339,16 @@ pub(crate) fn transmit(ifx: u32, window: &mut [u8], eb: *mut c_void) -> TxOutcom
     TxOutcome::Ok
 }
 
-/// TX task: hand pending frames to Wi-Fi until empty, cap, or `NO_MEM`.
+/// TX task: hand pending frames to Wi-Fi until empty or `NO_MEM`.
 pub fn poll() -> TxPoll {
     STAT_POLLS.fetch_add(1, Ordering::Relaxed);
     loop {
         let Some(idx) = ring_peek() else {
             return TxPoll::Idle;
         };
-        if TX_IN_FLIGHT.load(Ordering::Acquire) >= INFLIGHT_CAP.load(Ordering::Relaxed) {
+        // Soft cap (`txcap N`): off when 0. Prefer NO_MEM — see DEFAULT_INFLIGHT_CAP.
+        let soft_cap = INFLIGHT_CAP.load(Ordering::Relaxed);
+        if soft_cap > 0 && TX_IN_FLIGHT.load(Ordering::Acquire) >= soft_cap {
             STAT_CAP_WAIT.fetch_add(1, Ordering::Relaxed);
             note_block_start();
             return TxPoll::Blocked;
@@ -350,8 +359,8 @@ pub fn poll() -> TxPoll {
         let ifx = token.ifx.load(Ordering::Acquire);
         let flow = TSFLOW_ON.load(Ordering::Relaxed);
         let t0 = if flow { now_us() } else { 0 };
-        // Reserve the slot *before* `tx_by_ref` so a same-frame `tx_done` cannot
-        // race past `TX_NEED_DONE++` and leak an inflight count (seen as +1/window).
+        // Reserve before `tx_by_ref` so same-frame `tx_done` cannot race the
+        // NEED_DONE bump (diagnostic / soft-cap counter only).
         TX_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
         TX_NEED_DONE.fetch_add(1, Ordering::AcqRel);
         note_inflight_peak();
@@ -378,11 +387,9 @@ pub fn poll() -> TxPoll {
         note_block_end();
         ring_pop();
         if rc == include::ESP_OK as i32 {
-            // Driver should have called `netstack_ref` inside `tx_by_ref`.
             let retained = token.refs.load(Ordering::Acquire) >= 2;
             STAT_DRAIN_OK.fetch_add(1, Ordering::Relaxed);
             if retained {
-                // Prefer `netstack_free` for clear; drop the tx_done reservation.
                 let _ = TX_NEED_DONE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                     (n > 0).then_some(n - 1)
                 });
@@ -463,7 +470,8 @@ pub fn in_flight() -> usize {
 }
 
 pub fn set_inflight_cap(cap: usize) {
-    INFLIGHT_CAP.store(cap.max(1), Ordering::Relaxed);
+    // `0` disables the soft gate (NO_MEM-only). `txcap 0` from serial is valid.
+    INFLIGHT_CAP.store(cap, Ordering::Relaxed);
     TX_KICK.signal(());
 }
 
