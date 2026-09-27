@@ -13,8 +13,8 @@
 | 名 | 做什么 | 写哪些表 |
 |----|--------|----------|
 | `just_drop` | **正式** HAL + XDP 满速 blast，周期读 `drop` | `just_drop_config` + `just_drop_data` |
-| `just_tx` | **正式** HAL + XDP 扫速 / ~5% 工作点 | `just_tx_config` + `just_tx_data` |
-| `dev` | **调试** 仅 XDP：240/480/720/1200 × 1 × 4s；无 DB，看控制台 | — |
+| `just_tx` | **正式** HAL + XDP 扫速 / ~5% 工作点（网格 400…4000 pps，步长 400） | `just_tx_config` + `just_tx_data` |
+| `dev` | **调试** 仅 XDP：800/1600/2800/4000 × 1 × 8s；无 DB，看控制台 | — |
 
 `dev` 全硬编码（无独立 TOML）；永不碰 Postgres / `just_tx_*` / `just_drop_*`。
 

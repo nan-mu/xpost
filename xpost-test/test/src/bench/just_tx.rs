@@ -1,11 +1,14 @@
 //! `just_tx` — per-packet stimulus / reply observation → `just_tx_config` / `just_tx_data`.
 //!
-//! Also drives hardcoded debug experiment `dev` → `dev_*` (XDP only; 240/480/720/1200;
-//! 1 trial; no operating rounds; never DROPs `just_tx_*` / `just_drop_*`).
+//! Also drives hardcoded debug experiment `dev` → `dev_*` (XDP only; subset of formal
+//! grid; 1 trial; no operating rounds; never DROPs `just_tx_*` / `just_drop_*`).
 //!
 //! Arms: `hal` (`just-tx-hal`) and `xdp` (`just-tx`). Shared send-rate sweep finds ~5% loss
 //! operating point; every window (sweep + operating) is persisted as one config + packet rows.
 //! Formal `just_tx`: DROP same-named tables then CREATE empty (`TableSet::JustTx`).
+//!
+//! Sweep grid: 10 steps of `ceiling/10` where ceiling ≈ XDP ~50% loss send rate
+//! (TR3000 hping3+tcpdump calib; HAL ~50% lower — shared grid uses the XDP ceiling).
 
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant, SystemTime};
@@ -28,7 +31,7 @@ const IPPROTO_UDP: u32 = 17;
 const FLASH_IDLE: Duration = Duration::from_secs(300);
 const PERF_WINDOW: Duration = Duration::from_secs(20);
 const PERF_SMOKE_WINDOW: Duration = Duration::from_secs(5);
-const SWEEP_WINDOW: Duration = Duration::from_secs(8);
+const SWEEP_WINDOW: Duration = Duration::from_secs(12);
 const SWEEP_SMOKE_WINDOW: Duration = Duration::from_secs(4);
 const WARMUP: Duration = Duration::from_secs(1);
 const COOLDOWN: Duration = Duration::from_secs(2);
@@ -40,13 +43,14 @@ const RX_READY_TRIES: usize = 40;
 const RX_READY_BURST: u32 = 64;
 
 /// Shared TR3000 send-rate grid (pps) for HAL and XDP.
+/// Ceiling 4000 ≈ XDP ~50% loss (hping3 calib); step = ceiling/10.
 const SWEEP_PPS: &[f64] = &[
-    80.0, 160.0, 240.0, 320.0, 400.0, 480.0, 560.0, 720.0, 960.0, 1200.0,
+    400.0, 800.0, 1200.0, 1600.0, 2000.0, 2400.0, 2800.0, 3200.0, 3600.0, 4000.0,
 ];
-const SWEEP_SMOKE_PPS: &[f64] = &[160.0, 320.0, 480.0, 720.0];
+const SWEEP_SMOKE_PPS: &[f64] = &[400.0, 1200.0, 2400.0, 4000.0];
 /// Hardcoded `dev` grid — XDP TX debug (add `Hal` for a same-grid A/B).
 const DEV_PATHS: &[PpsPath] = &[PpsPath::Xdp];
-const DEV_PPS: &[f64] = &[240.0, 480.0, 720.0, 1200.0];
+const DEV_PPS: &[f64] = &[800.0, 1600.0, 2800.0, 4000.0];
 const DEV_SWEEP_WINDOW: Duration = Duration::from_secs(8);
 
 pub struct JustTxOpts {
