@@ -43,6 +43,7 @@ fn parse_value(v: &str) -> Value {
 }
 
 /// Keys whose value changed between `before` and `after`. Unchanged keys omitted.
+/// Numeric keys store `after - before`; strings store `after`.
 /// Missing-on-one-side counts as a change (uses the present side's value, or `null`).
 pub fn counters_delta(before: &CounterMap, after: &CounterMap) -> Value {
     let mut obj = Map::new();
@@ -59,11 +60,15 @@ pub fn counters_delta(before: &CounterMap, after: &CounterMap) -> Value {
         if b == a {
             continue;
         }
-        match a {
-            Some(v) => {
+        match (b.and_then(Value::as_i64), a) {
+            (Some(bn), Some(v)) if v.is_i64() => {
+                let an = v.as_i64().unwrap_or(0);
+                obj.insert((*k).to_string(), Value::Number(Number::from(an - bn)));
+            }
+            (_, Some(v)) => {
                 obj.insert((*k).to_string(), v.clone());
             }
-            None => {
+            (_, None) => {
                 obj.insert((*k).to_string(), Value::Null);
             }
         }

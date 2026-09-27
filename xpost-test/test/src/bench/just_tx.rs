@@ -44,9 +44,10 @@ const SWEEP_PPS: &[f64] = &[
     80.0, 160.0, 240.0, 320.0, 400.0, 480.0, 560.0, 720.0, 960.0, 1200.0,
 ];
 const SWEEP_SMOKE_PPS: &[f64] = &[160.0, 320.0, 480.0, 720.0];
-/// Hardcoded `dev` grid — XDP TX debug only.
+/// Hardcoded `dev` grid — XDP TX debug (add `Hal` for a same-grid A/B).
+const DEV_PATHS: &[PpsPath] = &[PpsPath::Xdp];
 const DEV_PPS: &[f64] = &[240.0, 480.0, 720.0, 1200.0];
-const DEV_SWEEP_WINDOW: Duration = Duration::from_secs(4);
+const DEV_SWEEP_WINDOW: Duration = Duration::from_secs(8);
 
 pub struct JustTxOpts {
     pub paths: Vec<PpsPath>,
@@ -121,7 +122,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     let esp_s = cfg.target.esp_ip.to_string();
 
     let paths = if is_dev {
-        vec![PpsPath::Xdp]
+        DEV_PATHS.to_vec()
     } else if opts.paths.is_empty() {
         cfg.just_tx
             .arms
@@ -136,7 +137,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     }
 
     let (grid, sweep_window, sweep_trials, rounds, op_window) = if is_dev {
-        // Hardcoded: 4 rates × 1 trial × 4s window; no operating rounds.
+        // Hardcoded: 4 rates × 1 trial × 8s window; no operating rounds.
         (
             DEV_PPS,
             DEV_SWEEP_WINDOW,
@@ -369,6 +370,26 @@ async fn run_arm_round(
                 100.0 * stats.loss,
             ));
             if is_dev {
+                let mut rtt_ms: Vec<f64> = stats
+                    .samples
+                    .iter()
+                    .filter_map(|s| s.t_rx?.duration_since(s.t_tx).ok())
+                    .map(|d| d.as_secs_f64() * 1e3)
+                    .collect();
+                rtt_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let pct = |q: f64| {
+                    rtt_ms
+                        .get(((rtt_ms.len() as f64 - 1.0) * q).round() as usize)
+                        .copied()
+                        .unwrap_or(f64::NAN)
+                };
+                ui.permanent(&format!(
+                    "      rtt_ms p50={:.2} p90={:.2} p99={:.2} max={:.2}",
+                    pct(0.5),
+                    pct(0.9),
+                    pct(0.99),
+                    pct(1.0)
+                ));
                 ui.permanent(&format!("      countersΔ {}", stats.counters));
                 match agent.request("txstats").await {
                     Ok(line) => ui.permanent(&format!("      {line}")),
