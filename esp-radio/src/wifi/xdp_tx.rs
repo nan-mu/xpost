@@ -29,9 +29,9 @@ use crate::sys::include;
 /// current blob `netstack_ref` never fires, so in-flight handoffs do **not** keep
 /// the RX buffer — only the ring does.
 ///
-/// Keep this small: deep pending + inflight turns air jitter into multi-100ms RTT
-/// tails and HOL stalls that show up as loss under longer windows.
-const TX_TOKEN_CAPACITY: usize = 16;
+/// Keep modest: each slot pins an RX buffer until drain. 32 ≈ 40 ms at 800 pps
+/// so brief air stalls refill the ring less often than with 16 (fewer `enq_claim`).
+const TX_TOKEN_CAPACITY: usize = 32;
 const RING_CAP: usize = TX_TOKEN_CAPACITY;
 const TX_TOKEN_SLOT_EMPTY: usize = 0;
 const TX_TOKEN_SLOT_OWNED: usize = 1;
