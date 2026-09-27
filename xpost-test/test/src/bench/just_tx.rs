@@ -52,8 +52,8 @@ const SWEEP_SMOKE_PPS: &[f64] = &[400.0, 1200.0, 2400.0, 4000.0];
 const DEV_PATHS: &[PpsPath] = &[PpsPath::Xdp, PpsPath::Hal];
 const DEV_PPS: &[f64] = &[800.0, 1200.0, 1600.0, 2000.0];
 const DEV_SWEEP_WINDOW: Duration = Duration::from_secs(8);
-/// XDP `txcap` per trial (firmware default is 32; repeat for variance).
-const DEV_TXCAPS: &[usize] = &[32, 32, 32];
+/// XDP `txcap` per trial (firmware default is 128; repeat for variance).
+const DEV_TXCAPS: &[usize] = &[128, 128, 128];
 
 pub struct JustTxOpts {
     pub paths: Vec<PpsPath>,

@@ -25,18 +25,20 @@ use super::xdp_prof::{self, Site, Span};
 use crate::sys::include;
 
 /// Token pool == ring capacity: a claimed token is always either queued or being handed off.
-/// Keep small: every slot pins an RX buffer until drain (or tail-drop free).
-const TX_TOKEN_CAPACITY: usize = 16;
+/// Every queued slot pins an RX buffer until drain (or tail-drop free). With the
+/// current blob `netstack_ref` never fires, so in-flight handoffs do **not** keep
+/// the RX buffer — only the ring does. Keep this below ~heap/1.7KB headroom.
+const TX_TOKEN_CAPACITY: usize = 32;
 const RING_CAP: usize = TX_TOKEN_CAPACITY;
 const TX_TOKEN_SLOT_EMPTY: usize = 0;
 const TX_TOKEN_SLOT_OWNED: usize = 1;
 const TX_TOKEN_SLOT_RELEASING: usize = 2;
 /// Print one full flow timestamp line every N handoffs (only while `tsflow on`).
 const FLOW_SAMPLE_EVERY: u32 = 100;
-/// Max XDP frames handed to the driver and not yet released via `netstack_free`
-/// (or the no-retain `tx_done` fallback). Sized for RX pin headroom, not
-/// `dynamic_tx_buf_num` (128): zero-copy keeps the RX buffer until free.
-const DEFAULT_INFLIGHT_CAP: usize = 32;
+/// Max XDP frames handed to the driver and not yet cleared via `netstack_free`
+/// (or the no-retain `tx_done` fallback). Matches `dynamic_tx_buf_num`: without
+/// retain, this bounds TX descriptors, not RX pins.
+const DEFAULT_INFLIGHT_CAP: usize = 128;
 
 /// Signaled on RX enqueue and on every `tx_done`; the board TX task waits on it.
 pub static TX_KICK: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -348,6 +350,11 @@ pub fn poll() -> TxPoll {
         let ifx = token.ifx.load(Ordering::Acquire);
         let flow = TSFLOW_ON.load(Ordering::Relaxed);
         let t0 = if flow { now_us() } else { 0 };
+        // Reserve the slot *before* `tx_by_ref` so a same-frame `tx_done` cannot
+        // race past `TX_NEED_DONE++` and leak an inflight count (seen as +1/window).
+        TX_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+        TX_NEED_DONE.fetch_add(1, Ordering::AcqRel);
+        note_inflight_peak();
         let rc = {
             let _span = Span::enter(Site::TxDrainOne);
             xdp_prof::hit_here();
@@ -361,6 +368,7 @@ pub fn poll() -> TxPoll {
             }
         };
         if rc == include::ESP_ERR_NO_MEM as i32 {
+            undo_inflight_reservation();
             STAT_NOMEM_WAIT.fetch_add(1, Ordering::Relaxed);
             STAT_LAST_DRAIN_RC.store(rc as u32, Ordering::Relaxed);
             push_log(TxEvKind::NomemRq, rc);
@@ -372,14 +380,14 @@ pub fn poll() -> TxPoll {
         if rc == include::ESP_OK as i32 {
             // Driver should have called `netstack_ref` inside `tx_by_ref`.
             let retained = token.refs.load(Ordering::Acquire) >= 2;
-            TX_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
-            note_inflight_peak();
             STAT_DRAIN_OK.fetch_add(1, Ordering::Relaxed);
             if retained {
-                // Clear inflight in `netstack_free` (XDP-only; ignores smoltcp TX).
+                // Prefer `netstack_free` for clear; drop the tx_done reservation.
+                let _ = TX_NEED_DONE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                    (n > 0).then_some(n - 1)
+                });
             } else {
                 STAT_NO_RETAIN.fetch_add(1, Ordering::Relaxed);
-                TX_NEED_DONE.fetch_add(1, Ordering::AcqRel);
             }
             if flow {
                 let t1 = now_us();
@@ -387,12 +395,22 @@ pub fn poll() -> TxPoll {
                 maybe_tsflow(token.t_enq_us.load(Ordering::Relaxed), t0, t1);
             }
         } else {
+            undo_inflight_reservation();
             STAT_DRAIN_FAIL.fetch_add(1, Ordering::Relaxed);
             STAT_LAST_DRAIN_RC.store(rc as u32, Ordering::Relaxed);
             push_log(TxEvKind::DrainFail, rc);
         }
         token.release();
     }
+}
+
+fn undo_inflight_reservation() {
+    let _ = TX_NEED_DONE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        (n > 0).then_some(n - 1)
+    });
+    let _ = TX_IN_FLIGHT.fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
+        Some(x.saturating_sub(1))
+    });
 }
 
 /// Wi-Fi finished an air TX. Do not call `tx_by_ref` here.
