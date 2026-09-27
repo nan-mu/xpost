@@ -39,12 +39,13 @@ const TX_TOKEN_SLOT_RELEASING: usize = 2;
 /// Print one full flow timestamp line every N handoffs (only while `tsflow on`).
 const FLOW_SAMPLE_EVERY: u32 = 100;
 /// Soft in-flight gate. Bounds driver queue depth for RTT (`cap/pps` queueing).
-/// `0` disables the gate (can fill all 128 TX bufs → 100ms+ tails). Default 32
-/// balances long-window loss vs p90 RTT; NO_MEM remains the hard stop.
-const DEFAULT_INFLIGHT_CAP: usize = 32;
-/// If blocked (soft-cap / NO_MEM) longer than this, drop the software ring so
-/// HOL frames do not pin RX or inflate RTT after the stall clears.
-const BLOCK_FLUSH_US: u32 = 15_000;
+/// `0` disables the gate (can fill all 128 TX bufs → 100ms+ tails).
+///
+/// Formal counters: cap=32 + 15ms whole-ring flush made 400/800 loss ≈ `tx_flush`
+/// after brief air stalls, and capped ≥2400 at ~1.3k pps (`enq_claim` dominated).
+/// Default 64 keeps a RTT bound (~40 ms at 1600 pps) without that flush tax;
+/// NO_MEM remains the hard stop.
+const DEFAULT_INFLIGHT_CAP: usize = 64;
 
 /// Signaled on RX enqueue and on every `tx_done`; the board TX task waits on it.
 pub static TX_KICK: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -353,7 +354,6 @@ pub fn poll() -> TxPoll {
         if soft_cap > 0 && TX_IN_FLIGHT.load(Ordering::Acquire) >= soft_cap {
             STAT_CAP_WAIT.fetch_add(1, Ordering::Relaxed);
             note_block_start();
-            maybe_flush_stale_pending();
             return TxPoll::Blocked;
         }
         let token = &TX_TOKENS[idx as usize];
@@ -385,7 +385,6 @@ pub fn poll() -> TxPoll {
             STAT_LAST_DRAIN_RC.store(rc as u32, Ordering::Relaxed);
             push_log(TxEvKind::NomemRq, rc);
             note_block_start();
-            maybe_flush_stale_pending();
             return TxPoll::Blocked;
         }
         note_block_end();
@@ -642,25 +641,6 @@ fn note_peak(stat: &AtomicU32, n: u32) {
 
 fn note_block_start() {
     let _ = BLOCK_SINCE_US.compare_exchange(0, now_us().max(1), Ordering::Relaxed, Ordering::Relaxed);
-}
-
-fn maybe_flush_stale_pending() {
-    let since = BLOCK_SINCE_US.load(Ordering::Relaxed);
-    if since == 0 {
-        return;
-    }
-    if now_us().wrapping_sub(since) < BLOCK_FLUSH_US {
-        return;
-    }
-    flush_pending_ring();
-}
-
-fn flush_pending_ring() {
-    while let Some(idx) = ring_peek() {
-        ring_pop();
-        TX_TOKENS[idx as usize].release();
-        STAT_FLUSH.fetch_add(1, Ordering::Relaxed);
-    }
 }
 
 fn note_block_end() {
