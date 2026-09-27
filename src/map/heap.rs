@@ -215,6 +215,7 @@ pub(crate) mod access {
         }
     }
 
+    #[esp_hal::ram]
     pub fn try_write() -> Option<HeapWriteGuard<'static>> {
         MAP_RT
             .try_get()
@@ -222,6 +223,7 @@ pub(crate) mod access {
             .map(|guard| HeapWriteGuard { guard })
     }
 
+    #[esp_hal::ram]
     pub fn try_read() -> Option<HeapReadGuard<'static>> {
         try_write()
     }

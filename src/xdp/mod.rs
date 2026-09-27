@@ -478,6 +478,7 @@ impl XdpRt {
             let binds = self.map_lease.vmr.alias_pairs();
             if !binds.is_empty() {
                 crate::map::set_map_aliases(binds.as_slice())?;
+                crate::map::set_fast_arrays(maps, binds.as_slice());
             }
         } else if let Some(id) = self.slots.get(self.primary).and_then(|s| s.image) {
             if !self.images[id].meta.required_maps.is_empty() {
@@ -503,8 +504,9 @@ impl XdpRt {
         if !self.leased {
             return Err(XdpReleaseError::NotLeased);
         }
-        ACTIVE.store(false, Ordering::Release);
-        while IN_FLIGHT.load(Ordering::Acquire) != 0 {
+        // SeqCst: Dekker pair with `ingress::run` (IN_FLIGHT claim → ACTIVE check).
+        ACTIVE.store(false, Ordering::SeqCst);
+        while IN_FLIGHT.load(Ordering::SeqCst) != 0 {
             core::hint::spin_loop();
         }
         PRIMARY_ENTRY.store(0, Ordering::Release);

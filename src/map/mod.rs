@@ -3,7 +3,7 @@
 //! Control-plane mutation is serialized by [`MAP_RT`]; helpers resolve AOT
 //! VMAs via [`alias`] and operate under a non-nested heap lock.
 
-mod alias;
+pub(crate) mod alias;
 pub(crate) mod builder;
 pub(crate) mod heap;
 pub(crate) mod kinds;
@@ -24,7 +24,7 @@ pub type MapRtGuard<'a> = RtMutexGuard<'a, MapRt>;
 /// Map index into [`MapRt`] meta rows.
 pub type MapIdx = usize;
 
-pub(crate) use alias::{clear_map_aliases, set_map_aliases};
+pub(crate) use alias::{clear_map_aliases, set_fast_arrays, set_map_aliases};
 pub(crate) use ops::{helper_delete, helper_lookup, helper_update};
 
 use alloc::{string::String, vec::Vec};
