@@ -1,7 +1,7 @@
 //! Wi-Fi bring-up with native-XDP [`xpost_type::XdpProg`].
 //!
-//! Passes the crate-mounted program into [`::esp_radio::wifi::new`]. Observation
-//! hooks are empty unless a `trace-*` feature fills them via [`crate::ext::trace`].
+//! Passes the crate-mounted program into [`::esp_radio::wifi::new`]. Performance
+//! hooks are empty unless a `perf-*` feature fills them via [`crate::ext::perf`].
 
 /// Create the Wi-Fi controller with the crate default XDP program.
 pub fn new<'d>(

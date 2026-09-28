@@ -275,7 +275,7 @@ sniffer = ["wifi", "__has_unstable_feature_enabled"]
 ## Recommended esp32c3 check: `esp32c3,wifi,unstable,xdp`.
 xdp = ["wifi", "dep:xpost-type"]
 
-## Compile [`wifi::xdp::Observe`] call-sites on the XDP / TX path.
+## Compile [`wifi::xdp::EspRadioTrace`] call-sites on the XDP / TX path.
 ## Requires `xdp`. Storage and semantics are owned by the `XdpProg` implementor.
 xdp-observe = ["xdp"]
 #DOC_ENDIF

@@ -4,8 +4,9 @@
 //! - [`map::MapRt`] / [`map::MapBuilder`]
 //! - [`xdp::XdpRt`] / [`xdp::XdpBuilder`]
 //!
-//! Optional observation: enable `trace-counter` / `trace-timestamp` and read via
-//! [`ext::trace`]. Wi-Fi + XDP attach: enable `esp-radio` and call [`esp_radio::new`].
+//! Optional performance monitoring: enable `perf-counter` / `perf-aggregate` /
+//! `perf-gauge` / `perf-trace` and read via [`ext::perf`]. Wi-Fi + XDP attach:
+//! enable `esp-radio` and call [`esp_radio::new`].
 //!
 //! Control-plane errors live in [`error`] (one small enum per public entrypoint).
 //! Optional / incomplete feature surface: [`ext`] (`ringbuf`). Board codegen is
@@ -32,7 +33,7 @@ pub mod esp_radio {
 }
 /// Control-plane errors (map + XDP public entrypoints).
 pub mod error;
-/// Feature-gated optional surfaces (`ringbuf`, `ext::trace` backends).
+/// Feature-gated optional surfaces (`ringbuf`, `ext::perf` backends).
 pub mod ext;
 /// AOT helper trampoline — not part of the integrator API; see [`helper::helper_dispatcher`].
 #[doc(hidden)]

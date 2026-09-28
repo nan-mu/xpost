@@ -6,12 +6,17 @@
 //! | Module | Feature | Notes |
 //! |--------|---------|-------|
 //! | [`ringbuf`] | `ringbuf` | incomplete → `compile_error!` |
-//! | [`trace`] | `trace-counter` / `trace-timestamp` | Observe + counter/timestamp face |
+//! | [`perf`] | `perf-counter` / `perf-aggregate` / `perf-gauge` / `perf-trace` | EspRadioTrace backends |
 //!
 //! Boot is firmware-first. Use [`crate::map::MapBuilder`] / [`crate::xdp::XdpBuilder`] directly.
 
 #[cfg(feature = "ringbuf")]
 pub mod ringbuf;
 
-#[cfg(any(feature = "trace-counter", feature = "trace-timestamp"))]
-pub mod trace;
+#[cfg(any(
+    feature = "perf-counter",
+    feature = "perf-aggregate",
+    feature = "perf-gauge",
+    feature = "perf-trace"
+))]
+pub mod perf;

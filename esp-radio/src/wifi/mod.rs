@@ -50,7 +50,7 @@
 //!
 //! Optional native-XDP driver surface: pass [`XdpProg`] as the third argument of
 //! [`new`]. STA/AP RX callbacks call [`XdpProg::run`], then map [`XdpAction`] to
-//! Pass / Drop / same-iface Tx. Observation hooks are [`xdp::Observe`]
+//! Pass / Drop / same-iface Tx. Performance hooks are [`xdp::EspRadioTrace`]
 //! (compiled in with feature `xdp-observe`).
 //!
 //! The prog slot is one-shot ([`embassy_sync::once_lock::OnceLock`]); first
@@ -121,7 +121,7 @@ pub mod xdp;
 
 #[cfg(feature = "xdp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "xdp")))]
-pub use xdp::{Action, NoopProg, Observe, XdpAction, XdpProg};
+pub use xdp::{Action, EspRadioTrace, NoopProg, XdpAction, XdpProg};
 
 #[cfg(feature = "xdp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "xdp")))]
@@ -1146,18 +1146,18 @@ fn xdp_dispatch(
     }
     let frame = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), len as usize) };
     let prog = xdp::current();
-    xdp::observe::notify(|p| p.on_rx_enter());
+    xdp::observe::notify(|p| p.rx_packets(frame.len()));
     let (action, window) = {
-        xdp::observe::notify(|p| p.on_xdp_enter());
+        xdp::observe::notify(|p| p.xdp_invocations());
         let _run = xdp::prof::Span::enter(xdp::prof::Site::XdpRun);
         let frame_ptr = frame.as_ptr();
         let frame_len = frame.len();
         let (xdp_act, win) = prog.run(frame);
-        xdp::observe::notify(|p| p.on_xdp_leave());
+        xdp::observe::notify(|p| p.xdp_action(xdp_act));
         let action = xdp::map_xdp_action(xdp_act, frame_ptr, frame_len, win);
         (action, win)
     };
-    match action {
+    let result = match action {
         Action::Pass => {
             let win_len = window.len();
             let packet = PacketBuffer {
@@ -1171,18 +1171,20 @@ fn xdp_dispatch(
                 match queue.with(|q| {
                     if q.len() < RX_QUEUE_SIZE.load(Ordering::Relaxed) {
                         q.push_back(packet);
-                        Ok(())
+                        Ok(q.len())
                     } else {
                         Err(packet)
                     }
                 }) {
-                    Ok(()) => {
-                        xdp::observe::notify(|p| p.on_pass_to_stack());
+                    Ok(depth) => {
+                        xdp::observe::notify(|p| p.rx_delivered(depth));
                         wake();
                         include::ESP_OK as esp_err_t
                     }
                     Err(_) => {
                         debug!("RX QUEUE FULL");
+                        let depth = RX_QUEUE_SIZE.load(Ordering::Relaxed);
+                        xdp::observe::notify(|p| p.rx_queue_overflow(depth));
                         include::ESP_ERR_NO_MEM as esp_err_t
                     }
                 },
@@ -1190,22 +1192,24 @@ fn xdp_dispatch(
         }
         Action::Drop => {
             xdp::free_rx_buffer(eb);
-            xdp::observe::notify(|p| p.on_drop());
+            xdp::observe::notify(|p| p.rx_discarded());
             Some(include::ESP_OK as esp_err_t)
         }
         Action::Tx => {
             match xdp::tx::transmit(ifx, window, eb) {
                 xdp::tx::TxOutcome::Ok => {}
                 xdp::tx::TxOutcome::FailBadBuf => {
-                    xdp::observe::notify(|p| p.on_tx_fail_bad_buf());
+                    xdp::observe::notify(|p| p.tx_fail_bad_buf());
                 }
                 xdp::tx::TxOutcome::FailToken | xdp::tx::TxOutcome::FailRing => {
-                    xdp::observe::notify(|p| p.on_tx_fail_token());
+                    xdp::observe::notify(|p| p.tx_fail_token());
                 }
             }
             Some(include::ESP_OK as esp_err_t)
         }
-    }
+    };
+    xdp::observe::notify(|p| p.rx_end());
+    result
 }
 
 pub(crate) static WIFI_TX_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -2375,7 +2379,7 @@ pub fn new<'d>(
 pub fn new<'d>(
     device: crate::hal::peripherals::WIFI<'d>,
     config: ControllerConfig,
-    #[cfg(feature = "xdp-observe")] prog: &'static dyn Observe,
+    #[cfg(feature = "xdp-observe")] prog: &'static dyn EspRadioTrace,
     #[cfg(not(feature = "xdp-observe"))] prog: &'static dyn XdpProg,
 ) -> Result<(WifiController<'d>, Interfaces<'d>), WifiError> {
     xdp::install_prog(prog);

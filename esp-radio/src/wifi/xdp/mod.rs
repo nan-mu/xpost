@@ -4,7 +4,7 @@
 //! [`XdpProg`] passed to [`super::new`], Pass / Drop / same-iface zero-copy Tx.
 //!
 //! Traits live in [`xpost_type`]; this module owns install + driver [`Action`].
-//! With `xdp-observe`, [`super::new`] takes [`Observe`] (extends [`XdpProg`]).
+//! With `xdp-observe`, [`super::new`] takes [`EspRadioTrace`] (extends [`XdpProg`]).
 //!
 //! # Initialization
 //!
@@ -26,7 +26,7 @@ pub use tx::{
     TxEvKind, TxLogEntry, TxPoll, TxStats, clear_stats, in_flight, last_drain_rc, pending_len,
     poll, set_inflight_cap, set_tsflow, snapshot_log, stats, TX_KICK,
 };
-pub use xpost_type::{Observe, XdpAction, XdpProg};
+pub use xpost_type::{EspRadioTrace, XdpAction, XdpProg};
 
 /// Driver disposition after mapping [`XdpAction`] (Pass / Drop / Tx).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,7 +61,7 @@ pub(crate) fn map_xdp_action(
     }
 }
 
-/// Default prog: always Pass the full frame; observe hooks are no-ops.
+/// Default prog: always Pass the full frame; EspRadioTrace hooks are no-ops.
 pub struct NoopProg;
 
 impl XdpProg for NoopProg {
@@ -72,12 +72,12 @@ impl XdpProg for NoopProg {
 }
 
 #[cfg(feature = "xdp-observe")]
-impl Observe for NoopProg {}
+impl EspRadioTrace for NoopProg {}
 
 static NOOP: NoopProg = NoopProg;
 
 #[cfg(feature = "xdp-observe")]
-static CURRENT: OnceLock<&'static dyn Observe> = OnceLock::new();
+static CURRENT: OnceLock<&'static dyn EspRadioTrace> = OnceLock::new();
 #[cfg(not(feature = "xdp-observe"))]
 static CURRENT: OnceLock<&'static dyn XdpProg> = OnceLock::new();
 
@@ -85,7 +85,7 @@ static CURRENT: OnceLock<&'static dyn XdpProg> = OnceLock::new();
 ///
 /// First wins; a second init leaves the first prog mounted.
 #[cfg(feature = "xdp-observe")]
-pub(crate) fn install_prog(prog: &'static dyn Observe) {
+pub(crate) fn install_prog(prog: &'static dyn EspRadioTrace) {
     let _ = CURRENT.init(prog);
 }
 
@@ -96,7 +96,7 @@ pub(crate) fn install_prog(prog: &'static dyn XdpProg) {
 
 #[cfg(feature = "xdp-observe")]
 #[inline]
-pub(crate) fn current() -> &'static dyn Observe {
+pub(crate) fn current() -> &'static dyn EspRadioTrace {
     CURRENT.try_get().copied().unwrap_or(&NOOP)
 }
 

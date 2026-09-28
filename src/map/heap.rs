@@ -73,8 +73,8 @@ impl Drop for RawResource {
         let addr = ptr as usize;
         let align = self.layout.align();
         if !addr.is_multiple_of(align) {
-            #[cfg(feature = "trace-counter")]
-            crate::ext::trace::counter::inc_pool_drop_misalign();
+            #[cfg(feature = "perf-counter")]
+            crate::ext::perf::counter::inc_pool_drop_misalign();
             return;
         }
         unsafe { (self.drop_fn)(ptr) };
@@ -83,15 +83,15 @@ impl Drop for RawResource {
 
 pub(crate) unsafe fn reclaim_talc_box<T>(ptr: *mut u8, _tag: &'static str) {
     if ptr.is_null() {
-        #[cfg(feature = "trace-counter")]
-        crate::ext::trace::counter::inc_pool_drop_misalign();
+        #[cfg(feature = "perf-counter")]
+        crate::ext::perf::counter::inc_pool_drop_misalign();
         return;
     }
     let addr = ptr as usize;
     let align = align_of::<T>();
     if !addr.is_multiple_of(align) {
-        #[cfg(feature = "trace-counter")]
-        crate::ext::trace::counter::inc_pool_drop_misalign();
+        #[cfg(feature = "perf-counter")]
+        crate::ext::perf::counter::inc_pool_drop_misalign();
         return;
     }
     let _ = unsafe { Box::from_raw_in(ptr as *mut T, allocator()) };

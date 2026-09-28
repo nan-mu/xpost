@@ -63,10 +63,20 @@ esp-radio = { version = "0.18.0", path = "../../esp-radio", features = [
   "wifi",
   "xdp",
 ] }
-xpost = { path = "../..", features = ["esp-radio", "trace-counter"] }
+xpost = { path = "../..", features = ["esp-radio"] }
 critical-section = "1.2.0"
 portable-atomic = { version = "1", default-features = false }
 static_cell      = "2.1.1"
+
+[features]
+default = ["kind-c"]
+# One compile kind per profile (plan: separate builds).
+kind-c = ["xpost/perf-counter"]
+kind-a = ["kind-c", "xpost/perf-aggregate"]
+kind-g = ["kind-c", "xpost/perf-gauge"]
+kind-t = ["kind-c", "xpost/perf-trace"]
+# Local smoke: all backends in one image.
+kind-all = ["kind-a", "kind-g", "kind-t"]
 
 [build-dependencies]
 xpost-build = { path = "../../xpost-build" }

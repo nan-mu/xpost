@@ -37,8 +37,8 @@ impl MapOpError {
         match self {
             Self::NotFound | Self::Exists => {}
             Self::Busy | Self::InvalidArg | Self::NoMem | Self::Unsupported => {
-                #[cfg(feature = "trace-counter")]
-                crate::ext::trace::counter::inc_helper_map();
+                #[cfg(feature = "perf-counter")]
+                crate::ext::perf::counter::inc_helper_map();
             }
         }
     }
@@ -98,8 +98,8 @@ pub(crate) fn helper_lookup(map: usize, key: usize) -> usize {
         return p;
     }
     let Some(id) = resolve_map_id(map) else {
-        #[cfg(feature = "trace-counter")]
-        crate::ext::trace::counter::inc_helper_unresolved();
+        #[cfg(feature = "perf-counter")]
+        crate::ext::perf::counter::inc_helper_unresolved();
         return 0;
     };
     let key = key as *const u8;

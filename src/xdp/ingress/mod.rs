@@ -21,7 +21,12 @@ pub(crate) mod ctx;
 pub(crate) mod esp_radio;
 
 pub(crate) use prog::XDP_PROG;
-#[cfg(feature = "trace-counter")]
+#[cfg(any(
+    feature = "perf-counter",
+    feature = "perf-aggregate",
+    feature = "perf-gauge",
+    feature = "perf-trace"
+))]
 pub(crate) use prog::XdpProg;
 
 use core::sync::atomic::Ordering;
@@ -69,8 +74,8 @@ pub(crate) fn run<'a>(frame: &'a mut [u8]) -> (xpost_type::XdpAction, &'a mut [u
     let valid =
         (window.data.cast_const() == frame.as_ptr()) & (window.len <= frame.len());
     if !valid {
-        #[cfg(feature = "trace-counter")]
-        crate::ext::trace::counter::inc_bad_md();
+        #[cfg(feature = "perf-counter")]
+        crate::ext::perf::counter::inc_bad_md();
         let bad = match act {
             XdpAction::Tx => XdpAction::Drop,
             other => other,
@@ -96,8 +101,8 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
         .compare_exchange(0, 1, Ordering::SeqCst, Ordering::Relaxed)
         .is_err()
     {
-        #[cfg(feature = "trace-counter")]
-        crate::ext::trace::counter::inc_reentry();
+        #[cfg(feature = "perf-counter")]
+        crate::ext::perf::counter::inc_reentry();
         return None;
     }
     // Dekker pair with `XdpRt::release` (ACTIVE=false → wait IN_FLIGHT==0):
@@ -109,8 +114,8 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
     };
     if entry == 0 {
         IN_FLIGHT.store(0, Ordering::Release);
-        #[cfg(feature = "trace-counter")]
-        crate::ext::trace::counter::inc_inactive_skip();
+        #[cfg(feature = "perf-counter")]
+        crate::ext::perf::counter::inc_inactive_skip();
         return None;
     }
     let action = unsafe { inner_xdp(entry, ctx_ptr) };
@@ -140,8 +145,8 @@ unsafe fn inner_xdp(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
         core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
     }
     if sp & 15 != 0 {
-        #[cfg(feature = "trace-counter")]
-        crate::ext::trace::counter::inc_stack_misalign();
+        #[cfg(feature = "perf-counter")]
+        crate::ext::perf::counter::inc_stack_misalign();
         return 2; // XDP_PASS
     }
 
