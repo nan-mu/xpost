@@ -67,7 +67,7 @@ impl TableSet {
                 "TRUNCATE TABLE just_tx_data, just_tx_config RESTART IDENTITY CASCADE"
             }
             Self::JustDrop => {
-                "TRUNCATE TABLE just_drop_data, just_drop_config RESTART IDENTITY CASCADE"
+                "TRUNCATE TABLE just_drop_trace_summary, just_drop_gauge, just_drop_agg, just_drop_run, just_drop_data, just_drop_config RESTART IDENTITY CASCADE"
             }
             Self::Dev => "",
         }
@@ -84,7 +84,9 @@ impl TableSet {
                 Some("DROP TABLE IF EXISTS just_tx_data, just_tx_config CASCADE")
             }
             Self::JustDrop => {
-                Some("DROP TABLE IF EXISTS just_drop_data, just_drop_config CASCADE")
+                Some(
+                    "DROP TABLE IF EXISTS just_drop_trace_summary, just_drop_gauge, just_drop_agg, just_drop_run, just_drop_data, just_drop_config CASCADE",
+                )
             }
             Self::Dev => None,
             _ => None,

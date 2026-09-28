@@ -64,7 +64,7 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 
 - `config/default.toml`：`run = [...]`（跑哪些**实验**）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`、版本与 profiles
 - `config/just_tx.toml`：正式 just_tx 轮次、臂、formal
-- `config/just_drop.toml`：正式 just_drop 同上
+- `config/just_drop.toml`：正式 just_drop（`arms` / `kinds=c|a|g|t` / `fixed_pps` / `trace_pps`）
 - 调试 XDP TX：`run = ["dev"]`（硬编码：XDP × 800/1600/2800/4000 × 1×8s；**无 DB**；固件每 100 包打 `tsflow`；agent `POST /v1/serial_window`）
 - Agent HTTP：`/health`、`/v1/*`（含 `/v1/serial_window`）、`/mcp`
 - 实验步骤固定在代码里：见 [`xpost-test/config/README.md`](xpost-test/config/README.md)
@@ -79,7 +79,7 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 只做**性能**分析。采集由 TR3000 上 `./xpost-test` 写 `formal.*`；笔记本现查，不负责烧录或功能 ACK。
 
 - **`just_tx`**（`default.toml` 当前 `run`）：扫速找 ~5% 丢包工作点后逐包刺激/回包 → `formal.just_tx_config` / `just_tx_data`
-- **`just_drop`**：满速 blast 下周期读 `drop` → `formal.just_drop_config` / `just_drop_data`
+- **`just_drop`**：`kinds` 含 **c**（满速 → `just_drop_config`/`data`）与 **a/g/t**（固定 pps → `just_drop_run` + agg/gauge/trace_summary）。Profile：`just-drop-{c,a,g,t}` / `just-drop-hal-*`（HAL = Pass XDP + app `drop on`）
 - 笔记：`just_tx.ipynb`（RTT + 处理 PPS）、`just_drop.ipynb`（drop 处理 PPS）
 
 ```bash

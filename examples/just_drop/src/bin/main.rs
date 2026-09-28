@@ -429,7 +429,9 @@ fn print_counters() {
 fn print_agg() {
     #[cfg(feature = "kind-a")]
     {
+        // Single OK line so agent `request` captures every hist (first OK wins).
         let a = xpost::ext::perf::aggregate();
+        esp_println::print!("OK agg");
         for (name, snap) in [
             ("rx_processing", a.rx_processing.snapshot()),
             ("xdp_execution", a.xdp_execution.snapshot()),
@@ -437,7 +439,7 @@ fn print_agg() {
             ("post_action", a.post_action.snapshot()),
         ] {
             esp_println::print!(
-                "OK agg name={name} count={} total={} min={} max={} lo={} width={} buckets=",
+                " | {name} count={} total={} min={} max={} lo={} width={} buckets=",
                 snap.count,
                 snap.total_ticks,
                 snap.min_ticks,
@@ -451,8 +453,8 @@ fn print_agg() {
                 }
                 esp_println::print!("{b}");
             }
-            esp_println::println!();
         }
+        esp_println::println!();
     }
     #[cfg(not(feature = "kind-a"))]
     esp_println::println!("ERR agg feature=kind-a required");

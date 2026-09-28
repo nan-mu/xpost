@@ -1,8 +1,9 @@
+use xpost_build::firmware_codegen;
+
 fn main() {
     load_dotenv();
     linker_be_nice();
-    // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
-    println!("cargo:rustc-link-arg=-Tlinkall.x");
+    firmware_codegen().unwrap();
 }
 
 /// Read `.env` next to Cargo.toml into compile-time `option_env!` keys.
@@ -81,7 +82,6 @@ fn linker_be_nice() {
                 }
                 _ => (),
             },
-            // we don't have anything helpful for "missing-lib" yet
             _ => {
                 std::process::exit(1);
             }

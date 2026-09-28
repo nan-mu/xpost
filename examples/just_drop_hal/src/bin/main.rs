@@ -19,6 +19,7 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use log::{error, info};
 use static_cell::StaticCell;
+use xpost::xdp::Slot;
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -35,9 +36,15 @@ const STIM_PORT: u16 = 8080;
 /// IPPROTO_UDP — matches just_drop `rxcnt` ARRAY key.
 const IPPROTO_UDP: u32 = 17;
 
+/// IRAM slot required by xpost-build link layout; HAL never leases a cold image
+/// (inactive Prog → Pass). Symbol name matches xpost-build `SLOT_SYMBOL`.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".xdp.hotload_0")]
+static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
+
 /// Packets that reached the UDP socket in Pass mode (`drop off`).
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
-/// Stim datagrams discarded in Drop mode (`drop on`).
+/// Stim datagrams discarded in Drop mode (`drop on`) — primary `drop=` for formal.
 static DROP: AtomicUsize = AtomicUsize::new(0);
 /// Per-ipproto counters; only UDP (17) is incremented on stim drop/pass classify.
 static RXCNT: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
@@ -59,12 +66,15 @@ static UDP_TX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    esp_println::logger::init_logger_from_env();
+    // Quiet USB: match just_drop under stress (agent session contention).
+    esp_println::logger::init_logger(log::LevelFilter::Error);
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
+    // Wi-Fi dynamic RX/TX buffers; align with just_drop / just_tx_hal.
+    esp_alloc::heap_allocator!(size: 64 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -76,9 +86,22 @@ async fn main(spawner: Spawner) -> ! {
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
     spawner.spawn(serial_task(usb_rx).unwrap());
 
-    let (mut controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, Default::default())
+    // Keep the IRAM slot symbol live for the linker; never lease.
+    let _slot = core::ptr::addr_of!(xdp_slot);
+
+    // Path esp-radio + xpost: inactive Prog → Pass; app still drops at UDP.
+    let wifi_cfg = esp_radio::wifi::ControllerConfig::default()
+        .with_dynamic_tx_buf_num(128)
+        .with_dynamic_rx_buf_num(1024)
+        .with_ampdu_tx_enable(false);
+    let (mut controller, interfaces) = xpost::esp_radio::new(peripherals.WIFI, wifi_cfg)
         .expect("Failed to initialize Wi-Fi controller");
-    info!("wifi ready (crates.io esp-radio; no xpost)");
+    info!(
+        "wifi+xdp Pass (no lease) drop_site=app tx_dyn=128 rx_dyn=1024"
+    );
+
+    // Drain path for any accidental XDP_TX; Pass-only should stay Idle.
+    spawner.spawn(xdp_tx_task().unwrap());
 
     match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
         (Some(ssid), Some(pass)) if !ssid.is_empty() => {
@@ -104,6 +127,20 @@ async fn main(spawner: Spawner) -> ! {
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn xdp_tx_task() {
+    use embassy_futures::select::select;
+    use esp_radio::wifi::{XDP_TX_KICK, XdpTxPoll, xdp_tx_poll};
+    loop {
+        match xdp_tx_poll() {
+            XdpTxPoll::Idle => XDP_TX_KICK.wait().await,
+            XdpTxPoll::Blocked => {
+                select(XDP_TX_KICK.wait(), Timer::after(Duration::from_micros(500))).await;
+            }
+        }
     }
 }
 
@@ -206,6 +243,19 @@ fn dispatch_serial(line: &str) {
     } else if line.eq_ignore_ascii_case("counters") || line.eq_ignore_ascii_case("report counters")
     {
         print_counters();
+    } else if line.eq_ignore_ascii_case("agg") {
+        print_agg();
+    } else if line.eq_ignore_ascii_case("gauge") {
+        print_gauge();
+    } else if line.eq_ignore_ascii_case("trace") {
+        print_trace_summary();
+    } else if line.eq_ignore_ascii_case("trace clear") {
+        #[cfg(feature = "kind-t")]
+        xpost::ext::perf::trace().clear();
+        esp_println::println!("OK trace clear");
+    } else if line.eq_ignore_ascii_case("perf clear") {
+        perf_clear();
+        esp_println::println!("OK perf clear");
     } else if let Some(rest) = strip_cmd(line, "rxcnt") {
         print_rxcnt(rest);
     } else if let Some(rest) = strip_cmd(line, "ack-dest") {
@@ -228,22 +278,138 @@ fn dispatch_serial(line: &str) {
     }
 }
 
+#[allow(
+    clippy::large_stack_frames,
+    reason = "single long println! of many counter fields"
+)]
 fn print_counters() {
-    // Field order matches just_drop; XDP runtime error counters are always 0 here.
+    let t = xpost::ext::perf::counter();
+    // `drop=` is app-layer DROP (formal primary); EspRadioTrace fields follow just_drop.
     esp_println::println!(
-        "OK counters drop={} failed_tx={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} pool_drop_misalign={} map_lock={}",
+        "OK counters drop={} failed_tx={} tx_bad_buf={} tx_token={} tx_wifi={} tx_wifi_rc={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} pool_drop_misalign={} map_lock={} tx_enq={} tx_pend={} tx_inflight={} tx_drain_ok={} tx_nomem_wait={} tx_cap_wait={} tx_enq_claim={} tx_enq_ring={} tx_done={} tx_done_fail={} tx_grp_src={} tx_ns_ref={} tx_ns_free={} tx_no_retain={} tx_flush={} tx_last_rc={} rx_packets={} xdp_invocations={} xdp_pass={} xdp_drop={} xdp_tx={} xdp_aborted={} rx_delivered={} rx_queue_overflow={} runtime_errors={}",
         DROP.load(Ordering::Relaxed),
-        0usize,
+        t.failed_tx_count(),
+        t.failed_tx_bad_buf_count(),
+        t.failed_tx_token_count(),
+        t.failed_tx_wifi_count(),
+        t.failed_tx_wifi_last_rc(),
         NET_RX.load(Ordering::Relaxed),
-        0u32,
-        0u32,
-        0u32,
-        0u32,
-        0u32,
-        0u32,
-        0u32,
+        t.inactive_skip(),
+        t.reentry(),
+        t.stack_misalign(),
+        t.bad_md(),
+        t.helper_unresolved(),
+        t.helper_map(),
+        t.pool_drop_misalign(),
         "no-rt",
+        t.tx_enq(),
+        t.tx_pend(),
+        t.tx_inflight(),
+        t.tx_drain_ok(),
+        t.tx_nomem_wait(),
+        t.tx_cap_wait(),
+        t.tx_enq_claim(),
+        t.tx_enq_ring(),
+        t.tx_done(),
+        t.tx_done_fail(),
+        t.tx_grp_src(),
+        t.tx_ns_ref(),
+        t.tx_ns_free(),
+        t.tx_no_retain(),
+        t.tx_flush(),
+        t.tx_last_rc(),
+        t.rx_packets(),
+        t.xdp_invocations(),
+        t.xdp_pass(),
+        t.xdp_drop(),
+        t.xdp_tx(),
+        t.xdp_aborted(),
+        t.rx_delivered(),
+        t.rx_queue_overflow(),
+        t.runtime_errors(),
     );
+}
+
+fn print_agg() {
+    #[cfg(feature = "kind-a")]
+    {
+        // Single OK line so agent `request` captures every hist (first OK wins).
+        let a = xpost::ext::perf::aggregate();
+        esp_println::print!("OK agg");
+        for (name, snap) in [
+            ("rx_processing", a.rx_processing.snapshot()),
+            ("xdp_execution", a.xdp_execution.snapshot()),
+            ("xdp_dispatch", a.xdp_dispatch.snapshot()),
+            ("post_action", a.post_action.snapshot()),
+        ] {
+            esp_println::print!(
+                " | {name} count={} total={} min={} max={} lo={} width={} buckets=",
+                snap.count,
+                snap.total_ticks,
+                snap.min_ticks,
+                snap.max_ticks,
+                snap.lo,
+                snap.width
+            );
+            for (i, b) in snap.buckets.iter().enumerate() {
+                if i > 0 {
+                    esp_println::print!(",");
+                }
+                esp_println::print!("{b}");
+            }
+        }
+        esp_println::println!();
+    }
+    #[cfg(not(feature = "kind-a"))]
+    esp_println::println!("ERR agg feature=kind-a required");
+}
+
+fn print_gauge() {
+    #[cfg(feature = "kind-g")]
+    {
+        let g = xpost::ext::perf::gauge();
+        esp_println::println!(
+            "OK gauge rx_queue_depth={},{} tx_queue_depth={},{} tx_inflight={},{} trace_buffer_usage={},{}",
+            g.rx_queue_depth.current(),
+            g.rx_queue_depth.peak(),
+            g.tx_queue_depth.current(),
+            g.tx_queue_depth.peak(),
+            g.tx_inflight.current(),
+            g.tx_inflight.peak(),
+            g.trace_buffer_usage.current(),
+            g.trace_buffer_usage.peak(),
+        );
+    }
+    #[cfg(not(feature = "kind-g"))]
+    esp_println::println!("ERR gauge feature=kind-g required");
+}
+
+fn print_trace_summary() {
+    #[cfg(feature = "kind-t")]
+    {
+        let t = xpost::ext::perf::trace();
+        esp_println::println!(
+            "OK trace len={} dropped={} cap={}",
+            t.len(),
+            t.dropped(),
+            xpost::ext::perf::TRACE_CAP
+        );
+    }
+    #[cfg(not(feature = "kind-t"))]
+    esp_println::println!("ERR trace feature=kind-t required");
+}
+
+fn perf_clear() {
+    #[cfg(feature = "kind-c")]
+    xpost::ext::perf::counter().reset_all();
+    #[cfg(feature = "kind-a")]
+    xpost::ext::perf::aggregate().reset_all();
+    #[cfg(feature = "kind-g")]
+    xpost::ext::perf::gauge().reset_all();
+    #[cfg(feature = "kind-t")]
+    xpost::ext::perf::trace().clear();
+    DROP.store(0, Ordering::Relaxed);
+    NET_RX.store(0, Ordering::Relaxed);
 }
 
 fn print_rxcnt(rest: &str) {

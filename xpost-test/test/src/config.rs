@@ -167,6 +167,21 @@ pub struct BenchPpsConfig {
     pub sample_interval_ms: u64,
     #[serde(default = "default_pps_arms")]
     pub arms: Vec<String>,
+    /// just_drop only: `c` / `a` / `g` / `t`. just_tx ignores.
+    #[serde(default = "default_kinds_c")]
+    pub kinds: Vec<String>,
+    /// Fixed pps for Aggregate / Gauge (just_drop A/G).
+    #[serde(default)]
+    pub fixed_pps: Option<u64>,
+    /// Fixed pps for Trace (lower than `fixed_pps`).
+    #[serde(default)]
+    pub trace_pps: Option<u64>,
+    /// Rounds for A/G/T (Counter still uses `rounds`).
+    #[serde(default)]
+    pub instr_rounds: Option<usize>,
+    /// Window seconds for A/G/T.
+    #[serde(default)]
+    pub instr_window_secs: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -181,6 +196,9 @@ fn default_sample_ms() -> u64 {
 fn default_pps_arms() -> Vec<String> {
     vec!["hal".into(), "xdp".into()]
 }
+fn default_kinds_c() -> Vec<String> {
+    vec!["c".into()]
+}
 
 impl Default for BenchPpsConfig {
     fn default() -> Self {
@@ -190,6 +208,11 @@ impl Default for BenchPpsConfig {
             window_secs: None,
             sample_interval_ms: default_sample_ms(),
             arms: default_pps_arms(),
+            kinds: default_kinds_c(),
+            fixed_pps: None,
+            trace_pps: None,
+            instr_rounds: None,
+            instr_window_secs: None,
         }
     }
 }

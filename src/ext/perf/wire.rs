@@ -40,7 +40,7 @@ impl EspRadioTrace for XdpProg {
         #[cfg(feature = "perf-aggregate")]
         {
             let now = crate::ext::perf::aggregate::AggregateSet::now_ticks();
-            let t0 = self.aggregate.xdp_execution.start_ticks();
+            let _t0 = self.aggregate.xdp_execution.start_ticks();
             self.aggregate.xdp_execution.end(now);
             self.aggregate.post_action.begin(now);
             #[cfg(feature = "perf-trace")]

@@ -12,7 +12,7 @@
 
 | 名 | 做什么 | 写哪些表 |
 |----|--------|----------|
-| `just_drop` | **正式** HAL + XDP 满速 blast，周期读 `drop` | `just_drop_config` + `just_drop_data` |
+| `just_drop` | **正式** HAL + XDP：`kinds` 含 `c`（满速 drop 序列）与 `a`/`g`/`t`（固定 pps 多轮） | `just_drop_config`/`data`；`just_drop_run` + agg/gauge/trace_summary |
 | `just_tx` | **正式** HAL + XDP 扫速 / ~5% 工作点（网格 400…4000 pps，步长 400） | `just_tx_config` + `just_tx_data` |
 | `dev` | **调试** 仅 XDP：800/1600/2800/4000 × 1 × 8s；无 DB，看控制台 | — |
 
@@ -29,7 +29,8 @@ run = ["dev"]           # 日常改固件
 ## 其它文件
 
 - `default.toml`：`run`、postgres、agent、DUT、probe、profiles
-- `just_tx.toml` / `just_drop.toml`：正式实验旋钮（调试时不要改）
+- `just_drop.toml`：`arms` / `kinds`（`c|a|g|t`）/ `fixed_pps` / `trace_pps` / `instr_rounds` / `instr_window_secs`
+- `just_tx.toml`：正式实验旋钮（调试时不要改）
 
 ## 功能 suite（可选）
 
