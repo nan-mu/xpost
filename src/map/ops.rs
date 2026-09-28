@@ -31,13 +31,13 @@ pub enum MapOpError {
 }
 
 impl MapOpError {
-    /// Soft-fail on the helper path: bump [`crate::xdp::counter`] for bug-class errors.
+    /// Soft-fail on the helper path: bump [`crate::trace`] soft counters for bug-class errors.
     /// `NotFound` / `Exists` stay quiet (normal datapath misses).
     pub(crate) fn count_if_bug(self) {
         match self {
             Self::NotFound | Self::Exists => {}
             Self::Busy | Self::InvalidArg | Self::NoMem | Self::Unsupported => {
-                crate::xdp::counter::inc_helper_map();
+                crate::trace::inc_helper_map();
             }
         }
     }
@@ -97,7 +97,7 @@ pub(crate) fn helper_lookup(map: usize, key: usize) -> usize {
         return p;
     }
     let Some(id) = resolve_map_id(map) else {
-        crate::xdp::counter::inc_helper_unresolved();
+        crate::trace::inc_helper_unresolved();
         return 0;
     };
     let key = key as *const u8;

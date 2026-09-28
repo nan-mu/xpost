@@ -816,6 +816,7 @@ dependencies = [
  "num-traits",
  "portable-atomic",
  "portable_atomic_enum",
+ "xpost-trait",
  "xtensa-lx-rt",
 ]
 
@@ -2006,6 +2007,7 @@ dependencies = [
  "talc",
  "xpost-elf",
  "xpost-macros",
+ "xpost-trait",
 ]
 
 [[package]]
@@ -2024,6 +2026,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "xpost-trait"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.1.1",
 ]
 
 [[package]]

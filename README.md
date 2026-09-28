@@ -23,7 +23,7 @@ xpost/                          # this repo (publishable library at root)
 
 Firmware-first only: `XdpRt::init` scans Flash Compact ELF (XDP ELF), creates required maps; `lease` installs VMR aliases from image meta.
 
-Soft errors on the RX / helper path are exposed via `xpost::xdp::ERRORS` (atomics), not logs. Control-plane APIs return `Result`.
+Soft errors / driver Observe counters: enable `trace-counter` and read `xpost::XDP_PROG`. Wi-Fi+XDP: `esp-radio` feature + `xpost::esp_radio::new`. Helper timestamps: `trace-timestamp`. Control-plane APIs return `Result`.
 
 ## Commands
 

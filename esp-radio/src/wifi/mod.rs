@@ -48,18 +48,16 @@
 //!
 //! ## Native XDP (`xdp`)
 //!
-//! Optional native-XDP driver surface: call [`attach_prog`] **once**, **before**
-//! [`new`] / Wi-Fi start. With the feature enabled, STA/AP RX callbacks always
-//! call [`Prog::run`]. Actions: Pass (enqueue returned window), Drop (free +
-//! [`Prog::count_drop`]), and Tx (zero-copy same-iface handoff; failure frees +
-//! [`Prog::count_failed_tx_token`] / [`Prog::count_failed_tx_wifi`] / …).
+//! Optional native-XDP driver surface: pass [`XdpProg`] as the third argument of
+//! [`new`]. STA/AP RX callbacks call [`XdpProg::run`], then map [`XdpAction`] to
+//! Pass / Drop / same-iface Tx. Observation hooks are [`xdp::Observe`]
+//! (compiled in with feature `xdp-observe`).
 //!
-//! Default prog is [`NoopProg`] (always Pass) until attach. Attach is one-shot
-//! ([`embassy_sync::once_lock::OnceLock`]); a second call fails and keeps the
-//! first prog. There is no detach/reset.
+//! The prog slot is one-shot ([`embassy_sync::once_lock::OnceLock`]); first
+//! `new` wins.
 //!
 //! Recommended typecheck feature set for esp32c3:
-//! `esp32c3,wifi,unstable,xdp`.
+//! `esp32c3,wifi,unstable,xdp` (add `xdp-observe` when wiring hooks).
 
 use alloc::{borrow::ToOwned, collections::vec_deque::VecDeque, str, vec::Vec};
 use core::{
@@ -122,22 +120,20 @@ pub mod sta;
 pub mod xdp;
 
 #[cfg(feature = "xdp")]
-pub(crate) mod xdp_tx;
+#[cfg_attr(docsrs, doc(cfg(feature = "xdp")))]
+pub use xdp::{Action, NoopProg, Observe, XdpAction, XdpProg};
 
 #[cfg(feature = "xdp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "xdp")))]
-pub mod xdp_prof;
+pub use xdp::prof as xdp_prof;
 
 #[cfg(feature = "xdp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "xdp")))]
-pub use xdp::{Action, NoopProg, Prog, attach_prog};
-
-#[cfg(feature = "xdp")]
-#[cfg_attr(docsrs, doc(cfg(feature = "xdp")))]
-pub use xdp_tx::{
+pub use xdp::tx::{
     TX_KICK as XDP_TX_KICK, TxEvKind as XdpTxEvKind, TxLogEntry as XdpTxLogEntry,
     TxPoll as XdpTxPoll, TxStats as XdpTxStats, clear_stats as xdp_tx_clear_stats,
-    in_flight as xdp_tx_in_flight, pending_len as xdp_tx_pending, poll as xdp_tx_poll,
+    in_flight as xdp_tx_in_flight, last_drain_rc as xdp_tx_last_drain_rc,
+    pending_len as xdp_tx_pending, poll as xdp_tx_poll,
     set_inflight_cap as xdp_tx_set_inflight_cap, set_tsflow as xdp_tx_set_tsflow,
     snapshot_log as xdp_tx_log, stats as xdp_tx_stats,
 };
@@ -999,7 +995,7 @@ pub(crate) fn wifi_init(_wifi: crate::hal::peripherals::WIFI<'_>) -> Result<(), 
         ))?;
 
         #[cfg(feature = "xdp")]
-        esp_wifi_result!(xdp_tx::arm_zero_copy())?;
+        esp_wifi_result!(xdp::tx::arm_zero_copy())?;
 
         Ok(())
     }
@@ -1129,7 +1125,7 @@ unsafe extern "C" fn recv_cb_ap(
     }
 }
 
-/// Run the attached [`Prog`] and dispose of the frame (Pass / Drop / Tx).
+/// Run the attached [`XdpProg`] and dispose of the frame (Pass / Drop / Tx).
 ///
 /// Returns `Some(rc)` when the frame was fully handled (Drop/Tx, or Pass
 /// already enqueued). Returns `None` to fall through to the baseline enqueue
@@ -1144,15 +1140,22 @@ fn xdp_dispatch(
     queue: &NonReentrantMutex<VecDeque<PacketBuffer>>,
     wake: impl FnOnce(),
 ) -> Option<esp_err_t> {
-    let _span = xdp_prof::Span::enter(xdp_prof::Site::WifiRxDispatch);
+    let _span = xdp::prof::Span::enter(xdp::prof::Site::WifiRxDispatch);
     if buffer.is_null() || len == 0 {
         return None;
     }
     let frame = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), len as usize) };
     let prog = xdp::current();
+    xdp::observe::notify(|p| p.on_rx_enter());
     let (action, window) = {
-        let _run = xdp_prof::Span::enter(xdp_prof::Site::XdpRun);
-        prog.run(frame)
+        xdp::observe::notify(|p| p.on_xdp_enter());
+        let _run = xdp::prof::Span::enter(xdp::prof::Site::XdpRun);
+        let frame_ptr = frame.as_ptr();
+        let frame_len = frame.len();
+        let (xdp_act, win) = prog.run(frame);
+        xdp::observe::notify(|p| p.on_xdp_leave());
+        let action = xdp::map_xdp_action(xdp_act, frame_ptr, frame_len, win);
+        (action, win)
     };
     match action {
         Action::Pass => {
@@ -1174,6 +1177,7 @@ fn xdp_dispatch(
                     }
                 }) {
                     Ok(()) => {
+                        xdp::observe::notify(|p| p.on_pass_to_stack());
                         wake();
                         include::ESP_OK as esp_err_t
                     }
@@ -1186,15 +1190,17 @@ fn xdp_dispatch(
         }
         Action::Drop => {
             xdp::free_rx_buffer(eb);
-            prog.count_drop();
+            xdp::observe::notify(|p| p.on_drop());
             Some(include::ESP_OK as esp_err_t)
         }
         Action::Tx => {
-            match xdp_tx::transmit(ifx, window, eb) {
-                xdp_tx::TxOutcome::Ok => {}
-                xdp_tx::TxOutcome::FailBadBuf => prog.count_failed_tx_bad_buf(),
-                xdp_tx::TxOutcome::FailToken | xdp_tx::TxOutcome::FailRing => {
-                    prog.count_failed_tx_token()
+            match xdp::tx::transmit(ifx, window, eb) {
+                xdp::tx::TxOutcome::Ok => {}
+                xdp::tx::TxOutcome::FailBadBuf => {
+                    xdp::observe::notify(|p| p.on_tx_fail_bad_buf());
+                }
+                xdp::tx::TxOutcome::FailToken | xdp::tx::TxOutcome::FailRing => {
+                    xdp::observe::notify(|p| p.on_tx_fail_token());
                 }
             }
             Some(include::ESP_OK as esp_err_t)
@@ -1224,7 +1230,7 @@ unsafe extern "C" fn esp_wifi_tx_done_cb(
     decrement_inflight_counter();
 
     #[cfg(feature = "xdp")]
-    xdp_tx::on_tx_done(_tx_status);
+    xdp::tx::on_tx_done(_tx_status);
 
     embassy::TRANSMIT_WAKER.wake();
 }
@@ -2338,13 +2344,44 @@ impl ControllerConfig {
 /// currently in use.
 ///
 /// ## Example
+/// Create a Wi-Fi controller and interfaces.
 ///
 /// ```rust,no_run
 /// # {before_snippet}
 /// let (controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, Default::default())?;
 /// # {after_snippet}
 /// ```
+#[cfg(not(feature = "xdp"))]
 pub fn new<'d>(
+    device: crate::hal::peripherals::WIFI<'d>,
+    config: ControllerConfig,
+) -> Result<(WifiController<'d>, Interfaces<'d>), WifiError> {
+    new_inner(device, config)
+}
+
+/// Create a Wi-Fi controller and interfaces with a native-XDP program.
+///
+/// `prog` is installed once (first `new` wins). Pass [`NoopProg`] for always-Pass.
+///
+/// ```rust,no_run
+/// # {before_snippet}
+/// use esp_radio::wifi::NoopProg;
+/// static PROG: NoopProg = NoopProg;
+/// let (controller, interfaces) =
+///     esp_radio::wifi::new(peripherals.WIFI, Default::default(), &PROG)?;
+/// # {after_snippet}
+/// ```
+#[cfg(feature = "xdp")]
+pub fn new<'d>(
+    device: crate::hal::peripherals::WIFI<'d>,
+    config: ControllerConfig,
+    prog: &'static dyn XdpProg,
+) -> Result<(WifiController<'d>, Interfaces<'d>), WifiError> {
+    xdp::install_prog(prog);
+    new_inner(device, config)
+}
+
+fn new_inner<'d>(
     device: crate::hal::peripherals::WIFI<'d>,
     config: ControllerConfig,
 ) -> Result<(WifiController<'d>, Interfaces<'d>), WifiError> {

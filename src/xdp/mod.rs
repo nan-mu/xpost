@@ -1,7 +1,6 @@
 //! XDP execution runtime. Control-plane mutation is serialized by `XDP_RT`;
 //! RX sees only the atomically published entry in `state`.
 
-pub mod counter;
 pub(crate) mod image;
 pub(crate) mod ingress;
 pub(crate) mod map;
@@ -20,8 +19,8 @@ pub(crate) use image::XdpMeta;
 pub use image::{Complete, Incomplete, XdpBuilder, XdpLocation, XdpMaps};
 /// Locked [`XdpRt`].
 pub type XdpRtGuard<'a> = RtMutexGuard<'a, XdpRt>;
-pub use counter::{ERRORS, ErrorCounters, ErrorCountersSnapshot};
 pub use slot::{Slot, XdpSlot};
+pub use crate::XDP_PROG;
 pub use state::XDP_RT;
 pub use table::storage::ColdRegion;
 pub(crate) use table::storage::{DEFAULT_IMAGE_CAPACITY, EspFlashXdpTable, XdpTableStorage};

@@ -3,7 +3,7 @@ resolver = "2"
 # MCU packages only under the default RV32 target. Host tools live under
 # `exclude` so they are not typechecked as riscv32 (thousands of false RA
 # errors from std crates). Invoke via `--manifest-path` / the `xtask` alias.
-members = [".", "esp-radio", "xpost-macros", "xpost-elf"]
+members = [".", "esp-radio", "xpost-macros", "xpost-elf", "xpost-trait"]
 default-members = ["."]
 exclude = ["xpost-build", "xtask", "xpost-agent", "xpost-serial", "xpost-test", "examples"]
 
@@ -27,6 +27,12 @@ default = []
 # Incomplete — do not enable (compile_error!).
 # Pulls optional ringbuf / async-ringbuf crates; source kept for later work.
 ringbuf = ["dep:ringbuf", "dep:async-ringbuf"]
+# `xpost::esp_radio::new` — injects [`XDP_PROG`] into `esp_radio::wifi::new`.
+esp-radio = []
+# Driver Observe + soft-fail counters → `xpost::XDP_PROG`.
+trace-counter = ["esp-radio/xdp-observe"]
+# Helper enter/leave timestamps → `xpost::XDP_PROG` (no esp-radio Observe yet).
+trace-timestamp = []
 
 # Path A defaults for `xpost-build::firmware_codegen` when the firmware crate
 # omits `[package.metadata.xpost]`. Firmware may override map/slots/target;
@@ -64,6 +70,7 @@ helper_length = 0x200
 [dependencies]
 xpost-macros     = { path = "xpost-macros" }
 xpost-elf        = { path = "xpost-elf" }
+xpost-trait      = { path = "xpost-trait" }
 log              = "0.4.27"
 critical-section = "1.2.0"
 heapless         = "0.9.3"

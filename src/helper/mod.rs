@@ -52,7 +52,9 @@ pub extern "C" fn helper_dispatcher(
 // IRAM: runs inside the XDP flight (IRQs off); flash cache misses here stall Wi-Fi.
 #[esp_hal::ram]
 fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> usize {
-    match idx {
+    #[cfg(feature = "trace-timestamp")]
+    crate::XDP_PROG.helper_enter(idx);
+    let ret = match idx {
         HelperIdx::BPF_FUNC_MAP_LOOKUP_ELEM => inner::map_lookup_elem::inner(a1, a2),
         HelperIdx::BPF_FUNC_MAP_UPDATE_ELEM => inner::map_update_elem::inner(a1, a2, a3, a4),
         HelperIdx::BPF_FUNC_MAP_DELETE_ELEM => inner::map_delete_elem::inner(a1, a2),
@@ -62,5 +64,8 @@ fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
         HelperIdx::BPF_FUNC_XDP_ADJUST_TAIL => inner::xdp_adjust_tail::inner(a1, a2),
         // Deleted / deferred / unsupported helpers: fail closed.
         _ => usize::MAX,
-    }
+    };
+    #[cfg(feature = "trace-timestamp")]
+    crate::XDP_PROG.helper_leave(idx);
+    ret
 }

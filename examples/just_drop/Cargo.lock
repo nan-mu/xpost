@@ -922,6 +922,7 @@ dependencies = [
  "num-traits",
  "portable-atomic",
  "portable_atomic_enum",
+ "xpost-trait",
 ]
 
 [[package]]
@@ -2208,6 +2209,7 @@ dependencies = [
  "talc",
  "xpost-elf",
  "xpost-macros",
+ "xpost-trait",
 ]
 
 [[package]]
@@ -2239,6 +2241,10 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "xpost-trait"
+version = "0.1.0"
 
 [[package]]
 name = "xtensa-lx"

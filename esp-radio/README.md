@@ -18,10 +18,10 @@ Optional feature (this tree only):
 
 | Feature | Role |
 | --- | --- |
-| `xdp` | [`wifi::Prog`] attach; Pass / Drop / same-iface zero-copy Tx + counters |
+| `xdp` | [`wifi::XdpProg`] via `wifi::new(..., prog)`; Pass / Drop / same-iface Tx |
 
-Call `wifi::attach_prog` **once**, **before** `wifi::new` / Wi-Fi start (one-shot;
-second attach fails). See `wifi` / `xdp` module docs.
+Pass `prog: &'static dyn XdpProg` as the third argument of `wifi::new` (one-shot;
+first wins). See `wifi` / `xdp` module docs.
 
 Recommended typecheck (esp32c3):
 
