@@ -761,7 +761,7 @@ async fn ingest_agg(client: &mut Client, run_id: i64, line: &str) -> Result<()> 
         .strip_prefix("OK agg")
         .context("expected OK agg")?;
     for seg in body.split('|').map(str::trim).filter(|s| !s.is_empty()) {
-        let mut name = None;
+        let mut name: Option<String> = None;
         let mut count = 0i64;
         let mut total = 0i64;
         let mut min = 0i64;
@@ -770,7 +770,9 @@ async fn ingest_agg(client: &mut Client, run_id: i64, line: &str) -> Result<()> 
         let mut width = 0i64;
         let mut buckets: Vec<i64> = Vec::new();
         let mut parts = seg.split_whitespace();
-        name = parts.next().map(|s| s.to_string());
+        if let Some(n) = parts.next() {
+            name = Some(n.to_string());
+        }
         for part in parts {
             let Some((k, v)) = part.split_once('=') else {
                 continue;

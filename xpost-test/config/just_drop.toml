@@ -9,7 +9,9 @@ formal = true
 rounds = 3
 sample_interval_ms = 1000
 arms = ["hal", "xdp"]
-kinds = ["c", "a", "g", "t"]
+# First formal: Counter only. Uncomment full matrix after C looks good.
+kinds = ["c"]
+# kinds = ["c", "a", "g", "t"]
 # A/G working point (pps); T uses trace_pps (lower to avoid filling the ring).
 fixed_pps = 800
 trace_pps = 200
