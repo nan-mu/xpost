@@ -1,4 +1,4 @@
-//! RX ingress: build `xdp_md`, run leased XDP under a critical section, return action/window.
+//! RX ingress: build `xdp_md`, run leased XDP as the single `IN_FLIGHT` owner, return action/window.
 //!
 //! Action mapping and Wi-Fi attach live in [`esp_radio`]; zero-copy Tx ownership
 //! is handled by esp-radio's `xdp` feature.
@@ -22,13 +22,13 @@ pub(crate) mod esp_radio;
 use core::sync::atomic::Ordering;
 
 use crate::xdp::{
+    counter::{inc_inactive_skip, inc_reentry, inc_stack_misalign},
     ingress::ctx::XdpMd,
     state::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY},
-    stats::{inc_inactive_skip, inc_reentry, inc_stack_misalign},
 };
 
 /// Invoke scratch in `.bss`: `[sp, ra, s0..s11]` (14 × `usize`), byte offsets 0..52.
-/// Written/read only from RV32 asm in [`invoke_aot`]; CS covers the flight.
+/// Written/read only from RV32 asm in [`invoke_aot`]; the `IN_FLIGHT` owner has it.
 #[unsafe(link_section = ".bss")]
 static mut XDP_FRAME: [usize; 14] = [0; 14];
 
@@ -49,38 +49,45 @@ pub(crate) struct RunResult {
 
 /// Run the leased program on `data`.
 ///
-/// - **Pre (Out of CS):** build `xdp_md`
-/// - **In CS:** validate lease/entry, `jalr` on the shared caller stack, restore
-///   callee-saved regs
-/// - **Post (Out of CS):** return the final md window with the action
+/// - Build `xdp_md`
+/// - Claim `IN_FLIGHT` (0 → 1), validate lease/entry, `jalr` on the shared
+///   caller stack, restore callee-saved regs, drop `IN_FLIGHT`
+/// - Return the final md window with the action
+///
+/// Interrupts stay enabled. `XdpRt::release` spins on `IN_FLIGHT`, so it must
+/// not run at a higher priority than the RX context that runs flights.
 ///
 /// Returns `None` when not leased, raced with release, or reentrancy is
 /// detected (`IN_FLIGHT != 0` at entry). Caller treats as PASS.
+#[esp_hal::ram]
 pub(crate) fn run(data: &mut [u8]) -> Option<RunResult> {
     let mut ctx_md = XdpMd::from_buf(data);
     let ctx_ptr = &mut ctx_md as *mut XdpMd;
 
-    let action = critical_section::with(|_cs| {
-        if !ACTIVE.load(Ordering::Relaxed) {
-            inc_inactive_skip();
-            return None;
-        }
-        let entry = PRIMARY_ENTRY.load(Ordering::Relaxed);
-        if entry == 0 {
-            inc_inactive_skip();
-            return None;
-        }
-        // Fail closed on reentrancy: at most one XDP flight (E4).
-        if IN_FLIGHT.load(Ordering::Relaxed) != 0 {
-            inc_reentry();
-            return None;
-        }
-
-        IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
-        let result = unsafe { invoke_aot(entry, ctx_ptr) };
-        IN_FLIGHT.fetch_sub(1, Ordering::Release);
-        Some(result)
-    })?;
+    // Fail closed on reentrancy: at most one XDP flight (E4); owning IN_FLIGHT
+    // also guards `XDP_FRAME`. IRQs stay enabled: tens of µs with interrupts off
+    // per packet makes the Wi-Fi MAC miss TX deadlines (retries → ~100 ms stalls).
+    if IN_FLIGHT
+        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::Relaxed)
+        .is_err()
+    {
+        inc_reentry();
+        return None;
+    }
+    // Dekker pair with `XdpRt::release` (ACTIVE=false → wait IN_FLIGHT==0):
+    // either we see ACTIVE=false here, or release waits for this flight.
+    let entry = if ACTIVE.load(Ordering::SeqCst) {
+        PRIMARY_ENTRY.load(Ordering::SeqCst)
+    } else {
+        0
+    };
+    if entry == 0 {
+        IN_FLIGHT.store(0, Ordering::Release);
+        inc_inactive_skip();
+        return None;
+    }
+    let action = unsafe { invoke_aot(entry, ctx_ptr) };
+    IN_FLIGHT.store(0, Ordering::Release);
 
     let data = ctx_md.data;
     let len = (ctx_md.data_end as usize).checked_sub(data as usize)?;
@@ -102,7 +109,7 @@ pub(crate) fn run(data: &mut [u8]) -> Option<RunResult> {
 ///
 /// # Safety
 /// `entry` must be a live IRAM XDP entry; `ctx` must remain valid for the call.
-/// Caller must hold a critical section for the whole call (protects `XDP_FRAME`).
+/// Caller must own `IN_FLIGHT` for the whole call (protects `XDP_FRAME`).
 #[inline(always)]
 unsafe fn invoke_aot(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
     // Soft canary: paint words just below current sp before jalr.

@@ -1,13 +1,16 @@
-# rust-analyzer for the xpost MCU lib.
+# rust-analyzer for the xpost MCU lib + linked firmware examples.
 #
-# Root `.cargo/config.toml` defaults to RV32. Host packages (agent/xtask/
-# xpost-build/examples) are workspace.exclude — do not set `files.exclude`
+# Root `.cargo/config.toml` defaults to RV32. Host packages (xtask/
+# xpost-build) stay workspace.exclude — do not set `files.exclude`
 # here (server rejects it).
+#
+# Firmware examples are separate Cargo workspaces (own `[workspace]`).
+# Discover them via `.vscode/settings.json` → `rust-analyzer.linkedProjects`
+# plus `scripts/ra-check.sh` as check/buildScripts override (cwd-aware so
+# `-p xpost` at root still applies, while examples typecheck themselves).
 #
 # Do not put `[procMacro]` here — rust-analyzer.toml rejects it
 # (`procMacro/enable: unexpected field`) and the proc-macro server then exits 101.
-# Proc-macro is on by default; `.vscode/settings.json` can still set cargo/check
-# overrideCommand so RA loads the host `xpost-macros` dylib.
 
 [cargo]
 target = "riscv32imc-unknown-none-elf"
@@ -17,12 +20,3 @@ allTargets = false
 [check]
 allTargets = false
 workspace = false
-overrideCommand = [
-    "cargo",
-    "check",
-    "-p",
-    "xpost",
-    "--target",
-    "riscv32imc-unknown-none-elf",
-    "--message-format=json",
-]

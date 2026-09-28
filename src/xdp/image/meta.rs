@@ -6,7 +6,7 @@ use crate::{
     map::MapMeta,
     xdp::{
         SlotId, XdpId,
-        error::XdpError,
+        ready::ReadyError,
         slot::XdpSlot,
         state::{MAX_IMAGES, MAX_REQUIRED_MAPS},
     },
@@ -23,8 +23,8 @@ pub enum XdpLocation {
 
 /// Runtime image record — only what lease/move/bind need after load validation.
 ///
-/// Wire-only fields (ELF header constants, xpost_version, machine, shoff, …) are
-/// checked during Compact ELF scan and **not** retained here.
+/// Wire-only fields (ELF header constants, xpost_version, machine, shoff, digest, …)
+/// are checked during Compact ELF scan and **not** retained here.
 #[derive(Clone)]
 pub(crate) struct XdpMeta {
     pub(crate) name: String,
@@ -35,13 +35,10 @@ pub(crate) struct XdpMeta {
     /// Map name → linked `.maps` symbol VMA (`map_vma` from Compact ELF).
     /// AOT code loads maps by this absolute address; lease installs VMR→RMA aliases.
     pub(crate) aot_binds: heapless::Vec<(String, usize), MAX_REQUIRED_MAPS>,
-    /// SHA-256 of the raw IMAGE bytes (optional integrity token).
-    pub(crate) image_digest: [u8; 32],
     /// Absolute cold-region offset of the IMAGE payload.
     pub(crate) image_abs: usize,
     pub(crate) image_len: usize,
-    /// Absolute cold-region offset of the Compact ELF container (for erase/scan).
-    pub(crate) container_abs: usize,
+    /// Compact ELF container length (for cold-region scan cursor).
     pub(crate) container_len: usize,
     pub(crate) location: XdpLocation,
 }
@@ -63,45 +60,31 @@ impl XdpMeta {
         self.image_abs
     }
 
-    pub(crate) fn check_arch(&self) -> Result<(), XdpError> {
+    pub(crate) fn check_arch(&self) -> Result<(), ReadyError> {
         if cfg!(target_feature = "c") {
             Ok(())
         } else {
-            Err(XdpError::Arch)
+            Err(ReadyError::Arch)
         }
     }
 
-    pub(crate) fn check_helper_address(&self) -> Result<(), XdpError> {
+    pub(crate) fn check_helper_address(&self) -> Result<(), ReadyError> {
         if self.helper_address == 0 {
-            return Err(XdpError::HelperAddress);
+            return Err(ReadyError::HelperAddress);
         }
         let expected = crate::helper::helper_dispatcher as *const () as usize;
         if expected != 0 && self.helper_address != expected {
-            return Err(XdpError::HelperAddressMismatch);
+            return Err(ReadyError::HelperAddressMismatch);
         }
         Ok(())
     }
 
-    pub(crate) fn check_slot_address(&self, slot: &XdpSlot) -> Result<(), XdpError> {
+    pub(crate) fn check_slot_address(&self, slot: &XdpSlot) -> Result<(), ReadyError> {
         if self.link_addr != 0 && slot.base() != self.link_addr {
-            return Err(XdpError::SlotAddress);
+            return Err(ReadyError::SlotAddress);
         }
         if self.link_addr != 0 && (self.link_addr & 3) != 0 {
-            return Err(XdpError::SlotAddressAlign);
-        }
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn check_digest(&self, expected: Option<&[u8; 32]>) -> Result<(), XdpError> {
-        let Some(exp) = expected else {
-            return Ok(());
-        };
-        if self.image_digest == [0; 32] {
-            return Ok(());
-        }
-        if &self.image_digest != exp {
-            return Err(XdpError::ImageDigest);
+            return Err(ReadyError::SlotAddressAlign);
         }
         Ok(())
     }

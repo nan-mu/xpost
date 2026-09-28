@@ -1,4 +1,7 @@
-//! RINGBUF extension (`feature = "ringbuf"`). Incomplete — kinds gate with `compile_error!`.
+//! RINGBUF extension (`feature = "ringbuf"`).
+//!
+//! Incomplete — enabling the Cargo feature fails with `compile_error!` until
+//! the design behind this module is finished. Kept out of [`crate::map`] so the
+//! primary map/XDP path stays lean.
 
-#[allow(unused_imports)]
-use crate::map::kinds::ringbuf as _;
+compile_error!("feature `ringbuf` is not implemented yet; do not enable it");

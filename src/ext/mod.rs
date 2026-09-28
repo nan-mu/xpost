@@ -5,10 +5,9 @@
 //!
 //! | Module | Feature | Notes |
 //! |--------|---------|-------|
-//! | [`ringbuf`] | `ringbuf` | incomplete → `compile_error!` in kinds |
+//! | [`ringbuf`] | `ringbuf` | incomplete → `compile_error!` |
 //!
-//! Boot: firmware-first is the default; enable `from-bpf-toml` for bpf.toml codegen.
-//! Use [`crate::map::MapBuilder`] / [`crate::xdp::XdpBuilder`] directly.
+//! Boot is firmware-first. Use [`crate::map::MapBuilder`] / [`crate::xdp::XdpBuilder`] directly.
 
 #[cfg(feature = "ringbuf")]
 pub mod ringbuf;

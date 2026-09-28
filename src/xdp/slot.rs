@@ -1,6 +1,6 @@
 //! Immutable executable-slot registration.
 
-use crate::xdp::error::XdpError;
+use crate::error::XdpInitError;
 
 #[derive(Clone, Copy)]
 pub struct XdpSlot {
@@ -10,6 +10,8 @@ pub struct XdpSlot {
 }
 
 impl XdpSlot {
+    /// # Safety
+    ///
     /// `base..base + len` must name a writable, executable, four-byte-aligned
     /// static region for the firmware's entire lifetime.
     pub const unsafe fn from_raw_parts(base: usize, len: usize, primary: bool) -> Self {
@@ -37,15 +39,15 @@ impl XdpSlot {
         self.primary
     }
 
-    pub(crate) fn validate(self) -> Result<(), XdpError> {
+    pub(crate) fn validate(self) -> Result<(), XdpInitError> {
         if self.base == 0 || self.len == 0 {
-            return Err(XdpError::EmptySlot);
+            return Err(XdpInitError::EmptySlot);
         }
         if self.base & 3 != 0 || self.len & 3 != 0 {
-            return Err(XdpError::SlotAlignment);
+            return Err(XdpInitError::SlotAlignment);
         }
         if self.base.checked_add(self.len).is_none() {
-            return Err(XdpError::SlotOverflow);
+            return Err(XdpInitError::SlotOverflow);
         }
         Ok(())
     }
@@ -68,13 +70,5 @@ impl<const N: usize> Slot<N> {
     /// `self` must remain at a fixed IRAM address for the firmware lifetime.
     pub unsafe fn as_xdp_slot(&'static self, primary: bool) -> XdpSlot {
         unsafe { XdpSlot::from_raw_parts(self.bytes.as_ptr() as usize, N, primary) }
-    }
-
-    pub(crate) fn as_ptr(&self) -> *const u8 {
-        self.bytes.as_ptr()
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        N
     }
 }

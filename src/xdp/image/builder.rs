@@ -3,8 +3,9 @@
 use alloc::{format, string::String};
 
 use crate::{
-    map::{MapBuilder, MapId, MapMeta, MapRt, MapType},
-    xdp::{SlotId, XdpId, XdpRt, error::XdpError, state::MAX_REQUIRED_MAPS},
+    error::XdpInitError,
+    map::{MapBuilder, MapIdx, MapMeta, MapRt},
+    xdp::{XdpId, XdpRt, state::MAX_REQUIRED_MAPS},
 };
 
 use super::meta::{XdpLocation, XdpMeta};
@@ -17,12 +18,12 @@ pub struct Incomplete;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Complete;
 
-/// Map dependency for [`XdpBuilder::with_maps`]: spec or live `(MapId, MapRt)`.
+/// Map dependency for [`XdpBuilder::with_maps`]: spec or live `(MapIdx, MapRt)`.
 pub enum XdpMaps<'a> {
     /// Left: declare from a [`MapBuilder`] spec (not yet necessarily created).
     Builder(MapBuilder),
     /// Right: bind an existing map in [`MapRt`].
-    Registered(MapId, &'a MapRt),
+    Registered(MapIdx, &'a MapRt),
 }
 
 /// Registers metadata for an XDP image **already** present in the cold Flash region
@@ -88,13 +89,14 @@ impl XdpBuilder<Incomplete> {
         }
     }
 
-    /// Record the intended hot-slot link address (`HOT_SLOT_BASES[slot]`).
-    pub fn with_slot(mut self, slot: SlotId) -> Result<Self, XdpError> {
-        let base = crate::xdp::mem_map::HOT_SLOT_BASES
-            .get(slot)
-            .copied()
-            .ok_or(XdpError::UnknownSlot)?;
-        self.link_addr = base;
+    /// Record a planned slot link address (firmware-owned IRAM base).
+    ///
+    /// Returns [`XdpInitError::SlotAddress`] when `link_addr` is 0 or misaligned.
+    pub fn with_slot(mut self, link_addr: usize) -> Result<Self, XdpInitError> {
+        if link_addr == 0 || (link_addr & 3) != 0 {
+            return Err(XdpInitError::SlotAddress);
+        }
+        self.link_addr = link_addr;
         Ok(self)
     }
 
@@ -103,17 +105,14 @@ impl XdpBuilder<Incomplete> {
         self
     }
 
-    /// Set helper address from layout codegen (`HELPER_DISPATCHER_BASE`) when non-zero.
+    /// Set helper address from the live [`crate::helper::helper_dispatcher`] symbol.
     pub fn with_helper_address(mut self) -> Self {
-        let base = crate::xdp::mem_map::HELPER_DISPATCHER_BASE;
-        if base != 0 {
-            self.helper_address = base;
-        }
+        self.helper_address = crate::helper::helper_dispatcher as *const () as usize;
         self
     }
 
     /// Attach map dependencies: [`XdpMaps::Builder`] or [`XdpMaps::Registered`].
-    pub fn with_maps<'a, I>(mut self, deps: I) -> Result<Self, XdpError>
+    pub fn with_maps<'a, I>(mut self, deps: I) -> Result<Self, XdpInitError>
     where
         I: IntoIterator<Item = XdpMaps<'a>>,
     {
@@ -121,16 +120,16 @@ impl XdpBuilder<Incomplete> {
             match dep {
                 XdpMaps::Builder(builder) => {
                     let meta =
-                        MapMeta::from_builder(builder).map_err(|_| XdpError::TypeMismatch)?;
+                        MapMeta::from_builder(builder).map_err(|_| XdpInitError::TypeMismatch)?;
                     self.required_maps
                         .push(meta)
-                        .map_err(|_| XdpError::TooManyImages)?;
+                        .map_err(|_| XdpInitError::TooManyImages)?;
                 }
                 XdpMaps::Registered(id, maps) => {
-                    let meta = maps.meta.get(id).ok_or(XdpError::RequiredMapAbsent)?;
+                    let meta = maps.meta.get(id).ok_or(XdpInitError::RequiredMapAbsent)?;
                     self.required_maps
                         .push(meta.spec_clone())
-                        .map_err(|_| XdpError::TooManyImages)?;
+                        .map_err(|_| XdpInitError::TooManyImages)?;
                 }
             }
         }
@@ -150,7 +149,7 @@ impl XdpBuilder<Incomplete> {
         if self.helper_address == 0 || (self.helper_address & 3) != 0 {
             return None;
         }
-        let expected = crate::xdp::mem_map::HELPER_DISPATCHER_BASE;
+        let expected = crate::helper::helper_dispatcher as *const () as usize;
         if expected != 0 && self.helper_address != expected {
             return None;
         }
@@ -167,10 +166,8 @@ impl XdpBuilder<Incomplete> {
             helper_address: self.helper_address,
             required_maps: self.required_maps,
             aot_binds: self.aot_binds,
-            image_digest: self.image_digest,
             image_abs: self.image_abs,
             image_len: self.image_len,
-            container_abs: self.container_abs,
             container_len: self.container_len,
             location: XdpLocation::Table {
                 index: self.table_index,
@@ -178,20 +175,20 @@ impl XdpBuilder<Incomplete> {
         })
     }
 
-    pub fn complete(self) -> Result<XdpBuilder<Complete>, XdpError> {
+    pub fn complete(self) -> Result<XdpBuilder<Complete>, XdpInitError> {
         if self.image_len == 0 {
-            return Err(XdpError::ImageEmpty);
+            return Err(XdpInitError::ImageEmpty);
         }
         if self.helper_address == 0 {
-            return Err(XdpError::HelperAddress);
+            return Err(XdpInitError::HelperAddress);
         }
-        let expected = crate::xdp::mem_map::HELPER_DISPATCHER_BASE;
+        let expected = crate::helper::helper_dispatcher as *const () as usize;
         if expected != 0 && self.helper_address != expected {
-            return Err(XdpError::HelperAddressMismatch);
+            return Err(XdpInitError::HelperAddressMismatch);
         }
         let name = match self.name {
             Some(n) if !n.is_empty() => n,
-            Some(_) => return Err(XdpError::InvalidName),
+            Some(_) => return Err(XdpInitError::InvalidName),
             None => format!("xdp_{}", self.table_index),
         };
         Ok(XdpBuilder {
@@ -213,28 +210,30 @@ impl XdpBuilder<Incomplete> {
 
 impl XdpBuilder<Complete> {
     /// Register metadata for an image already present in the cold table.
-    pub fn build(self, rt: &mut XdpRt) -> Result<XdpId, XdpError> {
+    pub fn build(self, rt: &mut XdpRt) -> Result<XdpId, XdpInitError> {
         let table_id = self.table_index;
-        let name = self.name.ok_or(XdpError::InvalidName)?;
-        if rt.find_name(&name).is_some() {
-            return Err(XdpError::DuplicateName);
+        let name = self.name.ok_or(XdpInitError::InvalidName)?;
+        if rt.find(&name).is_some() {
+            return Err(XdpInitError::DuplicateName);
         }
         let cap = rt.table.image_capacity();
         if self.image_len == 0 || self.image_len > cap {
-            return Err(XdpError::ImageTooLarge);
+            return Err(XdpInitError::ImageTooLarge);
         }
-        let (container_abs, container_len, image_abs) = if self.container_len != 0 {
+        let (_container_abs, container_len, image_abs) = if self.container_len != 0 {
             if self.container_len > cap {
-                return Err(XdpError::ImageTooLarge);
+                return Err(XdpInitError::ImageTooLarge);
             }
             if self.container_abs.saturating_add(self.container_len) > rt.table.capacity() {
-                return Err(XdpError::TableFull);
+                return Err(XdpInitError::TableFull);
             }
             (self.container_abs, self.container_len, self.image_abs)
         } else {
-            let offset = table_id.checked_mul(cap).ok_or(XdpError::TableIdOverflow)?;
+            let offset = table_id
+                .checked_mul(cap)
+                .ok_or(XdpInitError::TableIdOverflow)?;
             if offset.saturating_add(cap) > rt.table.capacity() {
-                return Err(XdpError::TableFull);
+                return Err(XdpInitError::TableFull);
             }
             (offset, self.image_len, offset)
         };
@@ -244,10 +243,8 @@ impl XdpBuilder<Complete> {
             helper_address: self.helper_address,
             required_maps: self.required_maps,
             aot_binds: self.aot_binds,
-            image_digest: self.image_digest,
             image_abs,
             image_len: self.image_len,
-            container_abs,
             container_len,
             location: XdpLocation::Table { index: table_id },
         };
@@ -262,21 +259,24 @@ pub(crate) const BPF_MAP_TYPE_ARRAY: u8 = 2;
 const MAX_LAYOUT_DESCS: usize = 32;
 const MAX_KEY_BYTES: usize = 64;
 const MAX_VALUE_BYTES: usize = 256;
-const MAX_ENTRIES: u32 = 64;
+/// Keep in lockstep with [`xpost_elf::MAX_ENTRIES`] (XDP ELF V0 profile).
+const MAX_ENTRIES: u32 = xpost_elf::MAX_ENTRIES;
 
-fn validate_layout(layout: &[u8], max_bytes: usize) -> Result<(), XdpError> {
+fn validate_layout(layout: &[u8], max_bytes: usize) -> Result<(), XdpInitError> {
     if layout.is_empty() || layout.len() > MAX_LAYOUT_DESCS {
-        return Err(XdpError::TypeMismatch);
+        return Err(XdpInitError::TypeMismatch);
     }
     let mut bits: usize = 0;
     for &b in layout {
         if b == 0 {
-            return Err(XdpError::TypeMismatch);
+            return Err(XdpInitError::TypeMismatch);
         }
-        bits = bits.checked_add(b as usize).ok_or(XdpError::TypeMismatch)?;
+        bits = bits
+            .checked_add(b as usize)
+            .ok_or(XdpInitError::TypeMismatch)?;
     }
-    if bits % 8 != 0 || bits / 8 > max_bytes {
-        return Err(XdpError::TypeMismatch);
+    if !bits.is_multiple_of(8) || bits / 8 > max_bytes {
+        return Err(XdpInitError::TypeMismatch);
     }
     Ok(())
 }
@@ -288,17 +288,17 @@ pub(crate) fn map_builder_from_descriptor(
     len: u32,
     key_layout: Option<&[u8]>,
     value_layout: Option<&[u8]>,
-) -> Result<MapBuilder, XdpError> {
+) -> Result<MapBuilder, XdpInitError> {
     if name.is_empty() || name.len() > 31 || !name.is_ascii() {
-        return Err(XdpError::InvalidName);
+        return Err(XdpInitError::InvalidName);
     }
     if !(1..=MAX_ENTRIES).contains(&len) {
-        return Err(XdpError::TypeMismatch);
+        return Err(XdpInitError::TypeMismatch);
     }
     match map_type {
         BPF_MAP_TYPE_HASH => {
-            let key = key_layout.ok_or(XdpError::TypeMismatch)?;
-            let value = value_layout.ok_or(XdpError::TypeMismatch)?;
+            let key = key_layout.ok_or(XdpInitError::TypeMismatch)?;
+            let value = value_layout.ok_or(XdpInitError::TypeMismatch)?;
             validate_layout(key, MAX_KEY_BYTES)?;
             validate_layout(value, MAX_VALUE_BYTES)?;
             Ok(MapBuilder::hash()
@@ -309,25 +309,15 @@ pub(crate) fn map_builder_from_descriptor(
         }
         BPF_MAP_TYPE_ARRAY => {
             if key_layout.is_some() {
-                return Err(XdpError::TypeMismatch);
+                return Err(XdpInitError::TypeMismatch);
             }
-            let value = value_layout.ok_or(XdpError::TypeMismatch)?;
+            let value = value_layout.ok_or(XdpInitError::TypeMismatch)?;
             validate_layout(value, MAX_VALUE_BYTES)?;
             Ok(MapBuilder::array()
                 .with_name(name)
                 .with_value_layout(value)
                 .with_capacity(len as usize))
         }
-        _ => Err(XdpError::TypeMismatch),
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn map_type_wire(t: MapType) -> Option<u8> {
-    match t {
-        MapType::Hash => Some(BPF_MAP_TYPE_HASH),
-        MapType::Array => Some(BPF_MAP_TYPE_ARRAY),
-        #[cfg(feature = "ringbuf")]
-        MapType::Ringbuf => None,
+        _ => Err(XdpInitError::TypeMismatch),
     }
 }

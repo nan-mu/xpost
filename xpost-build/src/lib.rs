@@ -1,17 +1,19 @@
-//! Board codegen library — layout/metadata/bpf.toml → Rust + IRAM linker script.
+//! Board codegen library — metadata / partitions.csv → Rust + helper IRAM linker script.
 //!
-//! Prefer [`sync`] as the unified entry (`validate` / `codegen` / `export` /
-//! `patch_elf` / `write_bin`). Board directory may still supply intent
-//! `layout.toml` and optional `bpf.toml`. Crate sizes come from
-//! `[package.metadata.xpost]`.
+//! Firmware `build.rs` calls [`firmware_codegen`]: emits linker scripts +
+//! embed meta, and ensures the host [`link_wrap`] binary exists. Boards set
+//! `[target.*.linker] = "…/xpost-build/xpost-link"` so plain `cargo build` runs
+//! `rust-lld` then embeds `.xpost.mem` (XPM1). Cold flash from `partitions.csv`.
 //!
 //! `mem.toml` is obsolete; codegen consumes in-memory [`Layout`].
+//! Host tool [`metadata_from_bpf_toml`] builds Compact ELF meta from libbpf-mcu
+//! `bpf.toml` (encode path only — not an on-device boot path).
 
-mod aot_bind;
-mod bpf_maps;
-mod bpf_xdp;
+mod bpf_toml_meta;
 mod config;
+pub mod embed;
 mod layout;
+pub mod link_wrap;
 mod map_view;
 mod mem_map;
 pub mod metadata;
@@ -19,10 +21,14 @@ pub mod partitions;
 pub mod sync;
 mod util;
 
+pub use bpf_toml_meta::metadata_from_bpf_toml;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+pub use embed::{HELPER_SYMBOL, SLOT_SYMBOL, embed_layout, read_mem_section};
+pub use link_wrap::try_run as try_link_wrap;
 pub use layout::{
     CONTRACT_ABI, CONTRACT_ARCH, ColdTable, Layout, LayoutReport, MAX_SLOT_COUNT, MIN_SLOT_COUNT,
     MountKind, elf_symbol_addr, export_contract, map_names_from_bpf_toml, patch_contract_from_elf,
@@ -34,10 +40,12 @@ pub use metadata::{
     METADATA_SCHEMA_VERSION, SlotEntry, TargetMeta, XdpTableMeta, XpostMetadata,
     load_from_cargo_toml, resolve_layout,
 };
-pub use partitions::{PartitionRow, parse_partitions_csv, validate_xdp_table_against_partitions};
+pub use partitions::{
+    PartitionRow, fill_xdp_table_from_csv, parse_partitions_csv, validate_xdp_table_against_partitions,
+};
 pub use sync::{
-    SyncMode, SyncReport, SyncRequest, codegen, doctor_with_metadata, export, patch_elf,
-    sync_default, sync_from_bpf_toml, validate, write_bin,
+    SyncReport, SyncRequest, codegen, doctor_with_metadata, embed_layout_sync, export,
+    firmware_codegen, patch_elf, sync_default, validate, write_bin,
 };
 
 /// Resolve board dir: `XPOST_BOARD` env, else `manifest_dir` (example package root).
@@ -113,25 +121,7 @@ pub struct GenResult {
     pub warnings: Vec<String>,
 }
 
-/// Generate runtime artifacts (`mem_map.rs`, `hot_slots.rs`, IRAM linker script,
-/// `bpf_maps.rs`, `xdp_bpf.rs`, `aot_map_bind.rs`) from tomls in `board_dir`.
-pub fn generate_runtime(board_dir: &Path, out_dir: &Path) -> Result<RuntimeGen> {
-    let mem = generate_layout_runtime(board_dir, out_dir)?;
-    bpf_maps::generate(board_dir, out_dir)?;
-    bpf_xdp::generate(board_dir, out_dir)?;
-    let aot = aot_bind::generate(board_dir, out_dir)?;
-    let mut warnings = mem.warnings;
-    warnings.extend(aot.warnings);
-    Ok(RuntimeGen {
-        custom_sections_path: mem.custom_sections_path,
-        warnings,
-    })
-}
-
-/// Generate layout artifacts only (`mem_map.rs`, `hot_slots.rs`, linker fragment).
-///
-/// Skips bpf.toml boot tables (`bpf_maps` / `xdp_bpf` / `aot_map_bind`). Callers that
-/// need the direct-start path should write empty stubs for those files themselves.
+/// Generate layout artifacts (`mem_map.rs`, `hot_slots.rs`, linker fragment).
 pub fn generate_layout_runtime(board_dir: &Path, out_dir: &Path) -> Result<RuntimeGen> {
     let layout = layout::compute_from_file(&board_dir.join("layout.toml"))?;
     layout::cross_check_firmware_config(board_dir, board_dir)?;
@@ -145,6 +135,11 @@ pub fn generate_layout_runtime(board_dir: &Path, out_dir: &Path) -> Result<Runti
     })
 }
 
+/// Alias for [`generate_layout_runtime`] (firmware-first only).
+pub fn generate_runtime(board_dir: &Path, out_dir: &Path) -> Result<RuntimeGen> {
+    generate_layout_runtime(board_dir, out_dir)
+}
+
 /// Generate DUT artifacts (`fw_cfg_data.rs` + enabled `fw_us_*` names) from `config.toml`.
 pub fn generate_fw_cfg(board_dir: &Path, out_dir: &Path) -> Result<FwCfgGen> {
     let cfg = config::generate(board_dir, out_dir)?;
@@ -154,10 +149,10 @@ pub fn generate_fw_cfg(board_dir: &Path, out_dir: &Path) -> Result<FwCfgGen> {
     })
 }
 
-/// Runtime + fw_cfg into one `out_dir`.
+/// Layout + fw_cfg into one `out_dir`.
 pub fn generate(board_dir: &Path, out_dir: &Path) -> Result<GenResult> {
     layout::cross_check_firmware_config(board_dir, board_dir)?;
-    let rt = generate_runtime(board_dir, out_dir)?;
+    let rt = generate_layout_runtime(board_dir, out_dir)?;
     let cfg = generate_fw_cfg(board_dir, out_dir)?;
     let mut warnings = cfg.warnings;
     warnings.extend(rt.warnings);

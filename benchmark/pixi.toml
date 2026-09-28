@@ -1,0 +1,27 @@
+[workspace]
+authors = ["nan-mu <mu.nan.11@outlook.com>"]
+channels = ["conda-forge"]
+name = "benchmark"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[dependencies]
+python = "3.12.*"
+
+[pypi-dependencies]
+pandas = "*"
+numpy = "*"
+scipy = "*"
+matplotlib = "*"
+ipykernel = "*"
+python-dotenv = "*"
+psycopg = { version = ">=3", extras = ["binary"] }
+sqlalchemy = "*"
+pytest = "*"
+
+[tasks]
+# Jupyter Lab is external/long-lived; this only registers the pixi Python kernel.
+kernel = { cmd = "python -m utils.install_kernel", cwd = "." }
+ingest-pps = { cmd = "python -m utils.ingest_pps", cwd = "." }
+ensure-schema = { cmd = "python -m utils.ensure_schema", cwd = "." }
+test = { cmd = "python -m pytest tests -q", cwd = "." }

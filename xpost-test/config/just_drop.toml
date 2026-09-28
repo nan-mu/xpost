@@ -1,0 +1,8 @@
+# just_drop / just_drop_hal experiment knobs (compile-time embed).
+# Selected via default.toml `run = ["just_drop"]` (full-rate drop sampling fixed in code).
+# See config/README.md.
+
+formal = true
+rounds = 3
+sample_interval_ms = 1000
+arms = ["hal", "xdp"]

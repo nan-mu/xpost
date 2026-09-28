@@ -1,0 +1,8 @@
+[build]
+target-dir = "target"
+# ImmortalWrt / OpenWrt: static musl. Avoid glibc + /lib/ld-linux-aarch64.so.1.
+target = "aarch64-unknown-linux-musl"
+
+# Note: Cargo has no config key that moves the *cargo process* into Docker.
+# `build.rustc-wrapper` only wraps rustc (host cargo still runs build.rs).
+# Whole-process intercept is via rust-toolchain.toml → .cargo/docker-toolchain/.

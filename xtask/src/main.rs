@@ -1,6 +1,6 @@
 //! Root dispatcher: `cargo xtask sync …` or `cargo xtask <example> <cmd…>`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result, bail};
@@ -39,8 +39,6 @@ enum SyncAction {
         board: Option<PathBuf>,
         #[arg(long)]
         out: PathBuf,
-        #[arg(long)]
-        from_bpf_toml: bool,
     },
     Export {
         #[arg(long)]
@@ -55,6 +53,13 @@ enum SyncAction {
         elf: PathBuf,
         #[arg(long)]
         contract: Option<PathBuf>,
+    },
+    /// Embed XPM1 `.xpost.mem` into a linked firmware ELF (path A endpoint).
+    EmbedLayout {
+        #[arg(long)]
+        board: PathBuf,
+        #[arg(long)]
+        elf: PathBuf,
     },
 }
 
@@ -96,14 +101,13 @@ fn main() -> Result<ExitCode> {
     dispatch_example(&root, &example, &args)
 }
 
-fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
+fn run_sync(root: &Path, action: SyncAction) -> Result<ExitCode> {
     let crate_manifest = root.join("Cargo.toml");
     let tmp_out = root.join("target/xpost-sync");
     match action {
         SyncAction::Validate { board } => {
             let out = tmp_out.clone();
             let req = xpost_build::SyncRequest {
-                mode: xpost_build::SyncMode::Default,
                 crate_manifest: &crate_manifest,
                 board_dir: board.as_deref(),
                 out_dir: &out,
@@ -114,27 +118,17 @@ fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
             for line in report.lines {
                 println!("{line}");
             }
-            if let Some(board) = board.as_ref() {
-                if let Some(table) = report.meta.xdp_table.as_ref() {
-                    let csv = board.join("partitions.csv");
-                    if csv.is_file() {
-                        xpost_build::validate_xdp_table_against_partitions(table, &csv)?;
-                    }
+            if let Some(board) = board.as_ref()
+                && let Some(table) = report.meta.xdp_table.as_ref()
+            {
+                let csv = board.join("partitions.csv");
+                if csv.is_file() {
+                    xpost_build::validate_xdp_table_against_partitions(table, &csv)?;
                 }
             }
         }
-        SyncAction::Codegen {
-            board,
-            out,
-            from_bpf_toml,
-        } => {
-            let mode = if from_bpf_toml {
-                xpost_build::SyncMode::FromBpfToml
-            } else {
-                xpost_build::SyncMode::Default
-            };
+        SyncAction::Codegen { board, out } => {
             let req = xpost_build::SyncRequest {
-                mode,
                 crate_manifest: &crate_manifest,
                 board_dir: board.as_deref(),
                 out_dir: &out,
@@ -153,7 +147,6 @@ fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| board.join("target/layout-export"));
             let req = xpost_build::SyncRequest {
-                mode: xpost_build::SyncMode::Default,
                 crate_manifest: &crate_manifest,
                 board_dir: Some(&board),
                 out_dir: &out_dir,
@@ -177,7 +170,6 @@ fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| board.join("target/layout-export"));
             let req = xpost_build::SyncRequest {
-                mode: xpost_build::SyncMode::Default,
                 crate_manifest: &crate_manifest,
                 board_dir: Some(&board),
                 out_dir: &out_dir,
@@ -187,16 +179,35 @@ fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
             xpost_build::patch_elf(&req)?;
             println!("patched {}", contract.display());
         }
+        SyncAction::EmbedLayout { board, elf } => {
+            let out = tmp_out.clone();
+            let req = xpost_build::SyncRequest {
+                crate_manifest: &crate_manifest,
+                board_dir: Some(&board),
+                out_dir: &out,
+                contract_out: None,
+                elf_path: Some(&elf),
+            };
+            let report = xpost_build::embed_layout_sync(&req)?;
+            for line in report.lines {
+                println!("{line}");
+            }
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
 
 fn dispatch_example(root: &PathBuf, example: &str, rest: &[String]) -> Result<ExitCode> {
     if example == "agent" {
+        // `xpost-agent/` is workspace-exclude (own host crate). Do not use `-p`
+        // on the RV32 root workspace. CLI stays `cargo xtask agent …`.
+        let manifest = root.join("xpost-agent/Cargo.toml");
         let mut args = vec![
             "run".to_string(),
-            "-p".to_string(),
-            "xpost-agent".to_string(),
+            "--manifest-path".to_string(),
+            manifest.display().to_string(),
+            "--target".to_string(),
+            host_triple().to_string(),
             "--".to_string(),
         ];
         args.extend(rest.iter().cloned());

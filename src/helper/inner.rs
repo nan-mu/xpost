@@ -2,7 +2,7 @@
 //!
 //! Deleted: redirect_map, tail_call, adjust_head, load/store_bytes,
 //! dynptr, xpost_evt_wake. Deferred BPF ringbuf helpers live in
-//! `map/kinds/ringbuf/` (not dispatched).
+//! Deferred BPF ringbuf helpers live in `ext/ringbuf/` (not dispatched).
 //!
 //! `xdp_adjust_tail` is supported **shrink-only** (positive delta rejected).
 
@@ -17,6 +17,7 @@ pub(super) mod ktime_get_ns {
 }
 
 pub(super) mod map_lookup_elem {
+    #[esp_hal::ram]
     pub(crate) fn inner(map: usize, key: usize) -> usize {
         crate::map::helper_lookup(map, key)
     }
@@ -189,10 +190,7 @@ pub(super) mod printk {
         for token in tokens {
             match token {
                 Token::Text(s) => {
-                    let text = match core::str::from_utf8(s) {
-                        Ok(s) => s,
-                        Err(_e) => "",
-                    };
+                    let text = core::str::from_utf8(s).unwrap_or_default();
                     let _ = write!(buf, "{}", text);
                 }
                 Token::Spec(spec_type) => {

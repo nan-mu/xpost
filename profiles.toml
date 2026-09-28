@@ -1,3 +1,47 @@
+# Profile registry for Mac `xpost-agent` FlashProfile (paths relative to xpost/).
+# `build` is argv run from XPOST_ROOT before flash so Mac only needs:
+#   cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
+# (HTTP /v1/flash_profile + /mcp on that port)
+[[profile]]
+id = "just-drop"
+path = "just_drop"
+description = "just_drop firmware + cold just_drop.elf (XDP ingress drop)"
+bin = "examples/just_drop/target/riscv32imc-unknown-none-elf/release/just_drop"
+partition_table = "examples/just_drop/partitions.csv"
+chip = "esp32c3"
+xdp_elf = "examples/just_drop/just_drop.elf"
+xdp_name = "just_drop"
+build = ["cargo", "xtask", "just_drop", "build", "--release"]
+
+[[profile]]
+id = "just-drop-hal"
+path = "just_drop_hal"
+description = "just_drop_hal firmware (app-layer UDP drop; serial `drop on`)"
+bin = "examples/just_drop_hal/target/riscv32imc-unknown-none-elf/release/just_drop_hal"
+partition_table = "examples/just_drop_hal/partitions.csv"
+chip = "esp32c3"
+build = ["cargo", "xtask", "just_drop_hal", "build", "--release"]
+
+[[profile]]
+id = "just-tx"
+path = "just_drop"
+description = "just_drop firmware + cold just_tx.elf (XDP MAC swap + XDP_TX)"
+bin = "examples/just_drop/target/riscv32imc-unknown-none-elf/release/just_drop"
+partition_table = "examples/just_drop/partitions.csv"
+chip = "esp32c3"
+xdp_elf = "examples/just_drop/just_tx.elf"
+xdp_name = "just_tx"
+build = ["cargo", "xtask", "just_drop", "build", "--release"]
+
+[[profile]]
+id = "just-tx-hal"
+path = "just_tx_hal"
+description = "just_tx_hal firmware (app-layer UDP echo; rxcnt[17] on recv)"
+bin = "examples/just_tx_hal/target/riscv32imc-unknown-none-elf/release/just_tx_hal"
+partition_table = "examples/just_tx_hal/partitions.csv"
+chip = "esp32c3"
+build = ["cargo", "xtask", "just_tx_hal", "build", "--release"]
+
 [[profile]]
 id = "drop-hal"
 path = "hal_drop"

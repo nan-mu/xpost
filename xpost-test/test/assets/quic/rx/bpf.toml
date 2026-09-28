@@ -1,0 +1,47 @@
+# Plan C: maps from quic_rx_dispatch (slot b). aot_addr from MCU ELF .maps.
+# TX image (quic_tx_encap) has no maps; boot bin is TX, RX uploaded at Q1.
+
+source = "/Users/nan/bs/libbpf-mcu/tests/xdp/quic_rx_dispatch.c"
+
+[maps.quic_events]
+map_type = "BPF_MAP_TYPE_RINGBUF"
+max_entries = 4096
+estimated_bytes = 4096
+aot_addr = 0x4038123c
+value = """
+    u8 v
+"""
+
+[maps.server_key]
+map_type = "BPF_MAP_TYPE_ARRAY"
+max_entries = 1
+estimated_bytes = 64
+aot_addr = 0x4038121c
+key = """
+    u32 idx
+"""
+value = """
+    u32 w0
+    u32 w1
+    u32 w2
+    u32 w3
+    u32 w4
+    u32 w5
+    u32 w6
+    u32 w7
+"""
+
+[maps.sessions]
+map_type = "BPF_MAP_TYPE_HASH"
+max_entries = 4
+estimated_bytes = 256
+aot_addr = 0x4038122c
+key = """
+    u32 peer_ip
+"""
+value = """
+    u32 state
+    u32 dcid0
+    u32 dcid1
+    u32 last_seq
+"""

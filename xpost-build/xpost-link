@@ -1,0 +1,30 @@
+#!/bin/sh
+# Stable entry for board `.cargo/config.toml` `linker =`.
+# Must NOT invoke cargo here (parent `cargo build` holds the lock).
+# `firmware_codegen` / board build.rs prebuilds the host binary.
+set -e
+ROOT=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+HOST=$(rustc -vV | awk '/^host:/{print $2}')
+TARGET_DIR="${XPOST_LINK_TARGET_DIR:-$ROOT/target}"
+BIN=""
+for c in \
+  "$TARGET_DIR/$HOST/release/xpost-link" \
+  "$TARGET_DIR/release/xpost-link" \
+  "$TARGET_DIR/$HOST/debug/xpost-link" \
+  "$TARGET_DIR/debug/xpost-link"
+do
+  if [ -x "$c" ]; then
+    BIN=$c
+    break
+  fi
+done
+if [ -z "$BIN" ]; then
+  BIN=$(find "$TARGET_DIR" -type f -name xpost-link -perm -111 2>/dev/null | head -n 1 || true)
+fi
+if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+  echo "xpost-link: host binary missing under $TARGET_DIR" >&2
+  echo "  (firmware build.rs should have built it; try:" >&2
+  echo "   cargo build --manifest-path $ROOT/Cargo.toml --release --bin xpost-link --target $HOST)" >&2
+  exit 1
+fi
+exec "$BIN" "$@"

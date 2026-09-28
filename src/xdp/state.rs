@@ -6,7 +6,7 @@
 use embassy_sync::once_lock::OnceLock;
 use portable_atomic::{AtomicBool, AtomicUsize};
 
-use crate::xdp::{XdpRt, lock::RtMutex};
+use crate::{RtMutex, xdp::XdpRt};
 
 // —— runtime table capacities ——
 
@@ -15,16 +15,8 @@ pub(crate) const MAX_MAP_REFS: usize = 16;
 pub(crate) const MAX_IMAGES: usize = 8;
 /// MapDescriptorV0 / AOT bind entries per Compact ELF image.
 pub(crate) const MAX_REQUIRED_MAPS: usize = 8;
+/// [`crate::xdp::map::VmrTable`] / LinearMap capacity.
 pub(crate) const MAX_VMR_BINDS: usize = 16;
-
-// —— shared-stack budget (E3 docs / placeholders; not enforced at runtime) ——
-
-/// eBPF verifier stack budget (prevail `--stack-size` default).
-pub(crate) const BPF_STACK_BUDGET: usize = 512;
-/// Extra shared-stack room assumed for synchronous helpers.
-pub(crate) const HELPER_STACK_BUDGET: usize = 512;
-/// Conservative XDP image + helper peak on the shared caller stack.
-pub(crate) const XDP_STACK_PEAK_BUDGET: usize = BPF_STACK_BUDGET + HELPER_STACK_BUDGET;
 
 // —— soft stack canary (debug / hwtest; does not prove N2/N3) ——
 

@@ -21,12 +21,11 @@ jobs:
       matrix:
         include:
           - name: build
-            run: cargo build --release -p firmware
+            run: cargo build --release -p xpost
           - name: fmt
-            run: cargo fmt --all -- --check
-          - name: clippy-firmware
-            # -p firmware only: xtask is a host build-dep (not clippy'd as a riscv crate).
-            run: cargo clippy --all-features -p firmware -- -D warnings
+            run: cargo +nightly fmt --all -- --check
+          - name: clippy
+            run: cargo clippy -- -D warnings
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

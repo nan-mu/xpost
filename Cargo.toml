@@ -5,7 +5,7 @@ resolver = "2"
 # errors from std crates). Invoke via `--manifest-path` / the `xtask` alias.
 members = [".", "esp-radio", "xpost-macros", "xpost-elf"]
 default-members = ["."]
-exclude = ["xpost-build", "xtask", "agent", "examples"]
+exclude = ["xpost-build", "xtask", "xpost-agent", "xpost-serial", "xpost-test", "examples"]
 
 [package]
 edition      = "2024"
@@ -24,15 +24,13 @@ bench = false
 
 [features]
 default = []
-# Boot path B: bpf.toml codegen (`boot_maps` / `boot_xdps`).
-# Firmware-first (path A) is implicit when this is off — no named feature.
-from-bpf-toml = []
 # Incomplete — do not enable (compile_error!).
 # Pulls optional ringbuf / async-ringbuf crates; source kept for later work.
 ringbuf = ["dep:ringbuf", "dep:async-ringbuf"]
 
-# Default MCU layout sizes for path A (xpost-build sync).
-# SRAM `declare_runtime!` table sizes are from-bpf-toml only.
+# Path A defaults for `xpost-build::firmware_codegen` when the firmware crate
+# omits `[package.metadata.xpost]`. Firmware may override map/slots/target;
+# cold flash span always comes from the board `partitions.csv`.
 [package.metadata.xpost]
 schema_version = 1
 
@@ -52,16 +50,14 @@ mount = "call"
 primary = false
 
 [package.metadata.xpost.xdp_table]
-flash_base = 0
-flash_len = 0x2000
+partition = "xdp"
 image_capacity = 0x1000
-image_count = 2
 
 [package.metadata.xpost.target]
 arch = "riscv32"
 abi = "ilp32"
 iram_base = 0x40380000
-arena_end = 0x40382000
+arena_end = 0x40380200
 helper_length = 0x200
 
 
@@ -69,7 +65,6 @@ helper_length = 0x200
 xpost-macros     = { path = "xpost-macros" }
 xpost-elf        = { path = "xpost-elf" }
 log              = "0.4.27"
-anyhow           = { version = "1.0.104", default-features = false }
 critical-section = "1.2.0"
 heapless         = "0.9.3"
 nom              = { version = "8.0.0", default-features = false, features = ["alloc"] }

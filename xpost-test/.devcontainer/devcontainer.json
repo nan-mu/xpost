@@ -1,0 +1,33 @@
+{
+  "name": "test",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "RUSTUP_PROXY": "http://192.168.110.104:7890"
+    },
+    "options": ["--platform=linux/arm64"]
+  },
+  "remoteUser": "root",
+  "privileged": true,
+  "runArgs": [
+    "--platform=linux/arm64",
+    "--cap-add=CAP_BPF",
+    "--cap-add=CAP_NET_ADMIN",
+    "--cap-add=CAP_SYS_ADMIN"
+  ],
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "mounts": [
+    "source=${localEnv:HOME}/.cargo/registry,target=/usr/local/cargo/registry,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.cargo/git,target=/usr/local/cargo/git,type=bind,consistency=cached"
+  ],
+  "postCreateCommand": "mkdir -p /sys/kernel/debug && (mountpoint -q /sys/kernel/debug || mount -t debugfs debugfs /sys/kernel/debug || true)",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb"
+      ]
+    }
+  }
+}

@@ -4,24 +4,30 @@
 //! Packet window: no adjust_head; adjust_tail shrink-only → prefix of `frame`.
 
 use esp_radio::wifi::{Action, Prog, attach_prog};
-use portable_atomic::{AtomicUsize, Ordering};
+use portable_atomic::{AtomicI32, AtomicUsize, Ordering};
 
 use crate::xdp::{
+    counter::inc_bad_md,
     ingress::{action::XdpAction, run},
     state::ACTIVE,
-    stats::inc_bad_md,
 };
 
 /// Process-wide XDP program mounted on esp-radio RX ingress.
 pub static XDP_PROG: XdpProg = XdpProg {
     drop_cnt: AtomicUsize::new(0),
-    failed_tx_cnt: AtomicUsize::new(0),
+    failed_tx_bad_buf_cnt: AtomicUsize::new(0),
+    failed_tx_token_cnt: AtomicUsize::new(0),
+    failed_tx_wifi_cnt: AtomicUsize::new(0),
+    failed_tx_wifi_last_rc: AtomicI32::new(0),
 };
 
 /// Prog that invokes the leased XDP image and records driver counter callbacks.
 pub struct XdpProg {
     drop_cnt: AtomicUsize,
-    failed_tx_cnt: AtomicUsize,
+    failed_tx_bad_buf_cnt: AtomicUsize,
+    failed_tx_token_cnt: AtomicUsize,
+    failed_tx_wifi_cnt: AtomicUsize,
+    failed_tx_wifi_last_rc: AtomicI32,
 }
 
 impl XdpProg {
@@ -30,13 +36,35 @@ impl XdpProg {
         self.drop_cnt.load(Ordering::Relaxed)
     }
 
+    /// Sum of all Tx failure arms (compat aggregate).
     #[inline]
     pub fn failed_tx_count(&self) -> usize {
-        self.failed_tx_cnt.load(Ordering::Relaxed)
+        self.failed_tx_bad_buf_count() + self.failed_tx_token_count() + self.failed_tx_wifi_count()
+    }
+
+    #[inline]
+    pub fn failed_tx_bad_buf_count(&self) -> usize {
+        self.failed_tx_bad_buf_cnt.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn failed_tx_token_count(&self) -> usize {
+        self.failed_tx_token_cnt.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn failed_tx_wifi_count(&self) -> usize {
+        self.failed_tx_wifi_cnt.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn failed_tx_wifi_last_rc(&self) -> i32 {
+        self.failed_tx_wifi_last_rc.load(Ordering::Relaxed)
     }
 }
 
 impl Prog for XdpProg {
+    #[esp_hal::ram]
     fn run<'a>(&self, frame: &'a mut [u8]) -> (Action, &'a mut [u8]) {
         // Fast path: not leased → Pass without md / critical section.
         if !ACTIVE.load(Ordering::Acquire) {
@@ -70,8 +98,19 @@ impl Prog for XdpProg {
     }
 
     #[inline]
-    fn count_failed_tx(&self) {
-        self.failed_tx_cnt.fetch_add(1, Ordering::Relaxed);
+    fn count_failed_tx_bad_buf(&self) {
+        self.failed_tx_bad_buf_cnt.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn count_failed_tx_token(&self) {
+        self.failed_tx_token_cnt.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn count_failed_tx_wifi(&self, rc: i32) {
+        self.failed_tx_wifi_cnt.fetch_add(1, Ordering::Relaxed);
+        self.failed_tx_wifi_last_rc.store(rc, Ordering::Relaxed);
     }
 }
 

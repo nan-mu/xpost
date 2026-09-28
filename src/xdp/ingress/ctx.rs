@@ -10,9 +10,6 @@
 
 /// Compile-time logical port table (stable across SoCs; not Linux ifindex).
 pub(crate) const IFINDEX_WIFI: u32 = 0;
-/// Wired NIC — reserved stub on ESP32-C3.
-#[allow(dead_code)]
-pub(crate) const IFINDEX_WIRED: u32 = 1;
 
 #[repr(C)]
 pub(crate) struct XdpMd {

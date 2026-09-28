@@ -1,14 +1,26 @@
-//! Compact ELF V0 decode：一块 SRAM buffer、`flash_layout!` 视图、[`ByteSource`]。
+//! Compact ELF V0 decode/encode + firmware mem-map contract blob (`XPM1`).
 //!
-//! 物理布局：EHDR | SHT×4 | `.xpost.meta` | image | names | pad | digest。
+//! Compact ELF layout：EHDR | SHT×4 | `.xpost.meta` | image | names | pad | digest。
 //!
 //! 冷区扫描分两档失败：
 //! - `HardFail`：连容器边界都算不出（非 ELF / 读失败 / 长度溢出）→ 停扫。
 //! - `SoftSkip`：`file_len` 可信，但不是合法 V0 profile → 按长度跳过，继续找下一个。
 //!
+//! 固件 ELF 上的 [mem_map]（`.xpost.mem`）只含编解码；读写 ELF 文件由 xpost-build 负责。
+//!
 //! 不含 `XdpBuilder` / map runtime；调用方把 [`ParsedContainer`] 再填进固件侧。
 
 #![no_std]
+
+#[path = "encode.rs"]
+mod compact;
+mod mem_map;
+
+pub use compact::{
+    EncodeError, ImageMetadataV0, MAX_CONTAINER_SIZE, MAX_ENTRIES, MAX_META_SIZE, MapDescriptorV0,
+    SECTION_NAMES, build_container,
+};
+pub use mem_map::{MAGIC, MemMapError, MemMapV0, SECTION_NAME, WIRE_SIZE, decode, encode};
 
 use sha2::{Digest, Sha256};
 
@@ -35,6 +47,9 @@ const XPOST_MACHINE: u8 = 1;
 /// 解析器只需要随机读和总长度；不包含 erase / write。
 pub trait ByteSource {
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn read(&mut self, offset: usize, out: &mut [u8]) -> bool;
 }
 
@@ -101,6 +116,8 @@ xpost_macros::flash_layout! {
 }
 
 /// 冷区扫描一步的结果。`file_len` 只在还能定位容器尾时给出。
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // Ok carries ParsedContainer by value; Box would change the API.
 pub enum ScanOutcome {
     /// 无法判断容器边界，调用方应终止扫描。
     HardFail,
@@ -112,6 +129,7 @@ pub enum ScanOutcome {
 }
 
 /// 一张已通过 wire / digest 校验的 Compact ELF 容器（相对 `at` 的偏移）。
+#[derive(Debug)]
 pub struct ParsedContainer {
     pub name: heapless::String<{ MAX_NAME + 1 }>,
     pub slot_address: usize,
@@ -124,6 +142,7 @@ pub struct ParsedContainer {
 }
 
 /// 一条 MapDescriptorV0；空 layout 为 `None`（ARRAY 的 implicit key）。
+#[derive(Debug)]
 pub struct ParsedMap {
     pub name: heapless::String<{ MAX_NAME + 1 }>,
     pub map_type: u8,
@@ -155,7 +174,7 @@ struct MapRecord<'a> {
 }
 
 #[inline(always)]
-const fn align4(x: usize) -> usize {
+pub(crate) const fn align4(x: usize) -> usize {
     (x + 3) & !3
 }
 
@@ -345,7 +364,7 @@ fn decode_layout(f: &CompactElfFixed, digest_off: usize) -> Option<WireLayout> {
 
     if meta_offset != meta_abs
         || !(MIN_META_SIZE..=WIRE_BUF).contains(&meta_size)
-        || meta_size % 4 != 0
+        || !meta_size.is_multiple_of(4)
     {
         return None;
     }
@@ -401,7 +420,7 @@ fn parse_meta(
     for _ in 0..layout.map_count {
         let rec = take_map_record(&mut rest)?;
         // name / map_vma 都是 AOT 绑定键，重复即非规范。
-        if seen_names.iter().any(|&n| n == rec.name) || seen_vmas.iter().any(|&v| v == rec.vma) {
+        if seen_names.contains(&rec.name) || seen_vmas.contains(&rec.vma) {
             return None;
         }
         let _ = seen_names.push(rec.name);

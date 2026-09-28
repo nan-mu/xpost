@@ -1,0 +1,741 @@
+"""Figure 1 (three bar panels) and Figure 2 (2×3 noise diagnostics)."""
+
+from __future__ import annotations
+
+from typing import Mapping, Sequence
+
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+
+# Okabe–Ito, tuned for a white paper background.
+_PPS = "#0072B2"
+_ADEV = "#D55E00"
+_CV = "#009E73"
+_INK = "#222222"
+_MUTED = "#6E6E6E"
+_FILL = "#D6E3F0"
+
+_RC = {
+    "font.family": "serif",
+    "font.serif": ["STIXGeneral", "Times New Roman", "DejaVu Serif"],
+    "mathtext.fontset": "stix",
+    "axes.unicode_minus": False,
+    "axes.linewidth": 0.7,
+    "axes.edgecolor": _INK,
+    "axes.labelcolor": _INK,
+    "xtick.color": _INK,
+    "ytick.color": _INK,
+    "text.color": _INK,
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "xtick.major.size": 3.2,
+    "ytick.major.size": 3.2,
+    "xtick.major.width": 0.7,
+    "ytick.major.width": 0.7,
+    "xtick.minor.size": 1.8,
+    "ytick.minor.size": 1.8,
+    "legend.frameon": False,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+    "savefig.dpi": 200,
+    "figure.facecolor": "white",
+    "axes.facecolor": "white",
+    "font.size": 9,
+    "axes.labelsize": 9,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "axes.titlesize": 10,
+}
+
+
+def _finite(x: float | None) -> bool:
+    return x is not None and bool(np.isfinite(x))
+
+
+def _ci_whisker(point: float | None, ci: tuple[float, float] | None) -> tuple[float, float]:
+    """Lower/upper error in the same unit as ``point``. Degenerate [0, ≈point] intervals are omitted."""
+    if not _finite(point) or ci is None or not (_finite(ci[0]) and _finite(ci[1])):
+        return 0.0, 0.0
+    lo, hi = float(ci[0]), float(ci[1])
+    y = float(point)
+    if lo <= 0.0 and hi <= y * 1.25:
+        return 0.0, 0.0
+    return max(0.0, y - lo), max(0.0, hi - y)
+
+
+def _bar_pair(
+    ax: Axes,
+    hal: float | None,
+    xdp: float | None,
+    hal_ci: tuple[float, float] | None,
+    xdp_ci: tuple[float, float] | None,
+    *,
+    ylabel: str,
+    fmt,
+    zero: bool,
+) -> None:
+    xs = (0.0, 1.0)
+    vals = [float(hal) if _finite(hal) else np.nan, float(xdp) if _finite(xdp) else np.nan]
+    err = np.array([_ci_whisker(vals[0], hal_ci), _ci_whisker(vals[1], xdp_ci)], dtype=float).T
+    ax.bar(
+        xs,
+        [0.0 if not np.isfinite(v) else v for v in vals],
+        width=0.62,
+        color=(_PPS, _ADEV),
+        yerr=err,
+        capsize=3.0,
+        error_kw={"elinewidth": 0.8, "capthick": 0.7, "ecolor": _INK},
+        zorder=2,
+    )
+    ax.set_xticks(list(xs))
+    ax.set_xticklabels(["HAL", "XDP"])
+    ax.set_ylabel(ylabel)
+    ax.tick_params(axis="x", length=0, pad=4)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    finite = [(v, e_lo, e_hi) for v, e_lo, e_hi in zip(vals, err[0], err[1]) if np.isfinite(v)]
+    if not finite:
+        ax.set_ylim(0, 1)
+        return
+    top = max(v + e_hi for v, _, e_hi in finite)
+    bot = min(v - e_lo for v, e_lo, _ in finite)
+    if zero or bot <= 0.2 * top:
+        ymin, ymax = 0.0, top * 1.28 if top > 0 else 1.0
+    else:
+        span = max(top - bot, top * 0.04)
+        ymin = bot - 0.55 * span
+        ymax = top + 0.85 * span
+    ax.set_ylim(ymin, ymax)
+    for x, v, e_hi in zip(xs, vals, err[1]):
+        if not np.isfinite(v):
+            continue
+        ax.annotate(
+            fmt(v),
+            xy=(x, v + e_hi),
+            xytext=(0, 4),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color=_INK,
+        )
+
+
+def figure1_summary(
+    *,
+    hal_mean_pps: float,
+    xdp_mean_pps: float,
+    hal_pps_points: Sequence[float] | None = None,
+    xdp_pps_points: Sequence[float] | None = None,
+    hal_pps_ci: tuple[float, float] | None = None,
+    xdp_pps_ci: tuple[float, float] | None = None,
+    hal_adev_1s: float | None = None,
+    xdp_adev_1s: float | None = None,
+    hal_adev_points: Sequence[float] | None = None,
+    xdp_adev_points: Sequence[float] | None = None,
+    hal_adev_ci: tuple[float, float] | None = None,
+    xdp_adev_ci: tuple[float, float] | None = None,
+    hal_cv: float | None = None,
+    xdp_cv: float | None = None,
+    hal_cv_ci: tuple[float, float] | None = None,
+    xdp_cv_ci: tuple[float, float] | None = None,
+    title: str = "HAL vs XDP",
+) -> tuple[Figure, Axes]:
+    """Three bar panels: mean PPS, relative ADEV at 1 s, between-run CV.
+
+    PPS and CV include 0. ADEV does not when both values sit well above 0,
+    so a sub-percent gap stays readable. Fractions are drawn in percent.
+    CI tuples are ``(lo, hi)`` in the same unit as the bar (fraction, not percent).
+    """
+    del hal_pps_points, xdp_pps_points, hal_adev_points, xdp_adev_points
+    with plt.rc_context(_RC):
+        fig, axes = plt.subplots(1, 3, figsize=(7.6, 4.1))
+        panel_titles = (
+            "Mean processing PPS",
+            "Rel. ADEV at 1 s",
+            "Between-run CV",
+        )
+        _bar_pair(
+            axes[0],
+            hal_mean_pps,
+            xdp_mean_pps,
+            hal_pps_ci,
+            xdp_pps_ci,
+            ylabel="packets/s",
+            fmt=lambda v: f"{v:,.0f}",
+            zero=True,
+        )
+        axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        _bar_pair(
+            axes[1],
+            None if not _finite(hal_adev_1s) else 100.0 * float(hal_adev_1s),
+            None if not _finite(xdp_adev_1s) else 100.0 * float(xdp_adev_1s),
+            None if hal_adev_ci is None else (100.0 * hal_adev_ci[0], 100.0 * hal_adev_ci[1]),
+            None if xdp_adev_ci is None else (100.0 * xdp_adev_ci[0], 100.0 * xdp_adev_ci[1]),
+            ylabel="%",
+            fmt=lambda v: f"{v:.2f}",
+            zero=False,
+        )
+        _bar_pair(
+            axes[2],
+            None if not _finite(hal_cv) else 100.0 * float(hal_cv),
+            None if not _finite(xdp_cv) else 100.0 * float(xdp_cv),
+            None if hal_cv_ci is None else (100.0 * hal_cv_ci[0], 100.0 * hal_cv_ci[1]),
+            None if xdp_cv_ci is None else (100.0 * xdp_cv_ci[0], 100.0 * xdp_cv_ci[1]),
+            ylabel="%",
+            fmt=lambda v: f"{v:.2f}",
+            zero=True,
+        )
+        # Column headers sit directly above each panel (not a shared legend row).
+        for ax, col in zip(axes, panel_titles):
+            ax.set_title(col, fontsize=10, pad=10, loc="center")
+        from matplotlib.patches import Patch
+
+        fig.legend(
+            [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
+            ["HAL", "XDP"],
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=2,
+            fontsize=8,
+            handlelength=0.9,
+            columnspacing=1.2,
+        )
+        if title:
+            fig.suptitle(title, fontsize=11, y=1.08)
+        fig.tight_layout(rect=(0, 0, 1, 0.90))
+        return fig, axes[0]
+
+
+def figure1_tx_rtt(
+    *,
+    hal_median_rtt_ms: float | None,
+    xdp_median_rtt_ms: float | None,
+    hal_rtt_ci: tuple[float, float] | None = None,
+    xdp_rtt_ci: tuple[float, float] | None = None,
+    hal_loss: float | None = None,
+    xdp_loss: float | None = None,
+    hal_loss_ci: tuple[float, float] | None = None,
+    xdp_loss_ci: tuple[float, float] | None = None,
+    hal_return_pps: float | None = None,
+    xdp_return_pps: float | None = None,
+    hal_pps_ci: tuple[float, float] | None = None,
+    xdp_pps_ci: tuple[float, float] | None = None,
+    title: str = "just_tx RTT @ ~5% loss",
+) -> tuple[Figure, Axes]:
+    """Kept for import compat; unused by just_tx.ipynb RTT cells."""
+    del hal_loss, xdp_loss, hal_loss_ci, xdp_loss_ci, hal_return_pps, xdp_return_pps, hal_pps_ci, xdp_pps_ci
+    return figure_tx_pps_mean(
+        hal_mean_pps=float(hal_median_rtt_ms or 0.0),
+        xdp_mean_pps=float(xdp_median_rtt_ms or 0.0),
+        hal_pps_ci=hal_rtt_ci,
+        xdp_pps_ci=xdp_rtt_ci,
+        title=title,
+        ylabel="ms",
+        fmt=lambda v: f"{v:.2f}",
+    )
+
+
+def figure_tx_pps_mean(
+    *,
+    hal_mean_pps: float,
+    xdp_mean_pps: float,
+    hal_pps_ci: tuple[float, float] | None = None,
+    xdp_pps_ci: tuple[float, float] | None = None,
+    title: str = "just_tx HAL vs XDP",
+    ylabel: str = "packets/s",
+    fmt=None,
+) -> tuple[Figure, Axes]:
+    """Single panel: mean processing PPS (just_tx_pps notebook)."""
+    if fmt is None:
+        fmt = lambda v: f"{v:,.0f}"
+    with plt.rc_context(_RC):
+        fig, ax = plt.subplots(1, 1, figsize=(3.6, 3.6))
+        _bar_pair(
+            ax,
+            hal_mean_pps,
+            xdp_mean_pps,
+            hal_pps_ci,
+            xdp_pps_ci,
+            ylabel=ylabel,
+            fmt=fmt,
+            zero=True,
+        )
+        if ylabel == "packets/s":
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        from matplotlib.patches import Patch
+
+        fig.legend(
+            [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
+            ["HAL", "XDP"],
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=2,
+            fontsize=8,
+            handlelength=0.9,
+            columnspacing=1.2,
+        )
+        if title:
+            fig.suptitle(title, fontsize=11, y=1.08)
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
+        return fig, ax
+
+
+def figure_tx_rtt_loss_vs_rate(
+    *,
+    rates_pps: Sequence[float],
+    hal_loss: Sequence[float | None],
+    xdp_loss: Sequence[float | None],
+    title: str = "Loss vs send rate",
+) -> tuple[Figure, Axes]:
+    """Grouped bars: loss rate at each shared TR3000 send rate."""
+    with plt.rc_context(_RC):
+        fig, ax = plt.subplots(figsize=(7.6, 3.6))
+        xs = np.arange(len(rates_pps), dtype=float)
+        width = 0.38
+        hal_y = [np.nan if v is None or not np.isfinite(v) else 100.0 * float(v) for v in hal_loss]
+        xdp_y = [np.nan if v is None or not np.isfinite(v) else 100.0 * float(v) for v in xdp_loss]
+        ax.bar(xs - width / 2, [0.0 if not np.isfinite(v) else v for v in hal_y], width=width, color=_PPS, zorder=2)
+        ax.bar(xs + width / 2, [0.0 if not np.isfinite(v) else v for v in xdp_y], width=width, color=_ADEV, zorder=2)
+        ax.axhline(5.0, color=_MUTED, lw=0.7, ls="--", zorder=1)
+        ax.set_xticks(list(xs))
+        ax.set_xticklabels([f"{int(r)}" for r in rates_pps])
+        ax.set_xlabel("TR3000 send rate (pps)")
+        ax.set_ylabel("loss (%)")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        from matplotlib.patches import Patch
+
+        ax.legend(
+            [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
+            ["HAL", "XDP"],
+            loc="upper left",
+            fontsize=8,
+            frameon=False,
+        )
+        if title:
+            ax.set_title(title, fontsize=10, pad=8)
+        ymax = max([v for v in hal_y + xdp_y if np.isfinite(v)] + [5.0])
+        ax.set_ylim(0, ymax * 1.2 if ymax > 0 else 1.0)
+        fig.tight_layout()
+        return fig, ax
+
+
+def figure_tx_rtt_boxplot(
+    *,
+    hal_rtts_ms: Sequence[float],
+    xdp_rtts_ms: Sequence[float],
+    hal_label: str,
+    xdp_label: str,
+    title: str = "RTT @ ~5% loss operating point",
+) -> tuple[Figure, Axes]:
+    """Boxplot of paired RTT samples at each arm's ~5% loss send rate."""
+    with plt.rc_context(_RC):
+        fig, ax = plt.subplots(figsize=(5.2, 3.8))
+        data = [list(hal_rtts_ms), list(xdp_rtts_ms)]
+        bp = ax.boxplot(
+            data,
+            tick_labels=["HAL", "XDP"],
+            patch_artist=True,
+            widths=0.55,
+            showfliers=False,
+        )
+        for patch, color in zip(bp["boxes"], (_PPS, _ADEV)):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.85)
+            patch.set_edgecolor(_INK)
+        for key in ("whiskers", "caps", "medians"):
+            for line in bp[key]:
+                line.set_color(_INK)
+                line.set_linewidth(0.8)
+        ax.set_ylabel("RTT (ms)")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        from matplotlib.patches import Patch
+
+        ax.legend(
+            [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
+            [hal_label, xdp_label],
+            loc="upper right",
+            fontsize=8,
+            frameon=False,
+        )
+        if title:
+            ax.set_title(title, fontsize=10, pad=8)
+        fig.tight_layout()
+        return fig, ax
+
+
+def _rtt_at_rate(pps: np.ndarray, rtt_ms: np.ndarray, rate: float) -> np.ndarray:
+    m = np.isfinite(pps) & np.isfinite(rtt_ms) & np.isclose(pps, rate)
+    return rtt_ms[m]
+
+
+def _draw_grouped_rtt_boxes(
+    ax: Axes,
+    *,
+    rates: Sequence[float],
+    hx: np.ndarray,
+    hy: np.ndarray,
+    xx: np.ndarray,
+    xy: np.ndarray,
+) -> None:
+    """HAL / XDP side-by-side boxes at each rate; caller owns labels / ylim."""
+    if not rates:
+        return
+    width = 0.34
+    positions_hal = [i - width / 2 for i in range(len(rates))]
+    positions_xdp = [i + width / 2 for i in range(len(rates))]
+    for data, positions, color in (
+        ([_rtt_at_rate(hx, hy, r) for r in rates], positions_hal, _PPS),
+        ([_rtt_at_rate(xx, xy, r) for r in rates], positions_xdp, _ADEV),
+    ):
+        use = [(d, p) for d, p in zip(data, positions) if d.size > 0]
+        if not use:
+            continue
+        ds, ps = zip(*use)
+        bp = ax.boxplot(
+            list(ds),
+            positions=list(ps),
+            widths=width * 0.92,
+            patch_artist=True,
+            showfliers=False,
+            manage_ticks=False,
+        )
+        for patch in bp["boxes"]:
+            patch.set_facecolor(color)
+            patch.set_alpha(0.85)
+            patch.set_edgecolor(_INK)
+        for key in ("whiskers", "caps", "medians"):
+            for line in bp[key]:
+                line.set_color(_INK)
+                line.set_linewidth(0.8)
+    ax.set_xticks(list(range(len(rates))))
+    ax.set_xticklabels([f"{int(r)}" if float(r).is_integer() else f"{r:g}" for r in rates])
+    ax.set_xlim(-0.7, len(rates) - 0.3)
+    ax.set_ylim(bottom=0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def figure_tx_rtt_vs_pps(
+    *,
+    hal_pps: Sequence[float],
+    hal_rtt_ms: Sequence[float],
+    xdp_pps: Sequence[float],
+    xdp_rtt_ms: Sequence[float],
+    title: str = "RTT vs send rate",
+    split_at_pps: float = 1800.0,
+) -> tuple[Figure, Axes]:
+    """Two-panel grouped boxplots: low vs high pps, independent y scales."""
+    with plt.rc_context(_RC):
+        fig, axes = plt.subplots(1, 2, figsize=(7.6, 3.8), sharey=False)
+        hx = np.asarray(hal_pps, dtype=float)
+        hy = np.asarray(hal_rtt_ms, dtype=float)
+        xx = np.asarray(xdp_pps, dtype=float)
+        xy = np.asarray(xdp_rtt_ms, dtype=float)
+        rates = sorted(
+            {
+                float(r)
+                for r in np.unique(np.concatenate([hx[np.isfinite(hx)], xx[np.isfinite(xx)]]))
+            }
+        )
+        low = [r for r in rates if r < split_at_pps]
+        high = [r for r in rates if r >= split_at_pps]
+        def _panel_title(rs: list[float], fallback: str) -> str:
+            if not rs:
+                return fallback
+            a, b = rs[0], rs[-1]
+            fa = f"{int(a)}" if float(a).is_integer() else f"{a:g}"
+            fb = f"{int(b)}" if float(b).is_integer() else f"{b:g}"
+            return f"{fa}–{fb} pps"
+
+        panels = (
+            (axes[0], low, _panel_title(low, "low pps")),
+            (axes[1], high, _panel_title(high, "high pps")),
+        )
+        for ax, panel_rates, panel_title in panels:
+            _draw_grouped_rtt_boxes(ax, rates=panel_rates, hx=hx, hy=hy, xx=xx, xy=xy)
+            ax.set_xlabel("pps")
+            ax.set_title(panel_title, fontsize=10, pad=6)
+        axes[0].set_ylabel("RTT (ms)")
+        from matplotlib.patches import Patch
+
+        fig.legend(
+            [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
+            ["HAL", "XDP"],
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=2,
+            fontsize=8,
+            frameon=False,
+            handlelength=0.9,
+            columnspacing=1.2,
+        )
+        if title:
+            fig.suptitle(title, fontsize=11, y=1.08)
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
+        return fig, axes[0]
+
+
+def _as_float_or_nan(v) -> float:
+    if v is None:
+        return float("nan")
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+    return x if np.isfinite(x) else float("nan")
+
+
+def _err_from_bounds(
+    y: Sequence[float | None],
+    y_lo: Sequence[float | None] | None,
+    y_hi: Sequence[float | None] | None,
+) -> np.ndarray | None:
+    """Build (2, n) absolute errorbar deltas from absolute lo/hi bounds."""
+    if y_lo is None or y_hi is None:
+        return None
+    med = np.asarray([_as_float_or_nan(v) for v in y], dtype=float)
+    lo = np.asarray([_as_float_or_nan(v) for v in y_lo], dtype=float)
+    hi = np.asarray([_as_float_or_nan(v) for v in y_hi], dtype=float)
+    err = np.vstack([np.maximum(0.0, med - lo), np.maximum(0.0, hi - med)])
+    return err
+
+
+def figure_tx_rtt_return_pps(
+    *,
+    rates_pps: Sequence[float],
+    hal_return_pps: Sequence[float | None],
+    xdp_return_pps: Sequence[float | None],
+    hal_return_lo: Sequence[float | None] | None = None,
+    hal_return_hi: Sequence[float | None] | None = None,
+    xdp_return_lo: Sequence[float | None] | None = None,
+    xdp_return_hi: Sequence[float | None] | None = None,
+    title: str = "Return PPS vs send rate",
+) -> tuple[Figure, Axes]:
+    """Median return PPS ± IQR vs send rate, with ideal y=x (capacity ceiling).
+
+    Ties together fig1 (loss = fall-off from y=x) and fig2 (RTT blow-up at saturation).
+    """
+    with plt.rc_context(_RC):
+        fig, ax = plt.subplots(figsize=(7.6, 3.6))
+        rates = np.asarray(list(rates_pps), dtype=float)
+        # Slight x offset so HAL / XDP error bars do not stack.
+        dx = 40.0 if rates.size else 0.0
+        hal_y = np.asarray([_as_float_or_nan(v) for v in hal_return_pps], dtype=float)
+        xdp_y = np.asarray([_as_float_or_nan(v) for v in xdp_return_pps], dtype=float)
+        hal_err = _err_from_bounds(hal_return_pps, hal_return_lo, hal_return_hi)
+        xdp_err = _err_from_bounds(xdp_return_pps, xdp_return_lo, xdp_return_hi)
+        if rates.size:
+            x0, x1 = float(rates.min()), float(rates.max())
+            ideal = np.linspace(x0, x1, 200)
+            ax.plot(
+                ideal,
+                ideal,
+                color=_INK,
+                ls="--",
+                lw=1.2,
+                zorder=1,
+                label=r"$y=x$ (ideal)",
+            )
+        ax.errorbar(
+            rates - dx,
+            hal_y,
+            yerr=hal_err,
+            fmt="o-",
+            color=_PPS,
+            lw=1.2,
+            ms=4.5,
+            capsize=2.5,
+            elinewidth=0.8,
+            zorder=3,
+            label="HAL",
+        )
+        ax.errorbar(
+            rates + dx,
+            xdp_y,
+            yerr=xdp_err,
+            fmt="s-",
+            color=_ADEV,
+            lw=1.2,
+            ms=4.5,
+            capsize=2.5,
+            elinewidth=0.8,
+            zorder=3,
+            label="XDP",
+        )
+        if rates.size:
+            ax.set_xticks([float(r) for r in rates])
+            ax.set_xticklabels(
+                [f"{int(r)}" if float(r).is_integer() else f"{r:g}" for r in rates]
+            )
+            pad = max(dx * 2.5, 0.03 * (x1 - x0 + 1.0))
+            ax.set_xlim(x0 - pad, x1 + pad)
+        ax.set_xlabel("pps")
+        ax.set_ylabel("return PPS")
+        ax.set_ylim(bottom=0)
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.legend(loc="upper left", fontsize=8, frameon=False)
+        if title:
+            ax.set_title(title, fontsize=10, pad=8)
+        fig.tight_layout()
+        return fig, ax
+
+
+def figure1_is_single_panel(fig: Figure) -> bool:
+    """True when the figure is three category panels, each labeled HAL and XDP."""
+    axes = [ax for ax in fig.axes if ax.get_visible()]
+    if len(axes) != 3:
+        return False
+    for ax in axes:
+        labels = [t.get_text() for t in ax.get_xticklabels()]
+        if labels != ["HAL", "XDP"]:
+            return False
+    return True
+
+
+def _scale_curve(
+    ax: Axes,
+    series: Mapping[float, float] | None,
+    ci: Mapping[float, tuple[float, float]] | None,
+    *,
+    ylabel: str,
+    scale: float = 1.0,
+    href: float | None = None,
+) -> None:
+    ax.set_xscale("log")
+    ax.set_xlabel(r"$\tau$ (s)")
+    ax.set_ylabel(ylabel)
+    if not series:
+        ax.text(0.5, 0.5, "no scale estimate", ha="center", va="center", transform=ax.transAxes, color=_MUTED, fontsize=8)
+        return
+    taus = np.asarray(sorted(series), dtype=float)
+    vals = np.asarray([scale * float(series[t]) for t in taus], dtype=float)
+    if ci:
+        lo, hi = [], []
+        for t in taus:
+            pair = ci.get(float(t))
+            if pair is None or not (_finite(pair[0]) and _finite(pair[1])):
+                lo.append(np.nan)
+                hi.append(np.nan)
+            else:
+                lo.append(scale * float(pair[0]))
+                hi.append(scale * float(pair[1]))
+        lo_a, hi_a = np.asarray(lo), np.asarray(hi)
+        ok = np.isfinite(lo_a) & np.isfinite(hi_a)
+        if np.any(ok):
+            ax.fill_between(taus[ok], np.maximum(lo_a[ok], 0.0), hi_a[ok], color=_PPS, alpha=0.18, linewidth=0)
+    ax.plot(taus, vals, "-o", color=_PPS, ms=4.5, lw=1.15, markeredgecolor="white", markeredgewidth=0.4)
+    if href is not None:
+        ax.axhline(href, color=_MUTED, lw=0.7, ls="--", zorder=1)
+        ax.text(
+            taus[-1],
+            href,
+            " Poisson",
+            ha="right",
+            va="bottom",
+            fontsize=7,
+            color=_MUTED,
+        )
+    ax.set_xticks(list(taus))
+    ax.set_xticklabels([f"{t:g}" for t in taus])
+    ax.tick_params(axis="x", which="minor", bottom=False)
+
+
+def figure2_noise(
+    *,
+    hal_adev: Mapping[float, float] | None = None,
+    xdp_adev: Mapping[float, float] | None = None,
+    hal_adev_ci: Mapping[float, tuple[float, float]] | None = None,
+    xdp_adev_ci: Mapping[float, tuple[float, float]] | None = None,
+    hal_counts: Sequence[float] | None = None,
+    xdp_counts: Sequence[float] | None = None,
+    hal_rate_ts: Sequence[tuple[float, float]] | None = None,
+    xdp_rate_ts: Sequence[tuple[float, float]] | None = None,
+    hal_af: Mapping[float, float] | None = None,
+    xdp_af: Mapping[float, float] | None = None,
+    hal_af_ci: Mapping[float, tuple[float, float]] | None = None,
+    xdp_af_ci: Mapping[float, tuple[float, float]] | None = None,
+    count_xlabel: str = "count in ~1 s window",
+    model_scores: Mapping[str, Mapping[str, float]] | None = None,
+    title: str = "",
+) -> Figure:
+    """One figure: 2 rows (HAL, XDP) × 3 cols (ADEV or rates, 1 s counts, holdout or AF).
+
+    Prefer a τ-curve of relative ADEV when provided; otherwise plot equal-interval
+    rate time series. Column 3 draws holdout scores when given, else Allan factor.
+    """
+    with plt.rc_context(_RC):
+        fig, axes = plt.subplots(2, 3, figsize=(7.6, 5.15), sharex=False)
+        rows = [
+            ("HAL", axes[0], hal_adev, hal_adev_ci, hal_counts, hal_rate_ts, hal_af, hal_af_ci, "hal"),
+            ("XDP", axes[1], xdp_adev, xdp_adev_ci, xdp_counts, xdp_rate_ts, xdp_af, xdp_af_ci, "xdp"),
+        ]
+        col_titles = ("Relative ADEV", "1 s window", "Holdout score" if model_scores else "Allan factor")
+        for name, row, adev, adev_ci, counts, rate_ts, af, af_ci, key in rows:
+            ax0, ax1, ax2 = row
+            for ax in row:
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+            if adev:
+                _scale_curve(ax0, adev, adev_ci, ylabel=f"{name}\nrel. ADEV (%)", scale=100.0)
+            elif rate_ts:
+                ts = [p[0] for p in rate_ts]
+                rs = [p[1] for p in rate_ts]
+                ax0.plot(ts, rs, "-", color=_PPS, lw=0.9, alpha=0.9)
+                ax0.set_xlabel("t (s)")
+                ax0.set_ylabel(f"{name}\ninterval PPS")
+                ax0.set_ylim(bottom=0)
+            else:
+                ax0.text(0.5, 0.5, "no rate / ADEV", ha="center", va="center", transform=ax0.transAxes, color=_MUTED, fontsize=8)
+                ax0.set_ylabel(name)
+
+            if counts is not None and len(counts) > 0:
+                vals = np.asarray(list(counts), dtype=float)
+                bins = min(18, max(6, int(np.sqrt(vals.size))))
+                ax1.hist(vals, bins=bins, color=_FILL, edgecolor="white", linewidth=0.6)
+                ax1.axvline(float(np.mean(vals)), color=_PPS, lw=0.9)
+                ax1.set_xlabel(count_xlabel)
+                ax1.set_ylabel("windows")
+            else:
+                ax1.text(0.5, 0.5, "no count samples", ha="center", va="center", transform=ax1.transAxes, color=_MUTED, fontsize=8)
+
+            scores = None
+            if model_scores:
+                scores = model_scores.get(key) or model_scores.get(name)
+            if scores:
+                names = list(scores.keys())
+                bar_vals = [scores[n] for n in names]
+                ax2.bar(names, bar_vals, color=_PPS, width=0.72)
+                ax2.tick_params(axis="x", rotation=30)
+                ax2.set_ylabel("holdout loglik")
+                ax2.axhline(0.0, color=_MUTED, lw=0.5)
+            elif af:
+                _scale_curve(ax2, af, af_ci, ylabel="Allan factor", href=1.0)
+            else:
+                ax2.text(
+                    0.5,
+                    0.5,
+                    "model holdout\nnot identified",
+                    ha="center",
+                    va="center",
+                    transform=ax2.transAxes,
+                    color=_MUTED,
+                    fontsize=8,
+                )
+                ax2.set_xticks([])
+                ax2.set_yticks([])
+                for spine in ax2.spines.values():
+                    spine.set_visible(False)
+
+        for ax, col in zip(axes[0], col_titles):
+            ax.set_title(col, fontsize=10, pad=6)
+        if title:
+            fig.suptitle(title, fontsize=11, y=1.02)
+        fig.tight_layout()
+        return fig
