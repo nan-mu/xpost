@@ -83,7 +83,8 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 - 笔记：`just_tx.ipynb`（RTT + 处理 PPS）、`just_drop.ipynb`（drop 处理 PPS）
 
 ```bash
-cd benchmark && pixi install && pixi run ensure-schema && pixi run lab
+cd benchmark && pixi install && pixi run ensure-schema && pixi run kernel
+# 外部常驻 Jupyter Lab 打开笔记本；内核选 xpost-benchmark (pixi)
 # notebook: just_tx.ipynb / just_drop.ipynb
 ```
 
