@@ -20,7 +20,6 @@ pub use image::{Complete, Incomplete, XdpBuilder, XdpLocation, XdpMaps};
 /// Locked [`XdpRt`].
 pub type XdpRtGuard<'a> = RtMutexGuard<'a, XdpRt>;
 pub use slot::{Slot, XdpSlot};
-pub use crate::XDP_PROG;
 pub use state::XDP_RT;
 pub use table::storage::ColdRegion;
 pub(crate) use table::storage::{DEFAULT_IMAGE_CAPACITY, EspFlashXdpTable, XdpTableStorage};

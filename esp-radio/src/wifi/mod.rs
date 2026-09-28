@@ -2375,7 +2375,8 @@ pub fn new<'d>(
 pub fn new<'d>(
     device: crate::hal::peripherals::WIFI<'d>,
     config: ControllerConfig,
-    prog: &'static dyn XdpProg,
+    #[cfg(feature = "xdp-observe")] prog: &'static dyn Observe,
+    #[cfg(not(feature = "xdp-observe"))] prog: &'static dyn XdpProg,
 ) -> Result<(WifiController<'d>, Interfaces<'d>), WifiError> {
     xdp::install_prog(prog);
     new_inner(device, config)

@@ -72,7 +72,7 @@ byte = { version = "0.2.7", optional = true }
 ieee802154 = { version = "0.6.1", optional = true }
 heapless = "0.9"
 embassy-sync = "0.8"
-xpost-trait = { path = "../xpost-trait", optional = true }
+xpost-type = { path = "../xpost-type", optional = true }
 # Make sure these are aligned with esp-phy's dependencies, too!
 esp-wifi-sys-esp32 = { version = "0.2.0", optional = true }
 esp-wifi-sys-esp32c2 = { version = "0.2.0", optional = true }
@@ -273,7 +273,7 @@ sniffer = ["wifi", "__has_unstable_feature_enabled"]
 ## Maps [`wifi::XdpAction`] to Pass / Drop / same-iface Tx.
 ##
 ## Recommended esp32c3 check: `esp32c3,wifi,unstable,xdp`.
-xdp = ["wifi", "dep:xpost-trait"]
+xdp = ["wifi", "dep:xpost-type"]
 
 ## Compile [`wifi::xdp::Observe`] call-sites on the XDP / TX path.
 ## Requires `xdp`. Storage and semantics are owned by the `XdpProg` implementor.
@@ -344,7 +344,7 @@ defmt = [
     "esp-sync/defmt",
     "esp-phy/defmt",
     "ieee802154?/defmt",
-    "xpost-trait?/defmt",
+    "xpost-type?/defmt",
 ]
 
 #! ### Unstable APIs

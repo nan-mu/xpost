@@ -4,8 +4,8 @@
 //! - [`map::MapRt`] / [`map::MapBuilder`]
 //! - [`xdp::XdpRt`] / [`xdp::XdpBuilder`]
 //!
-//! Optional observation: enable `trace-counter` / `trace-timestamp` and use [`XDP_PROG`].
-//! Wi-Fi + XDP attach: enable `esp-radio` and call [`esp_radio::new`].
+//! Optional observation: enable `trace-counter` / `trace-timestamp` and read via
+//! [`ext::trace`]. Wi-Fi + XDP attach: enable `esp-radio` and call [`esp_radio::new`].
 //!
 //! Control-plane errors live in [`error`] (one small enum per public entrypoint).
 //! Optional / incomplete feature surface: [`ext`] (`ringbuf`). Board codegen is
@@ -25,7 +25,7 @@ use embassy_sync::{
     mutex::{Mutex, MutexGuard},
 };
 
-/// Wi-Fi bring-up injecting [`XDP_PROG`] into `::esp_radio::wifi::new`.
+/// Wi-Fi bring-up injecting the crate default XDP program into `::esp_radio::wifi::new`.
 #[cfg(feature = "esp-radio")]
 pub mod esp_radio {
     pub use crate::xdp::ingress::esp_radio::new;
@@ -38,9 +38,6 @@ pub mod ext;
 #[doc(hidden)]
 pub mod helper;
 pub mod map;
-/// Always-on [`XDP_PROG`] ([`xpost_trait::XdpProg`] + optional Observe / timestamps).
-pub mod trace;
-pub use trace::XDP_PROG;
 pub mod xdp;
 
 /// Shared critical-section mutex for map / XDP runtimes.

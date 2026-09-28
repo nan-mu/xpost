@@ -53,7 +53,7 @@ pub extern "C" fn helper_dispatcher(
 #[esp_hal::ram]
 fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> usize {
     #[cfg(feature = "trace-timestamp")]
-    crate::XDP_PROG.helper_enter(idx);
+    crate::ext::trace::timestamp::helper_enter(idx);
     let ret = match idx {
         HelperIdx::BPF_FUNC_MAP_LOOKUP_ELEM => inner::map_lookup_elem::inner(a1, a2),
         HelperIdx::BPF_FUNC_MAP_UPDATE_ELEM => inner::map_update_elem::inner(a1, a2, a3, a4),
@@ -66,6 +66,6 @@ fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
         _ => usize::MAX,
     };
     #[cfg(feature = "trace-timestamp")]
-    crate::XDP_PROG.helper_leave(idx);
+    crate::ext::trace::timestamp::helper_leave(idx);
     ret
 }

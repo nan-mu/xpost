@@ -1,7 +1,7 @@
 //! Helper enter/leave timestamps (`feature = "trace-timestamp"`).
 //!
 //! Clock: [`esp_hal::time::Instant`] µs since epoch (`u32`, wraps ~4294 s).
-//! Attach target is always [`crate::XDP_PROG`]; this type is only the ring storage.
+//! Attach target is the crate-mounted ingress program; this type is only the ring storage.
 
 use core::sync::atomic::Ordering;
 
@@ -120,4 +120,16 @@ impl Timestamp {
     pub fn timestamp_dropped(&self) -> usize {
         self.dropped.load(Ordering::Relaxed)
     }
+}
+
+/// Helper enter on the mounted program's timestamp ring.
+#[inline]
+pub(crate) fn helper_enter(id: usize) {
+    crate::xdp::ingress::XDP_PROG.timestamp.helper_enter(id);
+}
+
+/// Helper leave on the mounted program's timestamp ring.
+#[inline]
+pub(crate) fn helper_leave(id: usize) {
+    crate::xdp::ingress::XDP_PROG.timestamp.helper_leave(id);
 }

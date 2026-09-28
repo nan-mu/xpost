@@ -1,9 +1,9 @@
-//! Wi-Fi bring-up with native-XDP [`XdpProg`](::esp_radio::wifi::XdpProg).
+//! Wi-Fi bring-up with native-XDP [`xpost_type::XdpProg`].
 //!
-//! Passes [`crate::XDP_PROG`] into [`::esp_radio::wifi::new`]. Observation hooks
-//! are empty unless a `trace-*` feature fills them.
+//! Passes the crate-mounted program into [`::esp_radio::wifi::new`]. Observation
+//! hooks are empty unless a `trace-*` feature fills them via [`crate::ext::trace`].
 
-/// Create the Wi-Fi controller with [`crate::XDP_PROG`] as the XDP program.
+/// Create the Wi-Fi controller with the crate default XDP program.
 pub fn new<'d>(
     device: esp_hal::peripherals::WIFI<'d>,
     config: ::esp_radio::wifi::ControllerConfig,
@@ -14,5 +14,5 @@ pub fn new<'d>(
     ),
     ::esp_radio::wifi::WifiError,
 > {
-    ::esp_radio::wifi::new(device, config, &crate::XDP_PROG)
+    ::esp_radio::wifi::new(device, config, &super::XDP_PROG)
 }

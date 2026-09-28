@@ -6,7 +6,7 @@
 //! | Module | Feature | Notes |
 //! |--------|---------|-------|
 //! | [`ringbuf`] | `ringbuf` | incomplete → `compile_error!` |
-//! | [`trace`] | `trace-counter` / `trace-timestamp` | Observe / ring storage for [`crate::XDP_PROG`] |
+//! | [`trace`] | `trace-counter` / `trace-timestamp` | Observe + counter/timestamp face |
 //!
 //! Boot is firmware-first. Use [`crate::map::MapBuilder`] / [`crate::xdp::XdpBuilder`] directly.
 

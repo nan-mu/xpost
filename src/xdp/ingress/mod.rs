@@ -1,6 +1,6 @@
 //! RX ingress: build `xdp_md`, run leased XDP as the single `IN_FLIGHT` owner.
 //!
-//! Wi-Fi attach / [`XdpAction`](xpost_trait::XdpAction) → driver Action mapping
+//! Wi-Fi attach / [`XdpAction`](xpost_type::XdpAction) → driver Action mapping
 //! live in esp-radio; this module only owns the lease flight.
 //!
 //! **Stack contract (E3):** the XDP image runs on the **shared caller stack**
@@ -14,21 +14,25 @@
 //! (root `.cargo/config.toml` sets `--target riscv32imc-unknown-none-elf`).
 
 mod stack;
+mod prog;
 
 pub(crate) mod ctx;
 #[cfg(feature = "esp-radio")]
 pub(crate) mod esp_radio;
 
+pub(crate) use prog::XDP_PROG;
+#[cfg(feature = "trace-counter")]
+pub(crate) use prog::XdpProg;
+
 use core::sync::atomic::Ordering;
 
-use crate::trace::{inc_inactive_skip, inc_reentry, inc_stack_misalign};
 use crate::xdp::{
     ingress::ctx::XdpMd,
     state::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY},
 };
 
 /// Invoke scratch in `.bss`: `[sp, ra, s0..s11]` (14 × `usize`), byte offsets 0..52.
-/// Written/read only from RV32 asm in [`invoke`]; the `IN_FLIGHT` owner has it.
+/// Written/read only from RV32 asm in [`inner_xdp`]; the `IN_FLIGHT` owner has it.
 #[unsafe(link_section = ".bss")]
 static mut XDP_FRAME: [usize; 14] = [0; 14];
 
@@ -46,18 +50,18 @@ struct RunResult {
     window: PacketWindow,
 }
 
-/// Lease flight for [`crate::XDP_PROG`]'s [`XdpProg`](xpost_trait::XdpProg).
+/// Lease flight for the crate-mounted [`XdpProg`](prog::XdpProg).
 ///
-/// Returns Linux-style [`XdpAction`](xpost_trait::XdpAction) + window. Driver
+/// Returns Linux-style [`XdpAction`](xpost_type::XdpAction) + window. Driver
 /// maps to Pass/Drop/Tx. Invalid md windows bump soft-fail and fail closed.
 #[esp_hal::ram]
-pub(crate) fn xdp<'a>(frame: &'a mut [u8]) -> (xpost_trait::XdpAction, &'a mut [u8]) {
-    use xpost_trait::XdpAction;
+pub(crate) fn run<'a>(frame: &'a mut [u8]) -> (xpost_type::XdpAction, &'a mut [u8]) {
+    use xpost_type::XdpAction;
 
     if !ACTIVE.load(Ordering::Acquire) {
         return (XdpAction::Pass, frame);
     }
-    let Some(result) = inner_xdp(frame) else {
+    let Some(result) = xdp(frame) else {
         return (XdpAction::Pass, frame);
     };
     let act = XdpAction::from(result.action);
@@ -65,7 +69,8 @@ pub(crate) fn xdp<'a>(frame: &'a mut [u8]) -> (xpost_trait::XdpAction, &'a mut [
     let valid =
         (window.data.cast_const() == frame.as_ptr()) & (window.len <= frame.len());
     if !valid {
-        crate::trace::inc_bad_md();
+        #[cfg(feature = "trace-counter")]
+        crate::ext::trace::counter::inc_bad_md();
         let bad = match act {
             XdpAction::Tx => XdpAction::Drop,
             other => other,
@@ -75,12 +80,12 @@ pub(crate) fn xdp<'a>(frame: &'a mut [u8]) -> (xpost_trait::XdpAction, &'a mut [
     (act, &mut frame[..window.len])
 }
 
-/// Claim `IN_FLIGHT`, validate lease/entry, [`invoke`] the image, return md window.
+/// Claim `IN_FLIGHT`, validate lease/entry, [`inner_xdp`] the image, return md window.
 ///
 /// Returns `None` when not leased, raced with release, or reentrancy is
 /// detected. Caller treats as PASS.
 #[esp_hal::ram]
-fn inner_xdp(data: &mut [u8]) -> Option<RunResult> {
+fn xdp(data: &mut [u8]) -> Option<RunResult> {
     let mut ctx_md = XdpMd::from_buf(data);
     let ctx_ptr = &mut ctx_md as *mut XdpMd;
 
@@ -91,7 +96,8 @@ fn inner_xdp(data: &mut [u8]) -> Option<RunResult> {
         .compare_exchange(0, 1, Ordering::SeqCst, Ordering::Relaxed)
         .is_err()
     {
-        inc_reentry();
+        #[cfg(feature = "trace-counter")]
+        crate::ext::trace::counter::inc_reentry();
         return None;
     }
     // Dekker pair with `XdpRt::release` (ACTIVE=false → wait IN_FLIGHT==0):
@@ -103,10 +109,11 @@ fn inner_xdp(data: &mut [u8]) -> Option<RunResult> {
     };
     if entry == 0 {
         IN_FLIGHT.store(0, Ordering::Release);
-        inc_inactive_skip();
+        #[cfg(feature = "trace-counter")]
+        crate::ext::trace::counter::inc_inactive_skip();
         return None;
     }
-    let action = unsafe { invoke(entry, ctx_ptr) };
+    let action = unsafe { inner_xdp(entry, ctx_ptr) };
     IN_FLIGHT.store(0, Ordering::Release);
 
     let data = ctx_md.data;
@@ -125,7 +132,7 @@ fn inner_xdp(data: &mut [u8]) -> Option<RunResult> {
 /// `entry` must be a live IRAM XDP entry; `ctx` must remain valid for the call.
 /// Caller must own `IN_FLIGHT` for the whole call (protects `XDP_FRAME`).
 #[inline(always)]
-unsafe fn invoke(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
+unsafe fn inner_xdp(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
     stack::paint_canary();
 
     let sp: usize;
@@ -133,7 +140,8 @@ unsafe fn invoke(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
         core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
     }
     if sp & 15 != 0 {
-        inc_stack_misalign();
+        #[cfg(feature = "trace-counter")]
+        crate::ext::trace::counter::inc_stack_misalign();
         return 2; // XDP_PASS
     }
 

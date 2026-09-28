@@ -1,6 +1,10 @@
-//! Shared XDP program / observe traits for esp-radio ↔ xpost.
+//! Shared XDP program / observe types for esp-radio ↔ xpost.
 //!
 //! `no_std`, no chip deps. Enable `defmt` for [`XdpAction`] formatting.
+//!
+//! Hierarchy: [`Observe`]: [`XdpProg`] — observation extends a program.
+//! A bare [`XdpProg`] need not implement [`Observe`]. Storage types (counters)
+//! are not [`Observe`]; only the mounted prog is.
 
 #![no_std]
 
@@ -48,11 +52,21 @@ impl fmt::Display for XdpAction {
     }
 }
 
-/// Zero-arg observation hooks for native-XDP / xdp_tx paths.
+/// Program mounted on the Wi-Fi RX ingress path.
 ///
-/// The driver only **calls** these; counting and timestamps are owned by the
-/// [`XdpProg`] implementor.
-pub trait Observe {
+/// `run` returns Linux-style [`XdpAction`] plus a visible window (subslice of
+/// `frame`). The driver maps that to Pass / Drop / Tx.
+pub trait XdpProg: Send + Sync {
+    /// Inspect/modify `frame` and return an [`XdpAction`] plus the visible window.
+    fn run<'a>(&self, frame: &'a mut [u8]) -> (XdpAction, &'a mut [u8]);
+}
+
+/// Observation hooks layered on a mounted [`XdpProg`].
+///
+/// The driver only **calls** these (when `xdp-observe` is enabled); counting
+/// and timestamps are owned by the implementor. Counter-like storage is not
+/// an [`Observe`] — only the program is.
+pub trait Observe: XdpProg {
     /// RX dispatch enter, before [`XdpProg::run`].
     fn on_rx_enter(&self) {}
     /// About to call [`XdpProg::run`].
@@ -108,13 +122,4 @@ pub trait Observe {
     fn on_tx_flow_sample(&self) {}
     /// TX log ring drop.
     fn on_tx_log_dropped(&self) {}
-}
-
-/// Program mounted on the Wi-Fi RX ingress path.
-///
-/// `run` returns Linux-style [`XdpAction`] plus a visible window (subslice of
-/// `frame`). The driver maps that to Pass / Drop / Tx.
-pub trait XdpProg: Send + Sync + Observe {
-    /// Inspect/modify `frame` and return an [`XdpAction`] plus the visible window.
-    fn run<'a>(&self, frame: &'a mut [u8]) -> (XdpAction, &'a mut [u8]);
 }

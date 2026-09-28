@@ -1,12 +1,11 @@
 //! Driver Observe counters (`feature = "trace-counter"`).
 //!
-//! [`Counter`] owns atomics and implements [`Observe`]. The attach target is
-//! always [`crate::XDP_PROG`] ([`crate::trace::Trace`]), which forwards here.
+//! [`Counter`] owns atomics; [`Observe`](xpost_type::Observe) on the mounted
+//! ingress program forwards hook bodies here. Apps read via [`super::counter`].
 
 use core::sync::atomic::Ordering;
 
 use portable_atomic::{AtomicI32, AtomicU32, AtomicUsize};
-use xpost_trait::Observe;
 
 /// Atomic counters for esp-radio Observe + xpost soft-fail paths.
 pub struct Counter {
@@ -408,58 +407,71 @@ impl Counter {
     }
 }
 
-impl Observe for Counter {
-    fn on_drop(&self) {
+impl Counter {
+    #[inline]
+    pub(crate) fn on_drop(&self) {
         self.drop.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_fail_bad_buf(&self) {
+    #[inline]
+    pub(crate) fn on_tx_fail_bad_buf(&self) {
         self.tx_fail_bad_buf.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_fail_token(&self) {
+    #[inline]
+    pub(crate) fn on_tx_fail_token(&self) {
         self.tx_fail_token.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_grp_src(&self) {
+    #[inline]
+    pub(crate) fn on_tx_grp_src(&self) {
         self.tx_grp_src.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_enqueued(&self) {
+    #[inline]
+    pub(crate) fn on_tx_enqueued(&self) {
         self.tx_enq.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_enq_fail_claim(&self) {
+    #[inline]
+    pub(crate) fn on_tx_enq_fail_claim(&self) {
         self.tx_enq_fail_claim.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_enq_fail_ring(&self) {
+    #[inline]
+    pub(crate) fn on_tx_enq_fail_ring(&self) {
         self.tx_enq_fail_ring.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_kick(&self) {
+    #[inline]
+    pub(crate) fn on_tx_kick(&self) {
         self.tx_kick.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_poll(&self) {
+    #[inline]
+    pub(crate) fn on_tx_poll(&self) {
         self.tx_poll.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_cap_wait(&self) {
+    #[inline]
+    pub(crate) fn on_tx_cap_wait(&self) {
         self.tx_cap_wait.fetch_add(1, Ordering::Relaxed);
         self.note_block_start();
     }
 
-    fn on_tx_nomem_wait(&self) {
+    #[inline]
+    pub(crate) fn on_tx_nomem_wait(&self) {
         self.tx_nomem_wait.fetch_add(1, Ordering::Relaxed);
         self.note_block_start();
     }
 
-    fn on_tx_submit_ok(&self) {
+    #[inline]
+    pub(crate) fn on_tx_submit_ok(&self) {
         self.tx_drain_ok.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_submit_fail(&self) {
+    #[inline]
+    pub(crate) fn on_tx_submit_fail(&self) {
         self.tx_submit_fail.fetch_add(1, Ordering::Relaxed);
         self.tx_wifi_last_rc.store(
             esp_radio::wifi::xdp_tx_last_drain_rc(),
@@ -467,43 +479,89 @@ impl Observe for Counter {
         );
     }
 
-    fn on_tx_no_retain(&self) {
+    #[inline]
+    pub(crate) fn on_tx_no_retain(&self) {
         self.tx_no_retain.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_flush(&self) {
+    #[inline]
+    pub(crate) fn on_tx_flush(&self) {
         self.tx_flush.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_air_done(&self) {
+    #[inline]
+    pub(crate) fn on_tx_air_done(&self) {
         self.tx_air_done.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_air_done_fail(&self) {
+    #[inline]
+    pub(crate) fn on_tx_air_done_fail(&self) {
         self.tx_air_done_fail.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_netstack_ref(&self) {
+    #[inline]
+    pub(crate) fn on_tx_netstack_ref(&self) {
         self.tx_ns_ref.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_netstack_free(&self) {
+    #[inline]
+    pub(crate) fn on_tx_netstack_free(&self) {
         self.tx_ns_free.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_depth_sample(&self) {
+    #[inline]
+    pub(crate) fn on_tx_depth_sample(&self) {
         self.depth_sample();
     }
 
-    fn on_tx_block_sample(&self) {
+    #[inline]
+    pub(crate) fn on_tx_block_sample(&self) {
         self.note_block_end();
     }
 
-    fn on_tx_flow_sample(&self) {
+    #[inline]
+    pub(crate) fn on_tx_flow_sample(&self) {
         self.tx_flow_sample.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_tx_log_dropped(&self) {
+    #[inline]
+    pub(crate) fn on_tx_log_dropped(&self) {
         self.tx_log_dropped.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Soft-fail bumps on the mounted program.
+#[inline]
+pub(crate) fn inc_inactive_skip() {
+    crate::xdp::ingress::XDP_PROG.counter.inc_inactive_skip();
+}
+
+#[inline]
+pub(crate) fn inc_reentry() {
+    crate::xdp::ingress::XDP_PROG.counter.inc_reentry();
+}
+
+#[inline]
+pub(crate) fn inc_stack_misalign() {
+    crate::xdp::ingress::XDP_PROG.counter.inc_stack_misalign();
+}
+
+#[inline]
+pub(crate) fn inc_bad_md() {
+    crate::xdp::ingress::XDP_PROG.counter.inc_bad_md();
+}
+
+#[inline]
+pub(crate) fn inc_helper_unresolved() {
+    crate::xdp::ingress::XDP_PROG.counter.inc_helper_unresolved();
+}
+
+#[inline]
+pub(crate) fn inc_helper_map() {
+    crate::xdp::ingress::XDP_PROG.counter.inc_helper_map();
+}
+
+#[inline]
+pub(crate) fn inc_pool_drop_misalign() {
+    crate::xdp::ingress::XDP_PROG.counter.inc_pool_drop_misalign();
 }

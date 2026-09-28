@@ -922,7 +922,7 @@ dependencies = [
  "num-traits",
  "portable-atomic",
  "portable_atomic_enum",
- "xpost-trait",
+ "xpost-type",
 ]
 
 [[package]]
@@ -2209,7 +2209,7 @@ dependencies = [
  "talc",
  "xpost-elf",
  "xpost-macros",
- "xpost-trait",
+ "xpost-type",
 ]
 
 [[package]]
@@ -2243,7 +2243,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "xpost-trait"
+name = "xpost-type"
 version = "0.1.0"
 
 [[package]]

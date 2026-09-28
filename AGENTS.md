@@ -106,20 +106,20 @@ aliases from meta `aot_binds` (`set_map_aliases`). There is no userspace
 Control-plane errors are `crate::error` (small enums per public entrypoint).
 BPF helper errno is `map::ops::MapOpError` (not nested into control-plane enums).
 
-### Trace (`xpost::XDP_PROG` / `xdp::XDP_PROG`)
+### Trace (`ext::trace` / ingress program)
 
-[`XDP_PROG`](crate::XDP_PROG) always exists and implements `xpost_trait::XdpProg`
-(re-exported as `esp_radio::wifi::XdpProg` under the `xdp` feature).
-With no features, `Observe` methods are empty defaults. Features only fill storage:
+The crate mounts a private `xdp::ingress::XdpProg` implementing `xpost_type::XdpProg`
+(re-exported as `esp_radio::wifi::XdpProg` under the `xdp` feature). Apps do **not**
+see `XDP_PROG`; they read via `ext::trace::counter()` / `timestamp()`.
 
-- `esp-radio` — `xpost::esp_radio::new` → `wifi::new(device, config, &XDP_PROG)`
-- `trace-counter` — `ext::trace::counter::Counter` (atomics + Observe bodies)
-- `trace-timestamp` — helper enter/leave ring on the same `XDP_PROG`
+- `esp-radio` — `xpost::esp_radio::new` → `wifi::new(device, config, &ingress::XDP_PROG)`
+- `trace-counter` — `ext::trace::counter::Counter` + `Observe` on the mounted prog
+- `trace-timestamp` — helper enter/leave ring on the same prog
 
-Traits live in the `xpost-trait` crate so esp-radio (xdp feature) and xpost share
-one declaration. esp-radio owns RX / `XdpAction`→`Action` mapping / Observe call-sites;
-`Trace::run` only invokes the leased XDP image. App fields like `net_rx` stay
-in the firmware crate.
+Traits live in the `xpost-type` crate so esp-radio (xdp feature) and xpost share
+one declaration (`Observe: XdpProg`). esp-radio owns RX / `XdpAction`→`Action`
+mapping / Observe call-sites; `XdpProg::run` only invokes the leased XDP image.
+App fields like `net_rx` stay in the firmware crate.
 
 Optional / incomplete: `ext::ringbuf` behind Cargo feature `ringbuf` (currently
 `compile_error!`).
