@@ -1,4 +1,4 @@
-"""CREATE IF NOT EXISTS for experiment_* and just_tx_rtt_* (loads xpost-test/sql/*.sql)."""
+"""CREATE IF NOT EXISTS for just_tx_* / just_drop_* (loads xpost-test/sql/*.sql)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from utils.db import connect, dsn_summary, schema
 
 # xpost/benchmark/utils/this → xpost/xpost-test/sql
 _SQL_DIR = Path(__file__).resolve().parents[2] / "xpost-test" / "sql"
-_SQL_FILES = ("experiment_pps.sql", "just_tx_rtt.sql")
+_SQL_FILES = ("just_tx.sql", "just_drop.sql")
 
 
 def main() -> None:
@@ -23,7 +23,7 @@ def main() -> None:
             print(f"  apply {path.relative_to(_SQL_DIR.parent.parent)}")
             conn.execute(text)
         conn.commit()
-    print("ok: experiment_* / just_tx_rtt_*")
+    print("ok: just_tx_* / just_drop_*")
 
 
 if __name__ == "__main__":

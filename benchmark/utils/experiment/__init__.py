@@ -16,11 +16,16 @@ from .figures import (
     figure_tx_rtt_boxplot,
     figure_tx_rtt_loss_vs_rate,
     figure_tx_rtt_return_pps,
+    figure_tx_rtt_vs_pps,
 )
 from .io import (
     load_counter_samples,
+    load_just_tx_config,
+    load_just_tx_rtts,
+    load_just_tx_rtt_points,
     load_just_tx_rtt_runs,
     load_just_tx_rtt_samples,
+    load_just_tx_window_stats,
     load_runs,
     load_sample_reads,
 )
@@ -68,6 +73,10 @@ __all__ = [
     "detect_linear_trend",
     "simulate_poisson_counts",
     "load_runs",
+    "load_just_tx_config",
+    "load_just_tx_window_stats",
+    "load_just_tx_rtts",
+    "load_just_tx_rtt_points",
     "load_just_tx_rtt_runs",
     "load_just_tx_rtt_samples",
     "load_counter_samples",
@@ -77,6 +86,7 @@ __all__ = [
     "figure_tx_pps_mean",
     "figure_tx_rtt_loss_vs_rate",
     "figure_tx_rtt_boxplot",
+    "figure_tx_rtt_vs_pps",
     "figure_tx_rtt_return_pps",
     "figure2_noise",
 ]

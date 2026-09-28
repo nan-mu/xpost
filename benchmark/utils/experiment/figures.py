@@ -368,23 +368,215 @@ def figure_tx_rtt_boxplot(
         return fig, ax
 
 
+def _rtt_at_rate(pps: np.ndarray, rtt_ms: np.ndarray, rate: float) -> np.ndarray:
+    m = np.isfinite(pps) & np.isfinite(rtt_ms) & np.isclose(pps, rate)
+    return rtt_ms[m]
+
+
+def _draw_grouped_rtt_boxes(
+    ax: Axes,
+    *,
+    rates: Sequence[float],
+    hx: np.ndarray,
+    hy: np.ndarray,
+    xx: np.ndarray,
+    xy: np.ndarray,
+) -> None:
+    """HAL / XDP side-by-side boxes at each rate; caller owns labels / ylim."""
+    if not rates:
+        return
+    width = 0.34
+    positions_hal = [i - width / 2 for i in range(len(rates))]
+    positions_xdp = [i + width / 2 for i in range(len(rates))]
+    for data, positions, color in (
+        ([_rtt_at_rate(hx, hy, r) for r in rates], positions_hal, _PPS),
+        ([_rtt_at_rate(xx, xy, r) for r in rates], positions_xdp, _ADEV),
+    ):
+        use = [(d, p) for d, p in zip(data, positions) if d.size > 0]
+        if not use:
+            continue
+        ds, ps = zip(*use)
+        bp = ax.boxplot(
+            list(ds),
+            positions=list(ps),
+            widths=width * 0.92,
+            patch_artist=True,
+            showfliers=False,
+            manage_ticks=False,
+        )
+        for patch in bp["boxes"]:
+            patch.set_facecolor(color)
+            patch.set_alpha(0.85)
+            patch.set_edgecolor(_INK)
+        for key in ("whiskers", "caps", "medians"):
+            for line in bp[key]:
+                line.set_color(_INK)
+                line.set_linewidth(0.8)
+    ax.set_xticks(list(range(len(rates))))
+    ax.set_xticklabels([f"{int(r)}" if float(r).is_integer() else f"{r:g}" for r in rates])
+    ax.set_xlim(-0.7, len(rates) - 0.3)
+    ax.set_ylim(bottom=0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def figure_tx_rtt_vs_pps(
+    *,
+    hal_pps: Sequence[float],
+    hal_rtt_ms: Sequence[float],
+    xdp_pps: Sequence[float],
+    xdp_rtt_ms: Sequence[float],
+    title: str = "RTT vs send rate",
+    split_at_pps: float = 1800.0,
+) -> tuple[Figure, Axes]:
+    """Two-panel grouped boxplots: low vs high pps, independent y scales."""
+    with plt.rc_context(_RC):
+        fig, axes = plt.subplots(1, 2, figsize=(7.6, 3.8), sharey=False)
+        hx = np.asarray(hal_pps, dtype=float)
+        hy = np.asarray(hal_rtt_ms, dtype=float)
+        xx = np.asarray(xdp_pps, dtype=float)
+        xy = np.asarray(xdp_rtt_ms, dtype=float)
+        rates = sorted(
+            {
+                float(r)
+                for r in np.unique(np.concatenate([hx[np.isfinite(hx)], xx[np.isfinite(xx)]]))
+            }
+        )
+        low = [r for r in rates if r < split_at_pps]
+        high = [r for r in rates if r >= split_at_pps]
+        def _panel_title(rs: list[float], fallback: str) -> str:
+            if not rs:
+                return fallback
+            a, b = rs[0], rs[-1]
+            fa = f"{int(a)}" if float(a).is_integer() else f"{a:g}"
+            fb = f"{int(b)}" if float(b).is_integer() else f"{b:g}"
+            return f"{fa}–{fb} pps"
+
+        panels = (
+            (axes[0], low, _panel_title(low, "low pps")),
+            (axes[1], high, _panel_title(high, "high pps")),
+        )
+        for ax, panel_rates, panel_title in panels:
+            _draw_grouped_rtt_boxes(ax, rates=panel_rates, hx=hx, hy=hy, xx=xx, xy=xy)
+            ax.set_xlabel("pps")
+            ax.set_title(panel_title, fontsize=10, pad=6)
+        axes[0].set_ylabel("RTT (ms)")
+        from matplotlib.patches import Patch
+
+        fig.legend(
+            [Patch(facecolor=_PPS, edgecolor="none"), Patch(facecolor=_ADEV, edgecolor="none")],
+            ["HAL", "XDP"],
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.02),
+            ncol=2,
+            fontsize=8,
+            frameon=False,
+            handlelength=0.9,
+            columnspacing=1.2,
+        )
+        if title:
+            fig.suptitle(title, fontsize=11, y=1.08)
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
+        return fig, axes[0]
+
+
+def _as_float_or_nan(v) -> float:
+    if v is None:
+        return float("nan")
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+    return x if np.isfinite(x) else float("nan")
+
+
+def _err_from_bounds(
+    y: Sequence[float | None],
+    y_lo: Sequence[float | None] | None,
+    y_hi: Sequence[float | None] | None,
+) -> np.ndarray | None:
+    """Build (2, n) absolute errorbar deltas from absolute lo/hi bounds."""
+    if y_lo is None or y_hi is None:
+        return None
+    med = np.asarray([_as_float_or_nan(v) for v in y], dtype=float)
+    lo = np.asarray([_as_float_or_nan(v) for v in y_lo], dtype=float)
+    hi = np.asarray([_as_float_or_nan(v) for v in y_hi], dtype=float)
+    err = np.vstack([np.maximum(0.0, med - lo), np.maximum(0.0, hi - med)])
+    return err
+
+
 def figure_tx_rtt_return_pps(
     *,
     rates_pps: Sequence[float],
     hal_return_pps: Sequence[float | None],
     xdp_return_pps: Sequence[float | None],
+    hal_return_lo: Sequence[float | None] | None = None,
+    hal_return_hi: Sequence[float | None] | None = None,
+    xdp_return_lo: Sequence[float | None] | None = None,
+    xdp_return_hi: Sequence[float | None] | None = None,
     title: str = "Return PPS vs send rate",
 ) -> tuple[Figure, Axes]:
-    """Lines: host-side paired return PPS at each send rate."""
+    """Median return PPS ± IQR vs send rate, with ideal y=x (capacity ceiling).
+
+    Ties together fig1 (loss = fall-off from y=x) and fig2 (RTT blow-up at saturation).
+    """
     with plt.rc_context(_RC):
         fig, ax = plt.subplots(figsize=(7.6, 3.6))
-        rates = list(rates_pps)
-        hal_y = [np.nan if v is None or not np.isfinite(v) else float(v) for v in hal_return_pps]
-        xdp_y = [np.nan if v is None or not np.isfinite(v) else float(v) for v in xdp_return_pps]
-        ax.plot(rates, hal_y, "o-", color=_PPS, lw=1.2, ms=4.5, label="HAL")
-        ax.plot(rates, xdp_y, "s-", color=_ADEV, lw=1.2, ms=4.5, label="XDP")
-        ax.set_xlabel("TR3000 send rate (pps)")
+        rates = np.asarray(list(rates_pps), dtype=float)
+        # Slight x offset so HAL / XDP error bars do not stack.
+        dx = 40.0 if rates.size else 0.0
+        hal_y = np.asarray([_as_float_or_nan(v) for v in hal_return_pps], dtype=float)
+        xdp_y = np.asarray([_as_float_or_nan(v) for v in xdp_return_pps], dtype=float)
+        hal_err = _err_from_bounds(hal_return_pps, hal_return_lo, hal_return_hi)
+        xdp_err = _err_from_bounds(xdp_return_pps, xdp_return_lo, xdp_return_hi)
+        if rates.size:
+            x0, x1 = float(rates.min()), float(rates.max())
+            ideal = np.linspace(x0, x1, 200)
+            ax.plot(
+                ideal,
+                ideal,
+                color=_INK,
+                ls="--",
+                lw=1.2,
+                zorder=1,
+                label=r"$y=x$ (ideal)",
+            )
+        ax.errorbar(
+            rates - dx,
+            hal_y,
+            yerr=hal_err,
+            fmt="o-",
+            color=_PPS,
+            lw=1.2,
+            ms=4.5,
+            capsize=2.5,
+            elinewidth=0.8,
+            zorder=3,
+            label="HAL",
+        )
+        ax.errorbar(
+            rates + dx,
+            xdp_y,
+            yerr=xdp_err,
+            fmt="s-",
+            color=_ADEV,
+            lw=1.2,
+            ms=4.5,
+            capsize=2.5,
+            elinewidth=0.8,
+            zorder=3,
+            label="XDP",
+        )
+        if rates.size:
+            ax.set_xticks([float(r) for r in rates])
+            ax.set_xticklabels(
+                [f"{int(r)}" if float(r).is_integer() else f"{r:g}" for r in rates]
+            )
+            pad = max(dx * 2.5, 0.03 * (x1 - x0 + 1.0))
+            ax.set_xlim(x0 - pad, x1 + pad)
+        ax.set_xlabel("pps")
         ax.set_ylabel("return PPS")
+        ax.set_ylim(bottom=0)
         ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}"))
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
