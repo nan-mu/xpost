@@ -219,29 +219,29 @@ fn parse_slots(meta: &toml::Table) -> Result<Vec<SlotEntry>> {
 
     // Flat form: count + length (+ optional mounts left as rx/call default).
     let slots_t = meta.get("slots").and_then(|v| v.as_table());
-    if let Some(s) = slots_t {
-        if let (Some(count), Some(length)) = (
+    if let Some(s) = slots_t
+        && let (Some(count), Some(length)) = (
             s.get("count").and_then(|v| v.as_integer()),
             s.get("length").and_then(|v| v.as_integer()),
-        ) {
-            let count = count as usize;
-            let length = length as usize;
-            let mut out = Vec::with_capacity(count);
-            for i in 0..count {
-                let primary = i == 0;
-                out.push(SlotEntry {
-                    name: format!("slot{i}"),
-                    length,
-                    mount: if primary {
-                        MountKind::Rx
-                    } else {
-                        MountKind::Call
-                    },
-                    primary,
-                });
-            }
-            return Ok(out);
+        )
+    {
+        let count = count as usize;
+        let length = length as usize;
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let primary = i == 0;
+            out.push(SlotEntry {
+                name: format!("slot{i}"),
+                length,
+                mount: if primary {
+                    MountKind::Rx
+                } else {
+                    MountKind::Call
+                },
+                primary,
+            });
         }
+        return Ok(out);
     }
 
     Ok(XpostMetadata::default_esp32c3().slots)
@@ -332,10 +332,10 @@ pub fn resolve_layout(
     let mut meta = crate_meta.clone();
     if let Some(board) = board_dir {
         let board_cargo = board.join("Cargo.toml");
-        if board_cargo.is_file() {
-            if let Some(over) = load_from_cargo_toml(&board_cargo)? {
-                merge_metadata(&mut meta, &over);
-            }
+        if board_cargo.is_file()
+            && let Some(over) = load_from_cargo_toml(&board_cargo)?
+        {
+            merge_metadata(&mut meta, &over);
         }
         apply_cold_from_partitions(&mut meta, board)?;
     }
@@ -397,10 +397,11 @@ fn layout_from_metadata(meta: &XpostMetadata) -> Result<Layout> {
     if meta.slots.is_empty() {
         bail!("metadata.xpost.slots empty");
     }
-    if let Some(t) = &meta.xdp_table {
-        if t.partition.is_some() && t.flash_len == 0 {
-            bail!("xdp_table.partition set but flash_len still 0 (need partitions.csv)");
-        }
+    if let Some(t) = &meta.xdp_table
+        && t.partition.is_some()
+        && t.flash_len == 0
+    {
+        bail!("xdp_table.partition set but flash_len still 0 (need partitions.csv)");
     }
     // Default: helper-only IRAM patch window. Slot buffers are firmware-owned
     // (base 0 = not pinned by custom-sections.x).

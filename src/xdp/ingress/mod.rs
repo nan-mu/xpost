@@ -22,9 +22,9 @@ pub(crate) mod esp_radio;
 use core::sync::atomic::Ordering;
 
 use crate::xdp::{
+    counter::{inc_inactive_skip, inc_reentry, inc_stack_misalign},
     ingress::ctx::XdpMd,
     state::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY},
-    counter::{inc_inactive_skip, inc_reentry, inc_stack_misalign},
 };
 
 /// Invoke scratch in `.bss`: `[sp, ra, s0..s11]` (14 × `usize`), byte offsets 0..52.

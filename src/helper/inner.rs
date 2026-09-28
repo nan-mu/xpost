@@ -190,10 +190,7 @@ pub(super) mod printk {
         for token in tokens {
             match token {
                 Token::Text(s) => {
-                    let text = match core::str::from_utf8(s) {
-                        Ok(s) => s,
-                        Err(_e) => "",
-                    };
+                    let text = core::str::from_utf8(s).unwrap_or_default();
                     let _ = write!(buf, "{}", text);
                 }
                 Token::Spec(spec_type) => {

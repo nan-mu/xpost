@@ -1,6 +1,6 @@
 //! Root dispatcher: `cargo xtask sync …` or `cargo xtask <example> <cmd…>`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result, bail};
@@ -101,7 +101,7 @@ fn main() -> Result<ExitCode> {
     dispatch_example(&root, &example, &args)
 }
 
-fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
+fn run_sync(root: &Path, action: SyncAction) -> Result<ExitCode> {
     let crate_manifest = root.join("Cargo.toml");
     let tmp_out = root.join("target/xpost-sync");
     match action {
@@ -118,12 +118,12 @@ fn run_sync(root: &PathBuf, action: SyncAction) -> Result<ExitCode> {
             for line in report.lines {
                 println!("{line}");
             }
-            if let Some(board) = board.as_ref() {
-                if let Some(table) = report.meta.xdp_table.as_ref() {
-                    let csv = board.join("partitions.csv");
-                    if csv.is_file() {
-                        xpost_build::validate_xdp_table_against_partitions(table, &csv)?;
-                    }
+            if let Some(board) = board.as_ref()
+                && let Some(table) = report.meta.xdp_table.as_ref()
+            {
+                let csv = board.join("partitions.csv");
+                if csv.is_file() {
+                    xpost_build::validate_xdp_table_against_partitions(table, &csv)?;
                 }
             }
         }

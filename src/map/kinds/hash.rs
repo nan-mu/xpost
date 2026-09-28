@@ -2,7 +2,10 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use core::{alloc::Layout, hash::{Hash, Hasher}};
+use core::{
+    alloc::Layout,
+    hash::{Hash, Hasher},
+};
 
 use allocator_api2::{alloc::AllocError, boxed::Box};
 use hashbrown::HashMap;
@@ -62,8 +65,6 @@ impl KeyBlob {
 
 /// Opaque value slot for [`BpfHashMap`].
 pub(crate) struct ValSlot {
-    #[allow(dead_code)]
-    len: usize,
     data: [u8; MAX_VAL_BYTES],
 }
 
@@ -74,10 +75,7 @@ impl ValSlot {
         }
         let mut data = [0u8; MAX_VAL_BYTES];
         data[..bytes.len()].copy_from_slice(bytes);
-        Some(Self {
-            len: bytes.len(),
-            data,
-        })
+        Some(Self { data })
     }
 
     unsafe fn from_ptr(p: *const u8, len: usize) -> Option<Self> {
@@ -99,18 +97,6 @@ pub(crate) struct BpfHashMap {
     pub(crate) value_size: usize,
     pub(crate) max_entries: usize,
     table: BpfHashTable,
-}
-
-impl BpfHashMap {
-    #[inline]
-    pub fn table(&self) -> &BpfHashTable {
-        &self.table
-    }
-
-    #[inline]
-    pub fn table_mut(&mut self) -> &mut BpfHashTable {
-        &mut self.table
-    }
 }
 
 impl MapOps for BpfHashMap {
@@ -165,7 +151,7 @@ fn alloc_bpf_hash(
     key_size: usize,
     value_size: usize,
     max_entries: usize,
-) -> Result<(*mut u8, Layout, usize, usize), AllocError> {
+) -> Result<(*mut u8, Layout), AllocError> {
     if key_size == 0 || key_size > MAX_KEY_BYTES || value_size == 0 || value_size > MAX_VAL_BYTES {
         return Err(AllocError);
     }
@@ -180,7 +166,7 @@ fn alloc_bpf_hash(
     let boxed = Box::try_new_in(map, allocator())?;
     let raw = Box::into_raw(boxed) as *mut u8;
     let layout = Layout::new::<BpfHashMap>();
-    Ok((raw, layout, key_size, value_size))
+    Ok((raw, layout))
 }
 
 pub(crate) fn alloc_hash_storage(
@@ -188,14 +174,11 @@ pub(crate) fn alloc_hash_storage(
     value_size: usize,
     max_entries: usize,
 ) -> Result<RawResource, AllocError> {
-    let (raw, layout, key_size, value_size) = alloc_bpf_hash(key_size, value_size, max_entries)?;
+    let (raw, layout) = alloc_bpf_hash(key_size, value_size, max_entries)?;
     Ok(RawResource::build(
         raw,
         layout,
         drop_hash,
         Some(MapType::Hash),
-        key_size,
-        value_size,
-        value_size,
     ))
 }

@@ -133,7 +133,7 @@ fn size_bytes(
 ) -> Result<usize> {
     let from_layout = {
         let sum: usize = bits.iter().map(|&b| usize::from(b)).sum();
-        if sum % 8 != 0 {
+        if !sum.is_multiple_of(8) {
             bail!("{key}: layout bit sum {sum} is not byte-aligned");
         }
         sum / 8
@@ -284,7 +284,7 @@ fn check_layout(bits: &[u8], max_bytes: usize) -> Result<()> {
         bail!("layout must have 1..32 descriptors; empty is not None");
     }
     let sum: usize = bits.iter().map(|&b| usize::from(b)).sum();
-    if sum % 8 != 0 || sum > max_bytes * 8 {
+    if !sum.is_multiple_of(8) || sum > max_bytes * 8 {
         bail!("layout must span whole bytes and at most {max_bytes} bytes");
     }
     Ok(())

@@ -106,6 +106,11 @@ fn put_varint(out: &mut [u8], mut i: usize, mut x: u64) -> Option<usize> {
     }
 }
 
+/// Protobuf wire tag for wire type 0 (varint): `(field << 3) | 0`.
+fn tag_varint(field: u64) -> u64 {
+    field << 3
+}
+
 fn skip_field(buf: &[u8], i: &mut usize, wt: u32) -> Result<(), DecodeError> {
     match wt {
         0 => {
@@ -214,14 +219,14 @@ pub fn hot_swap_rx_op(region: u32, payload: &[u8]) -> HotLoadOp<'_> {
 
 pub fn encode_op(op: &HotLoadOp<'_>, out: &mut [u8]) -> Option<usize> {
     let mut i = 0usize;
-    i = put_varint(out, i, (1u64 << 3) | 0)?;
+    i = put_varint(out, i, tag_varint(1))?;
     i = put_varint(out, i, op.kind as u64)?;
     if op.region != 0 {
-        i = put_varint(out, i, (2u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(2))?;
         i = put_varint(out, i, op.region as u64)?;
     }
     if op.dram_slot != 0 {
-        i = put_varint(out, i, (3u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(3))?;
         i = put_varint(out, i, op.dram_slot as u64)?;
     }
     if !op.payload.is_empty() {
@@ -234,11 +239,11 @@ pub fn encode_op(op: &HotLoadOp<'_>, out: &mut [u8]) -> Option<usize> {
         i += op.payload.len();
     }
     if op.src != 0 {
-        i = put_varint(out, i, (5u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(5))?;
         i = put_varint(out, i, op.src as u64)?;
     }
     if op.dst != 0 {
-        i = put_varint(out, i, (6u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(6))?;
         i = put_varint(out, i, op.dst as u64)?;
     }
     Some(i)
@@ -313,32 +318,32 @@ pub fn decode_ack(buf: &[u8]) -> Result<HotLoadOpAck<'_>, DecodeError> {
 
 pub fn encode_ack(ack: &HotLoadOpAck<'_>, out: &mut [u8]) -> Option<usize> {
     let mut i = 0usize;
-    i = put_varint(out, i, (1u64 << 3) | 0)?;
+    i = put_varint(out, i, tag_varint(1))?;
     i = put_varint(out, i, ack.kind as u64)?;
     if ack.region != 0 {
-        i = put_varint(out, i, (2u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(2))?;
         i = put_varint(out, i, ack.region as u64)?;
     }
     if ack.dram_slot != 0 {
-        i = put_varint(out, i, (3u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(3))?;
         i = put_varint(out, i, ack.dram_slot as u64)?;
     }
-    i = put_varint(out, i, (4u64 << 3) | 0)?;
+    i = put_varint(out, i, tag_varint(4))?;
     i = put_varint(out, i, ack.status as u64)?;
     if ack.stashed_len != 0 {
-        i = put_varint(out, i, (5u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(5))?;
         i = put_varint(out, i, ack.stashed_len as u64)?;
     }
     if ack.loaded_len != 0 {
-        i = put_varint(out, i, (6u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(6))?;
         i = put_varint(out, i, ack.loaded_len as u64)?;
     }
     if ack.readback_len != 0 {
-        i = put_varint(out, i, (7u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(7))?;
         i = put_varint(out, i, ack.readback_len as u64)?;
     }
     if ack.copied_len != 0 {
-        i = put_varint(out, i, (8u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(8))?;
         i = put_varint(out, i, ack.copied_len as u64)?;
     }
     if ack.sample_len != 0 {

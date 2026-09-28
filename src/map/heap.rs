@@ -58,9 +58,6 @@ pub(crate) struct RawResource {
     pub(crate) layout: Layout,
     drop_fn: unsafe fn(*mut u8),
     pub(crate) kind: Option<MapType>,
-    pub(crate) key_size: usize,
-    pub(crate) value_size: usize,
-    pub(crate) value_stride: usize,
     pub(crate) users: u32,
 }
 
@@ -75,7 +72,7 @@ impl Drop for RawResource {
         }
         let addr = ptr as usize;
         let align = self.layout.align();
-        if addr % align != 0 {
+        if !addr.is_multiple_of(align) {
             crate::xdp::counter::inc_pool_drop_misalign();
             return;
         }
@@ -90,7 +87,7 @@ pub(crate) unsafe fn reclaim_talc_box<T>(ptr: *mut u8, _tag: &'static str) {
     }
     let addr = ptr as usize;
     let align = align_of::<T>();
-    if addr % align != 0 {
+    if !addr.is_multiple_of(align) {
         crate::xdp::counter::inc_pool_drop_misalign();
         return;
     }
@@ -106,9 +103,6 @@ impl RawResource {
             layout: Layout::from_size_align(1, 1).unwrap(),
             drop_fn: noop,
             kind: None,
-            key_size: 0,
-            value_size: 0,
-            value_stride: 0,
             users: 0,
         }
     }
@@ -118,28 +112,17 @@ impl RawResource {
         unsafe { &*(self.ptr as *const T) }
     }
 
-    #[inline]
-    pub(crate) unsafe fn as_mut<T>(&mut self) -> &mut T {
-        unsafe { &mut *(self.ptr as *mut T) }
-    }
-
     pub(crate) fn build(
         ptr: *mut u8,
         layout: Layout,
         drop_fn: unsafe fn(*mut u8),
         kind: Option<MapType>,
-        key_size: usize,
-        value_size: usize,
-        value_stride: usize,
     ) -> Self {
         Self {
             ptr,
             layout,
             drop_fn,
             kind,
-            key_size,
-            value_size,
-            value_stride,
             users: 0,
         }
     }
@@ -167,7 +150,6 @@ pub(crate) mod access {
         pub fn get(&self, id: &MapIdx) -> Option<StorageRef> {
             let meta = self.guard.meta.get(*id)?;
             Some(StorageRef {
-                id: *id,
                 kind: meta.storage.kind,
                 ptr: meta.storage.ptr as *const u8,
             })
@@ -176,7 +158,6 @@ pub(crate) mod access {
         pub fn get_mut(&mut self, id: &MapIdx) -> Option<StorageMut> {
             let meta = self.guard.meta.get_mut(*id)?;
             Some(StorageMut {
-                id: *id,
                 kind: meta.storage.kind,
                 ptr: meta.storage.ptr,
             })
@@ -184,7 +165,6 @@ pub(crate) mod access {
     }
 
     pub struct StorageRef {
-        pub id: MapIdx,
         kind: Option<MapType>,
         ptr: *const u8,
     }
@@ -200,7 +180,6 @@ pub(crate) mod access {
     }
 
     pub struct StorageMut {
-        pub id: MapIdx,
         kind: Option<MapType>,
         ptr: *mut u8,
     }

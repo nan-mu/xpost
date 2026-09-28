@@ -1,13 +1,13 @@
 //! XDP execution runtime. Control-plane mutation is serialized by `XDP_RT`;
 //! RX sees only the atomically published entry in `state`.
 
+pub mod counter;
 pub(crate) mod image;
 pub(crate) mod ingress;
 pub(crate) mod map;
 mod ready;
 pub(crate) mod slot;
 mod state;
-pub mod counter;
 pub(crate) mod table;
 // TODO: `pub(crate) mod faults` — sibling error counters for ELF collect / ingress / table
 // (see plan XDP ELF faults-module; not implemented this phase).
@@ -15,14 +15,14 @@ pub(crate) mod table;
 pub use crate::error::{
     XdpInitError, XdpLeaseError, XdpReleaseError, XdpSlotError, XdpSwitchError,
 };
+pub use crate::{RtMutex, RtMutexGuard};
 pub(crate) use image::XdpMeta;
 pub use image::{Complete, Incomplete, XdpBuilder, XdpLocation, XdpMaps};
-pub use crate::{RtMutex, RtMutexGuard};
 /// Locked [`XdpRt`].
 pub type XdpRtGuard<'a> = RtMutexGuard<'a, XdpRt>;
+pub use counter::{ERRORS, ErrorCounters, ErrorCountersSnapshot};
 pub use slot::{Slot, XdpSlot};
 pub use state::XDP_RT;
-pub use counter::{ERRORS, ErrorCounters, ErrorCountersSnapshot};
 pub use table::storage::ColdRegion;
 pub(crate) use table::storage::{DEFAULT_IMAGE_CAPACITY, EspFlashXdpTable, XdpTableStorage};
 
@@ -325,7 +325,11 @@ impl XdpRt {
                 let Some(loaded_id) = slot_state.image else {
                     return Err(ReadyError::PrimaryEmpty);
                 };
-                let meta = &self.images.get(loaded_id).ok_or(ReadyError::UnknownImage)?.meta;
+                let meta = &self
+                    .images
+                    .get(loaded_id)
+                    .ok_or(ReadyError::UnknownImage)?
+                    .meta;
                 match meta.location() {
                     XdpLocation::Slot { index } if index == primary => {}
                     _ => return Err(ReadyError::SlotMismatch),
@@ -410,7 +414,10 @@ impl XdpRt {
             core::ptr::write_bytes(dst.add(image_len), 0, capacity - image_len);
         }
         Self::fence_instruction_cache();
-        let slot_state = self.slots.get_mut(slot).ok_or(XdpSwitchError::UnknownSlot)?;
+        let slot_state = self
+            .slots
+            .get_mut(slot)
+            .ok_or(XdpSwitchError::UnknownSlot)?;
         slot_state.loaded_len = image_len;
         slot_state.image = Some(id);
         self.images
@@ -463,7 +470,7 @@ impl XdpRt {
                         self.rollback_map_users(maps);
                         return Err(XdpLeaseError::MissingMap);
                     };
-                    if !self.map_lease.refs.iter().any(|m| *m == map_id) {
+                    if !self.map_lease.refs.contains(&map_id) {
                         if let Err(e) = maps.add_user(map_id) {
                             self.rollback_map_users(maps);
                             return Err(e.into());
@@ -480,10 +487,10 @@ impl XdpRt {
                 crate::map::set_map_aliases(binds.as_slice())?;
                 crate::map::set_fast_arrays(maps, binds.as_slice());
             }
-        } else if let Some(id) = self.slots.get(self.primary).and_then(|s| s.image) {
-            if !self.images[id].meta.required_maps.is_empty() {
-                return Err(XdpLeaseError::MapsRequired);
-            }
+        } else if let Some(id) = self.slots.get(self.primary).and_then(|s| s.image)
+            && !self.images[id].meta.required_maps.is_empty()
+        {
+            return Err(XdpLeaseError::MapsRequired);
         }
         PRIMARY_ENTRY.store(entry, Ordering::Release);
         ACTIVE.store(true, Ordering::Release);

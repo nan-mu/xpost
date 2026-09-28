@@ -20,7 +20,7 @@ pub struct TestReport {
     pub cases: Vec<CaseReport>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CaseReport {
     pub test: String,
     pub case: String,
@@ -50,31 +50,6 @@ pub struct CaseReport {
     pub got_cell: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-}
-
-impl Default for CaseReport {
-    fn default() -> Self {
-        Self {
-            test: String::new(),
-            case: String::new(),
-            expect_echo: false,
-            got_echo: false,
-            expect_bounce: false,
-            got_bounce: false,
-            pass: false,
-            t0_ns: None,
-            t1_ns: None,
-            delta_ns: None,
-            seq: 0,
-            src_ip: String::new(),
-            dst_ip: String::new(),
-            expect_sport: None,
-            got_sport: None,
-            expect_cell: None,
-            got_cell: None,
-            error: None,
-        }
-    }
 }
 
 /// `T0/a` → (`T0`, `a`) when role is a single lowercase letter.
@@ -247,8 +222,8 @@ fn format_stage_table(out: &mut String, cases: &[CaseReport]) {
 fn format_legacy_table(out: &mut String, cases: &[CaseReport]) {
     let _ = writeln!(
         out,
-        "{:<10} {:<4} {:<3} {:<3} {:>10}  {:<15} {:<15} {}",
-        "CASE", "RES", "EXP", "GOT", "Δ", "SRC", "DST", "ERR"
+        "{:<10} {:<4} {:<3} {:<3} {:>10}  {:<15} {:<15} ERR",
+        "CASE", "RES", "EXP", "GOT", "Δ", "SRC", "DST"
     );
     for c in cases {
         let delta = format_delta(c.delta_ns);

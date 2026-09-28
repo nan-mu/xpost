@@ -47,10 +47,10 @@ impl FileSink {
     /// Create/truncate `path` and append each transcript line (flush after write).
     pub fn create(path: impl AsRef<Path>, tee_stdout: bool) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         let file = OpenOptions::new()
             .create(true)
@@ -119,7 +119,7 @@ impl VecSink {
     pub fn transcript(&self) -> Vec<String> {
         self.events()
             .iter()
-            .map(|e| format_line(e))
+            .map(format_line)
             .collect()
     }
 }

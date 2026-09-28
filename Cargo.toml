@@ -65,7 +65,6 @@ helper_length = 0x200
 xpost-macros     = { path = "xpost-macros" }
 xpost-elf        = { path = "xpost-elf" }
 log              = "0.4.27"
-anyhow           = { version = "1.0.104", default-features = false }
 critical-section = "1.2.0"
 heapless         = "0.9.3"
 nom              = { version = "8.0.0", default-features = false, features = ["alloc"] }

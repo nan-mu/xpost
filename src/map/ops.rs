@@ -3,7 +3,7 @@
 //! # Safety subset (ARRAY / HASH)
 //!
 //! - **ARRAY**: lookup / update; delete → Unsupported (Linux-aligned).
-//! - **HASH**: lookup / update / delete; flags `BPF_ANY|NOEXIST|EXIST`.
+//! - **HASH**: lookup / update / delete; flags `BPF_NOEXIST|EXIST` (0 = ANY).
 //! - **lookup null**: miss and pool Busy both return `0` (indistinguishable).
 //! - **value pointer**: valid for the rest of the current flight while the map
 //!   remains leased; delete (HASH) invalidates prior lookup pointers.
@@ -16,7 +16,6 @@ use crate::map::{
 };
 
 /// Linux `bpf_map_update_elem` flags (low bits).
-pub(crate) const BPF_ANY: u64 = 0;
 pub(crate) const BPF_NOEXIST: u64 = 1;
 pub(crate) const BPF_EXIST: u64 = 2;
 

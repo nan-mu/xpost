@@ -120,10 +120,10 @@ fn parse_subtype(ty: Type, s: &str) -> Result<SubType> {
             Err(Error::Msg(format!("invalid data subtype `{s}`")))
         }
         Type::Custom(_) => {
-            if let Some(v) = parse_u32(s) {
-                if v <= u8::MAX as u32 {
-                    return Ok(SubType::Custom(v as u8));
-                }
+            if let Some(v) = parse_u32(s)
+                && v <= u8::MAX as u32
+            {
+                return Ok(SubType::Custom(v as u8));
             }
             Err(Error::Msg(format!("invalid custom subtype `{s}`")))
         }

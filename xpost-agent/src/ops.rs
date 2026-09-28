@@ -132,10 +132,10 @@ fn flash_profile_inner(state: &Mutex<AgentState>, id: &str, peer: &str) -> Resul
     }
     let fw_sz = file_size(&firmware).unwrap_or(0);
     let xdp_path = entry.xdp_elf.as_ref().map(|p| root.join(p));
-    if let Some(ref xp) = xdp_path {
-        if !xp.is_file() {
-            bail!("xdp elf not found: {}", xp.display());
-        }
+    if let Some(ref xp) = xdp_path
+        && !xp.is_file()
+    {
+        bail!("xdp elf not found: {}", xp.display());
     }
     let xdp_name_owned = match (&entry.xdp_name, &xdp_path) {
         (Some(n), _) => Some(n.clone()),

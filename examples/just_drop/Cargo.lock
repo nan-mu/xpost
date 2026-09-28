@@ -2193,7 +2193,6 @@ version = "0.1.1"
 dependencies = [
  "allocator-api2 0.2.21",
  "allocator-api2 0.4.0",
- "anyhow",
  "critical-section",
  "embassy-sync 0.8.0",
  "embassy-time",

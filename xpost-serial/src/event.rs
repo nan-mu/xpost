@@ -1,7 +1,7 @@
 //! Typed serial transcript events. Ordered by [`Event::seq`] like a file.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::SystemTime;
 
 /// Host-side session mode (UART exclusivity).
@@ -253,6 +253,6 @@ pub(crate) fn port_label(port: Option<&std::path::Path>) -> String {
 }
 
 #[allow(dead_code)]
-pub(crate) fn path_buf_label(p: &PathBuf) -> String {
+pub(crate) fn path_buf_label(p: &Path) -> String {
     p.display().to_string()
 }

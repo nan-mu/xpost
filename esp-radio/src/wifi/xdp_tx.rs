@@ -448,9 +448,9 @@ pub(crate) fn on_tx_done(ok: bool) {
     TX_KICK.signal(());
     if TSFLOW_ON.load(Ordering::Relaxed) {
         let n = TX_DONE_SAMPLE.fetch_add(1, Ordering::Relaxed);
-        if n % FLOW_SAMPLE_EVERY == 0 {
-            let air = now_us().wrapping_sub(LAST_HANDOFF_US.load(Ordering::Relaxed));
-            warn!("tsflow_done n={n} us_air={air} infl={}", in_flight());
+        if n.is_multiple_of(FLOW_SAMPLE_EVERY) {
+            let _air = now_us().wrapping_sub(LAST_HANDOFF_US.load(Ordering::Relaxed));
+            warn!("tsflow_done n={n} us_air={_air} infl={}", in_flight());
         }
     }
 }
@@ -530,9 +530,9 @@ pub fn snapshot_log(out: &mut [TxLogEntry]) -> usize {
     let take = n.min(out.len());
     let w = TX_LOG_W.load(Ordering::Acquire);
     let start = if n < TX_LOG_CAP { 0 } else { w % TX_LOG_CAP };
-    for i in 0..take {
+    for (i, slot) in out.iter_mut().enumerate().take(take) {
         let idx = (start + i) % TX_LOG_CAP;
-        out[i] = TxLogEntry {
+        *slot = TxLogEntry {
             t_us: TX_LOG_T_US[idx].load(Ordering::Relaxed),
             kind: TX_LOG_KIND[idx].load(Ordering::Relaxed),
             pending: TX_LOG_PEND[idx].load(Ordering::Relaxed),
@@ -597,7 +597,7 @@ fn maybe_tsflow(t_enq: u32, t0: u32, t1: u32) {
         return;
     }
     let n = FLOW_TICK.fetch_add(1, Ordering::Relaxed);
-    if n % FLOW_SAMPLE_EVERY != 0 {
+    if !n.is_multiple_of(FLOW_SAMPLE_EVERY) {
         return;
     }
     STAT_FLOW_SAMPLES.fetch_add(1, Ordering::Relaxed);
@@ -626,7 +626,8 @@ fn note_peak(stat: &AtomicU32, n: u32) {
 }
 
 fn note_block_start() {
-    let _ = BLOCK_SINCE_US.compare_exchange(0, now_us().max(1), Ordering::Relaxed, Ordering::Relaxed);
+    let _ =
+        BLOCK_SINCE_US.compare_exchange(0, now_us().max(1), Ordering::Relaxed, Ordering::Relaxed);
 }
 
 fn note_block_end() {
@@ -703,7 +704,7 @@ fn token_from_raw(token: *mut c_void) -> Option<&'static RxBufferOwnership> {
         return None;
     }
     let off = addr - base;
-    if off % core::mem::size_of::<RxBufferOwnership>() != 0 {
+    if !off.is_multiple_of(core::mem::size_of::<RxBufferOwnership>()) {
         return None;
     }
     let i = off / core::mem::size_of::<RxBufferOwnership>();

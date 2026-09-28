@@ -198,7 +198,7 @@ impl<S: Sink> Session<S> {
         const SECTOR: u32 = 0x1000;
         let abs = self.cold_table.base;
         let len = self.cold_table.len;
-        if abs % SECTOR != 0 || len % SECTOR != 0 || len == 0 {
+        if !abs.is_multiple_of(SECTOR) || !len.is_multiple_of(SECTOR) || len == 0 {
             return Err(Error::Msg(format!(
                 "cold table {abs:#x}+{len:#x} must be non-empty and {SECTOR:#x}-aligned"
             )));

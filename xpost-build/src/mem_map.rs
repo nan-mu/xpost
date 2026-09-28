@@ -54,16 +54,16 @@ pub fn generate(layout: &Layout, out_dir: &Path) -> Result<MemMapGen> {
 
     validate_layout(iram_base, arena_end, helper_base, helper_len, &hot_regions)?;
 
-    write_mem_map_rs(
+    write_mem_map_rs(MemMapWrite {
         out_dir,
         helper_base,
         helper_len,
-        &hot_regions,
+        hot: &hot_regions,
         iram_base,
         arena_end,
-        layout.cold_table.as_ref(),
-        &layout.maps_names,
-    )?;
+        cold: layout.cold_table.as_ref(),
+        maps_names: &layout.maps_names,
+    })?;
     write_hot_slots_rs(out_dir, &hot_regions)?;
     let sections_path = write_custom_sections(out_dir, helper_base, helper_len, &hot_regions)?;
 
@@ -132,15 +132,28 @@ fn validate_layout(
     Ok(())
 }
 
-fn write_mem_map_rs(
-    out_dir: &Path,
+struct MemMapWrite<'a> {
+    out_dir: &'a Path,
     helper_base: usize,
     helper_len: usize,
-    hot: &[Region],
+    hot: &'a [Region],
     iram_base: usize,
     arena_end: usize,
-    cold: Option<&ColdTable>,
-    maps_names: &[String],
+    cold: Option<&'a ColdTable>,
+    maps_names: &'a [String],
+}
+
+fn write_mem_map_rs(
+    MemMapWrite {
+        out_dir,
+        helper_base,
+        helper_len,
+        hot,
+        iram_base,
+        arena_end,
+        cold,
+        maps_names,
+    }: MemMapWrite<'_>,
 ) -> Result<()> {
     let n = hot.len();
     let mut bases = String::new();

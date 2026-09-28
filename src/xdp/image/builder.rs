@@ -4,7 +4,7 @@ use alloc::{format, string::String};
 
 use crate::{
     error::XdpInitError,
-    map::{MapBuilder, MapIdx, MapMeta, MapRt, MapType},
+    map::{MapBuilder, MapIdx, MapMeta, MapRt},
     xdp::{XdpId, XdpRt, state::MAX_REQUIRED_MAPS},
 };
 
@@ -166,10 +166,8 @@ impl XdpBuilder<Incomplete> {
             helper_address: self.helper_address,
             required_maps: self.required_maps,
             aot_binds: self.aot_binds,
-            image_digest: self.image_digest,
             image_abs: self.image_abs,
             image_len: self.image_len,
-            container_abs: self.container_abs,
             container_len: self.container_len,
             location: XdpLocation::Table {
                 index: self.table_index,
@@ -222,7 +220,7 @@ impl XdpBuilder<Complete> {
         if self.image_len == 0 || self.image_len > cap {
             return Err(XdpInitError::ImageTooLarge);
         }
-        let (container_abs, container_len, image_abs) = if self.container_len != 0 {
+        let (_container_abs, container_len, image_abs) = if self.container_len != 0 {
             if self.container_len > cap {
                 return Err(XdpInitError::ImageTooLarge);
             }
@@ -231,7 +229,9 @@ impl XdpBuilder<Complete> {
             }
             (self.container_abs, self.container_len, self.image_abs)
         } else {
-            let offset = table_id.checked_mul(cap).ok_or(XdpInitError::TableIdOverflow)?;
+            let offset = table_id
+                .checked_mul(cap)
+                .ok_or(XdpInitError::TableIdOverflow)?;
             if offset.saturating_add(cap) > rt.table.capacity() {
                 return Err(XdpInitError::TableFull);
             }
@@ -243,10 +243,8 @@ impl XdpBuilder<Complete> {
             helper_address: self.helper_address,
             required_maps: self.required_maps,
             aot_binds: self.aot_binds,
-            image_digest: self.image_digest,
             image_abs,
             image_len: self.image_len,
-            container_abs,
             container_len,
             location: XdpLocation::Table { index: table_id },
         };
@@ -273,9 +271,11 @@ fn validate_layout(layout: &[u8], max_bytes: usize) -> Result<(), XdpInitError> 
         if b == 0 {
             return Err(XdpInitError::TypeMismatch);
         }
-        bits = bits.checked_add(b as usize).ok_or(XdpInitError::TypeMismatch)?;
+        bits = bits
+            .checked_add(b as usize)
+            .ok_or(XdpInitError::TypeMismatch)?;
     }
-    if bits % 8 != 0 || bits / 8 > max_bytes {
+    if !bits.is_multiple_of(8) || bits / 8 > max_bytes {
         return Err(XdpInitError::TypeMismatch);
     }
     Ok(())
@@ -319,13 +319,5 @@ pub(crate) fn map_builder_from_descriptor(
                 .with_capacity(len as usize))
         }
         _ => Err(XdpInitError::TypeMismatch),
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn map_type_wire(t: MapType) -> Option<u8> {
-    match t {
-        MapType::Hash => Some(BPF_MAP_TYPE_HASH),
-        MapType::Array => Some(BPF_MAP_TYPE_ARRAY),
     }
 }

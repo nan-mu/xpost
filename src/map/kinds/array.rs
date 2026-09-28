@@ -36,26 +36,16 @@ impl BpfArrayMap {
         unsafe { self.data.as_ptr().add(idx * self.value_stride) as *mut u8 }
     }
 
-    #[inline]
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    #[inline]
-    pub fn data_mut(&mut self) -> &mut [u8] {
-        &mut self.data
-    }
-
     /// Natural alignment for an opaque value of `value_size` bytes (no BTF).
     pub fn value_align(value_size: usize) -> usize {
         if value_size == 0 {
             return 1;
         }
-        if value_size % 8 == 0 {
+        if value_size.is_multiple_of(8) {
             8
-        } else if value_size % 4 == 0 {
+        } else if value_size.is_multiple_of(4) {
             4
-        } else if value_size % 2 == 0 {
+        } else if value_size.is_multiple_of(2) {
             2
         } else {
             1
@@ -109,7 +99,7 @@ impl MapOps for BpfArrayMap {
 fn alloc_array(
     value_size: usize,
     max_entries: usize,
-) -> Result<(*mut u8, core::alloc::Layout, usize, usize), AllocError> {
+) -> Result<(*mut u8, core::alloc::Layout), AllocError> {
     if value_size == 0 || value_size > MAX_ELEM_BYTES || max_entries == 0 {
         return Err(AllocError);
     }
@@ -131,7 +121,7 @@ fn alloc_array(
     let boxed = Box::try_new_in(map, allocator())?;
     let raw = Box::into_raw(boxed) as *mut u8;
     let layout = core::alloc::Layout::new::<BpfArrayMap>();
-    Ok((raw, layout, value_size, stride))
+    Ok((raw, layout))
 }
 
 unsafe fn drop_array(ptr: *mut u8) {
@@ -142,14 +132,11 @@ pub(crate) fn alloc_array_storage(
     value_size: usize,
     max_entries: usize,
 ) -> Result<RawResource, AllocError> {
-    let (raw, layout, value_size, stride) = alloc_array(value_size, max_entries)?;
+    let (raw, layout) = alloc_array(value_size, max_entries)?;
     Ok(RawResource::build(
         raw,
         layout,
         drop_array,
         Some(MapType::Array),
-        4,
-        value_size,
-        stride,
     ))
 }

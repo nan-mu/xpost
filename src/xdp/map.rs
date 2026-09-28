@@ -21,8 +21,6 @@ use crate::{
 /// One published VMR→RMA binding for helpers during lease.
 struct VmrBind {
     map_id: MapIdx,
-    #[allow(dead_code)] // retained for lease-time RMA audit / future helper paths
-    rma: usize,
 }
 
 /// VMR table keyed by AOT symbol VMA.
@@ -41,11 +39,11 @@ impl VmrTable {
         self.by_vma.clear();
     }
 
-    pub(crate) fn insert(&mut self, vma: usize, map_id: MapIdx, rma: usize) -> Result<(), ()> {
+    pub(crate) fn insert(&mut self, vma: usize, map_id: MapIdx) -> Result<(), ()> {
         if self.by_vma.len() >= MAX_VMR_BINDS && !self.by_vma.contains_key(&vma) {
             return Err(());
         }
-        match self.by_vma.insert(vma, VmrBind { map_id, rma }) {
+        match self.by_vma.insert(vma, VmrBind { map_id }) {
             Ok(_) => Ok(()),
             Err(_) => Err(()),
         }
@@ -92,8 +90,7 @@ impl XdpRt {
             MapUseError::NotFound => XdpLeaseError::MissingMap,
             MapUseError::TypeMismatch => XdpLeaseError::Map(e),
         })?;
-        let rma = maps.storage_ptr(map_id)?;
-        if !self.map_lease.refs.iter().any(|m| *m == map_id) {
+        if !self.map_lease.refs.contains(&map_id) {
             maps.add_user(map_id)?;
             self.map_lease
                 .refs
@@ -102,7 +99,7 @@ impl XdpRt {
         }
         self.map_lease
             .vmr
-            .insert(vma, map_id, rma)
+            .insert(vma, map_id)
             .map_err(|_| XdpLeaseError::AliasFull)?;
         Ok(())
     }

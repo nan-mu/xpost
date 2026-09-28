@@ -3,7 +3,7 @@
 //! Does **not** build AOT or copy binaries. Someone else must put
 //! `esp32c3.bin` + `bpf.toml` into each asset dir beforehand.
 
-use std::{fs, path::PathBuf};
+use std::{fs, path::{Path, PathBuf}};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -58,7 +58,7 @@ struct MapSection {
     aot_addr: u64,
 }
 
-fn read_variant(assets_root: &PathBuf, name: &str) -> Result<BpfToml> {
+fn read_variant(assets_root: &Path, name: &str) -> Result<BpfToml> {
     let dir = assets_root.join(name);
     let toml_path = dir.join("bpf.toml");
     let bin_path = dir.join("esp32c3.bin");
@@ -111,7 +111,7 @@ fn emit_variant(name: &str, bpf: &BpfToml) -> proc_macro2::TokenStream {
     }
 }
 
-fn write_meta_file(out_path: &PathBuf, header: &str, variants: &[(&str, BpfToml)]) -> Result<()> {
+fn write_meta_file(out_path: &Path, header: &str, variants: &[(&str, BpfToml)]) -> Result<()> {
     let mods: Vec<_> = variants
         .iter()
         .map(|(name, bpf)| emit_variant(name, bpf))

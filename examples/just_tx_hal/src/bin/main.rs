@@ -94,14 +94,11 @@ async fn main(spawner: Spawner) -> ! {
                     .with_ssid(ssid)
                     .with_password(pass.to_string()),
             );
-            controller
-                .set_config(&station)
-                .expect("wifi set_config");
+            controller.set_config(&station).expect("wifi set_config");
             let seed = 0xC3C3_5A5A;
             let resources = NET_RESOURCES.init(StackResources::new());
             let net_config = embassy_net::Config::dhcpv4(Default::default());
-            let (stack, runner) =
-                embassy_net::new(interfaces.station, net_config, resources, seed);
+            let (stack, runner) = embassy_net::new(interfaces.station, net_config, resources, seed);
             spawner.spawn(net_task(runner).unwrap());
             spawner.spawn(udp_task(stack).unwrap());
             spawner.spawn(wifi_task(controller).unwrap());
@@ -134,13 +131,15 @@ async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
 }
 
 #[embassy_executor::task]
-async fn net_task(
-    mut runner: embassy_net::Runner<'static, esp_radio::wifi::Interface<'static>>,
-) {
+async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::Interface<'static>>) {
     runner.run().await
 }
 
 #[embassy_executor::task]
+#[allow(
+    clippy::large_stack_frames,
+    reason = "embassy UdpSocket future and larger TX/RX scratch buffers"
+)]
 async fn udp_task(stack: embassy_net::Stack<'static>) {
     stack.wait_config_up().await;
     if let Some(v4) = stack.config_v4() {
@@ -177,7 +176,9 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
 }
 
 #[embassy_executor::task]
-async fn serial_task(mut rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>) {
+async fn serial_task(
+    mut rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+) {
     let mut line = [0u8; 80];
     let mut len = 0usize;
     loop {
@@ -225,11 +226,10 @@ fn dispatch_serial(line: &str) {
 fn print_counters() {
     // Field order matches just_drop / just_tx; drop stays 0 (echo path).
     esp_println::println!(
-        "OK counters drop={} failed_tx={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={}",
+        "OK counters drop={} failed_tx={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} pool_drop_misalign={} map_lock={}",
         0usize,
         0usize,
         NET_RX.load(Ordering::Relaxed),
-        0u32,
         0u32,
         0u32,
         0u32,

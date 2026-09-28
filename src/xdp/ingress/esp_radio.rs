@@ -7,9 +7,9 @@ use esp_radio::wifi::{Action, Prog, attach_prog};
 use portable_atomic::{AtomicI32, AtomicUsize, Ordering};
 
 use crate::xdp::{
+    counter::inc_bad_md,
     ingress::{action::XdpAction, run},
     state::ACTIVE,
-    counter::inc_bad_md,
 };
 
 /// Process-wide XDP program mounted on esp-radio RX ingress.
@@ -39,9 +39,7 @@ impl XdpProg {
     /// Sum of all Tx failure arms (compat aggregate).
     #[inline]
     pub fn failed_tx_count(&self) -> usize {
-        self.failed_tx_bad_buf_count()
-            + self.failed_tx_token_count()
-            + self.failed_tx_wifi_count()
+        self.failed_tx_bad_buf_count() + self.failed_tx_token_count() + self.failed_tx_wifi_count()
     }
 
     #[inline]

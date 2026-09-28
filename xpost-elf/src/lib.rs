@@ -20,9 +20,7 @@ pub use compact::{
     EncodeError, ImageMetadataV0, MAX_CONTAINER_SIZE, MAX_ENTRIES, MAX_META_SIZE, MapDescriptorV0,
     SECTION_NAMES, build_container,
 };
-pub use mem_map::{
-    MAGIC, MemMapError, MemMapV0, SECTION_NAME, WIRE_SIZE, decode, encode,
-};
+pub use mem_map::{MAGIC, MemMapError, MemMapV0, SECTION_NAME, WIRE_SIZE, decode, encode};
 
 use sha2::{Digest, Sha256};
 
@@ -49,6 +47,9 @@ const XPOST_MACHINE: u8 = 1;
 /// 解析器只需要随机读和总长度；不包含 erase / write。
 pub trait ByteSource {
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn read(&mut self, offset: usize, out: &mut [u8]) -> bool;
 }
 
@@ -116,6 +117,7 @@ xpost_macros::flash_layout! {
 
 /// 冷区扫描一步的结果。`file_len` 只在还能定位容器尾时给出。
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // Ok carries ParsedContainer by value; Box would change the API.
 pub enum ScanOutcome {
     /// 无法判断容器边界，调用方应终止扫描。
     HardFail,
@@ -362,7 +364,7 @@ fn decode_layout(f: &CompactElfFixed, digest_off: usize) -> Option<WireLayout> {
 
     if meta_offset != meta_abs
         || !(MIN_META_SIZE..=WIRE_BUF).contains(&meta_size)
-        || meta_size % 4 != 0
+        || !meta_size.is_multiple_of(4)
     {
         return None;
     }
@@ -418,7 +420,7 @@ fn parse_meta(
     for _ in 0..layout.map_count {
         let rec = take_map_record(&mut rest)?;
         // name / map_vma 都是 AOT 绑定键，重复即非规范。
-        if seen_names.iter().any(|&n| n == rec.name) || seen_vmas.iter().any(|&v| v == rec.vma) {
+        if seen_names.contains(&rec.name) || seen_vmas.contains(&rec.vma) {
             return None;
         }
         let _ = seen_names.push(rec.name);

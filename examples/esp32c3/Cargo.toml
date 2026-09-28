@@ -24,13 +24,6 @@ esp-rtos = { version = "0.3.0", features = [
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c3", "log-04"] }
 log                    = "0.4.27"
 
-embassy-net = { version = "0.9.1", features = [
-  "dhcpv4",
-  "log",
-  "medium-ethernet",
-  "tcp",
-  "udp",
-] }
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
 esp-alloc = "0.10.0"
@@ -45,22 +38,8 @@ esp-radio = { version = "0.18.0", path = "../../esp-radio", features = [
   "unstable",
   "wifi",
 ] }
-smoltcp = { version = "0.13.0", default-features = false, features = [
-  "log",
-  "medium-ethernet",
-  "multicast",
-  "proto-dhcpv4",
-  "proto-dns",
-  "proto-ipv4",
-  "socket-dns",
-  "socket-icmp",
-  "socket-raw",
-  "socket-tcp",
-  "socket-udp",
-] }
 
 critical-section = "1.2.0"
-static_cell      = "2.1.1"
 
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html

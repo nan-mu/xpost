@@ -28,7 +28,6 @@ pub const ECHO_BYTE: u8 = 0x42;
 
 /// STA echo replies with [`MAGIC_STIM`] + `u64` LE seq (same header as stimulus).
 /// Legacy single-byte [`ECHO_BYTE`] is no longer used for timing pairing.
-
 /// Bytes after magic before seq ends: magic(6) + seq(8).
 pub const PAYLOAD_HDR_LEN: usize = 14;
 
@@ -43,7 +42,7 @@ pub const COLLECT_CAP: usize = 256;
 /// IPv4 addresses match the on-wire `u32` in the IPv4 header (network byte order
 /// as loaded by `ctx.load::<u32>`).
 /// Ports are **host** byte order.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 pub struct FilterConfig {
     pub esp_ip_be: u32,
@@ -51,17 +50,6 @@ pub struct FilterConfig {
     pub vip_ip_be: u32,
     pub echo_port: u16,
     pub reply_port: u16,
-}
-
-impl Default for FilterConfig {
-    fn default() -> Self {
-        Self {
-            esp_ip_be: 0,
-            vip_ip_be: 0,
-            echo_port: 0,
-            reply_port: 0,
-        }
-    }
 }
 
 /// One timestamped sighting from TC.

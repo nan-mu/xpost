@@ -32,10 +32,7 @@ use alloc::{string::String, vec::Vec};
 use crate::map::{
     builder::traits::layout_size,
     heap::{RawResource, allocator},
-    kinds::{
-        array::{self, BpfArrayMap},
-        hash::{self, BpfHashMap, BpfHashTable},
-    },
+    kinds::{array, hash},
     ops::MapOps,
     state::HEAP_CLAIMED,
 };
@@ -142,12 +139,12 @@ impl MapRt {
     ) -> usize {
         match map_type {
             MapType::Hash => {
-                let ks = key_layout.map(|l| layout_size(l)).unwrap_or(0);
-                let vs = value_layout.map(|l| layout_size(l)).unwrap_or(0);
+                let ks = key_layout.map(layout_size).unwrap_or(0);
+                let vs = value_layout.map(layout_size).unwrap_or(0);
                 len.saturating_mul(ks + vs + 32) + 256
             }
             MapType::Array => {
-                let vs = value_layout.map(|l| layout_size(l)).unwrap_or(0);
+                let vs = value_layout.map(layout_size).unwrap_or(0);
                 let stride = array::BpfArrayMap::value_stride(vs.max(1));
                 stride * len + 128
             }
@@ -188,12 +185,21 @@ impl MapRt {
         );
         let storage = match builder.map_type {
             MapType::Hash => {
-                let kl = builder.key_layout.as_ref().ok_or(MapCreateError::TypeMismatch)?;
-                let vl = builder.value_layout.as_ref().ok_or(MapCreateError::TypeMismatch)?;
+                let kl = builder
+                    .key_layout
+                    .as_ref()
+                    .ok_or(MapCreateError::TypeMismatch)?;
+                let vl = builder
+                    .value_layout
+                    .as_ref()
+                    .ok_or(MapCreateError::TypeMismatch)?;
                 hash::alloc_hash_storage(layout_size(kl), layout_size(vl), builder.len)?
             }
             MapType::Array => {
-                let vl = builder.value_layout.as_ref().ok_or(MapCreateError::TypeMismatch)?;
+                let vl = builder
+                    .value_layout
+                    .as_ref()
+                    .ok_or(MapCreateError::TypeMismatch)?;
                 array::alloc_array_storage(layout_size(vl), builder.len)?
             }
         };
@@ -222,14 +228,6 @@ impl MapRt {
             .ok_or(MapUseError::NotFound)
     }
 
-    /// Borrow a map mutably without re-locking [`MAP_RT`].
-    pub fn get_mut(&mut self, idx: MapIdx) -> Result<MapMutGuard<'_>, MapUseError> {
-        self.meta
-            .get_mut(idx)
-            .map(|meta| MapMutGuard { meta })
-            .ok_or(MapUseError::NotFound)
-    }
-
     pub(crate) fn add_user(&mut self, idx: MapIdx) -> Result<(), MapUseError> {
         let res = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
         res.storage.users = res.storage.users.saturating_add(1);
@@ -241,11 +239,6 @@ impl MapRt {
         res.storage.users = res.storage.users.saturating_sub(1);
         Ok(())
     }
-
-    pub(crate) fn storage_ptr(&self, idx: MapIdx) -> Result<usize, MapUseError> {
-        let res = self.meta.get(idx).ok_or(MapUseError::NotFound)?;
-        Ok(res.storage.ptr as usize)
-    }
 }
 
 /// Read-only map access guard (borrows the current [`MapRt`] lock).
@@ -253,32 +246,13 @@ pub struct MapGuard<'a> {
     pub(crate) meta: &'a MapMeta,
 }
 
-/// Writable map access guard (borrows the current [`MapRt`] lock).
-pub struct MapMutGuard<'a> {
-    pub(crate) meta: &'a mut MapMeta,
-}
-
 impl MapGuard<'_> {
-    pub(crate) fn as_hash(&self) -> Result<&BpfHashTable, MapUseError> {
-        if self.meta.map_type != MapType::Hash {
-            return Err(MapUseError::TypeMismatch);
-        }
-        Ok(unsafe { self.meta.storage.as_ref::<BpfHashMap>() }.table())
-    }
-
-    pub(crate) fn as_array(&self) -> Result<&[u8], MapUseError> {
-        if self.meta.map_type != MapType::Array {
-            return Err(MapUseError::TypeMismatch);
-        }
-        Ok(unsafe { self.meta.storage.as_ref::<BpfArrayMap>() }.data())
-    }
-
     /// Control-plane: read ARRAY element `index` as little-endian u64 (zero-extend).
     pub fn array_get_u64(&self, index: u32) -> Result<u64, MapUseError> {
         if self.meta.map_type != MapType::Array {
             return Err(MapUseError::TypeMismatch);
         }
-        let arr = unsafe { self.meta.storage.as_ref::<BpfArrayMap>() };
+        let arr = unsafe { self.meta.storage.as_ref::<array::BpfArrayMap>() };
         let key = index;
         let p = MapOps::lookup(arr, &key as *const u32 as *const u8).map_err(|e| match e {
             crate::map::ops::MapOpError::NotFound => MapUseError::NotFound,
@@ -290,22 +264,6 @@ impl MapGuard<'_> {
             core::ptr::copy_nonoverlapping(p, buf.as_mut_ptr(), vs);
         }
         Ok(u64::from_le_bytes(buf))
-    }
-}
-
-impl MapMutGuard<'_> {
-    pub(crate) fn as_hash(&mut self) -> Result<&mut BpfHashTable, MapUseError> {
-        if self.meta.map_type != MapType::Hash {
-            return Err(MapUseError::TypeMismatch);
-        }
-        Ok(unsafe { self.meta.storage.as_mut::<BpfHashMap>() }.table_mut())
-    }
-
-    pub(crate) fn as_array(&mut self) -> Result<&mut [u8], MapUseError> {
-        if self.meta.map_type != MapType::Array {
-            return Err(MapUseError::TypeMismatch);
-        }
-        Ok(unsafe { self.meta.storage.as_mut::<BpfArrayMap>() }.data_mut())
     }
 }
 

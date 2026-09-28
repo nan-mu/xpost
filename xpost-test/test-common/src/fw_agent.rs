@@ -140,6 +140,11 @@ fn put_varint(out: &mut [u8], mut i: usize, mut x: u64) -> Option<usize> {
     }
 }
 
+/// Protobuf wire tag for wire type 0 (varint): `(field << 3) | 0`.
+fn tag_varint(field: u32) -> u64 {
+    u64::from(field) << 3
+}
+
 fn skip_field(buf: &[u8], i: &mut usize, wt: u32) -> Result<(), DecodeError> {
     match wt {
         0 => {
@@ -197,7 +202,7 @@ fn put_u32(out: &mut [u8], mut i: usize, field: u32, v: u32) -> Option<usize> {
     if v == 0 {
         return Some(i);
     }
-    i = put_varint(out, i, ((field << 3) | 0) as u64)?;
+    i = put_varint(out, i, tag_varint(field))?;
     put_varint(out, i, v as u64)
 }
 
@@ -205,7 +210,7 @@ fn put_u64(out: &mut [u8], mut i: usize, field: u32, v: u64) -> Option<usize> {
     if v == 0 {
         return Some(i);
     }
-    i = put_varint(out, i, ((field << 3) | 0) as u64)?;
+    i = put_varint(out, i, tag_varint(field))?;
     put_varint(out, i, v)
 }
 
@@ -213,7 +218,7 @@ fn put_bool(out: &mut [u8], mut i: usize, field: u32, v: bool) -> Option<usize> 
     if !v {
         return Some(i);
     }
-    i = put_varint(out, i, ((field << 3) | 0) as u64)?;
+    i = put_varint(out, i, tag_varint(field))?;
     put_varint(out, i, 1)
 }
 
@@ -490,7 +495,7 @@ pub fn decode_get_job_req(buf: &[u8]) -> Result<u64, DecodeError> {
         let field = tag >> 3;
         let wt = tag & 7;
         if field == 1 && wt == 0 {
-            return Ok(read_varint(buf, &mut i)?);
+            return read_varint(buf, &mut i);
         }
         skip_field(buf, &mut i, wt)?;
     }

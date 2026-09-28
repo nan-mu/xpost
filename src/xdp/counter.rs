@@ -19,8 +19,6 @@ pub struct ErrorCounters {
     pub helper_unresolved: AtomicUsize,
     /// Helper map path: pool busy / unsupported / other map op soft-fail.
     pub helper_map: AtomicUsize,
-    /// `bind_map_symbols` skipped an unknown map name (legacy path removed; always 0).
-    pub bind_unknown: AtomicUsize,
     /// Pool `Drop` / reclaim saw misaligned or null ptr (leak path).
     pub pool_drop_misalign: AtomicUsize,
 }
@@ -34,7 +32,6 @@ impl ErrorCounters {
             bad_md: AtomicUsize::new(0),
             helper_unresolved: AtomicUsize::new(0),
             helper_map: AtomicUsize::new(0),
-            bind_unknown: AtomicUsize::new(0),
             pool_drop_misalign: AtomicUsize::new(0),
         }
     }
@@ -48,7 +45,6 @@ impl ErrorCounters {
             bad_md: self.bad_md.load(Ordering::Relaxed),
             helper_unresolved: self.helper_unresolved.load(Ordering::Relaxed),
             helper_map: self.helper_map.load(Ordering::Relaxed),
-            bind_unknown: self.bind_unknown.load(Ordering::Relaxed),
             pool_drop_misalign: self.pool_drop_misalign.load(Ordering::Relaxed),
         }
     }
@@ -63,7 +59,6 @@ pub struct ErrorCountersSnapshot {
     pub bad_md: usize,
     pub helper_unresolved: usize,
     pub helper_map: usize,
-    pub bind_unknown: usize,
     pub pool_drop_misalign: usize,
 }
 
@@ -98,11 +93,6 @@ pub(crate) fn inc_helper_unresolved() {
 #[inline]
 pub(crate) fn inc_helper_map() {
     ERRORS.helper_map.fetch_add(1, Ordering::Relaxed);
-}
-
-#[inline]
-pub(crate) fn inc_bind_unknown() {
-    ERRORS.bind_unknown.fetch_add(1, Ordering::Relaxed);
 }
 
 #[inline]

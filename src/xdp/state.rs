@@ -18,15 +18,6 @@ pub(crate) const MAX_REQUIRED_MAPS: usize = 8;
 /// [`crate::xdp::map::VmrTable`] / LinearMap capacity.
 pub(crate) const MAX_VMR_BINDS: usize = 16;
 
-// —— shared-stack budget (E3 docs / placeholders; not enforced at runtime) ——
-
-/// eBPF verifier stack budget (prevail `--stack-size` default).
-pub(crate) const BPF_STACK_BUDGET: usize = 512;
-/// Extra shared-stack room assumed for synchronous helpers.
-pub(crate) const HELPER_STACK_BUDGET: usize = 512;
-/// Conservative XDP image + helper peak on the shared caller stack.
-pub(crate) const XDP_STACK_PEAK_BUDGET: usize = BPF_STACK_BUDGET + HELPER_STACK_BUDGET;
-
 // —— soft stack canary (debug / hwtest; does not prove N2/N3) ——
 
 /// Words painted below `sp` before `jalr` into the XDP image.

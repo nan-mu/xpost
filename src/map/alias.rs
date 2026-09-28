@@ -7,10 +7,12 @@ use portable_atomic::{AtomicUsize, Ordering};
 
 use crate::map::{MapIdx, MapRt, MapType, kinds::array::BpfArrayMap, state::MAX_MAP_ALIASES};
 
+type AliasSlot = Option<(usize, MapIdx)>;
+
 /// Bumped under CS after alias table writes (weak publish token for readers).
 static ALIAS_EPOCH: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
 /// `(aot_addr, MapIdx)` slots; mutated only inside `critical_section`.
-static MAP_ALIASES: Mutex<RefCell<[Option<(usize, MapIdx)>; MAX_MAP_ALIASES]>> =
+static MAP_ALIASES: Mutex<RefCell<[AliasSlot; MAX_MAP_ALIASES]>> =
     Mutex::new(RefCell::new([None; MAX_MAP_ALIASES]));
 
 fn publish_aliases() {
@@ -85,7 +87,9 @@ static FAST_ARRAYS: [FastArray; MAX_MAP_ALIASES] = [const {
 pub(crate) fn set_fast_arrays(rt: &MapRt, binds: &[(usize, MapIdx)]) {
     let mut i = 0;
     for &(addr, id) in binds {
-        let Some(meta) = rt.meta.get(id) else { continue };
+        let Some(meta) = rt.meta.get(id) else {
+            continue;
+        };
         if addr == 0 || meta.storage.kind != Some(MapType::Array) || meta.storage.ptr.is_null() {
             continue;
         }
@@ -145,10 +149,10 @@ pub(crate) fn resolve_map_id(map: usize) -> Option<MapIdx> {
         let _epoch = *ALIAS_EPOCH.borrow_ref(cs);
         let table = MAP_ALIASES.borrow_ref(cs);
         for slot in table.iter() {
-            if let Some((a, id)) = *slot {
-                if a == map {
-                    return Some(id);
-                }
+            if let Some((a, id)) = *slot
+                && a == map
+            {
+                return Some(id);
             }
         }
         None

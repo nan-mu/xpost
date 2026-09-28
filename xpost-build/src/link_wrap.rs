@@ -141,10 +141,10 @@ fn output_path(args: &[String]) -> Option<PathBuf> {
         if a == "-o" || a == "--output" {
             return args.get(i + 1).map(PathBuf::from);
         }
-        if let Some(rest) = a.strip_prefix("-o") {
-            if !rest.is_empty() {
-                return Some(PathBuf::from(rest));
-            }
+        if let Some(rest) = a.strip_prefix("-o")
+            && !rest.is_empty()
+        {
+            return Some(PathBuf::from(rest));
         }
         if let Some(rest) = a.strip_prefix("--output=") {
             return Some(PathBuf::from(rest));

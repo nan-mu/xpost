@@ -23,8 +23,8 @@ pub enum XdpLocation {
 
 /// Runtime image record — only what lease/move/bind need after load validation.
 ///
-/// Wire-only fields (ELF header constants, xpost_version, machine, shoff, …) are
-/// checked during Compact ELF scan and **not** retained here.
+/// Wire-only fields (ELF header constants, xpost_version, machine, shoff, digest, …)
+/// are checked during Compact ELF scan and **not** retained here.
 #[derive(Clone)]
 pub(crate) struct XdpMeta {
     pub(crate) name: String,
@@ -35,13 +35,10 @@ pub(crate) struct XdpMeta {
     /// Map name → linked `.maps` symbol VMA (`map_vma` from Compact ELF).
     /// AOT code loads maps by this absolute address; lease installs VMR→RMA aliases.
     pub(crate) aot_binds: heapless::Vec<(String, usize), MAX_REQUIRED_MAPS>,
-    /// SHA-256 of the raw IMAGE bytes (optional integrity token).
-    pub(crate) image_digest: [u8; 32],
     /// Absolute cold-region offset of the IMAGE payload.
     pub(crate) image_abs: usize,
     pub(crate) image_len: usize,
-    /// Absolute cold-region offset of the Compact ELF container (for erase/scan).
-    pub(crate) container_abs: usize,
+    /// Compact ELF container length (for cold-region scan cursor).
     pub(crate) container_len: usize,
     pub(crate) location: XdpLocation,
 }
@@ -90,16 +87,5 @@ impl XdpMeta {
             return Err(ReadyError::SlotAddressAlign);
         }
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn check_digest(&self, expected: Option<&[u8; 32]>) -> bool {
-        let Some(exp) = expected else {
-            return true;
-        };
-        if self.image_digest == [0; 32] {
-            return true;
-        }
-        &self.image_digest == exp
     }
 }

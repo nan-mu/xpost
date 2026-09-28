@@ -106,6 +106,11 @@ fn put_varint(out: &mut [u8], mut i: usize, mut x: u64) -> Option<usize> {
     }
 }
 
+/// Protobuf wire tag for wire type 0 (varint): `(field << 3) | 0`.
+fn tag_varint(field: u64) -> u64 {
+    field << 3
+}
+
 fn skip_field(buf: &[u8], i: &mut usize, wt: u32) -> Result<(), DecodeError> {
     match wt {
         0 => {
@@ -137,7 +142,7 @@ fn skip_field(buf: &[u8], i: &mut usize, wt: u32) -> Result<(), DecodeError> {
 
 pub fn encode_op(op: &MapCrudOp<'_>, out: &mut [u8]) -> Option<usize> {
     let mut i = 0usize;
-    i = put_varint(out, i, (1u64 << 3) | 0)?;
+    i = put_varint(out, i, tag_varint(1))?;
     i = put_varint(out, i, op.kind as u64)?;
     i = put_varint(out, i, (2u64 << 3) | 2)?;
     i = put_varint(out, i, op.map_name.len() as u64)?;
@@ -146,7 +151,7 @@ pub fn encode_op(op: &MapCrudOp<'_>, out: &mut [u8]) -> Option<usize> {
     }
     out[i..i + op.map_name.len()].copy_from_slice(op.map_name.as_bytes());
     i += op.map_name.len();
-    i = put_varint(out, i, (3u64 << 3) | 0)?;
+    i = put_varint(out, i, tag_varint(3))?;
     i = put_varint(out, i, op.map_type as u64)?;
     if !op.key.is_empty() {
         i = put_varint(out, i, (4u64 << 3) | 2)?;
@@ -167,23 +172,23 @@ pub fn encode_op(op: &MapCrudOp<'_>, out: &mut [u8]) -> Option<usize> {
         i += op.value.len();
     }
     if op.flags != 0 {
-        i = put_varint(out, i, (6u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(6))?;
         i = put_varint(out, i, op.flags)?;
     }
     if op.key_size != 0 {
-        i = put_varint(out, i, (7u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(7))?;
         i = put_varint(out, i, op.key_size as u64)?;
     }
     if op.value_size != 0 {
-        i = put_varint(out, i, (8u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(8))?;
         i = put_varint(out, i, op.value_size as u64)?;
     }
     if op.max_entries != 0 {
-        i = put_varint(out, i, (9u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(9))?;
         i = put_varint(out, i, op.max_entries as u64)?;
     }
     if op.aot_addr != 0 {
-        i = put_varint(out, i, (10u64 << 3) | 0)?;
+        i = put_varint(out, i, tag_varint(10))?;
         i = put_varint(out, i, op.aot_addr)?;
     }
     Some(i)
@@ -231,9 +236,9 @@ pub fn decode_ack(buf: &[u8]) -> Result<MapCrudAck<'_>, DecodeError> {
 
 pub fn encode_ack(ack: &MapCrudAck<'_>, out: &mut [u8]) -> Option<usize> {
     let mut i = 0usize;
-    i = put_varint(out, i, (1u64 << 3) | 0)?;
+    i = put_varint(out, i, tag_varint(1))?;
     i = put_varint(out, i, ack.kind as u64)?;
-    i = put_varint(out, i, (2u64 << 3) | 0)?;
+    i = put_varint(out, i, tag_varint(2))?;
     i = put_varint(out, i, ack.status as u64)?;
     if !ack.value.is_empty() {
         i = put_varint(out, i, (3u64 << 3) | 2)?;

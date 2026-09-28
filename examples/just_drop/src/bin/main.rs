@@ -13,8 +13,8 @@ use alloc::string::ToString;
 use portable_atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use embassy_executor::Spawner;
-use embassy_net::{Ipv4Address, Ipv4Cidr, StackResources, StaticConfigV4};
 use embassy_net::udp::{PacketMetadata, UdpSocket};
+use embassy_net::{Ipv4Address, Ipv4Cidr, StackResources, StaticConfigV4};
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
@@ -163,14 +163,11 @@ async fn main(spawner: Spawner) -> ! {
                     .with_ssid(ssid)
                     .with_password(pass.to_string()),
             );
-            controller
-                .set_config(&station)
-                .expect("wifi set_config");
+            controller.set_config(&station).expect("wifi set_config");
             let seed = 0xC3C3_5A5A;
             let resources = NET_RESOURCES.init(StackResources::new());
             let net_config = static_ipv4_config();
-            let (stack, runner) =
-                embassy_net::new(interfaces.station, net_config, resources, seed);
+            let (stack, runner) = embassy_net::new(interfaces.station, net_config, resources, seed);
             spawner.spawn(net_task(runner).unwrap());
             spawner.spawn(udp_task(stack).unwrap());
             spawner.spawn(wifi_task(controller).unwrap());
@@ -197,11 +194,7 @@ async fn xdp_tx_task() {
             // a stuck inflight count) must not park the drain task indefinitely —
             // that is what turns brief air stalls into 0.5–1 s RTT tails.
             XdpTxPoll::Blocked => {
-                select(
-                    XDP_TX_KICK.wait(),
-                    Timer::after(Duration::from_micros(500)),
-                )
-                .await;
+                select(XDP_TX_KICK.wait(), Timer::after(Duration::from_micros(500))).await;
             }
         }
     }
@@ -224,13 +217,15 @@ async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
 }
 
 #[embassy_executor::task]
-async fn net_task(
-    mut runner: embassy_net::Runner<'static, esp_radio::wifi::Interface<'static>>,
-) {
+async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::Interface<'static>>) {
     runner.run().await
 }
 
 #[embassy_executor::task]
+#[allow(
+    clippy::large_stack_frames,
+    reason = "embassy UdpSocket future and RX scratch buffer"
+)]
 async fn udp_task(stack: embassy_net::Stack<'static>) {
     stack.wait_config_up().await;
     if let Some(v4) = stack.config_v4() {
@@ -265,7 +260,9 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
 }
 
 #[embassy_executor::task]
-async fn serial_task(mut rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>) {
+async fn serial_task(
+    mut rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+) {
     let mut line = [0u8; 80];
     let mut len = 0usize;
     loop {
@@ -287,6 +284,10 @@ async fn serial_task(mut rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, 
     }
 }
 
+#[allow(
+    clippy::large_stack_frames,
+    reason = "dispatch fans out to report helpers with large format temporaries"
+)]
 fn dispatch_serial(line: &str) {
     let line = line.trim();
     if line.eq_ignore_ascii_case("ping") {
@@ -359,12 +360,16 @@ fn map_lock_status() -> &'static str {
     }
 }
 
+#[allow(
+    clippy::large_stack_frames,
+    reason = "single long println! of many counter fields"
+)]
 fn print_counters() {
     let e = xpost::xdp::ERRORS.snapshot();
     let p = &xpost::esp_radio::XDP_PROG;
     let t = esp_radio::wifi::xdp_tx_stats();
     esp_println::println!(
-        "OK counters drop={} failed_tx={} tx_bad_buf={} tx_token={} tx_wifi={} tx_wifi_rc={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} bind_unknown={} pool_drop_misalign={} map_lock={} tx_enq={} tx_pend={} tx_inflight={} tx_drain_ok={} tx_nomem_wait={} tx_cap_wait={} tx_enq_claim={} tx_enq_ring={} tx_done={} tx_done_fail={} tx_grp_src={} tx_ns_ref={} tx_ns_free={} tx_no_retain={} tx_flush={} tx_last_rc={}",
+        "OK counters drop={} failed_tx={} tx_bad_buf={} tx_token={} tx_wifi={} tx_wifi_rc={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} pool_drop_misalign={} map_lock={} tx_enq={} tx_pend={} tx_inflight={} tx_drain_ok={} tx_nomem_wait={} tx_cap_wait={} tx_enq_claim={} tx_enq_ring={} tx_done={} tx_done_fail={} tx_grp_src={} tx_ns_ref={} tx_ns_free={} tx_no_retain={} tx_flush={} tx_last_rc={}",
         p.drop_count(),
         p.failed_tx_count(),
         p.failed_tx_bad_buf_count(),
@@ -378,7 +383,6 @@ fn print_counters() {
         e.bad_md,
         e.helper_unresolved,
         e.helper_map,
-        e.bind_unknown,
         e.pool_drop_misalign,
         map_lock_status(),
         t.enqueued,
@@ -489,6 +493,10 @@ fn print_flame_spans() {
     esp_println::println!();
 }
 
+#[allow(
+    clippy::large_stack_frames,
+    reason = "PC hit snapshot buffer lives on the stack for one-shot serial dump"
+)]
 fn print_pc_hits() {
     let mut buf = [esp_radio::wifi::xdp_prof::PcHit { pc: 0, hits: 0 }; 256];
     let n = esp_radio::wifi::xdp_prof::snapshot_pc_hits(&mut buf);

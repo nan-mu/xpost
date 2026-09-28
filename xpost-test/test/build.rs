@@ -1,11 +1,11 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::{Path, PathBuf}};
 
 use anyhow::{Context as _, anyhow};
 use aya_build::Toolchain;
 
 /// Embed pre-placed HOT_A AOT binaries from `assets/hot_a/{drop,pass}/`.
 /// Someone else prepares `esp32c3.bin` (+ `bpf.toml`); this build does not copy or build them.
-fn generate_hot_a_assets(out_dir: &PathBuf) -> anyhow::Result<()> {
+fn generate_hot_a_assets(out_dir: &Path) -> anyhow::Result<()> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let assets = manifest_dir.join("assets/hot_a");
     let drop_bin = assets.join("drop/esp32c3.bin");
@@ -33,7 +33,7 @@ fn generate_hot_a_assets(out_dir: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn generate_tail_call_assets(out_dir: &PathBuf) -> anyhow::Result<()> {
+fn generate_tail_call_assets(out_dir: &Path) -> anyhow::Result<()> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let assets = manifest_dir.join("assets/tail_call");
     let a_bin = assets.join("a_tailcall/esp32c3.bin");
@@ -134,7 +134,7 @@ fn parse_aot_addr(toml: &str) -> anyhow::Result<u64> {
     anyhow::bail!("no aot_addr in bpf.toml")
 }
 
-fn generate_ddos_wl_assets(out_dir: &PathBuf) -> anyhow::Result<()> {
+fn generate_ddos_wl_assets(out_dir: &Path) -> anyhow::Result<()> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let assets = manifest_dir.join("assets/ddos_wl");
     let bin = assets.join("esp32c3.bin");
@@ -188,7 +188,7 @@ fn parse_map_aot(toml: &str, map: &str) -> anyhow::Result<u64> {
     anyhow::bail!("no aot_addr for [maps.{map}]")
 }
 
-fn generate_xdp_echo_assets(out_dir: &PathBuf) -> anyhow::Result<()> {
+fn generate_xdp_echo_assets(out_dir: &Path) -> anyhow::Result<()> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let assets = manifest_dir.join("assets/xdp_echo");
     let bin = assets.join("esp32c3.bin");
@@ -214,7 +214,7 @@ fn generate_xdp_echo_assets(out_dir: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn generate_xdp_drop_assets(out_dir: &PathBuf) -> anyhow::Result<()> {
+fn generate_xdp_drop_assets(out_dir: &Path) -> anyhow::Result<()> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let assets = manifest_dir.join("assets/xdp_drop");
     let bin = assets.join("esp32c3.bin");
@@ -246,7 +246,7 @@ fn generate_xdp_drop_assets(out_dir: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn generate_ddos_rate_bl_assets(out_dir: &PathBuf) -> anyhow::Result<()> {
+fn generate_ddos_rate_bl_assets(out_dir: &Path) -> anyhow::Result<()> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let assets = manifest_dir.join("assets/ddos_rate_bl");
     let bin = assets.join("esp32c3.bin");

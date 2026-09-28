@@ -163,8 +163,12 @@ struct PcSlot {
 }
 
 #[unsafe(link_section = ".bss")]
-static PC_HITS: [PcSlot; PC_SLOTS] =
-    [const { PcSlot { pc: AtomicU32::new(0), hits: AtomicU32::new(0) } }; PC_SLOTS];
+static PC_HITS: [PcSlot; PC_SLOTS] = [const {
+    PcSlot {
+        pc: AtomicU32::new(0),
+        hits: AtomicU32::new(0),
+    }
+}; PC_SLOTS];
 
 static PC_OVERFLOW: AtomicU32 = AtomicU32::new(0);
 static PC_SAMPLES: AtomicU32 = AtomicU32::new(0);
