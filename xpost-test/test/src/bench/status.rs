@@ -500,12 +500,15 @@ pub fn fmt_short(d: Duration) -> String {
     }
 }
 
-/// Poll agent `/v1/dut_status` every 1s until UART shows `xpost ready` or budget expires.
+/// Poll agent `/v1/dut_status` until UART shows `xpost ready`, or fall back to
+/// `ping` after a short grace (XDP_DROP can delay/ starve the ready println).
 pub async fn settle_checklist(ui: &RoundUi, agent: &AgentClient, budget: Duration) -> Result<()> {
     let label = format!("settle ≤{}s", budget.as_secs());
     ui.check_activate(&label);
     let start = Instant::now();
     let mut last = String::from("booting");
+    /// Prefer UART ready; after this, ping is enough to leave settle.
+    const PING_AFTER: Duration = Duration::from_secs(3);
     loop {
         match agent.dut_status().await {
             Ok(msg) => {
@@ -527,20 +530,23 @@ pub async fn settle_checklist(ui: &RoundUi, agent: &AgentClient, budget: Duratio
                 ui.check_note(&format!("dut_status err: {e:#} · {} left", fmt_short(left)));
             }
         }
-        if start.elapsed() >= budget {
-            // Agent may latch `booting` if it missed the UART ready line; ping is authoritative.
+
+        if start.elapsed() >= PING_AFTER {
             match agent.request("ping").await {
                 Ok(m) if m.contains("OK ping") => {
-                    ui.check_ok(&format!("ping-ok (status={last})"));
+                    ui.check_ok(&format!("ping-ok (uart={last})"));
                     return Ok(());
                 }
-                Ok(m) => ui.check_note(&format!("ping after settle: {m}")),
-                Err(e) => ui.check_note(&format!("ping after settle: {e:#}")),
+                Ok(m) => ui.check_note(&format!("ping: {m}")),
+                Err(e) => ui.check_note(&format!("ping: {e:#}")),
             }
+        }
+
+        if start.elapsed() >= budget {
             ui.check_fail(&format!("timeout; last={last}"));
             bail!("DUT not ready within {:?}; last status={last}", budget);
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 

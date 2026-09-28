@@ -199,27 +199,24 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         Some(pg_dsn::connect(pg_opts).await?)
     };
 
-    let mut n_rounds = 0usize;
-    for kind in &kinds {
-        let r = match kind {
-            DropKind::Counter => c_rounds,
-            _ => instr_rounds,
-        };
-        n_rounds += r * paths.len();
-    }
+    // One flash per (kind × arm); rounds reuse the image (perf clear between).
+    let n_flashes = kinds.len() * paths.len();
     let mut eta = BudgetEta::new();
-    eta.add_flashes(n_rounds);
+    eta.add_flashes(n_flashes);
     for kind in &kinds {
         let (window, r) = match kind {
             DropKind::Counter => (c_window, c_rounds),
             _ => (instr_window, instr_rounds),
         };
-        let per = READY_BUDGET + window + Duration::from_millis(DRAIN_MS);
-        eta.add_fixed(per.saturating_mul((r * paths.len()) as u32));
+        // settle once per flash; window × rounds after that
+        let settle = READY_BUDGET.saturating_mul(paths.len() as u32);
+        let measure = (window + Duration::from_millis(DRAIN_MS))
+            .saturating_mul((r * paths.len()) as u32);
+        eta.add_fixed(settle.saturating_add(measure));
     }
 
     let ui = RoundUi::new();
-    let mut first_round = true;
+    let mut first_flash = true;
 
     for kind in &kinds {
         let (rounds, window, target_pps) = match kind {
@@ -227,51 +224,74 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
             DropKind::Trace => (instr_rounds, instr_window, Some(trace_pps)),
             _ => (instr_rounds, instr_window, Some(fixed_pps)),
         };
-        for _round in 1..=rounds {
-            for path in &paths {
-                run_arm(
-                    cfg,
-                    &agent,
-                    &ui,
-                    &mut eta,
-                    *path,
-                    *kind,
-                    window,
-                    sample,
-                    target_pps,
-                    formal,
-                    first_round,
-                    pg.as_mut(),
-                )
-                .await
-                .with_context(|| {
-                    format!("arm={} kind={}", path.as_str(), kind.as_str())
-                })?;
-                first_round = false;
+        for path in &paths {
+            flash_and_arm(
+                cfg,
+                &agent,
+                &ui,
+                &mut eta,
+                *path,
+                *kind,
+                formal,
+                first_flash,
+                pg.as_mut(),
+            )
+            .await
+            .with_context(|| {
+                format!("flash arm={} kind={}", path.as_str(), kind.as_str())
+            })?;
+            first_flash = false;
+
+            for round in 1..=rounds {
+                ui.begin_round();
+                ui.set_eta(&eta.fmt());
+                let result = match kind {
+                    DropKind::Counter => {
+                        run_counter_arm(cfg, &agent, &ui, &eta, *path, window, sample, pg.as_mut())
+                            .await
+                    }
+                    DropKind::Aggregate | DropKind::Gauge | DropKind::Trace => {
+                        let pps = target_pps.context("instr kind needs target_pps")?;
+                        run_instr_arm(cfg, &agent, &ui, &eta, *path, *kind, window, pps, pg.as_mut())
+                            .await
+                    }
+                };
+                if let Err(e) = result {
+                    ui.clear_temp_for_error();
+                    return Err(e).with_context(|| {
+                        format!(
+                            "arm={} kind={} round={round}",
+                            path.as_str(),
+                            kind.as_str()
+                        )
+                    });
+                }
+                eta.consume_fixed(window + Duration::from_millis(DRAIN_MS));
+                ui.set_eta(&eta.fmt());
+                ui.end_round();
             }
         }
     }
 
     RoundUi::banner(&format!(
-        "just_drop done kinds={} arms={}",
+        "just_drop done kinds={} arms={} flashes={}",
         kinds.len(),
-        paths.len()
+        paths.len(),
+        n_flashes
     ));
     Ok(())
 }
 
-async fn run_arm(
+/// Flash once + settle + HAL `drop on`. Measure rounds happen outside.
+async fn flash_and_arm(
     cfg: &FileConfig,
     agent: &AgentClient,
     ui: &RoundUi,
     eta: &mut BudgetEta,
     path: PpsPath,
     kind: DropKind,
-    window: Duration,
-    sample: Duration,
-    target_pps: Option<f64>,
     formal: bool,
-    first_round: bool,
+    first_flash: bool,
     pg: Option<&mut Client>,
 ) -> Result<()> {
     let profile = kind.profile(path);
@@ -279,7 +299,7 @@ async fn run_arm(
     ui.begin_round();
     ui.set_eta(&eta.fmt());
 
-    if first_round {
+    if first_flash {
         if let Some(client) = pg.as_ref() {
             ui.check_start("DROP+CREATE just_drop_*");
             let pg_opts = PgOpts { formal };
@@ -334,22 +354,6 @@ async fn run_arm(
         ui.check_ok("");
     }
 
-    let result = match kind {
-        DropKind::Counter => {
-            run_counter_arm(cfg, agent, ui, eta, path, window, sample, pg).await
-        }
-        DropKind::Aggregate | DropKind::Gauge | DropKind::Trace => {
-            let pps = target_pps.context("instr kind needs target_pps")?;
-            run_instr_arm(cfg, agent, ui, eta, path, kind, window, pps, pg).await
-        }
-    };
-    if let Err(e) = result {
-        ui.clear_temp_for_error();
-        return Err(e);
-    }
-
-    eta.consume_fixed(window + Duration::from_millis(DRAIN_MS));
-    ui.set_eta(&eta.fmt());
     ui.end_round();
     Ok(())
 }

@@ -85,6 +85,9 @@ async fn main(spawner: Spawner) -> ! {
 
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
     spawner.spawn(serial_task(usb_rx).unwrap());
+    // Host opens App UART ~800ms after reset; delay so settle can latch this.
+    Timer::after(Duration::from_millis(1200)).await;
+    esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
 
     // Keep the IRAM slot symbol live for the linker; never lease.
     let _slot = core::ptr::addr_of!(xdp_slot);
@@ -96,9 +99,7 @@ async fn main(spawner: Spawner) -> ! {
         .with_ampdu_tx_enable(false);
     let (mut controller, interfaces) = xpost::esp_radio::new(peripherals.WIFI, wifi_cfg)
         .expect("Failed to initialize Wi-Fi controller");
-    info!(
-        "wifi+xdp Pass (no lease) drop_site=app tx_dyn=128 rx_dyn=1024"
-    );
+    info!("wifi+xdp Pass (no lease) drop_site=app tx_dyn=128 rx_dyn=1024");
 
     // Drain path for any accidental XDP_TX; Pass-only should stay Idle.
     spawner.spawn(xdp_tx_task().unwrap());
@@ -174,6 +175,7 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
     stack.wait_config_up().await;
     if let Some(v4) = stack.config_v4() {
         info!("dhcp {}", v4.address);
+        esp_println::println!("xpost ready ipv4={} port={STIM_PORT}", v4.address);
     }
 
     let rx_meta = UDP_RX_META.init([PacketMetadata::EMPTY; 4]);
@@ -183,11 +185,6 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
     let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
     socket.bind(STIM_PORT).expect("bind stim");
     info!("udp ack listening {STIM_PORT}");
-    if let Some(v4) = stack.config_v4() {
-        esp_println::println!("xpost ready ipv4={} port={STIM_PORT}", v4.address);
-    } else {
-        esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
-    }
 
     let mut buf = [0u8; 256];
     loop {
