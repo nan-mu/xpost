@@ -41,11 +41,9 @@ pub struct FileConfig {
     #[serde(default)]
     pub profiles: ProfilesConfig,
     #[serde(default)]
-    pub just_drop_pps: BenchPpsConfig,
+    pub just_drop: BenchPpsConfig,
     #[serde(default)]
-    pub just_tx_pps: BenchPpsConfig,
-    #[serde(default)]
-    pub just_tx_rtt: BenchPpsConfig,
+    pub just_tx: BenchPpsConfig,
     #[serde(default)]
     pub tests: Vec<TestEntry>,
 }
@@ -55,7 +53,7 @@ fn default_version() -> String {
 }
 
 fn default_run() -> Vec<String> {
-    vec!["just_tx".into()]
+    vec!["dev".into()]
 }
 
 /// Fixed functional suite for `./xpost-test suite` (not selected via `run`).
@@ -289,20 +287,18 @@ struct DefaultFile {
 
 #[derive(Debug, Deserialize)]
 struct JustTxFile {
-    #[serde(default)]
-    pps: BenchPpsConfig,
-    #[serde(default)]
-    rtt: BenchPpsConfig,
+    #[serde(flatten)]
+    bench: BenchPpsConfig,
 }
 
 #[derive(Debug, Deserialize)]
 struct JustDropFile {
-    #[serde(default)]
-    pps: BenchPpsConfig,
+    #[serde(flatten)]
+    bench: BenchPpsConfig,
 }
 
 impl FileConfig {
-    /// Load and merge the three compile-time TOMLs.
+    /// Load and merge the compile-time TOMLs.
     pub fn embedded() -> Result<Self> {
         let def: DefaultFile =
             toml::from_str(EMBEDDED_DEFAULT).context("parse config/default.toml")?;
@@ -320,9 +316,8 @@ impl FileConfig {
             agent: def.agent,
             serve: def.serve,
             profiles: def.profiles,
-            just_drop_pps: drop.pps,
-            just_tx_pps: tx.pps,
-            just_tx_rtt: tx.rtt,
+            just_drop: drop.bench,
+            just_tx: tx.bench,
             tests: default_suite_tests(),
         };
         cfg.validate()?;
@@ -335,14 +330,14 @@ impl FileConfig {
         }
         for name in &self.run {
             match name.as_str() {
-                "just_tx" | "just_drop" | "suite" => {}
+                "just_tx" | "just_drop" | "dev" | "suite" => {}
                 "just-tx" | "just-drop" | "just-tx-pps" | "just-tx-rtt" | "just-drop-pps" => {
                     bail!(
-                        "default.toml `run` entry {name:?} is not an experiment name; use just_tx / just_drop (see config/README.md)"
+                        "default.toml `run` entry {name:?} is not an experiment name; use just_tx / just_drop / dev (see config/README.md)"
                     )
                 }
                 other => bail!(
-                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop (see config/README.md)"
+                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / dev (see config/README.md)"
                 ),
             }
         }

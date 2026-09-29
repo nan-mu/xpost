@@ -127,11 +127,11 @@ HTTP API：`POST /api/jobs`、`GET /api/jobs/:id`、`GET /api/jobs/:id/log?offse
 | `./probe rate-loss [--smoke] [--formal]` | 速率黑名单 · 丢包 | peak% × mit；事后 collect→dump | `xdp_rate_loss_*`（[`sql/xdp_rate_loss.sql`](../sql/xdp_rate_loss.sql)） |
 
 | `./probe just-drop [--formal] [--no-pg]` | just_drop ACK：clear vs drop | 两次刺激 | `xdp_ack_*` |
-| `./xpost-test` / `run = ["just_drop"]` | just_drop / just_drop_hal **PPS** | agent flash + 周期读 `drop` × UDP blast | `formal.experiment_*`（[`../benchmark/just_drop.ipynb`](../benchmark/just_drop.ipynb)） |
-| `./xpost-test` / `run = ["just_tx"]` | just_tx：**PPS + 扫速/RTT** | PPS（`rxcnt 17`）→ sweep → ~5% RTT | `formal.experiment_*` + `formal.just_tx_rtt_*`（[`../benchmark/just_tx.ipynb`](../benchmark/just_tx.ipynb)） |
+| `./xpost-test` / `run = ["just_drop"]` | just_drop / just_drop_hal 满速 drop 采样 | agent flash + 周期读 `drop` × UDP blast | `formal.just_drop_config` / `just_drop_data` |
+| `./xpost-test` / `run = ["just_tx"]` | just_tx / just_tx_hal 逐包刺激与回包 | 扫速 → ~5% 工作点；逐包 `t_tx`/`t_rx`/`got_rx` | `formal.just_tx_config` / `just_tx_data` |
 
 - **`--formal`**：仍连 `dbname=postgres`，写入 **schema `formal`**，开跑前 `TRUNCATE` **本命令**表族。默认写 `public`。
-- 别名：`bench` → `rate-rtt`；`bench-loss` → `wl-loss`。无子命令时打印帮助（不再默认跑 rate）。
+- 别名：`bench` → `rate-rtt`；`bench-loss` → `wl-loss`。无子命令时执行 `default.toml` 的 `run`（正式路径永远是无参 `./xpost-test`）。
 - 对外称「速率黑名单」，不称 Tolay。旧表 `xdp_tolay_*` 不再写入。
 - Loss 一律事后 dump，不用流中 echo 算 loss%。
 - Drop：`assets/xdp_drop/`（`bpf.toml` 含 `rxcnt`；AOT 与 `examples/drop_xdp` 同源）。

@@ -1,25 +1,26 @@
-//! `xpost-test just-drop-pps` — flash profile per arm, sample `drop` during UDP blast → `experiment_*`.
+//! `just_drop` — full-rate UDP blast, sample `drop` → `just_drop_config` / `just_drop_data`.
 //!
 //! Arms: `hal` (`just-drop-hal` + `drop on`) and `xdp` (`just-drop` profile includes xdp.elf).
-//! Formal: schema `formal`, ensure tables, empty before run. Arms from `config/just_drop.toml`.
+//! Formal: DROP same-named tables then CREATE empty (`pg_dsn::prepare` + `TableSet::JustDrop`).
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use rand::RngExt;
+use serde_json::Value as JsonValue;
 use tokio_postgres::Client;
-use uuid::Uuid;
 
 use crate::agent::AgentClient;
+use crate::bench::counters;
 use crate::bench::pg_dsn::{self, PgOpts, TableSet};
+use crate::bench::status::{self, BudgetEta, READY_BUDGET, RoundUi};
 use crate::bench::udp_blast;
 use crate::config::FileConfig;
 use crate::raw_tx::{RawTx, iface_mac};
 
 const STIM_PORT: u16 = 8080;
-const REBOOT_SETTLE: Duration = Duration::from_secs(25);
 const FLASH_IDLE: Duration = Duration::from_secs(300);
 const PERF_WINDOW: Duration = Duration::from_secs(40);
 const PERF_SMOKE_WINDOW: Duration = Duration::from_secs(10);
@@ -59,15 +60,9 @@ pub struct JustDropPpsOpts {
     pub rounds: Option<usize>,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Counters {
-    drop: u64,
-    net_rx: u64,
-}
-
 #[derive(Clone, Debug)]
 struct Sample {
-    t_ns: i64,
+    t: SystemTime,
     drop: u64,
 }
 
@@ -75,12 +70,12 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
     let endpoint = cfg
         .agent
         .resolved_endpoint()
-        .context("just-drop-pps needs [agent].endpoint in config/default.toml")?;
+        .context("just_drop needs [agent].endpoint in config/default.toml")?;
     let agent = AgentClient::new(endpoint.clone());
     let esp_s = cfg.target.esp_ip.to_string();
 
     let paths = if opts.paths.is_empty() {
-        cfg.just_drop_pps
+        cfg.just_drop
             .arms
             .iter()
             .map(|s| PpsPath::parse(s))
@@ -89,17 +84,13 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         opts.paths
     };
     if paths.is_empty() {
-        bail!("just-drop-pps: no arms (set [just_drop_pps].arms or --path)");
+        bail!("just_drop: no arms (set just_drop.toml arms or --path)");
     }
 
     let window = opts
         .window_secs
         .map(Duration::from_secs)
-        .or_else(|| {
-            cfg.just_drop_pps
-                .window_secs
-                .map(Duration::from_secs)
-        })
+        .or_else(|| cfg.just_drop.window_secs.map(Duration::from_secs))
         .unwrap_or(if opts.smoke {
             PERF_SMOKE_WINDOW
         } else {
@@ -108,59 +99,72 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
     let rounds = opts.rounds.unwrap_or(if opts.smoke {
         1
     } else {
-        cfg.just_drop_pps.rounds.max(1)
+        cfg.just_drop.rounds.max(1)
     });
     let sample = Duration::from_millis(opts.sample_interval_ms.max(100));
-    let formal = opts.formal || cfg.just_drop_pps.formal;
-    let run_kind = if formal { "pilot" } else { "pilot" }; // equal-interval short window → pilot
+    let formal = opts.formal || cfg.just_drop.formal;
 
-    eprintln!(
-        "just-drop-pps arms={:?} agent={endpoint} esp={esp_s} window={}s sample={}ms pairs={rounds} formal={formal} pg={}",
+    RoundUi::banner(&format!(
+        "just_drop arms={:?} agent={endpoint} esp={esp_s} window={}s sample={}ms rounds={rounds} formal={formal} pg={}",
         paths.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
         window.as_secs(),
         sample.as_millis(),
         !opts.no_pg
-    );
+    ));
 
     let mut pg = if opts.no_pg {
         None
     } else {
         let pg_opts = PgOpts { formal };
-        let client = pg_dsn::connect(pg_opts).await?;
-        pg_dsn::prepare(&client, pg_opts, TableSet::ExperimentPps).await?;
-        Some(client)
+        Some(pg_dsn::connect(pg_opts).await?)
     };
 
-    for pair_id in 1..=rounds {
-        eprintln!("  —— pair {pair_id}/{rounds} ——");
+    let n_rounds = rounds * paths.len();
+    let mut eta = BudgetEta::new();
+    eta.add_flashes(n_rounds);
+    let per_arm = READY_BUDGET + window + Duration::from_millis(DRAIN_MS);
+    eta.add_fixed(per_arm.saturating_mul(n_rounds as u32));
+
+    let ui = RoundUi::new();
+    let mut first_round = true;
+
+    for _round in 1..=rounds {
         for path in &paths {
             run_arm(
                 cfg,
                 &agent,
+                &ui,
+                &mut eta,
                 *path,
-                pair_id as i32,
                 window,
                 sample,
-                run_kind,
+                formal,
+                first_round,
                 pg.as_mut(),
             )
             .await
-            .with_context(|| format!("pair={pair_id} path={}", path.as_str()))?;
+            .with_context(|| format!("arm={}", path.as_str()))?;
+            first_round = false;
         }
     }
 
-    eprintln!("just-drop-pps done pairs={rounds} arms={}", paths.len());
+    RoundUi::banner(&format!(
+        "just_drop done rounds={rounds} arms={}",
+        paths.len()
+    ));
     Ok(())
 }
 
 async fn run_arm(
     cfg: &FileConfig,
     agent: &AgentClient,
+    ui: &RoundUi,
+    eta: &mut BudgetEta,
     path: PpsPath,
-    pair_id: i32,
     window: Duration,
     sample: Duration,
-    run_kind: &str,
+    formal: bool,
+    first_round: bool,
     pg: Option<&mut Client>,
 ) -> Result<()> {
     let profile = match path {
@@ -169,83 +173,121 @@ async fn run_arm(
             .just_drop_hal
             .as_deref()
             .unwrap_or("just-drop-hal"),
-        PpsPath::Xdp => cfg
-            .profiles
-            .just_drop
-            .as_deref()
-            .unwrap_or("just-drop"),
+        PpsPath::Xdp => cfg.profiles.just_drop.as_deref().unwrap_or("just-drop"),
     };
 
-    eprintln!("  arm {} flash profile `{profile}` …", path.as_str());
-    agent
-        .flash_profile(profile)
-        .await
-        .with_context(|| format!("FlashProfile `{profile}`"))?;
-    agent
-        .wait_idle(FLASH_IDLE)
-        .await
-        .context("wait agent idle after flash")?;
-    settle_after_reboot().await;
+    ui.begin_round();
+    ui.set_eta(&eta.fmt());
 
-    // Ping readiness
+    if first_round {
+        if let Some(client) = pg.as_ref() {
+            ui.check_start("DROP+CREATE just_drop_*");
+            let pg_opts = PgOpts { formal };
+            pg_dsn::prepare(client, pg_opts, TableSet::JustDrop)
+                .await
+                .context("prepare just_drop")?;
+            ui.check_ok(if formal { "recreated" } else { "ok" });
+        }
+    }
+
+    ui.check_pending(&format!("烧录 `{profile}`"));
+    ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
+    ui.check_pending("DUT ready");
+
+    if let Err(e) = status::flash_idle(ui, agent, profile, FLASH_IDLE, eta).await {
+        ui.clear_temp_for_error();
+        return Err(e);
+    }
+    eta.consume_fixed(READY_BUDGET);
+    if let Err(e) = status::settle_checklist(ui, agent, READY_BUDGET).await {
+        ui.clear_temp_for_error();
+        return Err(e);
+    }
+    ui.set_eta(&eta.fmt());
+
+    ui.check_activate("DUT ready");
     for i in 0..20 {
         match agent.request("ping").await {
-            Ok(m) if m.contains("OK ping") => break,
-            Ok(m) => eprintln!("    ping try{i}: {m}"),
-            Err(e) => eprintln!("    ping try{i}: {e:#}"),
+            Ok(m) if m.contains("OK ping") => {
+                ui.check_ok("ping");
+                break;
+            }
+            Ok(m) => ui.check_note(&format!("ping try{i}: {m}")),
+            Err(e) => ui.check_note(&format!("ping try{i}: {e:#}")),
         }
         if i == 19 {
+            ui.check_fail("no ping");
+            ui.clear_temp_for_error();
             bail!("DUT not responding to ping after flash `{profile}`");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
     if path == PpsPath::Hal {
+        ui.check_start("drop on");
         let msg = agent.request("drop on").await.context("drop on")?;
-        eprintln!("    {msg}");
         if !msg.contains("OK drop on") {
+            ui.check_fail(&msg);
+            ui.clear_temp_for_error();
             bail!("expected OK drop on after just-drop-hal flash, got: {msg}");
         }
+        ui.check_ok("");
     }
 
-    let run_id = Uuid::new_v4();
-    let started = Instant::now();
-    let (samples, drop_delta, net_rx_delta, host_pps, elapsed) =
-        measure_round(cfg, agent, path, window, sample).await?;
+    // Round counters: after firmware ready → before next flash/reset.
+    let counters_before = counters::fetch_counters(agent).await?;
+    let started_at = SystemTime::now();
 
-    eprintln!(
-        "    {} pair={pair_id}: dropΔ={drop_delta} net_rxΔ={net_rx_delta} host_pps={host_pps:.0} elapsed={elapsed:.2}s samples={}",
+    let measure = measure_round(cfg, agent, ui, eta, path, window, sample).await;
+    let (samples, drop_delta, net_rx_delta, host_pps, sent) = match measure {
+        Ok(v) => v,
+        Err(e) => {
+            ui.clear_temp_for_error();
+            return Err(e);
+        }
+    };
+    let stopped_at = SystemTime::now();
+    let counters_after = counters::fetch_counters(agent).await?;
+    let counters_json = counters::counters_delta(&counters_before, &counters_after);
+
+    ui.permanent(&format!(
+        "    {}: dropΔ={drop_delta} net_rxΔ={net_rx_delta} host_pps={host_pps:.0} sent={sent} samples={}",
         path.as_str(),
         samples.len()
-    );
+    ));
+
+    eta.consume_fixed(window + Duration::from_millis(DRAIN_MS));
+    ui.set_eta(&eta.fmt());
 
     if let Some(client) = pg {
+        ui.check_start("写入 postgres");
         ingest_run(
             client,
-            run_id,
-            pair_id,
-            run_kind,
             path,
-            window,
-            sample,
-            &samples,
-            drop_delta,
             host_pps,
+            started_at,
+            stopped_at,
+            sent,
+            &counters_json,
+            &samples,
         )
         .await?;
+        ui.check_ok(&format!("1 config, {} samples", samples.len()));
     }
 
-    let _ = started;
+    ui.end_round();
     Ok(())
 }
 
 async fn measure_round(
     cfg: &FileConfig,
     agent: &AgentClient,
+    ui: &RoundUi,
+    eta: &BudgetEta,
     path: PpsPath,
     window: Duration,
     sample: Duration,
-) -> Result<(Vec<Sample>, u64, u64, f64, f64)> {
+) -> Result<(Vec<Sample>, u64, u64, f64, u64)> {
     let esp = cfg.target.esp_ip;
     let esp_mac = cfg.esp_mac_bytes()?;
     let src_mac = match cfg.src_mac_override()? {
@@ -263,11 +305,13 @@ async fn measure_round(
     .context("RawTx::open")?;
     let spoof = gen_lan_ip(esp, &[esp]);
 
+    let wall0 = SystemTime::now();
     let t0 = Instant::now();
-    let first = parse_counters(&agent.counters().await.context("counters t0")?)?;
+    let first_line = agent.counters().await.context("counters t0")?;
+    let first = parse_drop_net_rx(&first_line)?;
     let mut samples = vec![Sample {
-        t_ns: 0,
-        drop: first.drop,
+        t: wall0,
+        drop: first.0,
     }];
 
     let blast_handle = tokio::task::spawn_blocking({
@@ -275,15 +319,49 @@ async fn measure_round(
         move || udp_blast::run_blast_window(raw, spoof, esp, STIM_PORT, window)
     });
 
+    ui.live_set(
+        &format!("arm={}", path.as_str()),
+        &[
+            ("tx", 0.0, &format!("0/{:.0}s", window.as_secs_f64())),
+            ("drop", 0.0, "dropΔ=0 net_rxΔ=0"),
+        ],
+    );
+    ui.set_eta(&eta.fmt());
+
     let deadline = t0 + window + Duration::from_millis(DRAIN_MS);
     while Instant::now() < deadline {
         tokio::time::sleep(sample).await;
         let line = agent.counters().await.context("counters sample")?;
-        let c = parse_counters(&line)?;
-        samples.push(Sample {
-            t_ns: t0.elapsed().as_nanos() as i64,
-            drop: c.drop,
-        });
+        let (drop, net_rx) = parse_drop_net_rx(&line)?;
+        let now = SystemTime::now();
+        samples.push(Sample { t: now, drop });
+        let elapsed = t0.elapsed().as_secs_f64().min(window.as_secs_f64());
+        let tx_frac = (elapsed / window.as_secs_f64().max(1e-6)).clamp(0.0, 1.0);
+        let drop_delta = drop.saturating_sub(first.0);
+        let net_rx_delta = net_rx.saturating_sub(first.1);
+        let drop_frac = if net_rx_delta > 0 {
+            (drop_delta as f64 / net_rx_delta as f64).clamp(0.0, 1.0)
+        } else if drop_delta > 0 {
+            tx_frac
+        } else {
+            0.0
+        };
+        ui.live_set(
+            &format!("arm={}", path.as_str()),
+            &[
+                (
+                    "tx",
+                    tx_frac,
+                    &format!("{:.0}/{:.0}s", elapsed, window.as_secs_f64()),
+                ),
+                (
+                    "drop",
+                    drop_frac,
+                    &format!("dropΔ={drop_delta} net_rxΔ={net_rx_delta}"),
+                ),
+            ],
+        );
+        ui.set_eta(&eta.fmt());
         if blast_handle.is_finished() {
             break;
         }
@@ -294,30 +372,33 @@ async fn measure_round(
         .context("blast join")?
         .context("udp_blast")?;
     tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
-    let last = parse_counters(&agent.counters().await.context("counters end")?)?;
-    let t_end = t0.elapsed().as_nanos() as i64;
+    let last_line = agent.counters().await.context("counters end")?;
+    let last = parse_drop_net_rx(&last_line)?;
+    let t_end = SystemTime::now();
     if samples
         .last()
-        .map(|s| (s.drop != last.drop) || (t_end - s.t_ns) > 50_000_000)
+        .map(|s| s.drop != last.0)
         .unwrap_or(true)
     {
         samples.push(Sample {
-            t_ns: t_end,
-            drop: last.drop,
+            t: t_end,
+            drop: last.0,
         });
     }
 
-    if last.drop < first.drop {
+    ui.live_clear();
+
+    if last.0 < first.0 {
         bail!(
             "counter decreased {} → {} (reboot/wrap?)",
-            first.drop,
-            last.drop
+            first.0,
+            last.0
         );
     }
-    let drop_delta = last.drop - first.drop;
-    let net_rx_delta = last.net_rx.saturating_sub(first.net_rx);
-    let elapsed = blast.elapsed_secs();
+    let drop_delta = last.0 - first.0;
+    let net_rx_delta = last.1.saturating_sub(first.1);
     let host_pps = blast.host_pps();
+    let sent = blast.tx_count;
 
     if path == PpsPath::Xdp && net_rx_delta != 0 {
         bail!("xdp path: net_rx moved under drop ({net_rx_delta}); stack saw traffic");
@@ -326,73 +407,53 @@ async fn measure_round(
         bail!("drop did not increase during blast");
     }
 
-    Ok((samples, drop_delta, net_rx_delta, host_pps, elapsed))
+    Ok((samples, drop_delta, net_rx_delta, host_pps, sent))
 }
 
 async fn ingest_run(
     client: &mut Client,
-    run_id: Uuid,
-    pair_id: i32,
-    run_kind: &str,
     path: PpsPath,
-    window: Duration,
-    sample: Duration,
+    target_pps: f64,
+    started_at: SystemTime,
+    stopped_at: SystemTime,
+    sent: u64,
+    counters: &JsonValue,
     samples: &[Sample],
-    drop_delta: u64,
-    host_pps: f64,
 ) -> Result<()> {
-    client
-        .execute(
+    let row = client
+        .query_one(
             r#"
-            INSERT INTO experiment_runs (
-                run_id, pair_id, run_kind, variant,
-                sender_target_pps, udp_payload_bytes,
-                window_secs, sample_interval_ms,
-                started_at_utc, stopped_at_utc, status, status_reason, source_note
-            ) VALUES (
-                $1, $2, $3, $4,
-                $5, 8,
-                $6, $7,
-                now(), now(), 'complete', $8, 'xpost-test just-drop-pps'
-            )
+            INSERT INTO just_drop_config (
+                fw_type, target_pps, started_at, stopped_at, sent, counters
+            ) VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id
             "#,
             &[
-                &run_id,
-                &pair_id,
-                &run_kind,
                 &path.as_str(),
-                &(host_pps.round() as i64),
-                &(window.as_secs_f64()),
-                &(sample.as_millis() as i32),
-                &format!("drop_delta={drop_delta} host_pps={host_pps:.0}"),
+                &target_pps,
+                &started_at,
+                &stopped_at,
+                &(sent as i64),
+                counters,
             ],
         )
         .await
-        .context("INSERT experiment_runs")?;
+        .context("INSERT just_drop_config")?;
+    let config_id = pg_dsn::config_id_from_row(&row)?;
 
     for s in samples {
         client
             .execute(
                 r#"
-                INSERT INTO counter_samples (run_id, time_ns, counter_value)
+                INSERT INTO just_drop_data (config_id, t, counter_value)
                 VALUES ($1, $2, $3)
-                ON CONFLICT (run_id, time_ns) DO UPDATE
-                  SET counter_value = EXCLUDED.counter_value
                 "#,
-                &[&run_id, &s.t_ns, &(s.drop as i64)],
+                &[&config_id, &s.t, &(s.drop as i64)],
             )
             .await
-            .context("INSERT counter_samples")?;
+            .context("INSERT just_drop_data")?;
     }
     Ok(())
-}
-
-async fn settle_after_reboot() {
-    eprintln!(
-        "    settle {}s after flash / reset …",
-        REBOOT_SETTLE.as_secs()
-    );
-    tokio::time::sleep(REBOOT_SETTLE).await;
 }
 
 fn gen_lan_ip(esp: Ipv4Addr, avoid: &[Ipv4Addr]) -> Ipv4Addr {
@@ -408,23 +469,15 @@ fn gen_lan_ip(esp: Ipv4Addr, avoid: &[Ipv4Addr]) -> Ipv4Addr {
     Ipv4Addr::new(o[0], o[1], o[2], if o[3] == 200 { 201 } else { 200 })
 }
 
-fn parse_counters(line: &str) -> Result<Counters> {
-    let line = line.trim();
-    let body = line
-        .strip_prefix("OK counters ")
-        .or_else(|| line.strip_prefix("OK COUNTERS "))
-        .unwrap_or(line);
-    let mut drop = None;
-    let mut net_rx = None;
-    for part in body.split_whitespace() {
-        if let Some(v) = part.strip_prefix("drop=") {
-            drop = Some(v.parse().context("drop=")?);
-        } else if let Some(v) = part.strip_prefix("net_rx=") {
-            net_rx = Some(v.parse().context("net_rx=")?);
-        }
-    }
-    Ok(Counters {
-        drop: drop.context("missing drop=")?,
-        net_rx: net_rx.context("missing net_rx=")?,
-    })
+fn parse_drop_net_rx(line: &str) -> Result<(u64, u64)> {
+    let map = counters::parse_counter_map(line)?;
+    let drop = map
+        .get("drop")
+        .and_then(|v| v.as_i64())
+        .context("missing drop=")? as u64;
+    let net_rx = map
+        .get("net_rx")
+        .and_then(|v| v.as_i64())
+        .context("missing net_rx=")? as u64;
+    Ok((drop, net_rx))
 }

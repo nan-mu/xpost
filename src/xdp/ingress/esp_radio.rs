@@ -66,6 +66,7 @@ impl XdpProg {
 }
 
 impl Prog for XdpProg {
+    #[esp_hal::ram]
     fn run<'a>(&self, frame: &'a mut [u8]) -> (Action, &'a mut [u8]) {
         // Fast path: not leased → Pass without md / critical section.
         if !ACTIVE.load(Ordering::Acquire) {

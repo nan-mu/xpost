@@ -433,6 +433,47 @@ impl<S: Sink> Session<S> {
         }
     }
 
+    /// Non-blocking: drain pending App UART lines into the sink (no command written).
+    ///
+    /// Reply-shaped lines (`OK `/`ERR `) are emitted as [`IoRole::CmdRx`]; others as
+    /// [`IoRole::UartRx`]. All drained lines are returned for callers that scrape boot
+    /// markers (e.g. `xpost ready`).
+    pub fn drain_uart(&mut self) -> Result<Vec<String>> {
+        if self.mode != Mode::App {
+            return Err(Error::NotApp(self.mode.to_string()));
+        }
+        self.ensure_app_reader()?;
+        let mut out = Vec::new();
+        loop {
+            let app = self.app.as_mut().ok_or(Error::Closed)?;
+            match app.rx.try_recv() {
+                Ok(AppRx::Line(rx)) => {
+                    if is_reply_line(&rx) {
+                        self.emit_io(IoRole::CmdRx, rx.clone());
+                    } else {
+                        self.emit_io(IoRole::UartRx, rx.clone());
+                    }
+                    out.push(rx);
+                }
+                Ok(AppRx::Died(msg)) => {
+                    self.emit_error("drain_uart", msg.clone());
+                    self.stop_app();
+                    return Err(Error::Msg(msg));
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(Error::Msg("app reader disconnected".into()));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Host-timestamped sink lines with `ts ∈ [since, until]` (FileSink ring).
+    pub fn serial_window(&self, since: SystemTime, until: SystemTime) -> Vec<String> {
+        self.sink.lines_in_range(since, until)
+    }
+
     // —— internals ——
 
     fn write_bin_on_flasher(&mut self, addr: u32, data: &[u8], target: FlashTarget) -> Result<()> {
@@ -859,11 +900,19 @@ mod tests {
             data: IoData::Line("OK PING".into()),
         });
         let lines = sink.transcript();
-        assert!(lines[0].starts_with("[session] open "));
-        assert!(lines[1].starts_with("[xdp] writing name=just_drop "));
-        assert_eq!(lines[2], "[cmd] → PING");
-        assert_eq!(lines[3], "[uart] INFO boot");
-        assert_eq!(lines[4], "[cmd] ← OK PING");
+        assert!(
+            lines[0].contains("[session] open "),
+            "got {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("[xdp] writing name=just_drop "),
+            "got {}",
+            lines[1]
+        );
+        assert!(lines[2].ends_with("[cmd] → PING"), "got {}", lines[2]);
+        assert!(lines[3].ends_with("[uart] INFO boot"), "got {}", lines[3]);
+        assert!(lines[4].ends_with("[cmd] ← OK PING"), "got {}", lines[4]);
         let ev = sink.events();
         for (i, e) in ev.iter().enumerate() {
             assert_eq!(e.seq, i as u64);

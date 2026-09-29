@@ -13,7 +13,7 @@
 
 #![allow(missing_docs)]
 
-use portable_atomic::{AtomicU32, AtomicU64, Ordering};
+use portable_atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Named sites on the XDP / TX path (index into [`SPANS`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,11 +21,11 @@ use portable_atomic::{AtomicU32, AtomicU64, Ordering};
 pub enum Site {
     /// `Prog::run` / leased image execution.
     XdpRun = 0,
-    /// Claim token + enqueue only (no `tx_by_ref`).
+    /// Claim token + prepare TX (pre-`tx_by_ref`).
     TxEnqueue = 1,
-    /// One `esp_wifi_internal_tx_by_ref` attempt inside a batch drain.
+    /// One `esp_wifi_internal_tx_by_ref` call.
     TxDrainOne = 2,
-    /// Whole `drain_batch` call.
+    /// Unused (batch path removed); retained for span index stability.
     TxDrainBatch = 3,
     /// STA/AP RX callback XDP dispatch (Pass/Drop/Tx decision).
     WifiRxDispatch = 4,
@@ -64,10 +64,19 @@ static SPANS: [SpanAccum; SITE_COUNT] = [const {
     }
 }; SITE_COUNT];
 
+/// Spans / PC hits are off by default: per-packet timer reads and flash-resident
+/// accounting on the RX path evict Wi-Fi blob code from cache.
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Turn span timing and PC-hit sampling on or off (serial `prof on|off`).
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, Ordering::Relaxed);
+}
+
 /// Enter a timed span; drop to accumulate `mcycle` delta into [`Site`].
 pub struct Span {
     site: Site,
-    t0: u64,
+    t0: Option<u64>,
 }
 
 impl Span {
@@ -75,7 +84,7 @@ impl Span {
     pub fn enter(site: Site) -> Self {
         Self {
             site,
-            t0: read_mcycle(),
+            t0: ENABLED.load(Ordering::Relaxed).then(read_mcycle),
         }
     }
 }
@@ -83,7 +92,8 @@ impl Span {
 impl Drop for Span {
     #[inline]
     fn drop(&mut self) {
-        let dt = read_mcycle().wrapping_sub(self.t0);
+        let Some(t0) = self.t0 else { return };
+        let dt = read_mcycle().wrapping_sub(t0);
         let i = self.site as usize;
         SPANS[i].cycles.fetch_add(dt, Ordering::Relaxed);
         SPANS[i].entries.fetch_add(1, Ordering::Relaxed);
@@ -196,6 +206,9 @@ pub fn hit_pc(pc: u32) {
 /// Sample the return address of the caller (coarse; not a full stack walk).
 #[inline(never)]
 pub fn hit_here() {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     let ra: u32;
     unsafe {
         core::arch::asm!("mv {0}, ra", out(reg) ra, options(nostack, preserves_flags));

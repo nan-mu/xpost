@@ -24,10 +24,12 @@
 //! | Event | Driver |
 //! |-------|--------|
 //! | Drop path freed `eb` | [`Prog::count_drop`] once |
-//! | Tx failed: null/`empty` window | [`Prog::count_failed_tx_bad_buf`] |
-//! | Tx failed: token pool exhausted | [`Prog::count_failed_tx_token`] |
-//! | Tx failed: `tx_by_ref` non-OK | [`Prog::count_failed_tx_wifi`] |
-//! | Tx handoff succeeded (`esp_wifi_internal_tx_by_ref` == OK) | no counter |
+//! | Tx failed: null/`empty` window or group source MAC | [`Prog::count_failed_tx_bad_buf`] |
+//! | Tx failed: token pool / TX ring full | [`Prog::count_failed_tx_token`] |
+//! | Tx queued for the board TX task | no counter (see `xdp_tx_stats`) |
+//!
+//! `esp_wifi_internal_tx_by_ref` runs later on the board TX task
+//! (`xdp_tx_poll`); its results are in `xdp_tx_stats`, not [`Prog`] counters.
 //!
 //! Netstack callbacks are registered in `wifi_init`; failure aborts init.
 //!

@@ -148,6 +148,11 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
     let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
     socket.bind(STIM_PORT).expect("bind stim");
     info!("udp ack listening {STIM_PORT}");
+    if let Some(v4) = stack.config_v4() {
+        esp_println::println!("xpost ready ipv4={} port={STIM_PORT}", v4.address);
+    } else {
+        esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
+    }
 
     let mut buf = [0u8; 256];
     loop {

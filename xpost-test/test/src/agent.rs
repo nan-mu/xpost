@@ -45,6 +45,11 @@ impl AgentClient {
         bail!("agent not idle within {:?}", budget);
     }
 
+    /// UART scrape: `ready …` or `booting` (see xpost-agent `/v1/dut_status`).
+    pub async fn dut_status(&self) -> Result<String> {
+        self.get_json("/v1/dut_status").await
+    }
+
     /// Install XDP ELF via the agent's USB session.
     pub async fn program(&self, elf: &str) -> Result<String> {
         let body = serde_json::json!({ "elf": elf });
@@ -83,6 +88,15 @@ impl AgentClient {
     pub async fn request(&self, cmd: &str) -> Result<String> {
         let body = serde_json::json!({ "cmd": cmd });
         self.post_json("/v1/request", &body).await
+    }
+
+    /// Host-timestamped UART/cmd transcript for `[since_unix_ms, until_unix_ms]`.
+    pub async fn serial_window(&self, since_unix_ms: u64, until_unix_ms: u64) -> Result<String> {
+        let body = serde_json::json!({
+            "since_unix_ms": since_unix_ms,
+            "until_unix_ms": until_unix_ms,
+        });
+        self.post_json("/v1/serial_window", &body).await
     }
 
     async fn get_json(&self, path: &str) -> Result<String> {

@@ -33,7 +33,7 @@ tokio = { workspace = true, features = [
 ] }
 toml = { workspace = true }
 rand = "0.10.2"
-tokio-postgres = { version = "0.7", default-features = false, features = ["runtime", "with-uuid-1"] }
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime", "with-uuid-1", "with-serde_json-1"] }
 uuid = { version = "1", features = ["v4"] }
 
 [build-dependencies]

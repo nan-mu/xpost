@@ -49,7 +49,8 @@ pub extern "C" fn helper_dispatcher(
     dispatch_helper(idx, a1, a2, a3, a4, a5)
 }
 
-#[inline(never)]
+// IRAM: runs inside the XDP flight (IRQs off); flash cache misses here stall Wi-Fi.
+#[esp_hal::ram]
 fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> usize {
     match idx {
         HelperIdx::BPF_FUNC_MAP_LOOKUP_ELEM => inner::map_lookup_elem::inner(a1, a2),

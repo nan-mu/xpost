@@ -135,9 +135,11 @@ pub use xdp::{Action, NoopProg, Prog, attach_prog};
 #[cfg(feature = "xdp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "xdp")))]
 pub use xdp_tx::{
-    TX_KICK as XDP_TX_KICK, TxStats as XdpTxStats, clear_stats as xdp_tx_clear_stats,
-    drain_batch as xdp_tx_drain_batch, in_flight as xdp_tx_in_flight, pending_len as xdp_tx_pending,
-    stats as xdp_tx_stats,
+    TX_KICK as XDP_TX_KICK, TxEvKind as XdpTxEvKind, TxLogEntry as XdpTxLogEntry,
+    TxPoll as XdpTxPoll, TxStats as XdpTxStats, clear_stats as xdp_tx_clear_stats,
+    in_flight as xdp_tx_in_flight, pending_len as xdp_tx_pending, poll as xdp_tx_poll,
+    set_inflight_cap as xdp_tx_set_inflight_cap, set_tsflow as xdp_tx_set_tsflow,
+    snapshot_log as xdp_tx_log, stats as xdp_tx_stats,
 };
 
 pub(crate) mod os_adapter;
@@ -1042,6 +1044,7 @@ fn wifi_deinit() -> Result<(), crate::WifiError> {
     Ok(())
 }
 
+#[cfg_attr(feature = "xdp", ram)]
 unsafe extern "C" fn recv_cb_sta(
     buffer: *mut c_types::c_void,
     len: u16,
@@ -1132,6 +1135,7 @@ unsafe extern "C" fn recv_cb_ap(
 /// already enqueued). Returns `None` to fall through to the baseline enqueue
 /// path (null/empty buffer).
 #[cfg(feature = "xdp")]
+#[ram]
 fn xdp_dispatch(
     ifx: u32,
     buffer: *mut c_types::c_void,
@@ -1189,8 +1193,9 @@ fn xdp_dispatch(
             match xdp_tx::transmit(ifx, window, eb) {
                 xdp_tx::TxOutcome::Ok => {}
                 xdp_tx::TxOutcome::FailBadBuf => prog.count_failed_tx_bad_buf(),
-                xdp_tx::TxOutcome::FailToken => prog.count_failed_tx_token(),
-                xdp_tx::TxOutcome::FailWifi(rc) => prog.count_failed_tx_wifi(rc),
+                xdp_tx::TxOutcome::FailToken | xdp_tx::TxOutcome::FailRing => {
+                    prog.count_failed_tx_token()
+                }
             }
             Some(include::ESP_OK as esp_err_t)
         }
@@ -1219,7 +1224,7 @@ unsafe extern "C" fn esp_wifi_tx_done_cb(
     decrement_inflight_counter();
 
     #[cfg(feature = "xdp")]
-    xdp_tx::on_tx_done();
+    xdp_tx::on_tx_done(_tx_status);
 
     embassy::TRANSMIT_WAKER.wake();
 }

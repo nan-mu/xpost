@@ -17,6 +17,7 @@ pub(super) mod ktime_get_ns {
 }
 
 pub(super) mod map_lookup_elem {
+    #[esp_hal::ram]
     pub(crate) fn inner(map: usize, key: usize) -> usize {
         crate::map::helper_lookup(map, key)
     }

@@ -37,7 +37,7 @@ const IPPROTO_UDP: u32 = 17;
 
 /// Packets that reached the UDP socket (always, before echo).
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
-/// Per-ipproto counters; UDP (17) increments on successful echo send.
+/// Per-ipproto counters; UDP (17) increments on recv (aligns with XDP just_tx rxcnt).
 static RXCNT: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 /// Optional fixed ACK destination (host order). Zero address → reply to the sender.
 static ACK_IP: AtomicU32 = AtomicU32::new(0);
@@ -55,12 +55,14 @@ static UDP_TX_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    esp_println::logger::init_logger_from_env();
+    esp_println::logger::init_logger(log::LevelFilter::Error);
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
+    // Wi-Fi dynamic RX/TX buffers come from this heap; must match examples/just_drop.
+    esp_alloc::heap_allocator!(size: 64 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -72,10 +74,18 @@ async fn main(spawner: Spawner) -> ! {
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
     spawner.spawn(serial_task(usb_rx).unwrap());
 
-    let (mut controller, interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, Default::default())
-            .expect("Failed to initialize Wi-Fi controller");
-    info!("wifi ready (crates.io esp-radio; no xpost)");
+    // Must match examples/just_drop (A/B fairness): dynamic TX/RX at ESP-IDF max.
+    // AMPDU TX off: its BA session stalls TX ~1.07 s under ping-pong load.
+    // Embassy frame queues (HAL-only; XDP_TX bypasses them): defaults 5/3 drop under burst.
+    let wifi_cfg = esp_radio::wifi::ControllerConfig::default()
+        .with_dynamic_tx_buf_num(128)
+        .with_dynamic_rx_buf_num(1024)
+        .with_ampdu_tx_enable(false)
+        .with_rx_queue_size(32)
+        .with_tx_queue_size(16);
+    let (mut controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, wifi_cfg)
+        .expect("Failed to initialize Wi-Fi controller");
+    info!("wifi ready (crates.io esp-radio; no xpost) tx_dyn=128 rx_dyn=1024 rx_q=32 tx_q=16");
 
     match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
         (Some(ssid), Some(pass)) if !ssid.is_empty() => {
@@ -144,6 +154,11 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
     let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
     socket.bind(STIM_PORT).expect("bind stim");
     info!("udp echo listening {STIM_PORT}");
+    if let Some(v4) = stack.config_v4() {
+        esp_println::println!("xpost ready ipv4={} port={STIM_PORT}", v4.address);
+    } else {
+        esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
+    }
 
     let mut buf = [0u8; 256];
     loop {
@@ -151,14 +166,12 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
             continue;
         };
         NET_RX.fetch_add(1, Ordering::Relaxed);
+        RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
         let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
         // Await TX fully: short with_timeout was silently dropping every echo
         // (Wi-Fi TX often ≫ 50 ms), so TC never saw bounce and RTT stayed empty.
-        match socket.send_to(&buf[..n], dest).await {
-            Ok(()) => {
-                RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
-            }
-            Err(_) => error!("echo send failed bytes={n}"),
+        if socket.send_to(&buf[..n], dest).await.is_err() {
+            error!("echo send failed bytes={n}");
         }
     }
 }

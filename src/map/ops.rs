@@ -92,7 +92,11 @@ fn with_typed_map_ref<R>(id: MapIdx, f: impl FnOnce(TypedMapRef<'_>) -> R) -> Op
 }
 
 /// Sync BPF helper entry: resolve `map` as AOT VMA alias only (fail-closed).
+#[esp_hal::ram]
 pub(crate) fn helper_lookup(map: usize, key: usize) -> usize {
+    if let Some(p) = crate::map::alias::fast_array_lookup(map, key) {
+        return p;
+    }
     let Some(id) = resolve_map_id(map) else {
         crate::xdp::counter::inc_helper_unresolved();
         return 0;
