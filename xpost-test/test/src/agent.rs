@@ -91,6 +91,10 @@ impl AgentClient {
     }
 
     /// Host-timestamped UART/cmd transcript for `[since_unix_ms, until_unix_ms]`.
+    ///
+    /// Manual capture of `tsflow` / `prof` lines. Formal and `dev` runs do not
+    /// call this: printing during the measurement window contends with Wi-Fi TX.
+    #[allow(dead_code, reason = "manual serial_window client; automated runs stay USB-quiet")]
     pub async fn serial_window(&self, since_unix_ms: u64, until_unix_ms: u64) -> Result<String> {
         let body = serde_json::json!({
             "since_unix_ms": since_unix_ms,

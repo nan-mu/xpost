@@ -449,8 +449,8 @@ pub(crate) fn on_tx_done(ok: bool) {
     if TSFLOW_ON.load(Ordering::Relaxed) {
         let n = TX_DONE_SAMPLE.fetch_add(1, Ordering::Relaxed);
         if n % FLOW_SAMPLE_EVERY == 0 {
-            let air = now_us().wrapping_sub(LAST_HANDOFF_US.load(Ordering::Relaxed));
-            warn!("tsflow_done n={n} us_air={air} infl={}", in_flight());
+            let _air = now_us().wrapping_sub(LAST_HANDOFF_US.load(Ordering::Relaxed));
+            warn!("tsflow_done n={n} us_air={_air} infl={}", in_flight());
         }
     }
 }
