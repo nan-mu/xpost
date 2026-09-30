@@ -118,14 +118,16 @@ impl EspRadioTrace for XdpProg {
         }
     }
 
-    fn tx_failed(&self) {
+    fn tx_failed(&self, rc: i32) {
         #[cfg(feature = "perf-counter")]
-        self.counter.bump_tx_failed();
+        self.counter.bump_tx_failed(rc);
         #[cfg(feature = "perf-aggregate")]
         {
             let now = crate::ext::perf::aggregate::AggregateSet::now_ticks();
             self.aggregate.tx_submission.end(now);
         }
+        #[cfg(not(feature = "perf-counter"))]
+        let _ = rc;
     }
 
     fn tx_completed(&self, ok: bool) {
@@ -178,9 +180,11 @@ impl EspRadioTrace for XdpProg {
         self.counter.bump_tx_cap_wait();
     }
 
-    fn tx_nomem_wait(&self) {
+    fn tx_nomem_wait(&self, rc: i32) {
         #[cfg(feature = "perf-counter")]
-        self.counter.bump_tx_nomem_wait();
+        self.counter.bump_tx_nomem_wait(rc);
+        #[cfg(not(feature = "perf-counter"))]
+        let _ = rc;
     }
 
     fn tx_no_retain(&self) {
@@ -214,6 +218,12 @@ impl EspRadioTrace for XdpProg {
         let _ = (pending, inflight);
     }
 
+    fn tx_inflight_cap(&self, cap: usize) {
+        #[cfg(feature = "perf-counter")]
+        self.counter.bump_tx_inflight_cap(cap);
+        let _ = cap;
+    }
+
     fn tx_block(&self) {
         #[cfg(feature = "perf-counter")]
         if let Some(us) = self.counter.note_block_end() {
@@ -226,10 +236,5 @@ impl EspRadioTrace for XdpProg {
     fn tx_flow_sample(&self) {
         #[cfg(feature = "perf-counter")]
         self.counter.bump_tx_flow_sample();
-    }
-
-    fn tx_log_dropped(&self) {
-        #[cfg(feature = "perf-counter")]
-        self.counter.bump_tx_log_dropped();
     }
 }

@@ -14,6 +14,9 @@ macro_rules! define_counters {
         pub struct Counter {
             $( $name: AtomicUsize, )+
             tx_wifi_last_rc: AtomicI32,
+            tx_pending: AtomicUsize,
+            tx_inflight: AtomicUsize,
+            tx_inflight_cap: AtomicUsize,
             tx_pending_peak: AtomicUsize,
             tx_inflight_peak: AtomicUsize,
             tx_block_max_us: AtomicU32,
@@ -25,6 +28,9 @@ macro_rules! define_counters {
                 Self {
                     $( $name: AtomicUsize::new(0), )+
                     tx_wifi_last_rc: AtomicI32::new(0),
+                    tx_pending: AtomicUsize::new(0),
+                    tx_inflight: AtomicUsize::new(0),
+                    tx_inflight_cap: AtomicUsize::new(0),
                     tx_pending_peak: AtomicUsize::new(0),
                     tx_inflight_peak: AtomicUsize::new(0),
                     tx_block_max_us: AtomicU32::new(0),
@@ -47,6 +53,9 @@ macro_rules! define_counters {
             pub fn reset_all(&self) {
                 $( self.$name.store(0, Ordering::Relaxed); )+
                 self.tx_wifi_last_rc.store(0, Ordering::Relaxed);
+                self.tx_pending.store(0, Ordering::Relaxed);
+                self.tx_inflight.store(0, Ordering::Relaxed);
+                self.tx_inflight_cap.store(0, Ordering::Relaxed);
                 self.tx_pending_peak.store(0, Ordering::Relaxed);
                 self.tx_inflight_peak.store(0, Ordering::Relaxed);
                 self.tx_block_max_us.store(0, Ordering::Relaxed);
@@ -86,7 +95,6 @@ define_counters! {
     tx_ns_ref => bump_tx_ns_ref,
     tx_ns_free => bump_tx_ns_free,
     tx_flow_sample => bump_tx_flow_sample,
-    tx_log_dropped => bump_tx_log_dropped,
     tx_block_gt10ms => bump_tx_block_gt10ms,
     tx_block_gt100ms => bump_tx_block_gt100ms,
     inactive_skip => bump_inactive_skip_raw,
@@ -191,12 +199,12 @@ impl Counter {
 
     #[inline]
     pub fn tx_pend(&self) -> usize {
-        esp_radio::wifi::xdp_tx_pending()
+        self.tx_pending.load(Ordering::Relaxed)
     }
 
     #[inline]
     pub fn tx_inflight(&self) -> usize {
-        esp_radio::wifi::xdp_tx_in_flight()
+        self.tx_inflight.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -206,7 +214,7 @@ impl Counter {
 
     #[inline]
     pub fn tx_inflight_cap(&self) -> usize {
-        esp_radio::wifi::xdp_tx_stats().inflight_cap as usize
+        self.tx_inflight_cap.load(Ordering::Relaxed)
     }
 
     /// Clear TX-path counters / peaks (formal round boundary).
@@ -231,7 +239,9 @@ impl Counter {
         self.tx_ns_ref.store(0, Ordering::Relaxed);
         self.tx_ns_free.store(0, Ordering::Relaxed);
         self.tx_flow_sample.store(0, Ordering::Relaxed);
-        self.tx_log_dropped.store(0, Ordering::Relaxed);
+        self.tx_pending.store(0, Ordering::Relaxed);
+        self.tx_inflight.store(0, Ordering::Relaxed);
+        // Keep last known soft-cap; only peaks / block timers reset.
         self.tx_pending_peak.store(0, Ordering::Relaxed);
         self.tx_inflight_peak.store(0, Ordering::Relaxed);
         self.tx_block_max_us.store(0, Ordering::Relaxed);
@@ -288,12 +298,9 @@ impl Counter {
     }
 
     #[inline]
-    pub(crate) fn bump_tx_failed(&self) {
+    pub(crate) fn bump_tx_failed(&self, rc: i32) {
         self.bump_tx_failed_raw();
-        self.tx_wifi_last_rc.store(
-            esp_radio::wifi::xdp_tx_last_drain_rc(),
-            Ordering::Relaxed,
-        );
+        self.tx_wifi_last_rc.store(rc, Ordering::Relaxed);
     }
 
     #[inline]
@@ -312,13 +319,21 @@ impl Counter {
     }
 
     #[inline]
-    pub(crate) fn bump_tx_nomem_wait(&self) {
+    pub(crate) fn bump_tx_nomem_wait(&self, rc: i32) {
         self.bump_tx_nomem_wait_raw();
+        self.tx_wifi_last_rc.store(rc, Ordering::Relaxed);
         self.note_block_start();
     }
 
     #[inline]
+    pub(crate) fn bump_tx_inflight_cap(&self, cap: usize) {
+        self.tx_inflight_cap.store(cap, Ordering::Relaxed);
+    }
+
+    #[inline]
     pub(crate) fn bump_tx_depth(&self, pending: usize, inflight: usize) {
+        self.tx_pending.store(pending, Ordering::Relaxed);
+        self.tx_inflight.store(inflight, Ordering::Relaxed);
         let _ = self
             .tx_pending_peak
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |m| {

@@ -5,6 +5,15 @@
 //!
 //! Traits live in [`xpost_type`]; this module owns install + driver [`Action`].
 //! With `xdp-observe`, [`super::new`] takes [`EspRadioTrace`] (extends [`XdpProg`]).
+//! Observation call-sites invoke [`current`] methods directly under
+//! `xdp-observe` — no helper wrapper and no local TxStats / event-log storage.
+//! Counter / Aggregate / Gauge / Trace storage lives in xpost `ext::perf` when
+//! those features replace the trait defaults.
+//!
+//! | Feature | Role |
+//! |---------|------|
+//! | `xdp` | [`XdpProg`] via `wifi::new(..., prog)`; Pass / Drop / same-iface Tx |
+//! | `xdp-observe` | compile EspRadioTrace call-sites on RX / TX paths |
 //!
 //! # Initialization
 //!
@@ -13,18 +22,21 @@
 //! `new` with another prog fails to replace the first (first wins).
 //!
 //! Recommended typecheck: `esp32c3,wifi,unstable,xdp` (+ `xdp-observe` as needed).
+//!
+//! ```bash
+//! cargo check -p esp-radio --features esp32c3,wifi,unstable,xdp
+//! # or from xpost workspace: cargo check-esp-radio-xdp
+//! ```
 
 use embassy_sync::once_lock::OnceLock;
 
 use crate::sys::{c_types, include};
 
-pub mod observe;
 pub mod prof;
 pub mod tx;
 
 pub use tx::{
-    TxEvKind, TxLogEntry, TxPoll, TxStats, clear_stats, in_flight, last_drain_rc, pending_len,
-    poll, set_inflight_cap, set_tsflow, snapshot_log, stats, TX_KICK,
+    TX_KICK, TxPoll, in_flight, pending_len, poll, set_inflight_cap, set_tsflow,
 };
 pub use xpost_type::{EspRadioTrace, XdpAction, XdpProg};
 

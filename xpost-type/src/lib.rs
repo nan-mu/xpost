@@ -88,8 +88,8 @@ pub trait EspRadioTrace: XdpProg {
     fn tx_submission_begin(&self) {}
     /// `tx_submitted` — `tx_by_ref` OK.
     fn tx_submitted(&self) {}
-    /// `tx_failed` — `tx_by_ref` failed.
-    fn tx_failed(&self) {}
+    /// `tx_failed` — `tx_by_ref` failed (`rc` = wifi return code).
+    fn tx_failed(&self, _rc: i32) {}
     /// `tx_completed` / `tx_air_done_fail` — air TX completion (`ok` = success).
     fn tx_completed(&self, _ok: bool) {}
     /// `tx_fail_bad_buf`.
@@ -110,8 +110,8 @@ pub trait EspRadioTrace: XdpProg {
     fn tx_poll(&self) {}
     /// `tx_cap_wait`.
     fn tx_cap_wait(&self) {}
-    /// `tx_nomem_wait`.
-    fn tx_nomem_wait(&self) {}
+    /// `tx_nomem_wait` — soft-cap / `NO_MEM` wait (`rc` = wifi return code).
+    fn tx_nomem_wait(&self, _rc: i32) {}
     /// `tx_no_retain`.
     fn tx_no_retain(&self) {}
     /// `tx_flush`.
@@ -122,10 +122,10 @@ pub trait EspRadioTrace: XdpProg {
     fn tx_ns_free(&self) {}
     /// `tx_queue_depth` / `tx_inflight` gauges (`pending`, `inflight`).
     fn tx_depth(&self, _pending: usize, _inflight: usize) {}
+    /// Soft in-flight cap changed (`set_inflight_cap`).
+    fn tx_inflight_cap(&self, _cap: usize) {}
     /// Aggregate `tx_block` (cap/NOMEM block ended).
     fn tx_block(&self) {}
     /// `tx_flow_sample`.
     fn tx_flow_sample(&self) {}
-    /// `tx_log_dropped`.
-    fn tx_log_dropped(&self) {}
 }

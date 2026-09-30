@@ -130,12 +130,9 @@ pub use xdp::prof as xdp_prof;
 #[cfg(feature = "xdp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "xdp")))]
 pub use xdp::tx::{
-    TX_KICK as XDP_TX_KICK, TxEvKind as XdpTxEvKind, TxLogEntry as XdpTxLogEntry,
-    TxPoll as XdpTxPoll, TxStats as XdpTxStats, clear_stats as xdp_tx_clear_stats,
-    in_flight as xdp_tx_in_flight, last_drain_rc as xdp_tx_last_drain_rc,
+    TX_KICK as XDP_TX_KICK, TxPoll as XdpTxPoll, in_flight as xdp_tx_in_flight,
     pending_len as xdp_tx_pending, poll as xdp_tx_poll,
     set_inflight_cap as xdp_tx_set_inflight_cap, set_tsflow as xdp_tx_set_tsflow,
-    snapshot_log as xdp_tx_log, stats as xdp_tx_stats,
 };
 
 pub(crate) mod os_adapter;
@@ -1146,14 +1143,23 @@ fn xdp_dispatch(
     }
     let frame = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), len as usize) };
     let prog = xdp::current();
-    xdp::observe::notify(|p| p.rx_packets(frame.len()));
+    #[cfg(feature = "xdp-observe")]
+    {
+        prog.rx_packets(frame.len());
+    }
     let (action, window) = {
-        xdp::observe::notify(|p| p.xdp_invocations());
+        #[cfg(feature = "xdp-observe")]
+        {
+            prog.xdp_invocations();
+        }
         let _run = xdp::prof::Span::enter(xdp::prof::Site::XdpRun);
         let frame_ptr = frame.as_ptr();
         let frame_len = frame.len();
         let (xdp_act, win) = prog.run(frame);
-        xdp::observe::notify(|p| p.xdp_action(xdp_act));
+        #[cfg(feature = "xdp-observe")]
+        {
+            prog.xdp_action(xdp_act);
+        }
         let action = xdp::map_xdp_action(xdp_act, frame_ptr, frame_len, win);
         (action, win)
     };
@@ -1177,14 +1183,22 @@ fn xdp_dispatch(
                     }
                 }) {
                     Ok(depth) => {
-                        xdp::observe::notify(|p| p.rx_delivered(depth));
+                        #[cfg(feature = "xdp-observe")]
+                        {
+                            prog.rx_delivered(depth);
+                        }
+                        #[cfg(not(feature = "xdp-observe"))]
+                        let _ = depth;
                         wake();
                         include::ESP_OK as esp_err_t
                     }
                     Err(_) => {
                         debug!("RX QUEUE FULL");
-                        let depth = RX_QUEUE_SIZE.load(Ordering::Relaxed);
-                        xdp::observe::notify(|p| p.rx_queue_overflow(depth));
+                        #[cfg(feature = "xdp-observe")]
+                        {
+                            let depth = RX_QUEUE_SIZE.load(Ordering::Relaxed);
+                            prog.rx_queue_overflow(depth);
+                        }
                         include::ESP_ERR_NO_MEM as esp_err_t
                     }
                 },
@@ -1192,23 +1206,35 @@ fn xdp_dispatch(
         }
         Action::Drop => {
             xdp::free_rx_buffer(eb);
-            xdp::observe::notify(|p| p.rx_discarded());
+            #[cfg(feature = "xdp-observe")]
+            {
+                prog.rx_discarded();
+            }
             Some(include::ESP_OK as esp_err_t)
         }
         Action::Tx => {
             match xdp::tx::transmit(ifx, window, eb) {
                 xdp::tx::TxOutcome::Ok => {}
                 xdp::tx::TxOutcome::FailBadBuf => {
-                    xdp::observe::notify(|p| p.tx_fail_bad_buf());
+                    #[cfg(feature = "xdp-observe")]
+                    {
+                        prog.tx_fail_bad_buf();
+                    }
                 }
                 xdp::tx::TxOutcome::FailToken | xdp::tx::TxOutcome::FailRing => {
-                    xdp::observe::notify(|p| p.tx_fail_token());
+                    #[cfg(feature = "xdp-observe")]
+                    {
+                        prog.tx_fail_token();
+                    }
                 }
             }
             Some(include::ESP_OK as esp_err_t)
         }
     };
-    xdp::observe::notify(|p| p.rx_end());
+    #[cfg(feature = "xdp-observe")]
+    {
+        prog.rx_end();
+    }
     result
 }
 

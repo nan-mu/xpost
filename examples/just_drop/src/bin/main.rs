@@ -299,12 +299,7 @@ fn dispatch_serial(line: &str) {
         print_counters();
     } else if line.eq_ignore_ascii_case("txstats") {
         print_txstats();
-    } else if line.eq_ignore_ascii_case("txlog") {
-        print_txlog();
-    } else if line.eq_ignore_ascii_case("txlogv") {
-        print_txlogv();
     } else if line.eq_ignore_ascii_case("tx clear") || line.eq_ignore_ascii_case("txstats clear") {
-        esp_radio::wifi::xdp_tx_clear_stats();
         xpost::ext::perf::counter().clear_tx();
         esp_println::println!("OK tx clear");
     } else if line.eq_ignore_ascii_case("heap") {
@@ -335,7 +330,6 @@ fn dispatch_serial(line: &str) {
         esp_println::println!("OK prof {}", if on { "on" } else { "off" });
     } else if line.eq_ignore_ascii_case("prof clear") {
         esp_radio::wifi::xdp_prof::clear_all();
-        esp_radio::wifi::xdp_tx_clear_stats();
         xpost::ext::perf::counter().clear_tx();
         esp_println::println!("OK prof clear");
     } else if line.eq_ignore_ascii_case("agg") {
@@ -547,47 +541,6 @@ fn print_txstats() {
         t.tx_no_retain(),
         t.tx_flush(),
     );
-}
-
-fn print_txlog() {
-    let mut buf = [esp_radio::wifi::XdpTxLogEntry::default(); 32];
-    let n = esp_radio::wifi::xdp_tx_log(&mut buf);
-    // Single OK line so agent `request` captures the ring (first OK wins).
-    esp_println::print!("OK txlog n={n} dropped={}", xpost::ext::perf::counter().tx_log_dropped());
-    for e in buf.iter().take(n) {
-        let kind = esp_radio::wifi::XdpTxEvKind::from_u8(e.kind)
-            .map(|k| k.as_str())
-            .unwrap_or("?");
-        esp_println::print!(
-            " | us={} kind={} pend={} infl={} rc={}",
-            e.t_us,
-            kind,
-            e.pending,
-            e.inflight,
-            e.rc
-        );
-    }
-    esp_println::println!();
-}
-
-fn print_txlogv() {
-    let mut buf = [esp_radio::wifi::XdpTxLogEntry::default(); 32];
-    let n = esp_radio::wifi::xdp_tx_log(&mut buf);
-    esp_println::println!("OK txlogv begin n={n} dropped={}", xpost::ext::perf::counter().tx_log_dropped());
-    for e in buf.iter().take(n) {
-        let kind = esp_radio::wifi::XdpTxEvKind::from_u8(e.kind)
-            .map(|k| k.as_str())
-            .unwrap_or("?");
-        esp_println::println!(
-            "us={} kind={} pend={} infl={} rc={}",
-            e.t_us,
-            kind,
-            e.pending,
-            e.inflight,
-            e.rc
-        );
-    }
-    esp_println::println!("OK txlogv end");
 }
 
 /// Brendan Gregg folded stacks — paste into speedscope / flamegraph.pl.

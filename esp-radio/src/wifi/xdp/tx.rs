@@ -12,6 +12,9 @@
 //! buffer. `RING_CAP + inflight_cap` must leave heap headroom for the Wi-Fi
 //! driver to keep allocating RX descriptors — otherwise frames never reach
 //! [`transmit`] and show up only as host `sent - tx_enq` loss.
+//!
+//! Observation: under `xdp-observe`, call [`super::current`] EspRadioTrace
+//! methods directly. No local stats / event-log storage.
 
 #![allow(missing_docs)]
 
@@ -21,7 +24,6 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use portable_atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
-use super::observe::notify;
 use super::prof::{self, Site, Span};
 use crate::sys::include;
 
@@ -69,118 +71,13 @@ pub enum TxPoll {
     Blocked,
 }
 
-/// Live TX gauges (+ deprecated zeroed cumulative fields for API compat).
-///
-/// Cumulative counters moved to [`super::EspRadioTrace`]; only `pending` / `in_flight` /
-/// `inflight_cap` / `last_drain_rc` are filled from driver state.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TxStats {
-    pub enqueued: u32,
-    pub enqueue_fail_token: u32,
-    pub enqueue_fail_claim: u32,
-    pub enqueue_fail_ring: u32,
-    pub drain_ok: u32,
-    pub drain_nomem_requeue: u32,
-    pub drain_nomem_drop_idle: u32,
-    pub drain_nomem_drop_rq_fail: u32,
-    pub drain_nomem_drop: u32,
-    pub drain_fail_other: u32,
-    pub last_drain_rc: i32,
-    pub drain_skip_stale: u32,
-    pub drain_busy: u32,
-    pub drain_calls: u32,
-    pub kicks: u32,
-    pub tx_done: u32,
-    pub pending: u32,
-    pub pending_peak: u32,
-    pub in_flight: u32,
-    pub in_flight_peak: u32,
-    pub log_dropped: u32,
-    pub flow_samples: u32,
-    pub inflight_cap: u32,
-    pub tx_done_fail: u32,
-    pub block_max_us: u32,
-    pub block_gt10ms: u32,
-    pub block_gt100ms: u32,
-    pub grp_src: u32,
-    pub netstack_ref: u32,
-    pub netstack_free: u32,
-    pub no_retain: u32,
-    pub flush_pending: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum TxEvKind {
-    EnqClaimFail = 1,
-    EnqRingFull = 2,
-    NomemRq = 3,
-    NomemDropIdle = 4,
-    NomemDropRqFail = 5,
-    DrainFail = 6,
-    SkipStale = 7,
-    DrainBusy = 8,
-}
-
-impl TxEvKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::EnqClaimFail => "enq_claim",
-            Self::EnqRingFull => "enq_ring",
-            Self::NomemRq => "nomem_rq",
-            Self::NomemDropIdle => "nomem_drop_idle",
-            Self::NomemDropRqFail => "nomem_drop_rqfail",
-            Self::DrainFail => "drain_fail",
-            Self::SkipStale => "skip_stale",
-            Self::DrainBusy => "drain_busy",
-        }
-    }
-
-    pub fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            1 => Some(Self::EnqClaimFail),
-            2 => Some(Self::EnqRingFull),
-            3 => Some(Self::NomemRq),
-            4 => Some(Self::NomemDropIdle),
-            5 => Some(Self::NomemDropRqFail),
-            6 => Some(Self::DrainFail),
-            7 => Some(Self::SkipStale),
-            8 => Some(Self::DrainBusy),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TxLogEntry {
-    pub t_us: u32,
-    pub kind: u8,
-    pub pending: u8,
-    pub inflight: u8,
-    pub rc: i32,
-}
-
-const TX_LOG_CAP: usize = 32;
-
-/// Last `esp_wifi_internal_tx_by_ref` failure / NOMEM rc (EspRadioTrace implementors read this).
-static LAST_DRAIN_RC: AtomicU32 = AtomicU32::new(0);
 static FLOW_TICK: AtomicU32 = AtomicU32::new(0);
 static LAST_HANDOFF_US: AtomicU32 = AtomicU32::new(0);
 static TX_DONE_SAMPLE: AtomicU32 = AtomicU32::new(0);
-/// Start (µs) of the current cap/NO_MEM block; 0 = not blocked.
-static BLOCK_SINCE_US: AtomicU32 = AtomicU32::new(0);
 static TSFLOW_ON: AtomicBool = AtomicBool::new(false);
 /// Outstanding handoffs that must clear via `tx_done` (driver skipped retain).
 static TX_NEED_DONE: AtomicUsize = AtomicUsize::new(0);
 static INFLIGHT_CAP: AtomicUsize = AtomicUsize::new(DEFAULT_INFLIGHT_CAP);
-
-static TX_LOG_KIND: [AtomicU8; TX_LOG_CAP] = [const { AtomicU8::new(0) }; TX_LOG_CAP];
-static TX_LOG_PEND: [AtomicU8; TX_LOG_CAP] = [const { AtomicU8::new(0) }; TX_LOG_CAP];
-static TX_LOG_INFL: [AtomicU8; TX_LOG_CAP] = [const { AtomicU8::new(0) }; TX_LOG_CAP];
-static TX_LOG_T_US: [AtomicU32; TX_LOG_CAP] = [const { AtomicU32::new(0) }; TX_LOG_CAP];
-static TX_LOG_RC: [AtomicU32; TX_LOG_CAP] = [const { AtomicU32::new(0) }; TX_LOG_CAP];
-static TX_LOG_W: AtomicUsize = AtomicUsize::new(0);
-static TX_LOG_N: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(C)]
 struct RxBufferOwnership {
@@ -274,6 +171,10 @@ static RING_HEAD: AtomicUsize = AtomicUsize::new(0);
 static RING_TAIL: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn arm_zero_copy() -> i32 {
+    #[cfg(feature = "xdp-observe")]
+    {
+        super::current().tx_inflight_cap(INFLIGHT_CAP.load(Ordering::Relaxed));
+    }
     unsafe {
         include::esp_wifi_internal_reg_netstack_buf_cb(Some(netstack_ref), Some(netstack_free))
     }
@@ -291,13 +192,18 @@ pub(crate) fn transmit(ifx: u32, window: &mut [u8], eb: *mut c_void) -> TxOutcom
     // (e.g. MAC-swapped broadcast/mDNS). The blob retries such frames until they
     // fail, blocking the TX queue behind them (up to ~0.8 s stalls).
     if window.len() < 12 || window[6] & 1 != 0 {
-        notify(|p| p.tx_grp_src());
+        #[cfg(feature = "xdp-observe")]
+        {
+            super::current().tx_grp_src();
+        }
         super::free_rx_buffer(eb);
         return TxOutcome::FailBadBuf;
     }
     let Some((idx, token)) = claim_token(eb, ifx, window.as_mut_ptr(), window.len()) else {
-        notify(|p| p.tx_enq_fail_claim());
-        push_log(TxEvKind::EnqClaimFail, 0);
+        #[cfg(feature = "xdp-observe")]
+        {
+            super::current().tx_enq_fail_claim();
+        }
         super::free_rx_buffer(eb);
         return TxOutcome::FailToken;
     };
@@ -305,21 +211,30 @@ pub(crate) fn transmit(ifx: u32, window: &mut [u8], eb: *mut c_void) -> TxOutcom
         token.t_enq_us.store(now_us(), Ordering::Relaxed);
     }
     if !ring_push(idx) {
-        notify(|p| p.tx_enq_fail_ring());
-        push_log(TxEvKind::EnqRingFull, 0);
+        #[cfg(feature = "xdp-observe")]
+        {
+            super::current().tx_enq_fail_ring();
+        }
         token.release();
         return TxOutcome::FailRing;
     }
-    notify(|p| p.tx_enq());
-    notify(|p| p.tx_depth(pending_len(), in_flight()));
-    notify(|p| p.tx_kick());
+    #[cfg(feature = "xdp-observe")]
+    {
+        let prog = super::current();
+        prog.tx_enq();
+        prog.tx_depth(pending_len(), in_flight());
+        prog.tx_kick();
+    }
     TX_KICK.signal(());
     TxOutcome::Ok
 }
 
 /// TX task: hand pending frames to Wi-Fi until empty or `NO_MEM`.
 pub fn poll() -> TxPoll {
-    notify(|p| p.tx_poll());
+    #[cfg(feature = "xdp-observe")]
+    {
+        super::current().tx_poll();
+    }
     loop {
         let Some(idx) = ring_peek() else {
             return TxPoll::Idle;
@@ -327,8 +242,10 @@ pub fn poll() -> TxPoll {
         // Soft cap (`txcap N`): off when 0. Prefer a modest default — see DEFAULT_INFLIGHT_CAP.
         let soft_cap = INFLIGHT_CAP.load(Ordering::Relaxed);
         if soft_cap > 0 && TX_IN_FLIGHT.load(Ordering::Acquire) >= soft_cap {
-            notify(|p| p.tx_cap_wait());
-            note_block_start();
+            #[cfg(feature = "xdp-observe")]
+            {
+                super::current().tx_cap_wait();
+            }
             return TxPoll::Blocked;
         }
         let token = &TX_TOKENS[idx as usize];
@@ -341,8 +258,12 @@ pub fn poll() -> TxPoll {
         // NEED_DONE bump (diagnostic / soft-cap counter only).
         TX_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
         TX_NEED_DONE.fetch_add(1, Ordering::AcqRel);
-        notify(|p| p.tx_depth(pending_len(), in_flight()));
-        notify(|p| p.tx_submission_begin());
+        #[cfg(feature = "xdp-observe")]
+        {
+            let prog = super::current();
+            prog.tx_depth(pending_len(), in_flight());
+            prog.tx_submission_begin();
+        }
         let rc = {
             let _span = Span::enter(Site::TxDrainOne);
             prof::hit_here();
@@ -357,23 +278,32 @@ pub fn poll() -> TxPoll {
         };
         if rc == include::ESP_ERR_NO_MEM as i32 {
             undo_inflight_reservation();
-            LAST_DRAIN_RC.store(rc as u32, Ordering::Relaxed);
-            notify(|p| p.tx_nomem_wait());
-            push_log(TxEvKind::NomemRq, rc);
-            note_block_start();
+            #[cfg(feature = "xdp-observe")]
+            {
+                super::current().tx_nomem_wait(rc);
+            }
             return TxPoll::Blocked;
         }
-        note_block_end();
+        #[cfg(feature = "xdp-observe")]
+        {
+            super::current().tx_block();
+        }
         ring_pop();
         if rc == include::ESP_OK as i32 {
             let retained = token.refs.load(Ordering::Acquire) >= 2;
-            notify(|p| p.tx_submitted());
+            #[cfg(feature = "xdp-observe")]
+            {
+                super::current().tx_submitted();
+            }
             if retained {
                 let _ = TX_NEED_DONE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                     (n > 0).then_some(n - 1)
                 });
             } else {
-                notify(|p| p.tx_no_retain());
+                #[cfg(feature = "xdp-observe")]
+                {
+                    super::current().tx_no_retain();
+                }
             }
             if flow {
                 let t1 = now_us();
@@ -382,9 +312,10 @@ pub fn poll() -> TxPoll {
             }
         } else {
             undo_inflight_reservation();
-            LAST_DRAIN_RC.store(rc as u32, Ordering::Relaxed);
-            notify(|p| p.tx_failed());
-            push_log(TxEvKind::DrainFail, rc);
+            #[cfg(feature = "xdp-observe")]
+            {
+                super::current().tx_failed(rc);
+            }
         }
         token.release();
     }
@@ -406,7 +337,12 @@ fn undo_inflight_reservation() {
 /// never decrement for every global `tx_done` (smoltcp ACKs would steal slots).
 #[esp_hal::ram]
 pub(crate) fn on_tx_done(ok: bool) {
-    notify(|p| p.tx_completed(ok));
+    #[cfg(feature = "xdp-observe")]
+    {
+        super::current().tx_completed(ok);
+    }
+    #[cfg(not(feature = "xdp-observe"))]
+    let _ = ok;
     if TX_NEED_DONE
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n > 0).then_some(n - 1)
@@ -448,64 +384,15 @@ pub fn in_flight() -> usize {
 pub fn set_inflight_cap(cap: usize) {
     // `0` disables the soft gate (NO_MEM-only). `txcap 0` from serial is valid.
     INFLIGHT_CAP.store(cap, Ordering::Relaxed);
+    #[cfg(feature = "xdp-observe")]
+    {
+        super::current().tx_inflight_cap(cap);
+    }
     TX_KICK.signal(());
 }
 
 pub fn set_tsflow(on: bool) {
     TSFLOW_ON.store(on, Ordering::Relaxed);
-}
-
-/// Last `tx_by_ref` failure / NOMEM return code (for EspRadioTrace implementors).
-pub fn last_drain_rc() -> i32 {
-    LAST_DRAIN_RC.load(Ordering::Relaxed) as i32
-}
-
-pub fn stats() -> TxStats {
-    TxStats {
-        last_drain_rc: last_drain_rc(),
-        pending: pending_len() as u32,
-        in_flight: in_flight() as u32,
-        inflight_cap: INFLIGHT_CAP.load(Ordering::Relaxed) as u32,
-        ..TxStats::default()
-    }
-}
-
-pub fn snapshot_log(out: &mut [TxLogEntry]) -> usize {
-    let n = TX_LOG_N.load(Ordering::Acquire).min(TX_LOG_CAP);
-    if n == 0 || out.is_empty() {
-        return 0;
-    }
-    let take = n.min(out.len());
-    let w = TX_LOG_W.load(Ordering::Acquire);
-    let start = if n < TX_LOG_CAP { 0 } else { w % TX_LOG_CAP };
-    for (i, slot) in out.iter_mut().enumerate().take(take) {
-        let idx = (start + i) % TX_LOG_CAP;
-        *slot = TxLogEntry {
-            t_us: TX_LOG_T_US[idx].load(Ordering::Relaxed),
-            kind: TX_LOG_KIND[idx].load(Ordering::Relaxed),
-            pending: TX_LOG_PEND[idx].load(Ordering::Relaxed),
-            inflight: TX_LOG_INFL[idx].load(Ordering::Relaxed),
-            rc: TX_LOG_RC[idx].load(Ordering::Relaxed) as i32,
-        };
-    }
-    take
-}
-
-pub fn clear_stats() {
-    LAST_DRAIN_RC.store(0, Ordering::Relaxed);
-    FLOW_TICK.store(0, Ordering::Relaxed);
-    TX_DONE_SAMPLE.store(0, Ordering::Relaxed);
-    BLOCK_SINCE_US.store(0, Ordering::Relaxed);
-    TX_NEED_DONE.store(0, Ordering::Relaxed);
-    for i in 0..TX_LOG_CAP {
-        TX_LOG_KIND[i].store(0, Ordering::Relaxed);
-        TX_LOG_PEND[i].store(0, Ordering::Relaxed);
-        TX_LOG_INFL[i].store(0, Ordering::Relaxed);
-        TX_LOG_T_US[i].store(0, Ordering::Relaxed);
-        TX_LOG_RC[i].store(0, Ordering::Relaxed);
-    }
-    TX_LOG_W.store(0, Ordering::Relaxed);
-    TX_LOG_N.store(0, Ordering::Relaxed);
 }
 
 fn now_us() -> u32 {
@@ -522,7 +409,10 @@ fn maybe_tsflow(t_enq: u32, t0: u32, t1: u32) {
     if !n.is_multiple_of(FLOW_SAMPLE_EVERY) {
         return;
     }
-    notify(|p| p.tx_flow_sample());
+    #[cfg(feature = "xdp-observe")]
+    {
+        super::current().tx_flow_sample();
+    }
     warn!(
         "tsflow n={n} us_queue={} us_txref={} pend={} infl={}",
         t0.wrapping_sub(t_enq),
@@ -530,24 +420,6 @@ fn maybe_tsflow(t_enq: u32, t0: u32, t1: u32) {
         pending_len(),
         in_flight()
     );
-}
-
-fn push_log(_kind: TxEvKind, _rc: i32) {
-    // Hot-path ring log disabled: under loss it ran every reject and contended
-    // with USB serial / Wi-Fi timing. Counters remain; use `txlog` only if re-enabled.
-}
-
-fn note_block_start() {
-    let _ =
-        BLOCK_SINCE_US.compare_exchange(0, now_us().max(1), Ordering::Relaxed, Ordering::Relaxed);
-}
-
-fn note_block_end() {
-    let since = BLOCK_SINCE_US.swap(0, Ordering::Relaxed);
-    if since == 0 {
-        return;
-    }
-    notify(|p| p.tx_block());
 }
 
 #[esp_hal::ram]
@@ -609,7 +481,10 @@ fn token_from_raw(token: *mut c_void) -> Option<&'static RxBufferOwnership> {
 }
 
 unsafe extern "C" fn netstack_ref(token: *mut c_void) {
-    notify(|p| p.tx_ns_ref());
+    #[cfg(feature = "xdp-observe")]
+    {
+        super::current().tx_ns_ref();
+    }
     if let Some(token) = token_from_raw(token) {
         token.retain_tx();
     } else {
@@ -618,7 +493,10 @@ unsafe extern "C" fn netstack_ref(token: *mut c_void) {
 }
 
 unsafe extern "C" fn netstack_free(token: *mut c_void) {
-    notify(|p| p.tx_ns_free());
+    #[cfg(feature = "xdp-observe")]
+    {
+        super::current().tx_ns_free();
+    }
     if let Some(token) = token_from_raw(token) {
         // XDP-only completion: do not couple to global `tx_done` (smoltcp).
         clear_one_inflight();
