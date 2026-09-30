@@ -14,9 +14,9 @@ pub const GAUGE_WIRE_LEN: usize = 32;
 #[cfg(feature = "perf-trace")]
 pub const TRACE_WIRE_LEN: usize = crate::ext::perf::trace::WIRE_LEN;
 #[cfg(feature = "perf-span")]
-pub const SPAN_WIRE_LEN: usize = crate::ext::perf::span::WIRE_LEN;
+pub const SPAN_WIRE_LEN: usize = crate::ext::perf::prof::span::WIRE_LEN;
 #[cfg(feature = "perf-pchit")]
-pub const PCHIT_WIRE_LEN: usize = crate::ext::perf::pchit::WIRE_LEN;
+pub const PCHIT_WIRE_LEN: usize = crate::ext::perf::prof::pchit::WIRE_LEN;
 
 /// Total payload bytes for the features compiled into this firmware image.
 pub const fn report_payload_len() -> usize {
@@ -59,9 +59,9 @@ pub fn clear_perf() {
     #[cfg(feature = "perf-trace")]
     crate::ext::perf::trace().clear();
     #[cfg(feature = "perf-span")]
-    crate::ext::perf::span().reset_all();
+    crate::ext::perf::prof::span().reset_all();
     #[cfg(feature = "perf-pchit")]
-    crate::ext::perf::pchit().reset_all();
+    crate::ext::perf::prof::pchit().reset_all();
 }
 
 /// Encode all enabled sections into `write` (raw LE bytes, no framing).
@@ -94,13 +94,13 @@ pub fn report_perf(mut write: impl FnMut(&[u8]) -> Result<(), Infallible>) {
     #[cfg(feature = "perf-span")]
     {
         let mut buf = [0u8; SPAN_WIRE_LEN];
-        crate::ext::perf::span().encode_wire(&mut buf);
+        crate::ext::perf::prof::span().encode_wire(&mut buf);
         let _ = write(&buf);
     }
     #[cfg(feature = "perf-pchit")]
     {
         let mut buf = [0u8; PCHIT_WIRE_LEN];
-        crate::ext::perf::pchit().encode_wire(&mut buf);
+        crate::ext::perf::prof::pchit().encode_wire(&mut buf);
         let _ = write(&buf);
     }
 }

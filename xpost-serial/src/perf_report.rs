@@ -1,4 +1,4 @@
-//! Binary `report` payload layout (must match `xpost::ext::perf::report`).
+//! Binary `report` payload layout (must match `xpost::ext::perf` report encode).
 //!
 //! Sections in order C → A → G → T → S → P; absent features omit the section.
 //! Total length uniquely identifies the feature mask.

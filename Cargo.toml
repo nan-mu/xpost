@@ -29,17 +29,17 @@ default = []
 ringbuf = ["dep:ringbuf", "dep:async-ringbuf"]
 # `xpost::esp_radio::new` — injects the crate default XDP program into `esp_radio::wifi::new`.
 esp-radio = []
-# esp-radio EspRadioTrace + Counter storage → `xpost::ext::perf::counter()`.
+# esp-radio EspRadioTrace + Counter → `xpost::ext::perf::counter()`.
 perf-counter = ["esp-radio/xdp-observe"]
 # Aggregate latency histograms → `xpost::ext::perf::aggregate()`.
 perf-aggregate = ["esp-radio/xdp-observe"]
 # Gauge current/peak → `xpost::ext::perf::gauge()`.
 perf-gauge = ["esp-radio/xdp-observe"]
-# Trace ring (heapless) → `xpost::ext::perf::trace()`.
+# Trace rings (sole timeline) → `xpost::ext::perf::trace()`.
 perf-trace = ["esp-radio/xdp-observe"]
-# Named site cycle/µs spans → `xpost::ext::perf::span()`.
+# Dormant site µs accumulators (under `perf::prof`; not a public exit).
 perf-span = ["esp-radio/xdp-observe"]
-# PC-hit histogram → `xpost::ext::perf::pchit()`.
+# Dormant PC-hit histogram (under `perf::prof`; not a public exit).
 perf-pchit = ["esp-radio/xdp-observe"]
 
 # Path A defaults for `xpost-build::firmware_codegen` when the firmware crate

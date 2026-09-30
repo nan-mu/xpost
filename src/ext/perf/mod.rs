@@ -1,24 +1,24 @@
-//! Performance backends under `ext` (replaces former `ext::trace`).
+//! Performance backends under `ext`.
 //!
-//! | Module | Feature | Role |
-//! |--------|---------|------|
+//! # Public exits (four)
+//!
+//! | Accessor | Feature | Role |
+//! |----------|---------|------|
 //! | [`counter`] | `perf-counter` | monotonic counters + soft-fail |
-//! | [`aggregate`] | `perf-aggregate` | latency + stretch histogram (high pps) |
+//! | [`aggregate`] | `perf-aggregate` | latency histograms (high pps) |
 //! | [`gauge`] | `perf-gauge` | current + peak |
-//! | [`trace`] | `perf-trace` | **sole timeline**: categorized rings of timestamped events |
-//! | [`span`] | `perf-span` | dormant site µs **accumulators** (not rings; unused in profiles) |
-//! | [`pchit`] | `perf-pchit` | dormant PC-hit histogram |
-//! | [`report`] | any `perf-*` | binary `report` encode / `clear_perf` |
-//! | [`esp_radio_trace`] | (internal) | `EspRadioTrace` impl on mounted [`XdpProg`](crate::xdp::ingress::XdpProg) |
+//! | [`trace`] | `perf-trace` | sole timeline — categorized rings of timestamped events |
 //!
-//! Timeline model: every flame / path stamp is a ring event (`t_us` + kind).
-//! Nest spans are paired `SpanBegin`/`SpanEnd` (or helper enter/leave) on the
-//! same ring category — not a separate store. High-pps formal runs use
-//! Counter/Aggregate/Gauge without flooding Trace.
+//! Nest “spans” on the flame are paired ring events (`SpanBegin`/`SpanEnd`),
+//! not a fifth exit. Dormant site µs / PC-hit accumulators live under private
+//! [`prof`] (`perf-span` / `perf-pchit`, unused in formal profiles).
+//!
+//! Binary `report` / `perf clear` are shared plumbing ([`clear_perf`],
+//! [`report_perf`]), not a metric backend.
 //!
 //! Storage lives on the crate-mounted program in [`crate::xdp::ingress`]; this
-//! module owns [`EspRadioTrace`](xpost_type::EspRadioTrace) impls and the public
-//! read face (no `XDP_PROG` export).
+//! module owns the [`EspRadioTrace`](xpost_type::EspRadioTrace) impl and the
+//! public read face (no `XDP_PROG` export).
 
 #[cfg(feature = "perf-counter")]
 pub mod counter;
@@ -28,10 +28,9 @@ pub mod aggregate;
 pub mod gauge;
 #[cfg(feature = "perf-trace")]
 pub mod trace;
-#[cfg(feature = "perf-span")]
-pub mod span;
-#[cfg(feature = "perf-pchit")]
-pub mod pchit;
+
+#[cfg(any(feature = "perf-span", feature = "perf-pchit"))]
+pub(crate) mod prof;
 
 #[cfg(any(
     feature = "perf-counter",
@@ -41,7 +40,7 @@ pub mod pchit;
     feature = "perf-span",
     feature = "perf-pchit"
 ))]
-pub mod report;
+mod report;
 
 #[cfg(any(
     feature = "perf-counter",
@@ -77,24 +76,10 @@ pub fn trace() -> &'static trace::Trace {
     &crate::xdp::ingress::XDP_PROG.trace
 }
 
-#[cfg(feature = "perf-span")]
-#[inline]
-pub fn span() -> &'static span::SpanSet {
-    &crate::xdp::ingress::XDP_PROG.span
-}
-
-#[cfg(feature = "perf-pchit")]
-#[inline]
-pub fn pchit() -> &'static pchit::PcHitSet {
-    &crate::xdp::ingress::XDP_PROG.pchit
-}
-
-/// Enable/disable span + PC-hit sampling (`prof on|off`).
+/// Enable/disable dormant span + PC-hit sampling (`prof on|off`).
 pub fn set_prof_enabled(on: bool) {
-    #[cfg(feature = "perf-span")]
-    span::set_enabled(on);
-    #[cfg(feature = "perf-pchit")]
-    pchit::set_enabled(on);
+    #[cfg(any(feature = "perf-span", feature = "perf-pchit"))]
+    prof::set_enabled(on);
     let _ = on;
 }
 
