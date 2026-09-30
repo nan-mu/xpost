@@ -1,11 +1,16 @@
-//! Named site cycle/µs accumulators (`feature = "perf-span"`).
+//! Named site cycle/µs **accumulators** (`feature = "perf-span"`).
+//!
+//! **Dormant / not used in formal profiles.** Timeline nest spans live on Trace
+//! rings (`SpanBegin`/`SpanEnd`). This module sums µs per [`ProfSite`] when
+//! `prof on` — orthogonal to flame charts; leave disabled unless a future
+//! kind-s consumer appears.
 
 use core::sync::atomic::Ordering;
 
 use portable_atomic::{AtomicBool, AtomicU32, AtomicU64};
 use xpost_type::ProfSite;
 
-/// Wire size: 5 × (cycles u64 + entries u32 + pad u32).
+/// Wire size: `ProfSite::COUNT` × (cycles u64 + entries u32 + pad u32).
 pub const WIRE_LEN: usize = ProfSite::COUNT * 16;
 
 /// Spans are off by default: per-packet timer reads on the RX path thrash I-cache.

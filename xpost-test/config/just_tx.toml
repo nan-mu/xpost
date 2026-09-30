@@ -2,15 +2,22 @@
 # Selected via default.toml `run = ["just_tx"]` (per-packet path fixed in code).
 # See `test` crate `config` module rustdoc.
 #
+# Two tracks:
+#   - Flame (Trace rings): use `run = ["dev"]` — short low-pps kind-t; do not
+#     put high-pps Trace here (ring overflow).
+#   - Perf (this file): kinds c/a/g at high pps without Trace flood.
+#     Optional low-pps `t` only if you need formal report_raw retention.
+#
 # kinds: c = Counter sweep + ~5% OP RTT (just_tx_config/data);
-#        a/g/t = Aggregate/Gauge/Trace at fixed pps (just_tx_run + child tables).
+#        a/g = Aggregate/Gauge at fixed_pps (just_tx_run + report_raw);
+#        t = Trace at trace_pps (keep low).
 
 formal = true
 # Operating-point repeats after sweep (sweep itself uses 5 trials + stall retries in code).
 rounds = 5
 arms = ["hal", "xdp"]
-# Trace-only pass (A/G/C skipped for this denser-stamp / report_raw validation).
-kinds = ["t"]
+# Perf track default (high pps). Add "t" only at low trace_pps.
+kinds = ["c", "a", "g"]
 # A/G working point (pps); T uses trace_pps.
 fixed_pps = 800
 trace_pps = 200

@@ -3,12 +3,18 @@
 //! | Module | Feature | Role |
 //! |--------|---------|------|
 //! | [`counter`] | `perf-counter` | monotonic counters + soft-fail |
-//! | [`aggregate`] | `perf-aggregate` | latency + stretch histogram |
+//! | [`aggregate`] | `perf-aggregate` | latency + stretch histogram (high pps) |
 //! | [`gauge`] | `perf-gauge` | current + peak |
-//! | [`trace`] | `perf-trace` | heapless event ring |
-//! | [`span`] | `perf-span` | named site cycle/µs accumulators |
-//! | [`pchit`] | `perf-pchit` | PC-hit histogram |
+//! | [`trace`] | `perf-trace` | **sole timeline**: categorized rings of timestamped events |
+//! | [`span`] | `perf-span` | dormant site µs **accumulators** (not rings; unused in profiles) |
+//! | [`pchit`] | `perf-pchit` | dormant PC-hit histogram |
 //! | [`report`] | any `perf-*` | binary `report` encode / `clear_perf` |
+//! | [`esp_radio_trace`] | (internal) | `EspRadioTrace` impl on mounted [`XdpProg`](crate::xdp::ingress::XdpProg) |
+//!
+//! Timeline model: every flame / path stamp is a ring event (`t_us` + kind).
+//! Nest spans are paired `SpanBegin`/`SpanEnd` (or helper enter/leave) on the
+//! same ring category — not a separate store. High-pps formal runs use
+//! Counter/Aggregate/Gauge without flooding Trace.
 //!
 //! Storage lives on the crate-mounted program in [`crate::xdp::ingress`]; this
 //! module owns [`EspRadioTrace`](xpost_type::EspRadioTrace) impls and the public
@@ -45,7 +51,7 @@ pub mod report;
     feature = "perf-span",
     feature = "perf-pchit"
 ))]
-mod wire;
+mod esp_radio_trace;
 
 #[cfg(feature = "perf-counter")]
 #[inline]

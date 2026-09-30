@@ -20,14 +20,15 @@
 //! | `dev` | Flame Trace: XDP × 100 pps × 2s × 1; `/tmp/xpost-dev-flame.report`; no DB | — |
 //!
 //! `dev` is fully hard-coded (no separate TOML); never touches Postgres /
-//! `just_tx_*` / `just_drop_*`.
+//! `just_tx_*` / `just_drop_*`. **Flame track** (Trace rings) vs formal
+//! **perf track** (`just_tx` kinds `c|a|g` at high pps without Trace flood).
 //!
 //! Formal experiments with `formal`: `DROP CASCADE` same-named tables then
 //! recreate. DDL lives under `xpost-test/sql/`.
 //!
 //! ```toml
 //! run = ["dev"]           # flame Trace short capture
-//! # run = ["just_tx"]     # formal
+//! # run = ["just_tx"]     # formal high-pps C/A/G (+ optional low-pps T)
 //! # run = ["just_drop", "just_tx"]
 //! ```
 //!

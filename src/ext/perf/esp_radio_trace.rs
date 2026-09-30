@@ -1,4 +1,4 @@
-//! [`EspRadioTrace`](xpost_type::EspRadioTrace) on the mounted ingress program.
+//! EspRadioTrace hooks → Counter / Aggregate / Gauge / Trace rings (and dormant Span/PcHit).
 
 use xpost_type::{EspRadioTrace, XdpAction};
 

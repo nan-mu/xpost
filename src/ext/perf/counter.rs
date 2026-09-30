@@ -118,68 +118,8 @@ impl Counter {
     }
 
     #[inline]
-    pub fn failed_tx_bad_buf_count(&self) -> usize {
-        self.tx_fail_bad_buf()
-    }
-
-    #[inline]
-    pub fn failed_tx_token_count(&self) -> usize {
-        self.tx_fail_token()
-    }
-
-    #[inline]
-    pub fn failed_tx_wifi_count(&self) -> usize {
-        self.tx_failed()
-    }
-
-    #[inline]
     pub fn failed_tx_wifi_last_rc(&self) -> i32 {
         self.tx_wifi_last_rc.load(Ordering::Relaxed)
-    }
-
-    #[inline]
-    pub fn tx_enq_claim(&self) -> usize {
-        self.tx_enq_fail_claim()
-    }
-
-    #[inline]
-    pub fn tx_enq_ring(&self) -> usize {
-        self.tx_enq_fail_ring()
-    }
-
-    #[inline]
-    pub fn tx_drain_ok(&self) -> usize {
-        self.tx_submitted()
-    }
-
-    #[inline]
-    pub fn tx_polls(&self) -> usize {
-        self.tx_poll()
-    }
-
-    #[inline]
-    pub fn tx_kicks(&self) -> usize {
-        self.tx_kick()
-    }
-
-    #[inline]
-    pub fn tx_done(&self) -> usize {
-        self.tx_completed()
-    }
-
-    #[inline]
-    pub fn tx_done_fail(&self) -> usize {
-        self.tx_air_done_fail()
-    }
-
-    #[inline]
-    pub fn tx_flow_samples(&self) -> usize {
-        self.tx_flow_sample()
-    }
-
-    #[inline]
-    pub fn tx_submit_fail(&self) -> usize {
-        self.tx_failed()
     }
 
     #[inline]
@@ -215,39 +155,6 @@ impl Counter {
     #[inline]
     pub fn tx_inflight_cap(&self) -> usize {
         self.tx_inflight_cap.load(Ordering::Relaxed)
-    }
-
-    /// Clear TX-path counters / peaks (formal round boundary).
-    pub fn clear_tx(&self) {
-        self.tx_fail_bad_buf.store(0, Ordering::Relaxed);
-        self.tx_fail_token.store(0, Ordering::Relaxed);
-        self.tx_failed.store(0, Ordering::Relaxed);
-        self.tx_submitted.store(0, Ordering::Relaxed);
-        self.tx_completed.store(0, Ordering::Relaxed);
-        self.tx_wifi_last_rc.store(0, Ordering::Relaxed);
-        self.tx_grp_src.store(0, Ordering::Relaxed);
-        self.tx_enq.store(0, Ordering::Relaxed);
-        self.tx_enq_fail_claim.store(0, Ordering::Relaxed);
-        self.tx_enq_fail_ring.store(0, Ordering::Relaxed);
-        self.tx_kick.store(0, Ordering::Relaxed);
-        self.tx_poll.store(0, Ordering::Relaxed);
-        self.tx_cap_wait.store(0, Ordering::Relaxed);
-        self.tx_nomem_wait.store(0, Ordering::Relaxed);
-        self.tx_no_retain.store(0, Ordering::Relaxed);
-        self.tx_flush.store(0, Ordering::Relaxed);
-        self.tx_air_done_fail.store(0, Ordering::Relaxed);
-        self.tx_ns_ref.store(0, Ordering::Relaxed);
-        self.tx_ns_free.store(0, Ordering::Relaxed);
-        self.tx_flow_sample.store(0, Ordering::Relaxed);
-        self.tx_pending.store(0, Ordering::Relaxed);
-        self.tx_inflight.store(0, Ordering::Relaxed);
-        // Keep last known soft-cap; only peaks / block timers reset.
-        self.tx_pending_peak.store(0, Ordering::Relaxed);
-        self.tx_inflight_peak.store(0, Ordering::Relaxed);
-        self.tx_block_max_us.store(0, Ordering::Relaxed);
-        self.tx_block_gt10ms.store(0, Ordering::Relaxed);
-        self.tx_block_gt100ms.store(0, Ordering::Relaxed);
-        self.block_since_us.store(0, Ordering::Relaxed);
     }
 
     #[inline]

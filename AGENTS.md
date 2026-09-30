@@ -34,11 +34,14 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
   path. Perf metrics live in `xpost::ext::perf`; DUT serial read face is
   `report` (binary, length → feature mask) + `perf clear`. Formal A/G/T
   stores the agent reply as `just_*_run.report_raw` (`OK report <n> b64=…`)
-  without host-side decode into agg/gauge/trace child tables. Trace flame
-  export is **XDP-only** split path charts (`export_flame_svg`:
-  `just_tx-xdp-*-path-rx|path-tx.flame.*`; x = ``t_us`` within episode).
-  Prefer short `dev` capture → `/tmp/xpost-dev-flame.report` → Mac
-  `target/dev-flame.report`. HAL app echo is async and not role-compared with XDP_TX.
+  without host-side decode into agg/gauge/trace child tables. Trace is the
+  **sole timeline**: categorized rings of timestamped events (nest =
+  paired Begin/End on the same ring). Flame export is **XDP-only** split
+  path charts (`export_flame_svg`: `just_tx-xdp-*-path-rx|path-tx.flame.*`;
+  x = ``t_us`` within episode). Prefer short `dev` capture →
+  `/tmp/xpost-dev-flame.report` → Mac `target/dev-flame.report`. High-pps
+  formal uses Counter/Aggregate/Gauge (no Trace flood). HAL app-category
+  ring slots are reserved empty.
 - **`--port`**: optional. Omit → unique USB serial; zero or many → require
   `--port`.
 
@@ -67,9 +70,9 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 ```
 
 - `config/default.toml`：`run = [...]`（跑哪些**实验**）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`、版本与 profiles
-- `config/just_tx.toml`：正式 just_tx（`arms` / `kinds=c|a|g|t` / 扫速+OP / `fixed_pps` / `trace_pps`）
+- `config/just_tx.toml`：正式 just_tx — **性能轨** `kinds` 含 `c`/`a`/`g`（高 pps；不开 Trace 环）；可选低 `trace_pps` 的 `t`
 - `config/just_drop.toml`：正式 just_drop（`arms` / `kinds=c|a|g|t` / `fixed_pps` / `trace_pps`）
-- 调试火焰图 Trace：`run = ["dev"]`（硬编码：XDP × `just-tx-t` × 100 pps × 2s × 1
+- 调试火焰图 Trace（**火焰轨**）：`run = ["dev"]`（硬编码：XDP × `just-tx-t` × 100 pps × 2s × 1
   轮；**无 DB**；report → `/tmp/xpost-dev-flame.report`；Mac scp 到
   `target/dev-flame.report` 后 `pixi run python -m utils.export_flame_svg`）
 - Agent HTTP：`/health`、`/v1/*`（含 `/v1/serial_window`）、`/mcp`
@@ -118,9 +121,10 @@ see `XDP_PROG`; they read via `ext::perf::counter()` / `aggregate()` / `gauge()`
 
 - `esp-radio` — `xpost::esp_radio::new` → `wifi::new(device, config, &ingress::XDP_PROG)`
 - `perf-counter` — Counter storage + `EspRadioTrace` on the mounted prog
-- `perf-aggregate` — latency aggregates + stretch histogram
+- `perf-aggregate` — latency aggregates + stretch histogram (high pps)
 - `perf-gauge` — current/peak gauges
-- `perf-trace` — heapless event ring
+- `perf-trace` — categorized event rings (sole timeline for flames)
+- `perf-span` / `perf-pchit` — dormant (not in formal profiles)
 
 Traits live in the `xpost-type` crate so esp-radio (xdp feature) and xpost share
 one declaration (`EspRadioTrace: XdpProg`). esp-radio owns RX / `XdpAction`→`Action`

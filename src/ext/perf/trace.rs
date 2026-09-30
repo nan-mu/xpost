@@ -1,4 +1,17 @@
-//! Trace event ring (`feature = "perf-trace"`) — heapless fixed capacity.
+//! Trace event rings (`feature = "perf-trace"`) — sole **timeline** substrate.
+//!
+//! Every path / flame stamp is a timestamped event pushed into a **categorized**
+//! ring (one category → one buffer). Nest “spans” are not a second store: they
+//! are paired events (`SpanBegin`/`SpanEnd`, `HelperEnter`/`HelperLeave`) on the
+//! same ring; unpaired kinds are point milestones (`RxBegin`, `TxKick`, …).
+//!
+//! Rings today:
+//! - **radio / XDP** ([`CAP`]): esp-radio + image helpers — flame path-rx/path-tx.
+//! - **app** ([`APP_CAP`]): reserved wire slot; **no firmware writers** currently
+//!   (`App*` kinds remain for ABI / future HAL stamps).
+//!
+//! High-pps formal metrics use Counter / Aggregate / Gauge — do not flood these
+//! rings. Dormant `perf-span` SpanSet accumulators are unrelated (not rings).
 
 use core::sync::atomic::Ordering;
 
@@ -8,7 +21,7 @@ use portable_atomic::{AtomicU32, AtomicUsize};
 /// Radio / XDP ring capacity (newest-wins overwrite).
 pub const CAP: usize = 256;
 
-/// HAL app-echo ring — separate so Pass-path radio flood cannot erase AppEcho*.
+/// App-category ring — reserved; writers removed until a HAL path returns.
 pub const APP_CAP: usize = 64;
 
 /// T-section wire size: hdr(16) + radio[CAP] + app[APP_CAP].
@@ -16,16 +29,13 @@ pub const WIRE_LEN: usize = 16 + CAP * 16 + APP_CAP * 16;
 
 /// Predefined trace event kinds (wire `kind` byte).
 ///
-/// Two vocabularies share one ring (not 1:1 aligned — compare flames by role):
-/// - **Radio / XDP**: `Rx*` / `Xdp*` / `Span*` / `Helper*` / `Tx*` (esp-radio + image).
-/// - **HAL app echo**: `AppUdp*` / `AppEcho*` / `AppWifiTx*` (`just_tx_hal`
-///   UDP bounce after Pass — includes wait for Wi-Fi TX done on the **copy** path).
+/// All are ring events. Nesting for flames uses
+/// [`Self::SpanBegin`]/[`Self::SpanEnd`] (`arg0` = [`xpost_type::ProfSite`]) and
+/// [`Self::HelperEnter`]/[`Self::HelperLeave`] (`arg0` = BPF helper id).
 ///
-/// Point stamps share one clock (`t_us`). Nesting for flames uses
-/// [`Self::SpanBegin`]/[`Self::SpanEnd`] (`arg0` = [`xpost_type::ProfSite`]),
-/// [`Self::HelperEnter`]/[`Self::HelperLeave`] (`arg0` = BPF helper id), and
-/// [`Self::AppEchoBegin`]/[`Self::AppEchoEnd`] + [`Self::AppUdpSendBegin`]/[`Self::AppUdpSendEnd`]
-/// + [`Self::AppWifiTxBegin`]/[`Self::AppWifiTxEnd`] (HAL air-TX wait ≈ XDP `TxDrainOne`/`TxCompleted`).
+/// `App*` (32–38): reserved for a future app-category writer; unused today.
+/// `SlowExecution` / `UserMarker` / `RuntimeError` / `TxFlush`: reserved-legacy
+/// (no live call-sites).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EventKind {
@@ -60,18 +70,13 @@ pub enum EventKind {
     TxFlush = 29,
     TxGrpSrc = 30,
     TxNoRetain = 31,
-    /// HAL/app echo: datagram accepted at UDP socket (`arg0` = len).
+    /// Reserved app-category kinds (no writers; wire slots kept).
     AppUdpRecv = 32,
-    /// HAL/app echo: whole forward after recv → send done (`arg0` = len).
     AppEchoBegin = 33,
     AppEchoEnd = 34,
-    /// HAL/app echo: nested `send_to` await (embassy queue only — not air TX).
     AppUdpSendBegin = 35,
-    /// `arg0` = 1 ok / 0 err.
     AppUdpSendEnd = 36,
-    /// HAL/app: wait for Wi-Fi TX-done after copy-path submit (vs XDP zero-copy `Tx*`).
     AppWifiTxBegin = 37,
-    /// `arg0` = 1 saw tx_done / 0 timeout; `arg1` = wait µs (`esp_hal::time`).
     AppWifiTxEnd = 38,
 }
 
@@ -174,7 +179,7 @@ pub struct Event {
     pub t_us: u32,
 }
 
-/// Two rings, one clock: radio/XDP vs HAL app echo (not 1:1 site-aligned).
+/// Two categorized rings, one clock: radio/XDP (live) + app (reserved empty).
 pub struct Trace {
     radio: critical_section::Mutex<core::cell::RefCell<Deque<Event, CAP>>>,
     app: critical_section::Mutex<core::cell::RefCell<Deque<Event, APP_CAP>>>,
@@ -203,16 +208,6 @@ impl Trace {
         esp_hal::time::Instant::now()
             .duration_since_epoch()
             .as_micros() as u32
-    }
-
-    #[inline]
-    pub fn set_slow_threshold_us(&self, us: u32) {
-        self.slow_threshold_us.store(us, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub fn slow_threshold_us(&self) -> u32 {
-        self.slow_threshold_us.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -253,63 +248,13 @@ impl Trace {
     }
 
     #[inline]
-    fn push_app_kind(&self, kind: EventKind, arg0: u32, arg1: u32) {
-        Self::push_ring(&self.app, &self.app_len, &self.app_dropped, kind, arg0, arg1);
-    }
-
-    #[inline]
     #[allow(dead_code)] // used when perf-aggregate + perf-trace
     pub(crate) fn maybe_slow(&self, dur_us: u32, action: u32) {
-        let thr = self.slow_threshold_us();
+        // Threshold defaults to u32::MAX (off); no public setter — reserved SlowExecution.
+        let thr = self.slow_threshold_us.load(Ordering::Relaxed);
         if thr != u32::MAX && dur_us >= thr {
             self.push(EventKind::SlowExecution, dur_us, action);
         }
-    }
-
-    /// User-facing marker (radio ring).
-    #[inline]
-    pub fn user_marker(&self, value: u32) {
-        self.push(EventKind::UserMarker, value, 0);
-    }
-
-    /// HAL/app: UDP datagram arrived at the echo socket (`len` bytes).
-    #[inline]
-    pub fn app_udp_recv(&self, len: u32) {
-        self.push_app_kind(EventKind::AppUdpRecv, len, 0);
-    }
-
-    /// HAL/app: start forward work after recv (until [`Self::app_echo_end`]).
-    #[inline]
-    pub fn app_echo_begin(&self, len: u32) {
-        self.push_app_kind(EventKind::AppEchoBegin, len, 0);
-    }
-
-    #[inline]
-    pub fn app_echo_end(&self) {
-        self.push_app_kind(EventKind::AppEchoEnd, 0, 0);
-    }
-
-    /// HAL/app: about to `send_to` (embassy queue — not air TX).
-    #[inline]
-    pub fn app_udp_send_begin(&self) {
-        self.push_app_kind(EventKind::AppUdpSendBegin, 0, 0);
-    }
-
-    #[inline]
-    pub fn app_udp_send_end(&self, ok: bool) {
-        self.push_app_kind(EventKind::AppUdpSendEnd, u32::from(ok), 0);
-    }
-
-    /// HAL/app: start waiting for Wi-Fi TX-done (copy path; peer of XDP `TxDrainOne`).
-    #[inline]
-    pub fn app_wifi_tx_begin(&self) {
-        self.push_app_kind(EventKind::AppWifiTxBegin, 0, 0);
-    }
-
-    /// `saw_done` from `perf::counter().tx_done()` delta; `wait_us` via `esp_hal::time`.
-    #[inline]
-    pub fn app_wifi_tx_end(&self, saw_done: bool, wait_us: u32) {
-        self.push_app_kind(EventKind::AppWifiTxEnd, u32::from(saw_done), wait_us);
     }
 
     pub fn snapshot_radio(&self, out: &mut [Event]) -> usize {
@@ -332,11 +277,6 @@ impl Trace {
             }
             n
         })
-    }
-
-    /// Legacy helper: radio ring only (tests / old callers).
-    pub fn snapshot(&self, out: &mut [Event]) -> usize {
-        self.snapshot_radio(out)
     }
 
     pub fn clear(&self) {

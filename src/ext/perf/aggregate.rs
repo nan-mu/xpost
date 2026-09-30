@@ -32,8 +32,6 @@ pub struct Aggregate {
     buckets: [AtomicU64; HIST_BUCKETS],
     /// 0 = uninitialized window.
     ready: AtomicU32,
-    sample_rate: AtomicU32,
-    sample_gate: AtomicU32,
     /// In-flight start tick; 0 = not started.
     start: AtomicU64,
 }
@@ -49,29 +47,8 @@ impl Aggregate {
             width: AtomicU64::new(1),
             buckets: [const { AtomicU64::new(0) }; HIST_BUCKETS],
             ready: AtomicU32::new(0),
-            sample_rate: AtomicU32::new(1),
-            sample_gate: AtomicU32::new(0),
             start: AtomicU64::new(0),
         }
-    }
-
-    #[inline]
-    pub fn set_sample_rate(&self, rate: u32) {
-        self.sample_rate.store(rate.max(1), Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate.load(Ordering::Relaxed).max(1)
-    }
-
-    #[inline]
-    fn should_sample(&self) -> bool {
-        let rate = self.sample_rate();
-        if rate <= 1 {
-            return true;
-        }
-        self.sample_gate.fetch_add(1, Ordering::Relaxed) % rate == 0
     }
 
     #[inline]
@@ -88,9 +65,6 @@ impl Aggregate {
     pub(crate) fn end(&self, now: u64) {
         let t0 = self.start.swap(0, Ordering::Relaxed);
         if t0 == 0 {
-            return;
-        }
-        if !self.should_sample() {
             return;
         }
         let dt = now.saturating_sub(t0);
@@ -221,7 +195,6 @@ impl Aggregate {
         self.lo.store(0, Ordering::Relaxed);
         self.width.store(1, Ordering::Relaxed);
         self.ready.store(0, Ordering::Relaxed);
-        self.sample_gate.store(0, Ordering::Relaxed);
         self.start.store(0, Ordering::Relaxed);
         for b in &self.buckets {
             b.store(0, Ordering::Relaxed);
@@ -292,9 +265,7 @@ impl AggregateSet {
             return;
         }
         let now = Self::now_ticks();
-        if self.helper_execution.should_sample() {
-            self.helper_execution.record(now.saturating_sub(t0));
-        }
+        self.helper_execution.record(now.saturating_sub(t0));
     }
 
     #[inline]
@@ -310,9 +281,7 @@ impl AggregateSet {
             return;
         }
         let now = Self::now_ticks();
-        if self.map_operation.should_sample() {
-            self.map_operation.record(now.saturating_sub(t0));
-        }
+        self.map_operation.record(now.saturating_sub(t0));
     }
 }
 

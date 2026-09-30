@@ -73,7 +73,7 @@ pub enum ProfSite {
     TxEnqueue = 1,
     /// One `esp_wifi_internal_tx_by_ref` call.
     TxDrainOne = 2,
-    /// Unused (batch path removed); retained for index stability.
+    /// Unused (batch path removed); reserved index for wire / ALL stability.
     TxDrainBatch = 3,
     /// STA/AP RX callback XDP dispatch (Pass/Drop/Tx decision).
     WifiRxDispatch = 4,
