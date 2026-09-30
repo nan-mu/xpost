@@ -29,8 +29,16 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 - **`xpost-agent/`**: CLI + `--listen` HTTP `/v1/*` and MCP `/mcp` on one port
   (shared USB). Dispatch: `cargo xtask agent …`.
 - **`xpost-serial`**: library only — **API** for `Session` / `install_xdp` /
-  `program` / `request` / `Sink` (see that crate’s rustdoc). Cold install is
-  **by XDP name**; do not pass raw cold addresses on the normal path.
+  `program` / `request` / `request_report` / `Sink` (see that crate’s rustdoc).
+  Cold install is **by XDP name**; do not pass raw cold addresses on the normal
+  path. Perf metrics live in `xpost::ext::perf`; DUT serial read face is
+  `report` (binary, length → feature mask) + `perf clear`. Formal A/G/T
+  stores the agent reply as `just_*_run.report_raw` (`OK report <n> b64=…`)
+  without host-side decode into agg/gauge/trace child tables. Trace flame
+  export is **XDP-only** split path charts (`export_flame_svg`:
+  `just_tx-xdp-*-path-rx|path-tx.flame.*`; x = ``t_us`` within episode).
+  Prefer short `dev` capture → `/tmp/xpost-dev-flame.report` → Mac
+  `target/dev-flame.report`. HAL app echo is async and not role-compared with XDP_TX.
 - **`--port`**: optional. Omit → unique USB serial; zero or many → require
   `--port`.
 
@@ -59,9 +67,11 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 ```
 
 - `config/default.toml`：`run = [...]`（跑哪些**实验**）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`、版本与 profiles
-- `config/just_tx.toml`：正式 just_tx 轮次、臂、formal
+- `config/just_tx.toml`：正式 just_tx（`arms` / `kinds=c|a|g|t` / 扫速+OP / `fixed_pps` / `trace_pps`）
 - `config/just_drop.toml`：正式 just_drop（`arms` / `kinds=c|a|g|t` / `fixed_pps` / `trace_pps`）
-- 调试 XDP TX：`run = ["dev"]`（硬编码：XDP × 800/1600/2800/4000 × 1×8s；**无 DB**；固件每 100 包打 `tsflow`；agent `POST /v1/serial_window`）
+- 调试火焰图 Trace：`run = ["dev"]`（硬编码：XDP × `just-tx-t` × 100 pps × 2s × 1
+  轮；**无 DB**；report → `/tmp/xpost-dev-flame.report`；Mac scp 到
+  `target/dev-flame.report` 后 `pixi run python -m utils.export_flame_svg`）
 - Agent HTTP：`/health`、`/v1/*`（含 `/v1/serial_window`）、`/mcp`
 - 实验步骤与全流程：`xpost-test` 的 `overview` / `config` rustdoc；串口 API：`xpost-serial`
 - 正式 `just_tx` 扫速网格：`400…4000` pps（步长 400；ceiling ≈ XDP ~50% 丢包工作点的 hping3 标定）
@@ -74,7 +84,7 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 
 只做**性能**分析。采集由 TR3000 上 `./xpost-test` 写 `formal.*`；笔记本现查，不负责烧录或功能 ACK。
 
-- **`just_tx`**：扫速找 ~5% 丢包工作点后逐包刺激/回包 → `formal.just_tx_config` / `just_tx_data`
+- **`just_tx`**：扫速找 ~5% 丢包工作点后逐包刺激/回包 → `formal.just_tx_config` / `just_tx_data`；`kinds` 含 **c**（RTT）与 **a/g/t**（固定 pps → `just_tx_run` + agg/gauge/trace_summary）。Profile：`just-tx-{c,a,g,t}` / `just-tx-hal-*`
 - **`just_drop`**：`kinds` 含 **c**（满速 → `just_drop_config`/`data`）与 **a/g/t**（固定 pps → `just_drop_run` + agg/gauge/trace_summary）。Profile：`just-drop-{c,a,g,t}` / `just-drop-hal-*`（HAL = Pass XDP + app `drop on`）
 - 笔记：`just_tx.ipynb` / `just_drop.ipynb`；环境与表说明见 `benchmark.utils` 包 docstring
 
