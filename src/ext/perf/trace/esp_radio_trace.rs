@@ -277,24 +277,16 @@ impl EspRadioTrace for XdpProg {
     }
 
     fn span_begin(&self, site: xpost_type::ProfSite) {
-        #[cfg(feature = "perf-span")]
-        self.span.begin(site);
         #[cfg(feature = "perf-trace")]
         self.trace.push(EventKind::SpanBegin, site as u32, 0);
         let _ = site;
     }
 
     fn span_end(&self, site: xpost_type::ProfSite) {
-        #[cfg(feature = "perf-span")]
-        self.span.end(site);
         #[cfg(feature = "perf-trace")]
         self.trace.push(EventKind::SpanEnd, site as u32, 0);
         let _ = site;
     }
 
-    fn pc_hit(&self, pc: u32) {
-        #[cfg(feature = "perf-pchit")]
-        self.pchit.hit(pc);
-        let _ = pc;
-    }
+    fn pc_hit(&self, _pc: u32) {}
 }

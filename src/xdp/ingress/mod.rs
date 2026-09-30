@@ -25,9 +25,7 @@ pub(crate) use prog::XDP_PROG;
     feature = "perf-counter",
     feature = "perf-aggregate",
     feature = "perf-gauge",
-    feature = "perf-trace",
-    feature = "perf-span",
-    feature = "perf-pchit"
+    feature = "perf-trace"
 ))]
 pub(crate) use prog::XdpProg;
 

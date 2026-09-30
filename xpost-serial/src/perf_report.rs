@@ -1,6 +1,6 @@
 //! Binary `report` payload layout (must match `xpost::ext::perf` report encode).
 //!
-//! Sections in order C → A → G → T → S → P; absent features omit the section.
+//! Sections in order C → A → G → T; absent features omit the section.
 //! Total length uniquely identifies the feature mask.
 
 use std::collections::BTreeMap;
@@ -14,23 +14,17 @@ pub const TRACE_CAP: usize = 256;
 pub const TRACE_APP_CAP: usize = 64;
 /// Dual-ring T section: n_radio, dropped_radio, n_app, dropped_app, radio[CAP], app[APP_CAP].
 pub const TRACE_WIRE_LEN: usize = 16 + TRACE_CAP * 16 + TRACE_APP_CAP * 16;
-pub const SPAN_WIRE_LEN: usize = 80;
-pub const PCHIT_WIRE_LEN: usize = 2060;
 
 pub const MASK_C: u8 = 1 << 0;
 pub const MASK_A: u8 = 1 << 1;
 pub const MASK_G: u8 = 1 << 2;
 pub const MASK_T: u8 = 1 << 3;
-pub const MASK_S: u8 = 1 << 4;
-pub const MASK_P: u8 = 1 << 5;
 
-const SECTION_LEN: [(u8, usize); 6] = [
+const SECTION_LEN: [(u8, usize); 4] = [
     (MASK_C, COUNTER_WIRE_LEN),
     (MASK_A, AGGREGATE_WIRE_LEN),
     (MASK_G, GAUGE_WIRE_LEN),
     (MASK_T, TRACE_WIRE_LEN),
-    (MASK_S, SPAN_WIRE_LEN),
-    (MASK_P, PCHIT_WIRE_LEN),
 ];
 
 /// Payload length for a feature mask.
@@ -44,7 +38,7 @@ pub fn payload_len_for_mask(mask: u8) -> usize {
 
 /// Invert length → mask; `None` if unknown.
 pub fn mask_for_len(len: usize) -> Option<u8> {
-    for mask in 0u8..=0x3f {
+    for mask in 0u8..=0x0f {
         if payload_len_for_mask(mask) == len {
             return Some(mask);
         }
@@ -52,10 +46,10 @@ pub fn mask_for_len(len: usize) -> Option<u8> {
     None
 }
 
-/// True when all 64 lengths are unique.
+/// True when all 16 lengths are unique.
 pub fn lengths_unique() -> bool {
     let mut seen = BTreeMap::new();
-    for mask in 0u8..=0x3f {
+    for mask in 0u8..=0x0f {
         let n = payload_len_for_mask(mask);
         if seen.insert(n, mask).is_some() {
             return false;
@@ -131,14 +125,6 @@ pub const GAUGE_NAMES: [&str; 4] = [
     "trace_buffer_usage",
 ];
 
-pub const SPAN_NAMES: [&str; 5] = [
-    "xdp_run",
-    "tx_enqueue",
-    "tx_drain_one",
-    "tx_drain_batch",
-    "wifi_rx_dispatch",
-];
-
 #[derive(Clone, Debug, Default)]
 pub struct Report {
     pub mask: u8,
@@ -146,8 +132,6 @@ pub struct Report {
     pub aggregates: Vec<AggSnap>,
     pub gauges: BTreeMap<String, (i64, i64)>,
     pub trace: Option<TraceSnap>,
-    pub spans: BTreeMap<String, (u64, u32)>,
-    pub pchit: Option<PcHitSnap>,
 }
 
 #[derive(Clone, Debug)]
@@ -180,13 +164,6 @@ pub struct TraceSnap {
     pub events: Vec<TraceEvent>,
 }
 
-#[derive(Clone, Debug)]
-pub struct PcHitSnap {
-    pub samples: u32,
-    pub overflow: u32,
-    pub slots: Vec<(u32, u32)>,
-}
-
 pub fn decode(payload: &[u8]) -> Result<Report> {
     let mask = mask_for_len(payload.len()).context("unknown report payload length")?;
     let mut off = 0usize;
@@ -212,16 +189,6 @@ pub fn decode(payload: &[u8]) -> Result<Report> {
     if mask & MASK_T != 0 {
         let end = off + TRACE_WIRE_LEN;
         report.trace = Some(decode_trace(&payload[off..end])?);
-        off = end;
-    }
-    if mask & MASK_S != 0 {
-        let end = off + SPAN_WIRE_LEN;
-        report.spans = decode_spans(&payload[off..end])?;
-        off = end;
-    }
-    if mask & MASK_P != 0 {
-        let end = off + PCHIT_WIRE_LEN;
-        report.pchit = Some(decode_pchit(&payload[off..end])?);
         off = end;
     }
     if off != payload.len() {
@@ -399,42 +366,6 @@ fn decode_trace(buf: &[u8]) -> Result<TraceSnap> {
     })
 }
 
-fn decode_spans(buf: &[u8]) -> Result<BTreeMap<String, (u64, u32)>> {
-    if buf.len() != SPAN_WIRE_LEN {
-        bail!("span section len");
-    }
-    let mut out = BTreeMap::new();
-    for (i, name) in SPAN_NAMES.iter().enumerate() {
-        let off = i * 16;
-        let cycles = u64_le(&buf[off..off + 8]);
-        let entries = u32_le(&buf[off + 8..off + 12]);
-        out.insert((*name).to_string(), (cycles, entries));
-    }
-    Ok(out)
-}
-
-fn decode_pchit(buf: &[u8]) -> Result<PcHitSnap> {
-    if buf.len() != PCHIT_WIRE_LEN {
-        bail!("pchit section len");
-    }
-    let samples = u32_le(&buf[0..4]);
-    let overflow = u32_le(&buf[4..8]);
-    let mut slots = Vec::new();
-    for i in 0..256 {
-        let off = 12 + i * 8;
-        let pc = u32_le(&buf[off..off + 4]);
-        let hits = u32_le(&buf[off + 4..off + 8]);
-        if pc != 0 && hits != 0 {
-            slots.push((pc, hits));
-        }
-    }
-    Ok(PcHitSnap {
-        samples,
-        overflow,
-        slots,
-    })
-}
-
 /// Parse `OK report <n>` header.
 pub fn parse_ok_report_len(line: &str) -> Option<usize> {
     let line = line.trim();
@@ -457,7 +388,6 @@ mod tests {
         assert_eq!(payload_len_for_mask(MASK_G), 32);
         assert_eq!(payload_len_for_mask(MASK_C | MASK_G), 216);
         assert_eq!(payload_len_for_mask(MASK_T), 2056);
-        assert_eq!(payload_len_for_mask(MASK_P), 2060);
         assert_eq!(
             payload_len_for_mask(MASK_C | MASK_A | MASK_G | MASK_T),
             184 + 1408 + 32 + 2056

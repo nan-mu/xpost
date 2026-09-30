@@ -11,10 +11,6 @@ use crate::ext::perf::aggregate::AggregateSet;
 use crate::ext::perf::gauge::GaugeSet;
 #[cfg(feature = "perf-trace")]
 use crate::ext::perf::trace::Trace;
-#[cfg(feature = "perf-span")]
-use crate::ext::perf::span::SpanSet;
-#[cfg(feature = "perf-pchit")]
-use crate::ext::perf::pchit::PcHitSet;
 
 /// Process-wide program singleton type (implements [`xpost_type::XdpProg`]).
 ///
@@ -29,10 +25,6 @@ pub(crate) struct XdpProg {
     pub(crate) gauge: GaugeSet,
     #[cfg(feature = "perf-trace")]
     pub(crate) trace: Trace,
-    #[cfg(feature = "perf-span")]
-    pub(crate) span: SpanSet,
-    #[cfg(feature = "perf-pchit")]
-    pub(crate) pchit: PcHitSet,
 }
 
 /// Mounted by [`super::esp_radio::new`]; not part of the public integrator API.
@@ -45,10 +37,6 @@ pub(crate) static XDP_PROG: XdpProg = XdpProg {
     gauge: GaugeSet::new(),
     #[cfg(feature = "perf-trace")]
     trace: Trace::new(),
-    #[cfg(feature = "perf-span")]
-    span: SpanSet::new(),
-    #[cfg(feature = "perf-pchit")]
-    pchit: PcHitSet::new(),
 };
 
 impl xpost_type::XdpProg for XdpProg {

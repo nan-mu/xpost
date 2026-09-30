@@ -1,6 +1,6 @@
 //! Compile-time feature-gated binary perf report (`report` serial command).
 //!
-//! Sections in order **C → A → G → T → S → P** (omit absent features).
+//! Sections in order **C → A → G → T** (omit absent features).
 //! Payload length uniquely identifies the feature mask (see host length table).
 
 use core::convert::Infallible;
@@ -13,10 +13,6 @@ pub const AGGREGATE_WIRE_LEN: usize = 8 * 176;
 pub const GAUGE_WIRE_LEN: usize = 32;
 #[cfg(feature = "perf-trace")]
 pub const TRACE_WIRE_LEN: usize = crate::ext::perf::trace::WIRE_LEN;
-#[cfg(feature = "perf-span")]
-pub const SPAN_WIRE_LEN: usize = crate::ext::perf::span::WIRE_LEN;
-#[cfg(feature = "perf-pchit")]
-pub const PCHIT_WIRE_LEN: usize = crate::ext::perf::pchit::WIRE_LEN;
 
 /// Total payload bytes for the features compiled into this firmware image.
 pub const fn report_payload_len() -> usize {
@@ -37,14 +33,6 @@ pub const fn report_payload_len() -> usize {
     {
         n += TRACE_WIRE_LEN;
     }
-    #[cfg(feature = "perf-span")]
-    {
-        n += SPAN_WIRE_LEN;
-    }
-    #[cfg(feature = "perf-pchit")]
-    {
-        n += PCHIT_WIRE_LEN;
-    }
     n
 }
 
@@ -58,10 +46,6 @@ pub fn clear_perf() {
     crate::ext::perf::gauge().reset_all();
     #[cfg(feature = "perf-trace")]
     crate::ext::perf::trace().clear();
-    #[cfg(feature = "perf-span")]
-    crate::ext::perf::span().reset_all();
-    #[cfg(feature = "perf-pchit")]
-    crate::ext::perf::pchit().reset_all();
 }
 
 /// Encode all enabled sections into `write` (raw LE bytes, no framing).
@@ -89,18 +73,6 @@ pub fn report_perf(mut write: impl FnMut(&[u8]) -> Result<(), Infallible>) {
     {
         let mut buf = [0u8; TRACE_WIRE_LEN];
         encode_trace(&mut buf);
-        let _ = write(&buf);
-    }
-    #[cfg(feature = "perf-span")]
-    {
-        let mut buf = [0u8; SPAN_WIRE_LEN];
-        crate::ext::perf::span().encode_wire(&mut buf);
-        let _ = write(&buf);
-    }
-    #[cfg(feature = "perf-pchit")]
-    {
-        let mut buf = [0u8; PCHIT_WIRE_LEN];
-        crate::ext::perf::pchit().encode_wire(&mut buf);
         let _ = write(&buf);
     }
 }

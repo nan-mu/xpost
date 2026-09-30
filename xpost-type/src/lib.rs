@@ -63,7 +63,7 @@ pub trait XdpProg: Send + Sync {
     fn run<'a>(&self, frame: &'a mut [u8]) -> (XdpAction, &'a mut [u8]);
 }
 
-/// Named sites for cycle/µs span accumulators (`perf-span` in xpost).
+/// Named sites for Trace nest events (`SpanBegin`/`SpanEnd`.arg0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ProfSite {
@@ -175,10 +175,10 @@ pub trait EspRadioTrace: XdpProg {
     /// `tx_flow_sample`.
     fn tx_flow_sample(&self) {}
 
-    /// Span enter (`perf-span`); no-op unless implementor records.
+    /// Trace nest enter (`SpanBegin` on the radio ring when `perf-trace`).
     fn span_begin(&self, _site: ProfSite) {}
-    /// Span leave; pairs with [`Self::span_begin`].
+    /// Trace nest leave; pairs with [`Self::span_begin`].
     fn span_end(&self, _site: ProfSite) {}
-    /// PC-hit sample (`perf-pchit`).
+    /// Optional PC sample (unused; kept for EspRadioTrace ABI stability).
     fn pc_hit(&self, _pc: u32) {}
 }

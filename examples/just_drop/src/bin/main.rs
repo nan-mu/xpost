@@ -318,10 +318,6 @@ fn dispatch_serial(line: &str) {
         let on = rest.trim().eq_ignore_ascii_case("on");
         esp_radio::wifi::xdp_tx_set_tsflow(on);
         esp_println::println!("OK tsflow {}", if on { "on" } else { "off" });
-    } else if line.eq_ignore_ascii_case("prof on") || line.eq_ignore_ascii_case("prof off") {
-        let on = line.eq_ignore_ascii_case("prof on");
-        xpost::ext::perf::set_prof_enabled(on);
-        esp_println::println!("OK prof {}", if on { "on" } else { "off" });
     } else if let Some(rest) = strip_cmd(line, "rxcnt") {
         print_rxcnt(rest);
     } else if let Some(rest) = strip_cmd(line, "ack-dest") {

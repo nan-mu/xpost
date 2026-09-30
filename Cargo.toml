@@ -37,10 +37,6 @@ perf-aggregate = ["esp-radio/xdp-observe"]
 perf-gauge = ["esp-radio/xdp-observe"]
 # Trace rings (sole timeline) → `xpost::ext::perf::trace()`.
 perf-trace = ["esp-radio/xdp-observe"]
-# Dormant site µs accumulators (crate-private `span`; not a public exit).
-perf-span = ["esp-radio/xdp-observe"]
-# Dormant PC-hit histogram (crate-private `pchit`; not a public exit).
-perf-pchit = ["esp-radio/xdp-observe"]
 
 # Path A defaults for `xpost-build::firmware_codegen` when the firmware crate
 # omits `[package.metadata.xpost]`. Firmware may override map/slots/target;

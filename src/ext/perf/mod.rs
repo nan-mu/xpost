@@ -9,13 +9,8 @@
 //! | [`gauge`] | `perf-gauge` | current + peak |
 //! | [`trace`] | `perf-trace` | sole timeline — categorized rings |
 //!
-//! Nest flame bars are paired ring events (`SpanBegin`/`SpanEnd`), not a fifth
-//! exit. Shared plumbing (`clear_perf` / `report_perf`) and dormant site/PC
-//! accumulators (`span` / `pchit`) are **crate-private** (`mod`, not `pub mod`):
-//! firmware apps and host use only the four accessors + report helpers.
-//!
-//! [`trace::esp_radio_trace`] lives under `trace/` (EspRadioTrace → all backends)
-//! but is wired from this parent so it still builds when only C/A/G are on.
+//! Nest flame bars are paired ring events (`SpanBegin`/`SpanEnd`), not a
+//! separate accumulator backend. Shared plumbing: [`clear_perf`] / [`report_perf`].
 
 #[cfg(feature = "perf-counter")]
 pub mod counter;
@@ -26,18 +21,11 @@ pub mod gauge;
 #[cfg(feature = "perf-trace")]
 pub mod trace;
 
-#[cfg(feature = "perf-span")]
-pub(crate) mod span;
-#[cfg(feature = "perf-pchit")]
-pub(crate) mod pchit;
-
 #[cfg(any(
     feature = "perf-counter",
     feature = "perf-aggregate",
     feature = "perf-gauge",
-    feature = "perf-trace",
-    feature = "perf-span",
-    feature = "perf-pchit"
+    feature = "perf-trace"
 ))]
 mod report;
 
@@ -46,9 +34,7 @@ mod report;
     feature = "perf-counter",
     feature = "perf-aggregate",
     feature = "perf-gauge",
-    feature = "perf-trace",
-    feature = "perf-span",
-    feature = "perf-pchit"
+    feature = "perf-trace"
 ))]
 #[path = "trace/esp_radio_trace.rs"]
 mod esp_radio_trace;
@@ -77,27 +63,6 @@ pub fn trace() -> &'static trace::Trace {
     &crate::xdp::ingress::XDP_PROG.trace
 }
 
-#[cfg(feature = "perf-span")]
-#[inline]
-pub(crate) fn span() -> &'static span::SpanSet {
-    &crate::xdp::ingress::XDP_PROG.span
-}
-
-#[cfg(feature = "perf-pchit")]
-#[inline]
-pub(crate) fn pchit() -> &'static pchit::PcHitSet {
-    &crate::xdp::ingress::XDP_PROG.pchit
-}
-
-/// Enable/disable dormant span + PC-hit sampling (`prof on|off` serial).
-pub fn set_prof_enabled(on: bool) {
-    #[cfg(feature = "perf-span")]
-    span::set_enabled(on);
-    #[cfg(feature = "perf-pchit")]
-    pchit::set_enabled(on);
-    let _ = on;
-}
-
 #[cfg(feature = "perf-trace")]
 pub use trace::{Event, EventKind, APP_CAP as TRACE_APP_CAP, CAP as TRACE_CAP, WIRE_LEN as TRACE_WIRE_LEN};
 
@@ -108,8 +73,6 @@ pub use aggregate::{AggregateSnapshot, HIST_BUCKETS};
     feature = "perf-counter",
     feature = "perf-aggregate",
     feature = "perf-gauge",
-    feature = "perf-trace",
-    feature = "perf-span",
-    feature = "perf-pchit"
+    feature = "perf-trace"
 ))]
 pub use report::{clear_perf, report_payload_len, report_perf};

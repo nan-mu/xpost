@@ -117,16 +117,14 @@ BPF helper errno is `map::ops::MapOpError` (not nested into control-plane enums)
 The crate mounts a private `xdp::ingress::XdpProg` implementing `xpost_type::XdpProg`
 (re-exported as `esp_radio::wifi::XdpProg` under the `xdp` feature). Apps do **not**
 see `XDP_PROG`; they read via `ext::perf::counter()` / `aggregate()` / `gauge()` /
-`trace()` (four public exits). `report` / `clear_perf` and dormant `span` /
-`pchit` are crate-private. EspRadioTrace wiring lives in `ext/perf/trace/`
-beside the ring store.
+`trace()` (four public exits). `report` / `clear_perf` are shared plumbing.
+EspRadioTrace wiring lives in `ext/perf/trace/` beside the ring store.
 
 - `esp-radio` — `xpost::esp_radio::new` → `wifi::new(device, config, &ingress::XDP_PROG)`
 - `perf-counter` — Counter storage + `EspRadioTrace` on the mounted prog
 - `perf-aggregate` — latency aggregates + stretch histogram (high pps)
 - `perf-gauge` — current/peak gauges
 - `perf-trace` — categorized event rings (sole timeline for flames)
-- `perf-span` / `perf-pchit` — dormant accumulators (crate-private; not exits)
 
 Traits live in the `xpost-type` crate so esp-radio (xdp feature) and xpost share
 one declaration (`EspRadioTrace: XdpProg`). esp-radio owns RX / `XdpAction`→`Action`

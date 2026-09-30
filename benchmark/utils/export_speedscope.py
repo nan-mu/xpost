@@ -102,7 +102,7 @@ def _mask_for_len(n: int) -> int | None:
             total += _G_LEN
         if mask & _MASK_T:
             total += _T_LEN
-        # span/pchit not used on kind-t formal images
+        # span/pchit backends removed; kind-t is C+A?+G?+T only
         if total == n:
             return mask
     return None

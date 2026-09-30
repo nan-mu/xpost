@@ -11,7 +11,7 @@
 //!   (`App*` kinds remain for ABI / future HAL stamps).
 //!
 //! High-pps formal metrics use Counter / Aggregate / Gauge — do not flood these
-//! rings. Dormant `perf-span` SpanSet accumulators are unrelated (not rings).
+//! rings.
 
 use core::sync::atomic::Ordering;
 
