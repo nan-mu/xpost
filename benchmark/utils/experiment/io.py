@@ -226,6 +226,171 @@ def load_just_tx_rtt_samples(run_ids: list[str] | None = None) -> pd.DataFrame:
     )
 
 
+def load_just_drop_config(*, fw_type: str | None = None) -> pd.DataFrame:
+    """Counter-kind windows from ``just_drop_config``."""
+    clauses: list[str] = []
+    params: dict = {}
+    if fw_type is not None:
+        clauses.append("fw_type = %(fw_type)s")
+        params["fw_type"] = fw_type
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return read_sql(
+        f"""
+        SELECT id AS config_id, fw_type, target_pps, started_at, stopped_at, sent, counters,
+               EXTRACT(EPOCH FROM (stopped_at - started_at))::double precision AS duration_s
+        FROM just_drop_config
+        {where}
+        ORDER BY fw_type, started_at
+        """,
+        params if params else None,
+    )
+
+
+def load_just_drop_data(config_ids: list[int] | None = None) -> pd.DataFrame:
+    """1 Hz ``drop`` samples for Counter windows."""
+    empty = pd.DataFrame(columns=["config_id", "t", "counter_value", "time_ns"])
+    if config_ids is not None and len(config_ids) == 0:
+        return empty
+    if config_ids is None:
+        df = read_sql(
+            """
+            SELECT config_id, t, counter_value,
+                   (EXTRACT(EPOCH FROM t) * 1e9)::bigint AS time_ns
+            FROM just_drop_data
+            ORDER BY config_id, t
+            """
+        )
+    else:
+        df = read_sql(
+            """
+            SELECT config_id, t, counter_value,
+                   (EXTRACT(EPOCH FROM t) * 1e9)::bigint AS time_ns
+            FROM just_drop_data
+            WHERE config_id = ANY(%(ids)s::bigint[])
+            ORDER BY config_id, t
+            """,
+            {"ids": config_ids},
+        )
+    return df if len(df) else empty
+
+
+def load_just_drop_run(*, kind: str | None = None, fw_type: str | None = None) -> pd.DataFrame:
+    """Fixed-pps Aggregate / Gauge / Trace rounds from ``just_drop_run``."""
+    clauses: list[str] = []
+    params: dict = {}
+    if kind is not None:
+        clauses.append("kind = %(kind)s")
+        params["kind"] = kind
+    if fw_type is not None:
+        clauses.append("fw_type = %(fw_type)s")
+        params["fw_type"] = fw_type
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return read_sql(
+        f"""
+        SELECT id AS run_id, fw_type, drop_site, kind, target_pps, window_s,
+               started_at, stopped_at, sent, counters
+        FROM just_drop_run
+        {where}
+        ORDER BY kind, fw_type, started_at
+        """,
+        params if params else None,
+    )
+
+
+def load_just_drop_agg(run_ids: list[int] | None = None) -> pd.DataFrame:
+    empty = pd.DataFrame(
+        columns=[
+            "run_id",
+            "name",
+            "count",
+            "total_ticks",
+            "min_ticks",
+            "max_ticks",
+            "lo",
+            "width",
+            "buckets",
+            "mean_ticks",
+        ]
+    )
+    if run_ids is not None and len(run_ids) == 0:
+        return empty
+    if run_ids is None:
+        df = read_sql(
+            """
+            SELECT run_id, name, count, total_ticks, min_ticks, max_ticks, lo, width, buckets,
+                   CASE WHEN count > 0
+                        THEN total_ticks::double precision / count
+                        ELSE NULL END AS mean_ticks
+            FROM just_drop_agg
+            ORDER BY run_id, name
+            """
+        )
+    else:
+        df = read_sql(
+            """
+            SELECT run_id, name, count, total_ticks, min_ticks, max_ticks, lo, width, buckets,
+                   CASE WHEN count > 0
+                        THEN total_ticks::double precision / count
+                        ELSE NULL END AS mean_ticks
+            FROM just_drop_agg
+            WHERE run_id = ANY(%(ids)s::bigint[])
+            ORDER BY run_id, name
+            """,
+            {"ids": run_ids},
+        )
+    return df if len(df) else empty
+
+
+def load_just_drop_gauge(run_ids: list[int] | None = None) -> pd.DataFrame:
+    empty = pd.DataFrame(columns=["run_id", "name", "current", "peak"])
+    if run_ids is not None and len(run_ids) == 0:
+        return empty
+    if run_ids is None:
+        df = read_sql(
+            """
+            SELECT run_id, name, current, peak
+            FROM just_drop_gauge
+            ORDER BY run_id, name
+            """
+        )
+    else:
+        df = read_sql(
+            """
+            SELECT run_id, name, current, peak
+            FROM just_drop_gauge
+            WHERE run_id = ANY(%(ids)s::bigint[])
+            ORDER BY run_id, name
+            """,
+            {"ids": run_ids},
+        )
+    return df if len(df) else empty
+
+
+def load_just_drop_trace_summary(run_ids: list[int] | None = None) -> pd.DataFrame:
+    empty = pd.DataFrame(columns=["run_id", "len", "dropped", "kind_hist"])
+    if run_ids is not None and len(run_ids) == 0:
+        return empty
+    if run_ids is None:
+        df = read_sql(
+            """
+            SELECT run_id, len, dropped, kind_hist
+            FROM just_drop_trace_summary
+            ORDER BY run_id
+            """
+        )
+    else:
+        df = read_sql(
+            """
+            SELECT run_id, len, dropped, kind_hist
+            FROM just_drop_trace_summary
+            WHERE run_id = ANY(%(ids)s::bigint[])
+            ORDER BY run_id
+            """,
+            {"ids": run_ids},
+        )
+    return df if len(df) else empty
+
+
 def load_counter_samples(run_ids: list[str] | None = None) -> pd.DataFrame:
     if run_ids is not None and len(run_ids) == 0:
         return pd.DataFrame(columns=["run_id", "time_ns", "counter_value"])
