@@ -1,9 +1,8 @@
 //! Named site cycle/µs **accumulators** (`feature = "perf-span"`).
 //!
-//! **Dormant / not used in formal profiles.** Timeline nest spans live on Trace
-//! rings (`SpanBegin`/`SpanEnd`). This module sums µs per [`ProfSite`] when
-//! `prof on` — orthogonal to flame charts; leave disabled unless a future
-//! kind-s consumer appears.
+//! **Dormant / not a public exit.** Timeline nest spans live on Trace rings
+//! (`SpanBegin`/`SpanEnd`). This module sums µs per [`ProfSite`] when `prof on`
+//! — unused in current board profiles.
 
 use core::sync::atomic::Ordering;
 

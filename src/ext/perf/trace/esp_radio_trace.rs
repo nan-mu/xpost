@@ -1,4 +1,8 @@
-//! EspRadioTrace hooks → Counter / Aggregate / Gauge / Trace rings (and dormant Span/PcHit).
+//! EspRadioTrace call-sites → Counter / Aggregate / Gauge / Trace rings
+//! (and dormant Span/PcHit when those features are on).
+//!
+//! Lives under `trace/` next to the ring store; linked from `perf` parent so
+//! the impl still builds when `perf-trace` is off but C/A/G are on.
 
 use xpost_type::{EspRadioTrace, XdpAction};
 

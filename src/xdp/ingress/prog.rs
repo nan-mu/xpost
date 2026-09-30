@@ -12,9 +12,9 @@ use crate::ext::perf::gauge::GaugeSet;
 #[cfg(feature = "perf-trace")]
 use crate::ext::perf::trace::Trace;
 #[cfg(feature = "perf-span")]
-use crate::ext::perf::prof::span::SpanSet;
+use crate::ext::perf::span::SpanSet;
 #[cfg(feature = "perf-pchit")]
-use crate::ext::perf::prof::pchit::PcHitSet;
+use crate::ext::perf::pchit::PcHitSet;
 
 /// Process-wide program singleton type (implements [`xpost_type::XdpProg`]).
 ///
