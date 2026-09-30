@@ -1,6 +1,6 @@
 # just_drop / just_drop_hal experiment knobs (compile-time embed).
 # Selected via default.toml `run = ["just_drop"]`.
-# See config/README.md.
+# See `test` crate `config` module rustdoc.
 #
 # kinds: c = Counter full-rate (just_drop_config/data);
 #        a/g/t = Aggregate/Gauge/Trace at fixed pps (just_drop_run + child tables).
@@ -10,8 +10,8 @@ rounds = 3
 sample_interval_ms = 1000
 arms = ["hal", "xdp"]
 # First formal: Counter only. Uncomment full matrix after C looks good.
-kinds = ["c"]
-# kinds = ["c", "a", "g", "t"]
+# kinds = ["c"]
+kinds = ["c", "a", "g", "t"]
 # A/G working point (pps); T uses trace_pps (lower to avoid filling the ring).
 fixed_pps = 800
 trace_pps = 200

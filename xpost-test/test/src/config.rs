@@ -1,4 +1,46 @@
-//! Compile-time TOML: `config/default.toml` + `just_tx.toml` + `just_drop.toml`.
+//! Compile-time TOML for the `xpost-test` binary:
+//! `config/default.toml` + `just_tx.toml` + `just_drop.toml`.
+//!
+//! Files are embedded at compile time; after editing, rebuild and scp to TR3000.
+//! Formal collection is always:
+//!
+//! ```bash
+//! ./xpost-test
+//! ```
+//!
+//! No env vars, no CLI args. `default.toml` `run = [...]` selects **experiment
+//! names** only; steps are hard-coded in Rust, not split across TOML.
+//!
+//! # `run` values
+//!
+//! | Name | What | Postgres tables |
+//! |------|------|-----------------|
+//! | `just_drop` | Formal HAL + XDP: `kinds` includes `c` (full-rate drop series) and `a`/`g`/`t` (fixed pps) | `just_drop_config`/`data`; `just_drop_run` + agg/gauge/trace_summary |
+//! | `just_tx` | Formal HAL + XDP sweep / ~5% working point (grid 400…4000 pps, step 400) | `just_tx_config` + `just_tx_data` |
+//! | `dev` | Debug XDP only: 800/1600/2800/4000 × 1 × 8s; no DB | — |
+//!
+//! `dev` is fully hard-coded (no separate TOML); never touches Postgres /
+//! `just_tx_*` / `just_drop_*`.
+//!
+//! Formal experiments with `formal`: `DROP CASCADE` same-named tables then
+//! recreate. DDL lives under `xpost-test/sql/`.
+//!
+//! ```toml
+//! run = ["dev"]           # day-to-day firmware work
+//! # run = ["just_tx"]     # formal
+//! # run = ["just_drop", "just_tx"]
+//! ```
+//!
+//! # Other files
+//!
+//! - `default.toml`: `run`, postgres, agent, DUT, probe, profiles
+//! - `just_drop.toml`: `arms` / `kinds` (`c|a|g|t`) / `fixed_pps` / `trace_pps` /
+//!   `instr_rounds` / `instr_window_secs`
+//! - `just_tx.toml`: formal knobs (do not tweak for casual debug)
+//!
+//! # Functional suite (optional)
+//!
+//! `./xpost-test suite` runs fixed `test0`. `./xpost-test dev` is also available.
 
 use std::{net::Ipv4Addr, str::FromStr, sync::OnceLock};
 
@@ -356,11 +398,11 @@ impl FileConfig {
                 "just_tx" | "just_drop" | "dev" | "suite" => {}
                 "just-tx" | "just-drop" | "just-tx-pps" | "just-tx-rtt" | "just-drop-pps" => {
                     bail!(
-                        "default.toml `run` entry {name:?} is not an experiment name; use just_tx / just_drop / dev (see config/README.md)"
+                        "default.toml `run` entry {name:?} is not an experiment name; use just_tx / just_drop / dev (see `config` module docs)"
                     )
                 }
                 other => bail!(
-                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / dev (see config/README.md)"
+                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / dev (see `config` module docs)"
                 ),
             }
         }

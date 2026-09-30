@@ -67,7 +67,7 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 - `config/just_drop.toml`：正式 just_drop（`arms` / `kinds=c|a|g|t` / `fixed_pps` / `trace_pps`）
 - 调试 XDP TX：`run = ["dev"]`（硬编码：XDP × 800/1600/2800/4000 × 1×8s；**无 DB**；固件每 100 包打 `tsflow`；agent `POST /v1/serial_window`）
 - Agent HTTP：`/health`、`/v1/*`（含 `/v1/serial_window`）、`/mcp`
-- 实验步骤固定在代码里：见 [`xpost-test/config/README.md`](xpost-test/config/README.md)
+- 实验步骤固定在代码里：见 `xpost-test` crate 的 `config` / `overview` 模块 rustdoc
 - 正式 `just_tx` 扫速网格：`400…4000` pps（步长 400；ceiling ≈ XDP ~50% 丢包工作点的 hping3 标定）
 
 只跑正式 just_tx：`run = ["just_tx"]`。一次跑全部 formal A/B：`run = ["just_drop", "just_tx"]`。
@@ -78,17 +78,14 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 
 只做**性能**分析。采集由 TR3000 上 `./xpost-test` 写 `formal.*`；笔记本现查，不负责烧录或功能 ACK。
 
-- **`just_tx`**（`default.toml` 当前 `run`）：扫速找 ~5% 丢包工作点后逐包刺激/回包 → `formal.just_tx_config` / `just_tx_data`
+- **`just_tx`**：扫速找 ~5% 丢包工作点后逐包刺激/回包 → `formal.just_tx_config` / `just_tx_data`
 - **`just_drop`**：`kinds` 含 **c**（满速 → `just_drop_config`/`data`）与 **a/g/t**（固定 pps → `just_drop_run` + agg/gauge/trace_summary）。Profile：`just-drop-{c,a,g,t}` / `just-drop-hal-*`（HAL = Pass XDP + app `drop on`）
-- 笔记：`just_tx.ipynb`（RTT + 处理 PPS）、`just_drop.ipynb`（drop 处理 PPS）
+- 笔记：`just_tx.ipynb` / `just_drop.ipynb`；环境与表说明见 `benchmark.utils` 包 docstring
 
 ```bash
 cd benchmark && pixi install && pixi run ensure-schema && pixi run kernel
-# 外部常驻 Jupyter Lab 打开笔记本；内核选 xpost-benchmark (pixi)
-# notebook: just_tx.ipynb / just_drop.ipynb
+# 外部常驻 Jupyter Lab；内核选 xpost-benchmark (pixi)
 ```
-
-See [`benchmark/README.md`](benchmark/README.md).
 
 ## Scope
 

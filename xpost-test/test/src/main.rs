@@ -1,17 +1,17 @@
-//! TR3000 host harness: RAW stimulus + compile-time TOML config.
+//! TR3000 host harness binary **`xpost-test`**.
 //!
-//! Binary: `xpost-test`. Formal path on TR3000 is always bare:
-//!   ./xpost-test
-//! which runs `default.toml` `run = [...]` (no env, no flags).
-//! `run` names whole experiments (`just_tx`, `just_drop`); steps are fixed in code.
-//! Experiment knobs: `config/just_tx.toml`, `config/just_drop.toml`.
-//! Shared DUT / agent / postgres: `config/default.toml`. See `config/README.md`.
+//! Formal path on TR3000 is always bare `./xpost-test` (no env, no flags), which
+//! runs `default.toml` `run = [...]`. Experiment knobs live in
+//! `config/just_tx.toml` / `just_drop.toml`; shared DUT / agent / postgres in
+//! `config/default.toml` — see [`config`]. Full topology, protocol contracts, and
+//! bench inventory: [`overview`].
 
 mod agent;
 mod bench;
 mod config;
 mod generated;
 mod harness;
+mod overview;
 mod raw_tx;
 mod serve;
 mod tests;
@@ -139,7 +139,7 @@ fn commands_for_run_entry(name: &str) -> Result<Vec<Command>> {
         "dev" => vec![Command::DevExp],
         "suite" => vec![Command::Suite],
         other => anyhow::bail!(
-            "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / dev (see config/README.md)"
+            "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / dev (see `config` module docs)"
         ),
     })
 }

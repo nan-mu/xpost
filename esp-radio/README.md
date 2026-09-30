@@ -14,16 +14,9 @@ Note that this crate currently requires you to enable the `unstable` feature on 
 
 ## Local fork: native XDP
 
-Optional feature (this tree only):
-
-| Feature | Role |
-| --- | --- |
-| `xdp` | [`wifi::XdpProg`] via `wifi::new(..., prog)`; Pass / Drop / same-iface Tx |
-
-Pass `prog: &'static dyn XdpProg` as the third argument of `wifi::new` (one-shot;
-first wins). See `wifi` / `xdp` module docs.
-
-Recommended typecheck (esp32c3):
+This tree adds optional `xdp` / `xdp-observe` features. Details live in the
+[`wifi::xdp`](src/wifi/xdp/mod.rs) module rustdoc (Pass / Drop / Tx, EspRadioTrace
+call-sites, no local TxStats storage).
 
 ```bash
 cargo check -p esp-radio --features esp32c3,wifi,unstable,xdp
