@@ -1,7 +1,8 @@
 //! `just_drop` — Counter full-rate + Aggregate/Gauge/Trace fixed-pps rounds.
 //!
 //! Arms: `hal` (`just-drop-hal-*` + `drop on`) and `xdp` (`just-drop-*` + xdp.elf).
-//! Kinds: `c` → `just_drop_config`/`data`; `a`/`g`/`t` → `just_drop_run` + children.
+//! Kinds: `c` → `just_drop_config`/`data`; `a`/`g`/`t` → `just_drop_run.report_raw`
+//! (`OK report <n> b64=…` verbatim; no host decode).
 //! Formal: DROP same-named tables then CREATE empty (`pg_dsn::prepare` + `TableSet::JustDrop`).
 
 use std::net::Ipv4Addr;
@@ -10,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use rand::RngExt;
-use serde_json::{Number, Value as JsonValue, json};
+use serde_json::Value as JsonValue;
 use tokio_postgres::Client;
 
 use crate::agent::AgentClient;
@@ -444,37 +445,21 @@ async fn run_instr_arm(
         )
         .await?;
         match kind {
-            DropKind::Aggregate => {
-                let line = agent.request("agg").await.context("agg")?;
-                ingest_agg(client, run_id, &line).await?;
-                ui.check_ok("run+agg");
-            }
-            DropKind::Gauge => {
-                let line = agent.request("gauge").await.context("gauge")?;
-                ingest_gauge(client, run_id, &line).await?;
-                ui.check_ok("run+gauge");
-            }
-            DropKind::Trace => {
-                let line = agent.request("trace").await.context("trace")?;
-                ingest_trace(client, run_id, &line).await?;
-                ui.check_ok("run+trace");
+            DropKind::Aggregate | DropKind::Gauge | DropKind::Trace => {
+                let msg = agent.request("report").await.context("report")?;
+                client
+                    .execute(
+                        "UPDATE just_drop_run SET report_raw = $1 WHERE id = $2",
+                        &[&msg, &run_id],
+                    )
+                    .await
+                    .context("UPDATE just_drop_run.report_raw")?;
+                ui.check_ok(&format!("run+report_raw bytes≈{}", msg.len()));
             }
             DropKind::Counter => unreachable!(),
         }
     } else {
-        // Still exercise serial cmds without PG.
-        match kind {
-            DropKind::Aggregate => {
-                let _ = agent.request("agg").await?;
-            }
-            DropKind::Gauge => {
-                let _ = agent.request("gauge").await?;
-            }
-            DropKind::Trace => {
-                let _ = agent.request("trace").await?;
-            }
-            DropKind::Counter => {}
-        }
+        let _ = agent.request("report").await?;
     }
 
     let _ = agent.request("perf clear").await;
@@ -612,7 +597,7 @@ async fn measure_counter_round(
     Ok((samples, drop_delta, net_rx_delta, host_pps, sent))
 }
 
-async fn paced_blast(
+pub(crate) async fn paced_blast(
     cfg: &FileConfig,
     ui: &RoundUi,
     eta: &BudgetEta,
@@ -757,130 +742,6 @@ async fn ingest_run_meta(
         .await
         .context("INSERT just_drop_run")?;
     pg_dsn::config_id_from_row(&row)
-}
-
-async fn ingest_agg(client: &mut Client, run_id: i64, line: &str) -> Result<()> {
-    let body = line
-        .trim()
-        .strip_prefix("OK agg")
-        .context("expected OK agg")?;
-    for seg in body.split('|').map(str::trim).filter(|s| !s.is_empty()) {
-        let mut name: Option<String> = None;
-        let mut count = 0i64;
-        let mut total = 0i64;
-        let mut min = 0i64;
-        let mut max = 0i64;
-        let mut lo = 0i64;
-        let mut width = 0i64;
-        let mut buckets: Vec<i64> = Vec::new();
-        let mut parts = seg.split_whitespace();
-        if let Some(n) = parts.next() {
-            name = Some(n.to_string());
-        }
-        for part in parts {
-            let Some((k, v)) = part.split_once('=') else {
-                continue;
-            };
-            match k {
-                "count" => count = v.parse().unwrap_or(0),
-                "total" => total = v.parse().unwrap_or(0),
-                "min" => min = v.parse().unwrap_or(0),
-                "max" => max = v.parse().unwrap_or(0),
-                "lo" => lo = v.parse().unwrap_or(0),
-                "width" => width = v.parse().unwrap_or(0),
-                "buckets" => {
-                    buckets = v
-                        .split(',')
-                        .filter_map(|x| x.parse().ok())
-                        .collect();
-                }
-                _ => {}
-            }
-        }
-        let Some(name) = name else {
-            continue;
-        };
-        let buckets_json = JsonValue::Array(
-            buckets
-                .into_iter()
-                .map(|b| JsonValue::Number(Number::from(b)))
-                .collect(),
-        );
-        client
-            .execute(
-                r#"
-                INSERT INTO just_drop_agg (
-                    run_id, name, count, total_ticks, min_ticks, max_ticks, lo, width, buckets
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                "#,
-                &[
-                    &run_id,
-                    &name,
-                    &count,
-                    &total,
-                    &min,
-                    &max,
-                    &lo,
-                    &width,
-                    &buckets_json,
-                ],
-            )
-            .await
-            .context("INSERT just_drop_agg")?;
-    }
-    Ok(())
-}
-
-async fn ingest_gauge(client: &mut Client, run_id: i64, line: &str) -> Result<()> {
-    let body = line
-        .trim()
-        .strip_prefix("OK gauge ")
-        .context("expected OK gauge")?;
-    for part in body.split_whitespace() {
-        let Some((name, rest)) = part.split_once('=') else {
-            continue;
-        };
-        let mut it = rest.split(',');
-        let current: i64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let peak: i64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        client
-            .execute(
-                r#"
-                INSERT INTO just_drop_gauge (run_id, name, current, peak)
-                VALUES ($1, $2, $3, $4)
-                "#,
-                &[&run_id, &name, &current, &peak],
-            )
-            .await
-            .context("INSERT just_drop_gauge")?;
-    }
-    Ok(())
-}
-
-async fn ingest_trace(client: &mut Client, run_id: i64, line: &str) -> Result<()> {
-    let body = line.trim().strip_prefix("OK trace ").unwrap_or(line);
-    let mut len = 0i64;
-    let mut dropped = 0i64;
-    for part in body.split_whitespace() {
-        if let Some((k, v)) = part.split_once('=') {
-            match k {
-                "len" => len = v.parse().unwrap_or(0),
-                "dropped" => dropped = v.parse().unwrap_or(0),
-                _ => {}
-            }
-        }
-    }
-    client
-        .execute(
-            r#"
-            INSERT INTO just_drop_trace_summary (run_id, len, dropped, kind_hist)
-            VALUES ($1, $2, $3, $4)
-            "#,
-            &[&run_id, &len, &dropped, &json!({})],
-        )
-        .await
-        .context("INSERT just_drop_trace_summary")?;
-    Ok(())
 }
 
 fn gen_lan_ip(esp: Ipv4Addr, avoid: &[Ipv4Addr]) -> Ipv4Addr {

@@ -63,11 +63,57 @@ pub trait XdpProg: Send + Sync {
     fn run<'a>(&self, frame: &'a mut [u8]) -> (XdpAction, &'a mut [u8]);
 }
 
+/// Named sites for cycle/µs span accumulators (`perf-span` in xpost).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ProfSite {
+    /// `Prog::run` / leased image execution.
+    XdpRun = 0,
+    /// Claim token + prepare TX (pre-`tx_by_ref`).
+    TxEnqueue = 1,
+    /// One `esp_wifi_internal_tx_by_ref` call.
+    TxDrainOne = 2,
+    /// Unused (batch path removed); retained for index stability.
+    TxDrainBatch = 3,
+    /// STA/AP RX callback XDP dispatch (Pass/Drop/Tx decision).
+    WifiRxDispatch = 4,
+    /// One TX-task submit attempt: reserve → `tx_by_ref` → submitted/failed.
+    TxSubmit = 5,
+}
+
+impl ProfSite {
+    /// Number of sites (contiguous from 0).
+    pub const COUNT: usize = 6;
+
+    /// All sites in wire / snapshot order.
+    pub const ALL: [ProfSite; Self::COUNT] = [
+        Self::XdpRun,
+        Self::TxEnqueue,
+        Self::TxDrainOne,
+        Self::TxDrainBatch,
+        Self::WifiRxDispatch,
+        Self::TxSubmit,
+    ];
+
+    #[inline]
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::XdpRun),
+            1 => Some(Self::TxEnqueue),
+            2 => Some(Self::TxDrainOne),
+            3 => Some(Self::TxDrainBatch),
+            4 => Some(Self::WifiRxDispatch),
+            5 => Some(Self::TxSubmit),
+            _ => None,
+        }
+    }
+}
+
 /// Performance hooks layered on a mounted [`XdpProg`] for esp-radio call-sites.
 ///
 /// Names align with the metric catalog. The driver only **calls** these (when
-/// `xdp-observe` is enabled); Counter / Aggregate / Gauge / Trace storage is
-/// owned by the xpost implementor.
+/// `xdp-observe` is enabled); Counter / Aggregate / Gauge / Trace / Span / PcHit
+/// storage is owned by the xpost implementor.
 pub trait EspRadioTrace: XdpProg {
     /// `rx_packets` — RX software entry (`len` = frame length).
     fn rx_packets(&self, _len: usize) {}
@@ -128,4 +174,11 @@ pub trait EspRadioTrace: XdpProg {
     fn tx_block(&self) {}
     /// `tx_flow_sample`.
     fn tx_flow_sample(&self) {}
+
+    /// Span enter (`perf-span`); no-op unless implementor records.
+    fn span_begin(&self, _site: ProfSite) {}
+    /// Span leave; pairs with [`Self::span_begin`].
+    fn span_end(&self, _site: ProfSite) {}
+    /// PC-hit sample (`perf-pchit`).
+    fn pc_hit(&self, _pc: u32) {}
 }

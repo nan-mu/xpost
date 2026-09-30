@@ -106,10 +106,13 @@ partition_table = "examples/just_drop_hal/partitions.csv"
 chip = "esp32c3"
 build = ["cargo", "xtask", "just_drop_hal", "build", "--release", "--no-default-features", "--features", "kind-t"]
 
+# just_tx kinds: same kind-c/a/g/t split as just_drop. Legacy `just-tx` /
+# `just-tx-hal` ≡ kind-c. XDP reuses just_drop FW + cold just_tx.elf.
+
 [[profile]]
 id = "just-tx"
 path = "just_drop"
-description = "just_drop firmware + cold just_tx.elf (XDP MAC swap + XDP_TX)"
+description = "just_tx Counter (kind-c) + cold just_tx.elf"
 bin = "examples/just_drop/target/riscv32imc-unknown-none-elf/release/just_drop"
 partition_table = "examples/just_drop/partitions.csv"
 chip = "esp32c3"
@@ -118,13 +121,93 @@ xdp_name = "just_tx"
 build = ["cargo", "xtask", "just_drop", "build", "--release", "--no-default-features", "--features", "kind-c"]
 
 [[profile]]
+id = "just-tx-c"
+path = "just_drop"
+description = "just_tx Counter (kind-c) + cold just_tx.elf"
+bin = "examples/just_drop/target/riscv32imc-unknown-none-elf/release/just_drop"
+partition_table = "examples/just_drop/partitions.csv"
+chip = "esp32c3"
+xdp_elf = "examples/just_drop/just_tx.elf"
+xdp_name = "just_tx"
+build = ["cargo", "xtask", "just_drop", "build", "--release", "--no-default-features", "--features", "kind-c"]
+
+[[profile]]
+id = "just-tx-a"
+path = "just_drop"
+description = "just_tx Aggregate (kind-a) + cold just_tx.elf"
+bin = "examples/just_drop/target/riscv32imc-unknown-none-elf/release/just_drop"
+partition_table = "examples/just_drop/partitions.csv"
+chip = "esp32c3"
+xdp_elf = "examples/just_drop/just_tx.elf"
+xdp_name = "just_tx"
+build = ["cargo", "xtask", "just_drop", "build", "--release", "--no-default-features", "--features", "kind-a"]
+
+[[profile]]
+id = "just-tx-g"
+path = "just_drop"
+description = "just_tx Gauge (kind-g) + cold just_tx.elf"
+bin = "examples/just_drop/target/riscv32imc-unknown-none-elf/release/just_drop"
+partition_table = "examples/just_drop/partitions.csv"
+chip = "esp32c3"
+xdp_elf = "examples/just_drop/just_tx.elf"
+xdp_name = "just_tx"
+build = ["cargo", "xtask", "just_drop", "build", "--release", "--no-default-features", "--features", "kind-g"]
+
+[[profile]]
+id = "just-tx-t"
+path = "just_drop"
+description = "just_tx Trace (kind-t) + cold just_tx.elf"
+bin = "examples/just_drop/target/riscv32imc-unknown-none-elf/release/just_drop"
+partition_table = "examples/just_drop/partitions.csv"
+chip = "esp32c3"
+xdp_elf = "examples/just_drop/just_tx.elf"
+xdp_name = "just_tx"
+build = ["cargo", "xtask", "just_drop", "build", "--release", "--no-default-features", "--features", "kind-t"]
+
+[[profile]]
 id = "just-tx-hal"
 path = "just_tx_hal"
-description = "just_tx_hal firmware (app-layer UDP echo; rxcnt[17] on recv)"
+description = "just_tx_hal Counter (kind-c); Pass XDP + app UDP echo"
 bin = "examples/just_tx_hal/target/riscv32imc-unknown-none-elf/release/just_tx_hal"
 partition_table = "examples/just_tx_hal/partitions.csv"
 chip = "esp32c3"
-build = ["cargo", "xtask", "just_tx_hal", "build", "--release"]
+build = ["cargo", "xtask", "just_tx_hal", "build", "--release", "--no-default-features", "--features", "kind-c"]
+
+[[profile]]
+id = "just-tx-hal-c"
+path = "just_tx_hal"
+description = "just_tx_hal Counter (kind-c); Pass XDP + app UDP echo"
+bin = "examples/just_tx_hal/target/riscv32imc-unknown-none-elf/release/just_tx_hal"
+partition_table = "examples/just_tx_hal/partitions.csv"
+chip = "esp32c3"
+build = ["cargo", "xtask", "just_tx_hal", "build", "--release", "--no-default-features", "--features", "kind-c"]
+
+[[profile]]
+id = "just-tx-hal-a"
+path = "just_tx_hal"
+description = "just_tx_hal Aggregate (kind-a); Pass XDP + app UDP echo"
+bin = "examples/just_tx_hal/target/riscv32imc-unknown-none-elf/release/just_tx_hal"
+partition_table = "examples/just_tx_hal/partitions.csv"
+chip = "esp32c3"
+build = ["cargo", "xtask", "just_tx_hal", "build", "--release", "--no-default-features", "--features", "kind-a"]
+
+[[profile]]
+id = "just-tx-hal-g"
+path = "just_tx_hal"
+description = "just_tx_hal Gauge (kind-g); Pass XDP + app UDP echo"
+bin = "examples/just_tx_hal/target/riscv32imc-unknown-none-elf/release/just_tx_hal"
+partition_table = "examples/just_tx_hal/partitions.csv"
+chip = "esp32c3"
+build = ["cargo", "xtask", "just_tx_hal", "build", "--release", "--no-default-features", "--features", "kind-g"]
+
+[[profile]]
+id = "just-tx-hal-t"
+path = "just_tx_hal"
+description = "just_tx_hal Trace (kind-t); Pass XDP + app UDP echo"
+bin = "examples/just_tx_hal/target/riscv32imc-unknown-none-elf/release/just_tx_hal"
+partition_table = "examples/just_tx_hal/partitions.csv"
+chip = "esp32c3"
+build = ["cargo", "xtask", "just_tx_hal", "build", "--release", "--no-default-features", "--features", "kind-t"]
 
 [[profile]]
 id = "drop-hal"

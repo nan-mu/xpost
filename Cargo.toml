@@ -37,6 +37,10 @@ perf-aggregate = ["esp-radio/xdp-observe"]
 perf-gauge = ["esp-radio/xdp-observe"]
 # Trace ring (heapless) → `xpost::ext::perf::trace()`.
 perf-trace = ["esp-radio/xdp-observe"]
+# Named site cycle/µs spans → `xpost::ext::perf::span()`.
+perf-span = ["esp-radio/xdp-observe"]
+# PC-hit histogram → `xpost::ext::perf::pchit()`.
+perf-pchit = ["esp-radio/xdp-observe"]
 
 # Path A defaults for `xpost-build::firmware_codegen` when the firmware crate
 # omits `[package.metadata.xpost]`. Firmware may override map/slots/target;

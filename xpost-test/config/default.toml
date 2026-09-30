@@ -12,8 +12,8 @@
 version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
-# Formal: just_tx / just_drop. Fast debug: dev (own tables, hardcoded).
-run = ["just_drop"]
+# Flame short Trace: `dev`. Formal: just_tx / just_drop.
+run = ["dev"]
 
 [postgres]
 host = "192.168.110.96"
@@ -51,10 +51,10 @@ http_listen = "0.0.0.0:19081"
 drop_hal = "drop-hal"
 drop_xdp = "drop-xdp"
 firmware = "firmware"
-# Legacy aliases (= kind-c). Formal just_drop picks just-drop-{c,a,g,t} /
-# just-drop-hal-* from just_drop.toml `kinds` in code — these two keys are
-# only for other benches / manual flash helpers.
+# Legacy aliases (= kind-c). Formal just_drop / just_tx pick
+# just-{drop,tx}-{c,a,g,t} / just-*-hal-* from TOML `kinds` in code —
+# these keys are only for other benches / manual flash helpers / `dev`.
 just_drop = "just-drop-c"
 just_drop_hal = "just-drop-hal-c"
-just_tx = "just-tx"
-just_tx_hal = "just-tx-hal"
+just_tx = "just-tx-c"
+just_tx_hal = "just-tx-hal-c"

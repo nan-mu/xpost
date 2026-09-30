@@ -24,7 +24,8 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use portable_atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
-use super::prof::{self, Site, Span};
+use super::prof::{Site, Span};
+
 use crate::sys::include;
 
 /// Token pool == ring capacity: a claimed token is always either queued or being handed off.
@@ -258,6 +259,7 @@ pub fn poll() -> TxPoll {
         // NEED_DONE bump (diagnostic / soft-cap counter only).
         TX_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
         TX_NEED_DONE.fetch_add(1, Ordering::AcqRel);
+        let _submit = Span::enter(Site::TxSubmit);
         #[cfg(feature = "xdp-observe")]
         {
             let prog = super::current();
@@ -266,7 +268,7 @@ pub fn poll() -> TxPoll {
         }
         let rc = {
             let _span = Span::enter(Site::TxDrainOne);
-            prof::hit_here();
+            super::prof::hit_here();
             unsafe {
                 include::esp_wifi_internal_tx_by_ref(
                     ifx,
@@ -318,6 +320,7 @@ pub fn poll() -> TxPoll {
             }
         }
         token.release();
+        // `_submit` drops here — one attempt end.
     }
 }
 

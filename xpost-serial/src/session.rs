@@ -82,6 +82,8 @@ impl<S: Sink> ProgressCallbacks for SinkProgress<'_, S> {
 
 enum AppRx {
     Line(String),
+    /// Raw bytes following an `OK report <n>` line (exact length).
+    Blob(Vec<u8>),
     Died(String),
 }
 
@@ -392,6 +394,11 @@ impl<S: Sink> Session<S> {
         }
         self.ensure_app_reader()?;
         let line = cmd.trim_end_matches(['\r', '\n']);
+        // Binary report needs framed read — use [`Self::request_report`].
+        if line.eq_ignore_ascii_case("report") || line.eq_ignore_ascii_case("report perf") {
+            let (hdr, _payload) = self.request_report_timeout(timeout)?;
+            return Ok(hdr);
+        }
         self.emit_io(IoRole::CmdTx, line.to_string());
         {
             let app = self.app.as_mut().ok_or(Error::Closed)?;
@@ -417,6 +424,10 @@ impl<S: Sink> Session<S> {
                     // MCU-initiated traffic interleaved while waiting for the reply.
                     self.emit_io(IoRole::UartRx, rx);
                 }
+                Ok(AppRx::Blob(_)) => {
+                    // Spurious blob (should follow report); ignore into transcript as error.
+                    self.emit_error("request", "unexpected binary blob".into());
+                }
                 Ok(AppRx::Died(msg)) => {
                     self.emit_error("request", msg.clone());
                     self.stop_app();
@@ -429,6 +440,98 @@ impl<S: Sink> Session<S> {
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(Error::Msg("app reader disconnected".into()));
                 }
+            }
+        }
+    }
+
+    /// Send `report` and return `(OK report <n>, payload bytes)`.
+    pub fn request_report(&mut self) -> Result<(String, Vec<u8>)> {
+        self.request_report_timeout(DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    pub fn request_report_timeout(&mut self, timeout: Duration) -> Result<(String, Vec<u8>)> {
+        if self.mode != Mode::App {
+            return Err(Error::NotApp(self.mode.to_string()));
+        }
+        self.ensure_app_reader()?;
+        let cmd = "report";
+        self.emit_io(IoRole::CmdTx, cmd.to_string());
+        {
+            let app = self.app.as_mut().ok_or(Error::Closed)?;
+            let mut w = app.writer.lock().map_err(|_| Error::Msg("writer lock".into()))?;
+            w.write_all(cmd.as_bytes())?;
+            w.write_all(b"\n")?;
+            w.flush()?;
+        }
+        let deadline = Instant::now() + timeout;
+        let header = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.emit_error("request_report", "timeout waiting for OK report".into());
+                return Err(Error::RequestTimeout(timeout));
+            }
+            let app = self.app.as_mut().ok_or(Error::Closed)?;
+            match app.rx.recv_timeout(remaining) {
+                Ok(AppRx::Line(rx)) => {
+                    if rx.starts_with("ERR ") {
+                        self.emit_io(IoRole::CmdRx, rx.clone());
+                        return Err(Error::Msg(rx));
+                    }
+                    if crate::perf_report::parse_ok_report_len(&rx).is_some() {
+                        self.emit_io(IoRole::CmdRx, rx.clone());
+                        break rx;
+                    }
+                    if is_reply_line(&rx) {
+                        self.emit_io(IoRole::CmdRx, rx.clone());
+                        return Err(Error::Msg(format!("expected OK report, got {rx}")));
+                    }
+                    self.emit_io(IoRole::UartRx, rx);
+                }
+                Ok(AppRx::Blob(_)) => {
+                    self.emit_error("request_report", "blob before OK report header".into());
+                }
+                Ok(AppRx::Died(msg)) => {
+                    self.emit_error("request_report", msg.clone());
+                    self.stop_app();
+                    return Err(Error::Msg(msg));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.emit_error("request_report", "timeout waiting for OK report".into());
+                    return Err(Error::RequestTimeout(timeout));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Error::Msg("app reader disconnected".into()));
+                }
+            }
+        };
+        let n = crate::perf_report::parse_ok_report_len(&header)
+            .ok_or_else(|| Error::Msg(format!("bad report header: {header}")))?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::RequestTimeout(timeout));
+        }
+        let app = self.app.as_mut().ok_or(Error::Closed)?;
+        match app.rx.recv_timeout(remaining) {
+            Ok(AppRx::Blob(bytes)) => {
+                if bytes.len() != n {
+                    return Err(Error::Msg(format!(
+                        "report blob len {} != header {n}",
+                        bytes.len()
+                    )));
+                }
+                Ok((header, bytes))
+            }
+            Ok(AppRx::Line(rx)) => Err(Error::Msg(format!(
+                "expected report blob, got line: {rx}"
+            ))),
+            Ok(AppRx::Died(msg)) => {
+                self.emit_error("request_report", msg.clone());
+                self.stop_app();
+                Err(Error::Msg(msg))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(Error::RequestTimeout(timeout)),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(Error::Msg("app reader disconnected".into()))
             }
         }
     }
@@ -454,6 +557,9 @@ impl<S: Sink> Session<S> {
                         self.emit_io(IoRole::UartRx, rx.clone());
                     }
                     out.push(rx);
+                }
+                Ok(AppRx::Blob(_)) => {
+                    // Orphan blob (report without consumer); drop.
                 }
                 Ok(AppRx::Died(msg)) => {
                     self.emit_error("drain_uart", msg.clone());
@@ -704,6 +810,7 @@ impl<S: Sink> Session<S> {
 }
 
 fn app_reader_loop(port: Box<dyn SerialPort>, tx: Sender<AppRx>, stop: Arc<AtomicBool>) {
+    use std::io::Read;
     let mut reader = BufReader::new(port);
     let mut buf = String::new();
     while !stop.load(Ordering::Acquire) {
@@ -717,7 +824,19 @@ fn app_reader_loop(port: Box<dyn SerialPort>, tx: Sender<AppRx>, stop: Arc<Atomi
                 if line.is_empty() {
                     continue;
                 }
-                if tx.send(AppRx::Line(line)).is_err() {
+                if let Some(n) = crate::perf_report::parse_ok_report_len(&line) {
+                    if tx.send(AppRx::Line(line)).is_err() {
+                        break;
+                    }
+                    let mut payload = vec![0u8; n];
+                    if let Err(e) = reader.read_exact(&mut payload) {
+                        let _ = tx.send(AppRx::Died(format!("report read_exact: {e}")));
+                        break;
+                    }
+                    if tx.send(AppRx::Blob(payload)).is_err() {
+                        break;
+                    }
+                } else if tx.send(AppRx::Line(line)).is_err() {
                     break;
                 }
             }

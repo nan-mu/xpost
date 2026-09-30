@@ -49,7 +49,9 @@ Var      Meaning
 ``PGSCHEMA``  use ``formal`` for formal perf data
 =======  =================================
 
-Tables: ``just_tx_config`` / ``just_tx_data`` (sweep + RTT);
+Tables: ``just_tx_config`` / ``just_tx_data`` (Counter sweep + RTT);
+``just_tx_run`` + ``just_tx_agg`` / ``just_tx_gauge`` /
+``just_tx_trace_summary`` (A/G/T fixed pps);
 ``just_drop_config`` / ``just_drop_data`` (Counter full-rate drop PPS),
 ``just_drop_run`` + ``just_drop_agg`` / ``just_drop_gauge`` /
 ``just_drop_trace_summary`` (A/G/T fixed pps). DDL: ``xpost-test/sql/``.

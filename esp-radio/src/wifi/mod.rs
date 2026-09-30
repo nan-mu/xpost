@@ -1240,6 +1240,21 @@ fn xdp_dispatch(
 
 pub(crate) static WIFI_TX_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
 
+/// Monotonic pulse on every `esp_wifi_tx_done_cb` (embassy copy path + XDP).
+static WIFI_TX_DONE_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// Embassy/smoltcp TX frames waiting for `esp_wifi_tx_done_cb` (not XDP ring).
+#[inline]
+pub fn wifi_tx_inflight() -> usize {
+    WIFI_TX_INFLIGHT.load(Ordering::SeqCst)
+}
+
+/// Host/app air-TX wait: advances on each Wi-Fi TX-done callback.
+#[inline]
+pub fn wifi_tx_done_seq() -> usize {
+    WIFI_TX_DONE_SEQ.load(Ordering::Relaxed)
+}
+
 fn decrement_inflight_counter() {
     unwrap!(
         WIFI_TX_INFLIGHT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
@@ -1257,6 +1272,7 @@ unsafe extern "C" fn esp_wifi_tx_done_cb(
 ) {
     trace!("esp_wifi_tx_done_cb");
 
+    WIFI_TX_DONE_SEQ.fetch_add(1, Ordering::Relaxed);
     decrement_inflight_counter();
 
     #[cfg(feature = "xdp")]

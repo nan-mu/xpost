@@ -7,8 +7,8 @@
 //! With `xdp-observe`, [`super::new`] takes [`EspRadioTrace`] (extends [`XdpProg`]).
 //! Observation call-sites invoke [`current`] methods directly under
 //! `xdp-observe` — no helper wrapper and no local TxStats / event-log storage.
-//! Counter / Aggregate / Gauge / Trace storage lives in xpost `ext::perf` when
-//! those features replace the trait defaults.
+//! Counter / Aggregate / Gauge / Trace / Span / PcHit storage lives in xpost
+//! `ext::perf` when those features replace the trait defaults.
 //!
 //! | Feature | Role |
 //! |---------|------|

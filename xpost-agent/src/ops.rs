@@ -329,9 +329,12 @@ pub fn list_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
 pub fn counters(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     with_log(peer, "Counters", "", true, state, || {
         let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
-        g.session
-            .request_timeout("counters", Duration::from_secs(5))
-            .context("request counters")
+        let (_hdr, payload) = g
+            .session
+            .request_report_timeout(Duration::from_secs(5))
+            .context("request report for counters")?;
+        let report = xpost_serial::decode_perf_report(&payload).context("decode report")?;
+        Ok(xpost_serial::format_counters_ok(&report.counters))
     })
 }
 
@@ -340,13 +343,47 @@ pub fn request(state: &Mutex<AgentState>, cmd: &str, peer: &str) -> Result<Strin
     if cmd.is_empty() {
         bail!("empty request");
     }
-    let noisy = cmd.starts_with("rxcnt") || cmd.eq_ignore_ascii_case("counters");
+    let is_report = cmd.eq_ignore_ascii_case("report") || cmd.eq_ignore_ascii_case("report perf");
+    let noisy = cmd.starts_with("rxcnt") || is_report;
     with_log(peer, "Request", &format!("`{cmd}`"), noisy, state, || {
         let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
-        g.session
-            .request_timeout(cmd, Duration::from_secs(5))
-            .with_context(|| format!("request `{cmd}`"))
+        if is_report {
+            let (hdr, payload) = g
+                .session
+                .request_report_timeout(Duration::from_secs(5))
+                .context("request report")?;
+            let b64 = base64_encode(&payload);
+            Ok(format!("{hdr} b64={b64}"))
+        } else {
+            g.session
+                .request_timeout(cmd, Duration::from_secs(5))
+                .with_context(|| format!("request `{cmd}`"))
+        }
     })
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0] as u32;
+        let b = chunk.get(1).copied().unwrap_or(0) as u32;
+        let c = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (a << 16) | (b << 8) | c;
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(T[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(T[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 /// Return sink transcript lines whose host timestamp falls in `[since_unix_ms, until_unix_ms]`.

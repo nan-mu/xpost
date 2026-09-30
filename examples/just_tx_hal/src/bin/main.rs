@@ -19,6 +19,7 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use log::{error, info};
 use static_cell::StaticCell;
+use xpost::xdp::Slot;
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -34,6 +35,12 @@ esp_bootloader_esp_idf::esp_app_desc!();
 const STIM_PORT: u16 = 8080;
 /// IPPROTO_UDP — matches just_tx `rxcnt` ARRAY key.
 const IPPROTO_UDP: u32 = 17;
+
+/// IRAM slot required by xpost-build link layout; HAL never leases a cold image
+/// (inactive Prog → Pass). Symbol name matches xpost-build `SLOT_SYMBOL`.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".xdp.hotload_0")]
+static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
 /// Packets that reached the UDP socket (always, before echo).
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
@@ -55,13 +62,14 @@ static UDP_TX_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
+    // Quiet USB: match just_drop under stress (agent session contention).
     esp_println::logger::init_logger(log::LevelFilter::Error);
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
-    // Wi-Fi dynamic RX/TX buffers come from this heap; must match examples/just_drop.
+    // Wi-Fi dynamic RX/TX buffers; align with just_drop / just_drop_hal.
     esp_alloc::heap_allocator!(size: 64 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -73,8 +81,14 @@ async fn main(spawner: Spawner) -> ! {
 
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
     spawner.spawn(serial_task(usb_rx).unwrap());
+    // Host opens App UART ~800ms after reset; delay so settle can latch this.
+    Timer::after(Duration::from_millis(1200)).await;
+    esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
 
-    // Must match examples/just_drop (A/B fairness): dynamic TX/RX at ESP-IDF max.
+    // Keep the IRAM slot symbol live for the linker; never lease.
+    let _slot = core::ptr::addr_of!(xdp_slot);
+
+    // Path esp-radio + xpost: inactive Prog → Pass; app echoes at UDP.
     // AMPDU TX off: its BA session stalls TX ~1.07 s under ping-pong load.
     // Embassy frame queues (HAL-only; XDP_TX bypasses them): defaults 5/3 drop under burst.
     let wifi_cfg = esp_radio::wifi::ControllerConfig::default()
@@ -83,9 +97,12 @@ async fn main(spawner: Spawner) -> ! {
         .with_ampdu_tx_enable(false)
         .with_rx_queue_size(32)
         .with_tx_queue_size(16);
-    let (mut controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, wifi_cfg)
+    let (mut controller, interfaces) = xpost::esp_radio::new(peripherals.WIFI, wifi_cfg)
         .expect("Failed to initialize Wi-Fi controller");
-    info!("wifi ready (crates.io esp-radio; no xpost) tx_dyn=128 rx_dyn=1024 rx_q=32 tx_q=16");
+    info!("wifi+xdp Pass (no lease) echo_site=app tx_dyn=128 rx_dyn=1024 rx_q=32 tx_q=16");
+
+    // Drain path for any accidental XDP_TX; Pass-only should stay Idle.
+    spawner.spawn(xdp_tx_task().unwrap());
 
     match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
         (Some(ssid), Some(pass)) if !ssid.is_empty() => {
@@ -111,6 +128,20 @@ async fn main(spawner: Spawner) -> ! {
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn xdp_tx_task() {
+    use embassy_futures::select::select;
+    use esp_radio::wifi::{XDP_TX_KICK, XdpTxPoll, xdp_tx_poll};
+    loop {
+        match xdp_tx_poll() {
+            XdpTxPoll::Idle => XDP_TX_KICK.wait().await,
+            XdpTxPoll::Blocked => {
+                select(XDP_TX_KICK.wait(), Timer::after(Duration::from_micros(500))).await;
+            }
+        }
     }
 }
 
@@ -144,6 +175,7 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
     stack.wait_config_up().await;
     if let Some(v4) = stack.config_v4() {
         info!("dhcp {}", v4.address);
+        esp_println::println!("xpost ready ipv4={} port={STIM_PORT}", v4.address);
     }
 
     let rx_meta = UDP_RX_META.init([PacketMetadata::EMPTY; 16]);
@@ -153,11 +185,6 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
     let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
     socket.bind(STIM_PORT).expect("bind stim");
     info!("udp echo listening {STIM_PORT}");
-    if let Some(v4) = stack.config_v4() {
-        esp_println::println!("xpost ready ipv4={} port={STIM_PORT}", v4.address);
-    } else {
-        esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
-    }
 
     let mut buf = [0u8; 256];
     loop {
@@ -169,7 +196,9 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
         let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
         // Await TX fully: short with_timeout was silently dropping every echo
         // (Wi-Fi TX often ≫ 50 ms), so TC never saw bounce and RTT stayed empty.
-        if socket.send_to(&buf[..n], dest).await.is_err() {
+        // No App* Trace stamps — HAL/XDP flames are not role-comparable under async.
+        let send_ok = socket.send_to(&buf[..n], dest).await.is_ok();
+        if !send_ok {
             error!("echo send failed bytes={n}");
         }
     }
@@ -204,9 +233,22 @@ fn dispatch_serial(line: &str) {
     let line = line.trim();
     if line.eq_ignore_ascii_case("ping") {
         esp_println::println!("OK ping");
-    } else if line.eq_ignore_ascii_case("counters") || line.eq_ignore_ascii_case("report counters")
-    {
-        print_counters();
+    } else if line.eq_ignore_ascii_case("report") || line.eq_ignore_ascii_case("report perf") {
+        print_report();
+    } else if line.eq_ignore_ascii_case("perf clear") {
+        #[cfg(any(
+            feature = "kind-c",
+            feature = "kind-a",
+            feature = "kind-g",
+            feature = "kind-t"
+        ))]
+        xpost::ext::perf::clear_perf();
+        NET_RX.store(0, Ordering::Relaxed);
+        esp_println::println!("OK perf clear");
+    } else if line.eq_ignore_ascii_case("prof on") || line.eq_ignore_ascii_case("prof off") {
+        let on = line.eq_ignore_ascii_case("prof on");
+        xpost::ext::perf::set_prof_enabled(on);
+        esp_println::println!("OK prof {}", if on { "on" } else { "off" });
     } else if let Some(rest) = strip_cmd(line, "rxcnt") {
         print_rxcnt(rest);
     } else if let Some(rest) = strip_cmd(line, "ack-dest") {
@@ -223,22 +265,28 @@ fn dispatch_serial(line: &str) {
     }
 }
 
-fn print_counters() {
-    // Field order matches just_drop / just_tx; drop stays 0 (echo path).
-    esp_println::println!(
-        "OK counters drop={} failed_tx={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} pool_drop_misalign={} map_lock={}",
-        0usize,
-        0usize,
-        NET_RX.load(Ordering::Relaxed),
-        0u32,
-        0u32,
-        0u32,
-        0u32,
-        0u32,
-        0u32,
-        0u32,
-        "no-rt",
-    );
+fn print_report() {
+    #[cfg(any(
+        feature = "kind-c",
+        feature = "kind-a",
+        feature = "kind-g",
+        feature = "kind-t"
+    ))]
+    {
+        let n = xpost::ext::perf::report_payload_len();
+        esp_println::println!("OK report {n}");
+        xpost::ext::perf::report_perf(|chunk| {
+            esp_println::Printer::write_bytes(chunk);
+            Ok::<(), core::convert::Infallible>(())
+        });
+    }
+    #[cfg(not(any(
+        feature = "kind-c",
+        feature = "kind-a",
+        feature = "kind-g",
+        feature = "kind-t"
+    )))]
+    esp_println::println!("ERR report no-perf");
 }
 
 fn print_rxcnt(rest: &str) {

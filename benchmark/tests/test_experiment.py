@@ -206,3 +206,24 @@ def test_figure2_shape():
     )
     assert len(fig.axes) == 6
     __import__("matplotlib.pyplot", fromlist=["close"]).close(fig)
+
+
+def test_ok_trace_one_call_flame_stages():
+    from utils.experiment.trace_flame import action_name, extract_calls, parse_ok_trace
+
+    line = (
+        "OK trace len=4 dropped=0 cap=256 "
+        "| RxBegin t_us=100 arg0=50 arg1=0 "
+        "| XdpBegin t_us=133 arg0=0 arg1=0 "
+        "| XdpEnd t_us=141 arg0=3 arg1=0 "
+        "| RxEnd t_us=202 arg0=0 arg1=0"
+    )
+    calls = extract_calls(parse_ok_trace(line))
+    assert len(calls) == 1
+    c = calls[0]
+    assert c.pkt_len == 50
+    assert action_name(c.action) == "Tx"
+    assert c.xdp_dispatch_us == 33
+    assert c.xdp_execution_us == 8
+    assert c.post_action_us == 61
+    assert c.rx_processing_us == 102

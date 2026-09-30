@@ -13,6 +13,7 @@ pub mod hping;
 pub mod just_drop;
 pub mod just_drop_pps;
 pub mod just_tx;
+pub mod perf_ingest;
 pub mod pg_dsn;
 pub mod rate_common;
 pub mod rate_loss;

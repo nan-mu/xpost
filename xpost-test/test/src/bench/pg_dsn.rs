@@ -35,7 +35,7 @@ pub enum TableSet {
     RateRtt,
     RateLoss,
     Ack,
-    /// Formal `just_tx` → `just_tx_config` / `just_tx_data`.
+    /// Formal `just_tx` → `just_tx_config` / `just_tx_data` (+ run/agg/gauge/trace).
     JustTx,
     /// Formal `just_drop` → `just_drop_config` / `just_drop_data`.
     JustDrop,
@@ -64,7 +64,7 @@ impl TableSet {
                 "TRUNCATE TABLE xdp_ack_trial, xdp_ack_config RESTART IDENTITY CASCADE"
             }
             Self::JustTx => {
-                "TRUNCATE TABLE just_tx_data, just_tx_config RESTART IDENTITY CASCADE"
+                "TRUNCATE TABLE just_tx_trace_event, just_tx_trace_call, just_tx_trace_summary, just_tx_gauge, just_tx_agg, just_tx_run, just_tx_data, just_tx_config RESTART IDENTITY CASCADE"
             }
             Self::JustDrop => {
                 "TRUNCATE TABLE just_drop_trace_summary, just_drop_gauge, just_drop_agg, just_drop_run, just_drop_data, just_drop_config RESTART IDENTITY CASCADE"
@@ -81,7 +81,9 @@ impl TableSet {
                 Some("DROP TABLE IF EXISTS xdp_drop_rxcnt, xdp_drop_round, xdp_drop_config CASCADE")
             }
             Self::JustTx => {
-                Some("DROP TABLE IF EXISTS just_tx_data, just_tx_config CASCADE")
+                Some(
+                    "DROP TABLE IF EXISTS just_tx_trace_event, just_tx_trace_call, just_tx_trace_summary, just_tx_gauge, just_tx_agg, just_tx_run, just_tx_data, just_tx_config CASCADE",
+                )
             }
             Self::JustDrop => {
                 Some(

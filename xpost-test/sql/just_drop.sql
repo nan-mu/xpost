@@ -41,11 +41,14 @@ CREATE TABLE IF NOT EXISTS just_drop_run (
     started_at TIMESTAMPTZ NOT NULL,
     stopped_at TIMESTAMPTZ NOT NULL,
     sent BIGINT NOT NULL CHECK (sent >= 0),
-    counters JSONB NOT NULL DEFAULT '{}'::jsonb
+    counters JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- Agent/serial reply verbatim: `OK report <n> b64=…` (no host-side decode).
+    report_raw TEXT
 );
 
 CREATE INDEX IF NOT EXISTS just_drop_run_kind ON just_drop_run (kind, fw_type);
 
+-- Optional offline decode tables (formal path does NOT write these).
 CREATE TABLE IF NOT EXISTS just_drop_agg (
     id bigserial PRIMARY KEY,
     run_id BIGINT NOT NULL REFERENCES just_drop_run (id) ON DELETE CASCADE,

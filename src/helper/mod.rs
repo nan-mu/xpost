@@ -52,6 +52,12 @@ pub extern "C" fn helper_dispatcher(
 // IRAM: runs inside the XDP flight (IRQs off); flash cache misses here stall Wi-Fi.
 #[esp_hal::ram]
 fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> usize {
+    #[cfg(feature = "perf-trace")]
+    crate::ext::perf::trace().push(
+        crate::ext::perf::trace::EventKind::HelperEnter,
+        idx as u32,
+        0,
+    );
     #[cfg(feature = "perf-aggregate")]
     crate::ext::perf::aggregate::helper_enter();
     #[cfg(feature = "perf-aggregate")]
@@ -82,5 +88,11 @@ fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
     }
     #[cfg(feature = "perf-aggregate")]
     crate::ext::perf::aggregate::helper_leave();
+    #[cfg(feature = "perf-trace")]
+    crate::ext::perf::trace().push(
+        crate::ext::perf::trace::EventKind::HelperLeave,
+        idx as u32,
+        0,
+    );
     ret
 }

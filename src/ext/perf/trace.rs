@@ -5,10 +5,27 @@ use core::sync::atomic::Ordering;
 use heapless::Deque;
 use portable_atomic::{AtomicU32, AtomicUsize};
 
-/// Ring capacity.
-pub const CAP: usize = 128;
+/// Radio / XDP ring capacity (newest-wins overwrite).
+pub const CAP: usize = 256;
 
-/// Predefined trace event kinds.
+/// HAL app-echo ring — separate so Pass-path radio flood cannot erase AppEcho*.
+pub const APP_CAP: usize = 64;
+
+/// T-section wire size: hdr(16) + radio[CAP] + app[APP_CAP].
+pub const WIRE_LEN: usize = 16 + CAP * 16 + APP_CAP * 16;
+
+/// Predefined trace event kinds (wire `kind` byte).
+///
+/// Two vocabularies share one ring (not 1:1 aligned — compare flames by role):
+/// - **Radio / XDP**: `Rx*` / `Xdp*` / `Span*` / `Helper*` / `Tx*` (esp-radio + image).
+/// - **HAL app echo**: `AppUdp*` / `AppEcho*` / `AppWifiTx*` (`just_tx_hal`
+///   UDP bounce after Pass — includes wait for Wi-Fi TX done on the **copy** path).
+///
+/// Point stamps share one clock (`t_us`). Nesting for flames uses
+/// [`Self::SpanBegin`]/[`Self::SpanEnd`] (`arg0` = [`xpost_type::ProfSite`]),
+/// [`Self::HelperEnter`]/[`Self::HelperLeave`] (`arg0` = BPF helper id), and
+/// [`Self::AppEchoBegin`]/[`Self::AppEchoEnd`] + [`Self::AppUdpSendBegin`]/[`Self::AppUdpSendEnd`]
+/// + [`Self::AppWifiTxBegin`]/[`Self::AppWifiTxEnd`] (HAL air-TX wait ≈ XDP `TxDrainOne`/`TxCompleted`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EventKind {
@@ -20,6 +37,42 @@ pub enum EventKind {
     RxOverflow = 6,
     RuntimeError = 7,
     UserMarker = 8,
+    SpanBegin = 9,
+    SpanEnd = 10,
+    HelperEnter = 11,
+    HelperLeave = 12,
+    RxDelivered = 13,
+    RxDiscarded = 14,
+    TxSubBegin = 15,
+    TxSubmitted = 16,
+    TxFailed = 17,
+    TxCompleted = 18,
+    TxFailBadBuf = 19,
+    TxFailToken = 20,
+    TxEnq = 21,
+    TxKick = 22,
+    TxPoll = 23,
+    TxCapWait = 24,
+    TxNomemWait = 25,
+    TxBlock = 26,
+    TxEnqFailClaim = 27,
+    TxEnqFailRing = 28,
+    TxFlush = 29,
+    TxGrpSrc = 30,
+    TxNoRetain = 31,
+    /// HAL/app echo: datagram accepted at UDP socket (`arg0` = len).
+    AppUdpRecv = 32,
+    /// HAL/app echo: whole forward after recv → send done (`arg0` = len).
+    AppEchoBegin = 33,
+    AppEchoEnd = 34,
+    /// HAL/app echo: nested `send_to` await (embassy queue only — not air TX).
+    AppUdpSendBegin = 35,
+    /// `arg0` = 1 ok / 0 err.
+    AppUdpSendEnd = 36,
+    /// HAL/app: wait for Wi-Fi TX-done after copy-path submit (vs XDP zero-copy `Tx*`).
+    AppWifiTxBegin = 37,
+    /// `arg0` = 1 saw tx_done / 0 timeout; `arg1` = wait µs (`esp_hal::time`).
+    AppWifiTxEnd = 38,
 }
 
 impl EventKind {
@@ -33,7 +86,81 @@ impl EventKind {
             6 => Some(Self::RxOverflow),
             7 => Some(Self::RuntimeError),
             8 => Some(Self::UserMarker),
+            9 => Some(Self::SpanBegin),
+            10 => Some(Self::SpanEnd),
+            11 => Some(Self::HelperEnter),
+            12 => Some(Self::HelperLeave),
+            13 => Some(Self::RxDelivered),
+            14 => Some(Self::RxDiscarded),
+            15 => Some(Self::TxSubBegin),
+            16 => Some(Self::TxSubmitted),
+            17 => Some(Self::TxFailed),
+            18 => Some(Self::TxCompleted),
+            19 => Some(Self::TxFailBadBuf),
+            20 => Some(Self::TxFailToken),
+            21 => Some(Self::TxEnq),
+            22 => Some(Self::TxKick),
+            23 => Some(Self::TxPoll),
+            24 => Some(Self::TxCapWait),
+            25 => Some(Self::TxNomemWait),
+            26 => Some(Self::TxBlock),
+            27 => Some(Self::TxEnqFailClaim),
+            28 => Some(Self::TxEnqFailRing),
+            29 => Some(Self::TxFlush),
+            30 => Some(Self::TxGrpSrc),
+            31 => Some(Self::TxNoRetain),
+            32 => Some(Self::AppUdpRecv),
+            33 => Some(Self::AppEchoBegin),
+            34 => Some(Self::AppEchoEnd),
+            35 => Some(Self::AppUdpSendBegin),
+            36 => Some(Self::AppUdpSendEnd),
+            37 => Some(Self::AppWifiTxBegin),
+            38 => Some(Self::AppWifiTxEnd),
             _ => None,
+        }
+    }
+
+    /// Stable name for host decode / `OK trace` lines.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RxBegin => "RxBegin",
+            Self::XdpBegin => "XdpBegin",
+            Self::XdpEnd => "XdpEnd",
+            Self::RxEnd => "RxEnd",
+            Self::SlowExecution => "SlowExecution",
+            Self::RxOverflow => "RxOverflow",
+            Self::RuntimeError => "RuntimeError",
+            Self::UserMarker => "UserMarker",
+            Self::SpanBegin => "SpanBegin",
+            Self::SpanEnd => "SpanEnd",
+            Self::HelperEnter => "HelperEnter",
+            Self::HelperLeave => "HelperLeave",
+            Self::RxDelivered => "RxDelivered",
+            Self::RxDiscarded => "RxDiscarded",
+            Self::TxSubBegin => "TxSubBegin",
+            Self::TxSubmitted => "TxSubmitted",
+            Self::TxFailed => "TxFailed",
+            Self::TxCompleted => "TxCompleted",
+            Self::TxFailBadBuf => "TxFailBadBuf",
+            Self::TxFailToken => "TxFailToken",
+            Self::TxEnq => "TxEnq",
+            Self::TxKick => "TxKick",
+            Self::TxPoll => "TxPoll",
+            Self::TxCapWait => "TxCapWait",
+            Self::TxNomemWait => "TxNomemWait",
+            Self::TxBlock => "TxBlock",
+            Self::TxEnqFailClaim => "TxEnqFailClaim",
+            Self::TxEnqFailRing => "TxEnqFailRing",
+            Self::TxFlush => "TxFlush",
+            Self::TxGrpSrc => "TxGrpSrc",
+            Self::TxNoRetain => "TxNoRetain",
+            Self::AppUdpRecv => "AppUdpRecv",
+            Self::AppEchoBegin => "AppEchoBegin",
+            Self::AppEchoEnd => "AppEchoEnd",
+            Self::AppUdpSendBegin => "AppUdpSendBegin",
+            Self::AppUdpSendEnd => "AppUdpSendEnd",
+            Self::AppWifiTxBegin => "AppWifiTxBegin",
+            Self::AppWifiTxEnd => "AppWifiTxEnd",
         }
     }
 }
@@ -47,21 +174,26 @@ pub struct Event {
     pub t_us: u32,
 }
 
-/// Heapless trace ring (stop-on-full).
+/// Two rings, one clock: radio/XDP vs HAL app echo (not 1:1 site-aligned).
 pub struct Trace {
-    // Interior mutability via critical section for Deque.
-    buf: critical_section::Mutex<core::cell::RefCell<Deque<Event, CAP>>>,
-    len: AtomicUsize,
-    dropped: AtomicUsize,
+    radio: critical_section::Mutex<core::cell::RefCell<Deque<Event, CAP>>>,
+    app: critical_section::Mutex<core::cell::RefCell<Deque<Event, APP_CAP>>>,
+    radio_len: AtomicUsize,
+    app_len: AtomicUsize,
+    radio_dropped: AtomicUsize,
+    app_dropped: AtomicUsize,
     slow_threshold_us: AtomicU32,
 }
 
 impl Trace {
     pub const fn new() -> Self {
         Self {
-            buf: critical_section::Mutex::new(core::cell::RefCell::new(Deque::new())),
-            len: AtomicUsize::new(0),
-            dropped: AtomicUsize::new(0),
+            radio: critical_section::Mutex::new(core::cell::RefCell::new(Deque::new())),
+            app: critical_section::Mutex::new(core::cell::RefCell::new(Deque::new())),
+            radio_len: AtomicUsize::new(0),
+            app_len: AtomicUsize::new(0),
+            radio_dropped: AtomicUsize::new(0),
+            app_dropped: AtomicUsize::new(0),
             slow_threshold_us: AtomicU32::new(u32::MAX),
         }
     }
@@ -84,30 +216,49 @@ impl Trace {
     }
 
     #[inline]
-    pub(crate) fn push(&self, kind: EventKind, arg0: u32, arg1: u32) {
+    fn push_ring<const N: usize>(
+        q_mtx: &critical_section::Mutex<core::cell::RefCell<Deque<Event, N>>>,
+        len: &AtomicUsize,
+        dropped: &AtomicUsize,
+        kind: EventKind,
+        arg0: u32,
+        arg1: u32,
+    ) {
         let ev = Event {
             kind: kind as u8,
             arg0,
             arg1,
             t_us: Self::now_us(),
         };
-        let ok = critical_section::with(|cs| {
-            let mut q = self.buf.borrow_ref_mut(cs);
-            q.push_back(ev).is_ok()
+        let n = critical_section::with(|cs| {
+            let mut q = q_mtx.borrow_ref_mut(cs);
+            if q.is_full() {
+                let _ = q.pop_front();
+                dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            let _ = q.push_back(ev);
+            q.len()
         });
-        if ok {
-            self.len.fetch_add(1, Ordering::Relaxed);
-            #[cfg(feature = "perf-gauge")]
-            crate::xdp::ingress::XDP_PROG
-                .gauge
-                .trace_buffer_usage
-                .set(self.len.load(Ordering::Relaxed).min(CAP));
-        } else {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
-        }
+        len.store(n, Ordering::Relaxed);
     }
 
     #[inline]
+    pub(crate) fn push(&self, kind: EventKind, arg0: u32, arg1: u32) {
+        Self::push_ring(&self.radio, &self.radio_len, &self.radio_dropped, kind, arg0, arg1);
+        #[cfg(feature = "perf-gauge")]
+        crate::xdp::ingress::XDP_PROG
+            .gauge
+            .trace_buffer_usage
+            .set(self.radio_len.load(Ordering::Relaxed).min(CAP));
+    }
+
+    #[inline]
+    fn push_app_kind(&self, kind: EventKind, arg0: u32, arg1: u32) {
+        Self::push_ring(&self.app, &self.app_len, &self.app_dropped, kind, arg0, arg1);
+    }
+
+    #[inline]
+    #[allow(dead_code)] // used when perf-aggregate + perf-trace
     pub(crate) fn maybe_slow(&self, dur_us: u32, action: u32) {
         let thr = self.slow_threshold_us();
         if thr != u32::MAX && dur_us >= thr {
@@ -115,15 +266,55 @@ impl Trace {
         }
     }
 
-    /// User-facing marker.
+    /// User-facing marker (radio ring).
     #[inline]
     pub fn user_marker(&self, value: u32) {
         self.push(EventKind::UserMarker, value, 0);
     }
 
-    pub fn snapshot(&self, out: &mut [Event]) -> usize {
+    /// HAL/app: UDP datagram arrived at the echo socket (`len` bytes).
+    #[inline]
+    pub fn app_udp_recv(&self, len: u32) {
+        self.push_app_kind(EventKind::AppUdpRecv, len, 0);
+    }
+
+    /// HAL/app: start forward work after recv (until [`Self::app_echo_end`]).
+    #[inline]
+    pub fn app_echo_begin(&self, len: u32) {
+        self.push_app_kind(EventKind::AppEchoBegin, len, 0);
+    }
+
+    #[inline]
+    pub fn app_echo_end(&self) {
+        self.push_app_kind(EventKind::AppEchoEnd, 0, 0);
+    }
+
+    /// HAL/app: about to `send_to` (embassy queue — not air TX).
+    #[inline]
+    pub fn app_udp_send_begin(&self) {
+        self.push_app_kind(EventKind::AppUdpSendBegin, 0, 0);
+    }
+
+    #[inline]
+    pub fn app_udp_send_end(&self, ok: bool) {
+        self.push_app_kind(EventKind::AppUdpSendEnd, u32::from(ok), 0);
+    }
+
+    /// HAL/app: start waiting for Wi-Fi TX-done (copy path; peer of XDP `TxDrainOne`).
+    #[inline]
+    pub fn app_wifi_tx_begin(&self) {
+        self.push_app_kind(EventKind::AppWifiTxBegin, 0, 0);
+    }
+
+    /// `saw_done` from `perf::counter().tx_done()` delta; `wait_us` via `esp_hal::time`.
+    #[inline]
+    pub fn app_wifi_tx_end(&self, saw_done: bool, wait_us: u32) {
+        self.push_app_kind(EventKind::AppWifiTxEnd, u32::from(saw_done), wait_us);
+    }
+
+    pub fn snapshot_radio(&self, out: &mut [Event]) -> usize {
         critical_section::with(|cs| {
-            let q = self.buf.borrow_ref(cs);
+            let q = self.radio.borrow_ref(cs);
             let n = q.len().min(out.len());
             for (i, slot) in out.iter_mut().enumerate().take(n) {
                 *slot = q.iter().nth(i).copied().unwrap_or_default();
@@ -132,23 +323,52 @@ impl Trace {
         })
     }
 
+    pub fn snapshot_app(&self, out: &mut [Event]) -> usize {
+        critical_section::with(|cs| {
+            let q = self.app.borrow_ref(cs);
+            let n = q.len().min(out.len());
+            for (i, slot) in out.iter_mut().enumerate().take(n) {
+                *slot = q.iter().nth(i).copied().unwrap_or_default();
+            }
+            n
+        })
+    }
+
+    /// Legacy helper: radio ring only (tests / old callers).
+    pub fn snapshot(&self, out: &mut [Event]) -> usize {
+        self.snapshot_radio(out)
+    }
+
     pub fn clear(&self) {
         critical_section::with(|cs| {
-            self.buf.borrow_ref_mut(cs).clear();
+            self.radio.borrow_ref_mut(cs).clear();
+            self.app.borrow_ref_mut(cs).clear();
         });
-        self.len.store(0, Ordering::Relaxed);
-        self.dropped.store(0, Ordering::Relaxed);
+        self.radio_len.store(0, Ordering::Relaxed);
+        self.app_len.store(0, Ordering::Relaxed);
+        self.radio_dropped.store(0, Ordering::Relaxed);
+        self.app_dropped.store(0, Ordering::Relaxed);
         #[cfg(feature = "perf-gauge")]
         crate::xdp::ingress::XDP_PROG.gauge.trace_buffer_usage.set(0);
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.len.load(Ordering::Relaxed).min(CAP)
+        self.radio_len.load(Ordering::Relaxed).min(CAP)
+    }
+
+    #[inline]
+    pub fn app_len(&self) -> usize {
+        self.app_len.load(Ordering::Relaxed).min(APP_CAP)
     }
 
     #[inline]
     pub fn dropped(&self) -> usize {
-        self.dropped.load(Ordering::Relaxed)
+        self.radio_dropped.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn app_dropped(&self) -> usize {
+        self.app_dropped.load(Ordering::Relaxed)
     }
 }

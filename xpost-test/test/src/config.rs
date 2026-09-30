@@ -16,8 +16,8 @@
 //! | Name | What | Postgres tables |
 //! |------|------|-----------------|
 //! | `just_drop` | Formal HAL + XDP: `kinds` includes `c` (full-rate drop series) and `a`/`g`/`t` (fixed pps) | `just_drop_config`/`data`; `just_drop_run` + agg/gauge/trace_summary |
-//! | `just_tx` | Formal HAL + XDP sweep / ~5% working point (grid 400…4000 pps, step 400) | `just_tx_config` + `just_tx_data` |
-//! | `dev` | Debug XDP only: 800/1600/2800/4000 × 1 × 8s; no DB | — |
+//! | `just_tx` | Formal HAL + XDP: `kinds` `c` (sweep / ~5% OP RTT) and `a`/`g`/`t` (fixed pps) | `just_tx_config`/`data`; `just_tx_run` + agg/gauge/trace_summary |
+//! | `dev` | Flame Trace: XDP × 100 pps × 2s × 1; `/tmp/xpost-dev-flame.report`; no DB | — |
 //!
 //! `dev` is fully hard-coded (no separate TOML); never touches Postgres /
 //! `just_tx_*` / `just_drop_*`.
@@ -26,7 +26,7 @@
 //! recreate. DDL lives under `xpost-test/sql/`.
 //!
 //! ```toml
-//! run = ["dev"]           # day-to-day firmware work
+//! run = ["dev"]           # flame Trace short capture
 //! # run = ["just_tx"]     # formal
 //! # run = ["just_drop", "just_tx"]
 //! ```
@@ -34,9 +34,8 @@
 //! # Other files
 //!
 //! - `default.toml`: `run`, postgres, agent, DUT, probe, profiles
-//! - `just_drop.toml`: `arms` / `kinds` (`c|a|g|t`) / `fixed_pps` / `trace_pps` /
-//!   `instr_rounds` / `instr_window_secs`
-//! - `just_tx.toml`: formal knobs (do not tweak for casual debug)
+//! - `just_drop.toml` / `just_tx.toml`: `arms` / `kinds` (`c|a|g|t`) /
+//!   `fixed_pps` / `trace_pps` / `instr_rounds` / `instr_window_secs`
 //!
 //! # Functional suite (optional)
 //!
@@ -209,16 +208,16 @@ pub struct BenchPpsConfig {
     pub sample_interval_ms: u64,
     #[serde(default = "default_pps_arms")]
     pub arms: Vec<String>,
-    /// just_drop only: `c` / `a` / `g` / `t`. just_tx ignores.
+    /// `c` / `a` / `g` / `t` for just_drop and just_tx formal matrices.
     #[serde(default = "default_kinds_c")]
     pub kinds: Vec<String>,
-    /// Fixed pps for Aggregate / Gauge (just_drop A/G).
+    /// Fixed pps for Aggregate / Gauge (A/G).
     #[serde(default)]
     pub fixed_pps: Option<u64>,
     /// Fixed pps for Trace (lower than `fixed_pps`).
     #[serde(default)]
     pub trace_pps: Option<u64>,
-    /// Rounds for A/G/T (Counter still uses `rounds`).
+    /// Rounds for A/G/T (Counter still uses `rounds` / sweep trials).
     #[serde(default)]
     pub instr_rounds: Option<usize>,
     /// Window seconds for A/G/T.

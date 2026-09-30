@@ -34,11 +34,13 @@
 //! |-------|------|--------|
 //! | `just_drop` | HAL + XDP; kinds `c` full-rate + `a`/`g`/`t` fixed pps | `just_drop_*` |
 //! | `just_tx` | HAL + XDP sweep → ~5% loss working point + RTT | `just_tx_*` |
-//! | `dev` | Debug XDP TX grid only; **no DB** | — |
+//! | `dev` | Flame Trace only: XDP × 100 pps × 2s × 1; report file; **no DB** | — |
 //!
 //! Agent profile flash builds firmware + optional XDP ELF from `profiles.toml`.
-//! Serial read face on DUT: `counters` / `agg` / `gauge` / `trace` / `perf clear`
+//! Serial read face on DUT: `report` / `perf clear` (binary metrics via xpost `ext::perf`)
 //! (esp-radio only **calls** `EspRadioTrace`; storage is xpost `ext::perf`).
+//! Formal A/G/T stores agent reply verbatim in `just_*_run.report_raw`
+//! (`OK report <n> b64=…`); decode offline — harness does not expand agg/gauge/trace.
 //!
 //! # Topology
 //!

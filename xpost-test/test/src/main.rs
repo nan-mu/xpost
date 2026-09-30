@@ -104,7 +104,7 @@ enum Command {
         #[arg(long, value_parser = ["xdp", "hal"])]
         path: Option<String>,
     },
-    /// Hardcoded XDP TX debug: 800/1600/2800/4000 × 1 trial → `dev_*`.
+    /// Flame Trace short capture: XDP × 100 pps × 2s × 1 → `/tmp/xpost-dev-flame.report`.
     #[command(name = "dev")]
     DevExp,
     /// Alias of `rate-rtt`.

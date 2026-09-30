@@ -47,6 +47,7 @@
 mod error;
 mod event;
 mod partitions;
+mod perf_report;
 mod session;
 mod sink;
 mod table;
@@ -56,6 +57,7 @@ pub use event::{
     Chip, Dir, Event, FlashPhase, FlashTarget, Image, IoData, IoRole, Kind, Mode, SessionWhy,
     XdpImage,
 };
+pub use perf_report::{Report, decode as decode_perf_report, format_counters_ok, mask_for_len};
 pub use session::Session;
 pub use sink::{FileSink, Sink, StdoutSink, VecSink};
 pub use table::{
