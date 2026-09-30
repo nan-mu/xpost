@@ -9,6 +9,7 @@ pub mod drop_xdp;
 pub mod dut_ready;
 pub mod echo;
 pub mod flash;
+pub mod formal;
 pub mod hping;
 pub mod just_drop;
 pub mod just_drop_pps;

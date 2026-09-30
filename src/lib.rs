@@ -50,8 +50,8 @@
 //! # Commands (host, repo root)
 //!
 //! ```bash
-//! cargo xtask just_drop build --release
-//! cargo xtask agent program --elf examples/just_drop/just_drop.elf
+//! cargo xtask just_xdp build --release
+//! cargo xtask agent program --elf examples/just_xdp/just_drop.elf
 //! ```
 //!
 //! # AOT handoff (from libbpf-mcu)

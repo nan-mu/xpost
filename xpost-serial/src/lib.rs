@@ -34,7 +34,17 @@
 //! | [`Session::program`] | `/v1/flash_profile` | Full image: firmware + partitions + optional xdp |
 //! | [`Session::install_xdp`] | `/v1/program` | Cold XDP only; often followed by reset-to-app |
 //! | [`Session::list_xdp`] / [`clear_xdp`] | `/v1/list`, `/v1/clear` | Cold table |
-//! | [`Session::request`] | `/v1/request`, `/v1/counters` | App-mode line; waits for `OK`/`ERR` |
+//! Session surface (agent maps these to `/v1/*`)
+//!
+//! | Method | Typical agent route | Notes |
+//! |--------|---------------------|-------|
+//! | [`Session::open`] | listen startup | `port=None` → unique USB serial; 0/many → error |
+//! | [`Session::program`] | `/v1/flash_profile` | Full image: firmware + partitions + optional xdp |
+//! | [`Session::install_xdp`] | `/v1/program` | Cold XDP only; often followed by reset-to-app |
+//! | [`Session::list_xdp`] / [`clear_xdp`] | `/v1/list`, `/v1/clear` | Cold table |
+//! | [`Session::request`] | `/v1/request`, `/v1/counters`, `/v1/perf_clear` | App-mode line; waits for `OK`/`ERR` |
+//! | [`Session::serial_window`] | `/v1/serial_window` | Sink slice by wall time (e.g. `tsflow`) |
+//! | [`Session::reset_to_app`] | after program | Leave download, run app |
 //! | [`Session::serial_window`] | `/v1/serial_window` | Sink slice by wall time (e.g. `tsflow`) |
 //! | [`Session::reset_to_app`] | after program | Leave download, run app |
 //!

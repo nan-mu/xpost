@@ -32,9 +32,11 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
   `program` / `request` / `request_report` / `Sink` (see that crate’s rustdoc).
   Cold install is **by XDP name**; do not pass raw cold addresses on the normal
   path. Perf metrics live in `xpost::ext::perf`; DUT serial read face is
-  `report` (binary, length → feature mask) + `perf clear`. Formal A/G/T
-  stores the agent reply as `just_*_run.report_raw` (`OK report <n> b64=…`)
-  without host-side decode into agg/gauge/trace child tables. Trace is the
+  `report` (binary, length → feature mask) + `perf clear` (agent:
+  `/v1/perf_clear`). Formal decodes the report and writes exam-scoped tables
+  (`sql/formal.sql`: `exam` + `just_*_config/data` + `xdp_*`/`hal_*` +
+  `trace_event`) — no `report_raw`. Open-run never DROP/TRUNCATE; explicit
+  wipe is `./xpost-test formal-clear` (`TRUNCATE exam CASCADE`). Trace is the
   **sole timeline**: categorized rings of timestamped events (nest =
   paired Begin/End on the same ring). Flame export is **XDP-only** split
   path charts (`export_flame_svg`: `just_tx-xdp-*-path-rx|path-tx.flame.*`;
@@ -56,7 +58,7 @@ cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
 ```
 
 Cursor MCP 示例 URL：`http://127.0.0.1:9240/mcp`。
-Wi-Fi 凭据仍在 `examples/just_drop/.env`、`examples/just_drop_hal/.env` 与 `examples/just_tx_hal/.env`（`WIFI_SSID` / `WIFI_PASS`）。
+Wi-Fi 凭据仍在 `examples/just_xdp/.env`、`examples/just_drop_hal/.env` 与 `examples/just_tx_hal/.env`（`WIFI_SSID` / `WIFI_PASS`）。
 
 TR3000（编译期嵌入 `xpost-test/config/`：`default.toml` + `just_tx.toml` + `just_drop.toml`）：
 
@@ -70,14 +72,17 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 ```
 
 - `config/default.toml`：`run = [...]`（跑哪些**实验**）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`、版本与 profiles
-- `config/just_tx.toml`：正式 just_tx — **性能轨** `kinds` 含 `c`/`a`/`g`（高 pps；不开 Trace 环）；可选低 `trace_pps` 的 `t`
-- `config/just_drop.toml`：正式 just_drop（`arms` / `kinds=c|a|g|t` / `fixed_pps` / `trace_pps`）
+- `config/just_tx.toml` / `just_drop.toml`：formal 开关与 sample 等；流水线固定三固件标签
+  `xdp_cag` / `hal` / `xdp_t`（`window_s=30`；全网格；无 OP 早停）
+- XDP 固件工程：`examples/just_xdp`（原 `just_drop`）；profiles `just-*-cag` /
+  `just-*-t` / `just-*-hal-cag`（features：已有 `kind-a,kind-g` 或 `kind-t`）
 - 调试火焰图 Trace（**火焰轨**）：`run = ["dev"]`（硬编码：XDP × `just-tx-t` × 100 pps × 2s × 1
   轮；**无 DB**；report → `/tmp/xpost-dev-flame.report`；Mac scp 到
   `target/dev-flame.report` 后 `pixi run python -m utils.export_flame_svg`）
-- Agent HTTP：`/health`、`/v1/*`（含 `/v1/serial_window`）、`/mcp`
+- Agent HTTP：`/health`、`/v1/*`（含 `/v1/perf_clear`、`/v1/serial_window`）、`/mcp`
 - 实验步骤与全流程：`xpost-test` 的 `overview` / `config` rustdoc；串口 API：`xpost-serial`
 - 正式 `just_tx` 扫速网格：`400…4000` pps（步长 400；ceiling ≈ XDP ~50% 丢包工作点的 hping3 标定）
+- Schema：`xpost-test/sql/formal.sql`；显式清空：`./xpost-test formal-clear`
 
 只跑正式 just_tx：`run = ["just_tx"]`。一次跑全部 formal A/B：`run = ["just_drop", "just_tx"]`。
 

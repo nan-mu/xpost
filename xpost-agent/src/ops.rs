@@ -338,6 +338,23 @@ pub fn counters(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     })
 }
 
+/// Clear DUT perf accumulators (`perf clear`); await `OK perf clear` with timeout.
+pub fn perf_clear(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
+    with_log(peer, "PerfClear", "", false, state, || {
+        let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
+        let reply = g
+            .session
+            .request_timeout("perf clear", Duration::from_secs(5))
+            .context("request `perf clear`")?;
+        if !reply.trim().eq_ignore_ascii_case("OK perf clear")
+            && !reply.trim().to_ascii_lowercase().starts_with("ok perf clear")
+        {
+            bail!("unexpected perf clear reply: {reply}");
+        }
+        Ok(reply)
+    })
+}
+
 pub fn request(state: &Mutex<AgentState>, cmd: &str, peer: &str) -> Result<String> {
     let cmd = cmd.trim();
     if cmd.is_empty() {

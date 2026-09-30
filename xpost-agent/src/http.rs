@@ -126,6 +126,7 @@ async fn serve_async(addr: &str, port: Option<&Path>, log: &Path) -> Result<()> 
         .route("/clear", post(v1_clear))
         .route("/list", get(v1_list))
         .route("/counters", post(v1_counters))
+        .route("/perf_clear", post(v1_perf_clear))
         .route("/request", post(v1_request))
         .route("/serial_window", post(v1_serial_window))
         .route("/probe", post(v1_probe))
@@ -204,6 +205,11 @@ async fn v1_list(State(st): State<AppState>) -> Json<ApiResp> {
 async fn v1_counters(State(st): State<AppState>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     run_blocking(move || ops::counters(shared.as_ref(), "http")).await
+}
+
+async fn v1_perf_clear(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::perf_clear(shared.as_ref(), "http")).await
 }
 
 async fn v1_request(State(st): State<AppState>, Json(body): Json<RequestBody>) -> Json<ApiResp> {

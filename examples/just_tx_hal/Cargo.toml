@@ -70,6 +70,7 @@ static_cell      = "2.1.1"
 
 [features]
 default = ["kind-c"]
+# Formal HAL images use kind-a,kind-g (C+A+G); kind-t is manual/smoke only.
 kind-c = ["xpost/perf-counter"]
 kind-a = ["kind-c", "xpost/perf-aggregate"]
 kind-g = ["kind-c", "xpost/perf-gauge"]

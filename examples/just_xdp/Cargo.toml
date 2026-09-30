@@ -2,12 +2,12 @@
 
 [package]
 edition      = "2024"
-name         = "just_drop"
+name         = "just_xdp"
 rust-version = "1.88"
 version      = "0.1.0"
 
 [[bin]]
-name = "just_drop"
+name         = "just_xdp"
 path = "./src/bin/main.rs"
 
 [package.metadata.espflash]
@@ -70,7 +70,7 @@ static_cell      = "2.1.1"
 
 [features]
 default = ["kind-c"]
-# One compile kind per profile (plan: separate builds).
+# Formal: kind-a,kind-g → xdp_cag; kind-t → xdp_t. Do not invent kind-cag.
 kind-c = ["xpost/perf-counter"]
 kind-a = ["kind-c", "xpost/perf-aggregate"]
 kind-g = ["kind-c", "xpost/perf-gauge"]

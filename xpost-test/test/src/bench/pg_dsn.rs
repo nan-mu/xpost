@@ -35,11 +35,11 @@ pub enum TableSet {
     RateRtt,
     RateLoss,
     Ack,
-    /// Formal `just_tx` → `just_tx_config` / `just_tx_data` (+ run/agg/gauge/trace).
+    /// Formal `just_tx` → use [`crate::bench::formal`] (exam schema; no DROP).
     JustTx,
-    /// Formal `just_drop` → `just_drop_config` / `just_drop_data`.
+    /// Formal `just_drop` → use [`crate::bench::formal`] (exam schema; no DROP).
     JustDrop,
-    /// Debug `dev` → `dev_config` / `dev_data` (never formal-DROP).
+    /// Debug `dev` → console-only (never formal-DROP).
     Dev,
 }
 
@@ -63,44 +63,28 @@ impl TableSet {
             Self::Ack => {
                 "TRUNCATE TABLE xdp_ack_trial, xdp_ack_config RESTART IDENTITY CASCADE"
             }
-            Self::JustTx => {
-                "TRUNCATE TABLE just_tx_trace_event, just_tx_trace_call, just_tx_trace_summary, just_tx_gauge, just_tx_agg, just_tx_run, just_tx_data, just_tx_config RESTART IDENTITY CASCADE"
-            }
-            Self::JustDrop => {
-                "TRUNCATE TABLE just_drop_trace_summary, just_drop_gauge, just_drop_agg, just_drop_run, just_drop_data, just_drop_config RESTART IDENTITY CASCADE"
-            }
-            Self::Dev => "",
+            // Formal just_* uses exam CASCADE wipe via `formal::clear` only.
+            Self::JustTx | Self::JustDrop | Self::Dev => "",
         }
     }
 
     /// `formal` only: drop same-named tables so `ensure_*` recreates empty current schema.
+    /// Formal just_tx / just_drop never DROP on open-run (see `formal::ensure` / `formal::clear`).
     /// `Dev` never recreates — console-only debug, no tables.
     fn recreate_sql(self) -> Option<&'static str> {
         match self {
             Self::Drop => {
                 Some("DROP TABLE IF EXISTS xdp_drop_rxcnt, xdp_drop_round, xdp_drop_config CASCADE")
             }
-            Self::JustTx => {
-                Some(
-                    "DROP TABLE IF EXISTS just_tx_trace_event, just_tx_trace_call, just_tx_trace_summary, just_tx_gauge, just_tx_agg, just_tx_run, just_tx_data, just_tx_config CASCADE",
-                )
-            }
-            Self::JustDrop => {
-                Some(
-                    "DROP TABLE IF EXISTS just_drop_trace_summary, just_drop_gauge, just_drop_agg, just_drop_run, just_drop_data, just_drop_config CASCADE",
-                )
-            }
-            Self::Dev => None,
+            Self::JustTx | Self::JustDrop | Self::Dev => None,
             _ => None,
         }
     }
 
-    /// just_tx / just_drop DDL (`xpost-test/sql/*.sql`).
+    /// Legacy just_tx / just_drop DDL retired — formal path uses `sql/formal.sql`.
     fn ensure_batch(self) -> Option<&'static str> {
         match self {
-            Self::JustTx => Some(include_str!("../../../sql/just_tx.sql")),
-            Self::JustDrop => Some(include_str!("../../../sql/just_drop.sql")),
-            Self::Dev => None,
+            Self::JustTx | Self::JustDrop | Self::Dev => None,
             _ => None,
         }
     }

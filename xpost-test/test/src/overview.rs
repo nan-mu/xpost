@@ -32,15 +32,15 @@
 //!
 //! | `run` | Role | Tables |
 //! |-------|------|--------|
-//! | `just_drop` | HAL + XDP; kinds `c` full-rate + `a`/`g`/`t` fixed pps | `just_drop_*` |
-//! | `just_tx` | HAL + XDP sweep → ~5% loss working point + RTT | `just_tx_*` |
+//! | `just_drop` | `xdp_cag`/`hal` full-rate+800pps + `xdp_t` Trace | `exam` + `just_drop_*` + perf |
+//! | `just_tx` | `xdp_cag`/`hal` full pps grid RTT + `xdp_t` Trace | `exam` + `just_tx_*` + perf |
 //! | `dev` | Flame Trace only: XDP × 100 pps × 2s × 1; report file; **no DB** | — |
 //!
 //! Agent profile flash builds firmware + optional XDP ELF from `profiles.toml`.
 //! Serial read face on DUT: `report` / `perf clear` (binary metrics via xpost `ext::perf`)
 //! (esp-radio only **calls** `EspRadioTrace`; storage is xpost `ext::perf`).
-//! Formal A/G/T stores agent reply verbatim in `just_*_run.report_raw`
-//! (`OK report <n> b64=…`); decode offline — harness does not expand agg/gauge/trace.
+//! Formal decodes report → exam-scoped tables (`sql/formal.sql`); no `report_raw`.
+//! Open-run never DROP/TRUNCATE; wipe with `./xpost-test formal-clear`.
 //!
 //! # Topology
 //!
@@ -55,7 +55,7 @@
 //!
 //! - Deploy **`xpost-test`** to TR3000; do not ssh the gateway for harness runs.
 //! - Mac flashes via agent; does not own the stimulus path.
-//! - DUT Wi-Fi credentials: `examples/just_drop/.env` (and HAL / just_tx_hal).
+//! - DUT Wi-Fi credentials: `examples/just_xdp/.env` (and HAL / just_tx_hal).
 //!
 //! # Stimulus contract (formal + suite)
 //!

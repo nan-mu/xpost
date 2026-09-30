@@ -51,10 +51,10 @@ http_listen = "0.0.0.0:19081"
 drop_hal = "drop-hal"
 drop_xdp = "drop-xdp"
 firmware = "firmware"
-# Legacy aliases (= kind-c). Formal just_drop / just_tx pick
-# just-{drop,tx}-{c,a,g,t} / just-*-hal-* from TOML `kinds` in code —
+# Legacy aliases (= kind-c / cag). Formal just_drop / just_tx pick
+# just-{drop,tx}-cag / just-*-t / just-*-hal-cag from code —
 # these keys are only for other benches / manual flash helpers / `dev`.
-just_drop = "just-drop-c"
-just_drop_hal = "just-drop-hal-c"
-just_tx = "just-tx-c"
-just_tx_hal = "just-tx-hal-c"
+just_drop = "just-drop-cag"
+just_drop_hal = "just-drop-hal-cag"
+just_tx = "just-tx-cag"
+just_tx_hal = "just-tx-hal-cag"

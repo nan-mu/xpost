@@ -1,9 +1,6 @@
-//! `just_drop` — Counter full-rate + Aggregate/Gauge/Trace fixed-pps rounds.
+//! `just_drop` — formal exam: XDP/HAL CAG (full-rate + 800pps) + XDP Trace one-shot.
 //!
-//! Arms: `hal` (`just-drop-hal-*` + `drop on`) and `xdp` (`just-drop-*` + xdp.elf).
-//! Kinds: `c` → `just_drop_config`/`data`; `a`/`g`/`t` → `just_drop_run.report_raw`
-//! (`OK report <n> b64=…` verbatim; no host decode).
-//! Formal: DROP same-named tables then CREATE empty (`pg_dsn::prepare` + `TableSet::JustDrop`).
+//! Formal `window_s=30s`. No open-run DROP/TRUNCATE; decode report → ORM (no report_raw).
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -11,12 +8,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use rand::RngExt;
-use serde_json::Value as JsonValue;
-use tokio_postgres::Client;
 
 use crate::agent::AgentClient;
 use crate::bench::counters;
-use crate::bench::pg_dsn::{self, PgOpts, TableSet};
+use crate::bench::formal::{self, Firmware};
+use crate::bench::pg_dsn::PgOpts;
 use crate::bench::status::{self, BudgetEta, READY_BUDGET, RoundUi};
 use crate::bench::udp_blast;
 use crate::config::FileConfig;
@@ -24,13 +20,10 @@ use crate::raw_tx::{RawTx, iface_mac};
 
 const STIM_PORT: u16 = 8080;
 const FLASH_IDLE: Duration = Duration::from_secs(300);
-const PERF_WINDOW: Duration = Duration::from_secs(40);
-const PERF_SMOKE_WINDOW: Duration = Duration::from_secs(10);
+const WINDOW_S: Duration = Duration::from_secs(30);
+const WINDOW_SMOKE: Duration = Duration::from_secs(10);
 const DRAIN_MS: u64 = 200;
-const DEFAULT_FIXED_PPS: u64 = 800;
-const DEFAULT_TRACE_PPS: u64 = 200;
-const DEFAULT_INSTR_ROUNDS: usize = 10;
-const DEFAULT_INSTR_WINDOW_SECS: u64 = 12;
+const FIXED_PPS: f64 = 800.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PpsPath {
@@ -62,50 +55,13 @@ impl PpsPath {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DropKind {
-    Counter,
-    Aggregate,
-    Gauge,
-    Trace,
-}
-
-impl DropKind {
-    fn parse(s: &str) -> Result<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "c" | "counter" => Ok(Self::Counter),
-            "a" | "aggregate" => Ok(Self::Aggregate),
-            "g" | "gauge" => Ok(Self::Gauge),
-            "t" | "trace" => Ok(Self::Trace),
-            other => bail!("kind must be c|a|g|t, got {other}"),
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Counter => "c",
-            Self::Aggregate => "a",
-            Self::Gauge => "g",
-            Self::Trace => "t",
-        }
-    }
-
-    fn profile(self, path: PpsPath) -> &'static str {
-        match (path, self) {
-            (PpsPath::Xdp, Self::Counter) => "just-drop-c",
-            (PpsPath::Xdp, Self::Aggregate) => "just-drop-a",
-            (PpsPath::Xdp, Self::Gauge) => "just-drop-g",
-            (PpsPath::Xdp, Self::Trace) => "just-drop-t",
-            (PpsPath::Hal, Self::Counter) => "just-drop-hal-c",
-            (PpsPath::Hal, Self::Aggregate) => "just-drop-hal-a",
-            (PpsPath::Hal, Self::Gauge) => "just-drop-hal-g",
-            (PpsPath::Hal, Self::Trace) => "just-drop-hal-t",
-        }
-    }
+#[derive(Clone, Debug)]
+struct Sample {
+    t: SystemTime,
+    drop: u64,
 }
 
 pub struct JustDropPpsOpts {
-    /// Arms to run (order preserved). Empty → both from embedded config.
     pub paths: Vec<PpsPath>,
     pub smoke: bool,
     pub formal: bool,
@@ -113,12 +69,22 @@ pub struct JustDropPpsOpts {
     pub window_secs: Option<u64>,
     pub sample_interval_ms: u64,
     pub rounds: Option<usize>,
+    pub formal_clear: bool,
 }
 
-#[derive(Clone, Debug)]
-struct Sample {
-    t: SystemTime,
-    drop: u64,
+fn profile_for(fw: Firmware) -> &'static str {
+    match fw {
+        Firmware::XdpCag => "just-drop-cag",
+        Firmware::XdpT => "just-drop-t",
+        Firmware::Hal => "just-drop-hal-cag",
+    }
+}
+
+fn path_for(fw: Firmware) -> PpsPath {
+    match fw {
+        Firmware::Hal => PpsPath::Hal,
+        _ => PpsPath::Xdp,
+    }
 }
 
 pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Result<()> {
@@ -128,68 +94,32 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         .context("just_drop needs [agent].endpoint in config/default.toml")?;
     let agent = AgentClient::new(endpoint.clone());
     let esp_s = cfg.target.esp_ip.to_string();
-
-    let paths = if opts.paths.is_empty() {
-        cfg.just_drop
-            .arms
-            .iter()
-            .map(|s| PpsPath::parse(s))
-            .collect::<Result<Vec<_>>>()?
-    } else {
-        opts.paths
-    };
-    if paths.is_empty() {
-        bail!("just_drop: no arms (set just_drop.toml arms or --path)");
-    }
-
-    let kinds = cfg
-        .just_drop
-        .kinds
-        .iter()
-        .map(|s| DropKind::parse(s))
-        .collect::<Result<Vec<_>>>()?;
-    if kinds.is_empty() {
-        bail!("just_drop: kinds empty (set just_drop.toml kinds)");
-    }
-
     let formal = opts.formal || cfg.just_drop.formal;
-    let sample = Duration::from_millis(opts.sample_interval_ms.max(100));
-
-    let c_window = opts
+    let window = opts
         .window_secs
         .map(Duration::from_secs)
-        .or_else(|| cfg.just_drop.window_secs.map(Duration::from_secs))
-        .unwrap_or(if opts.smoke {
-            PERF_SMOKE_WINDOW
-        } else {
-            PERF_WINDOW
-        });
-    let c_rounds = opts.rounds.unwrap_or(if opts.smoke {
-        1
-    } else {
-        cfg.just_drop.rounds.max(1)
-    });
+        .unwrap_or(if opts.smoke { WINDOW_SMOKE } else { WINDOW_S });
+    let sample = Duration::from_millis(opts.sample_interval_ms.max(1));
 
-    let instr_window = Duration::from_secs(
-        cfg.just_drop
-            .instr_window_secs
-            .unwrap_or(if opts.smoke { 5 } else { DEFAULT_INSTR_WINDOW_SECS }),
-    );
-    let instr_rounds = if opts.smoke {
-        1
+    let mut arms: Vec<Firmware> = Vec::new();
+    if opts.paths.is_empty() {
+        arms.extend([Firmware::XdpCag, Firmware::Hal]);
     } else {
-        cfg.just_drop
-            .instr_rounds
-            .unwrap_or(DEFAULT_INSTR_ROUNDS)
-            .max(1)
-    };
-    let fixed_pps = cfg.just_drop.fixed_pps.unwrap_or(DEFAULT_FIXED_PPS) as f64;
-    let trace_pps = cfg.just_drop.trace_pps.unwrap_or(DEFAULT_TRACE_PPS) as f64;
+        for p in &opts.paths {
+            match p {
+                PpsPath::Xdp => arms.push(Firmware::XdpCag),
+                PpsPath::Hal => arms.push(Firmware::Hal),
+            }
+        }
+    }
+    arms.dedup();
 
     RoundUi::banner(&format!(
-        "just_drop arms={:?} kinds={:?} agent={endpoint} esp={esp_s} formal={formal} pg={}",
-        paths.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
-        kinds.iter().map(|k| k.as_str()).collect::<Vec<_>>(),
+        "just_drop arms={:?} +xdp_t window={}s sample={}ms formal={formal} clear={} agent={endpoint} esp={esp_s} pg={}",
+        arms.iter().map(|a| a.as_db()).collect::<Vec<_>>(),
+        window.as_secs(),
+        sample.as_millis(),
+        opts.formal_clear,
         !opts.no_pg
     ));
 
@@ -197,119 +127,151 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         None
     } else {
         let pg_opts = PgOpts { formal };
-        Some(pg_dsn::connect(pg_opts).await?)
+        let client = formal::connect_and_ensure(pg_opts).await?;
+        if opts.formal_clear {
+            formal::clear(&client, pg_opts).await?;
+        }
+        Some(client)
     };
 
-    // One flash per (kind × arm); rounds reuse the image (perf clear between).
-    let n_flashes = kinds.len() * paths.len();
     let mut eta = BudgetEta::new();
-    eta.add_flashes(n_flashes);
-    for kind in &kinds {
-        let (window, r) = match kind {
-            DropKind::Counter => (c_window, c_rounds),
-            _ => (instr_window, instr_rounds),
-        };
-        // settle once per flash; window × rounds after that
-        let settle = READY_BUDGET.saturating_mul(paths.len() as u32);
-        let measure = (window + Duration::from_millis(DRAIN_MS))
-            .saturating_mul((r * paths.len()) as u32);
-        eta.add_fixed(settle.saturating_add(measure));
-    }
+    eta.add_flashes(arms.len() + 1);
+    // full-rate + 800pps per arm
+    eta.add_fixed((READY_BUDGET + window * 2).saturating_mul(arms.len() as u32));
+    eta.add_fixed(READY_BUDGET + Duration::from_secs(5));
 
     let ui = RoundUi::new();
-    let mut first_flash = true;
+    let exam_id = if let Some(client) = pg.as_mut() {
+        ui.check_start("INSERT exam");
+        let id = formal::insert_exam(client, Some("just_drop")).await?;
+        ui.check_ok(&format!("exam={id}"));
+        Some(id)
+    } else {
+        None
+    };
 
-    for kind in &kinds {
-        let (rounds, window, target_pps) = match kind {
-            DropKind::Counter => (c_rounds, c_window, None),
-            DropKind::Trace => (instr_rounds, instr_window, Some(trace_pps)),
-            _ => (instr_rounds, instr_window, Some(fixed_pps)),
-        };
-        for path in &paths {
-            flash_and_arm(
-                cfg,
-                &agent,
-                &ui,
-                &mut eta,
-                *path,
-                *kind,
-                formal,
-                first_flash,
-                pg.as_mut(),
+    for fw in &arms {
+        let profile = profile_for(*fw);
+        let path = path_for(*fw);
+        flash_and_arm(cfg, &agent, &ui, &mut eta, path, profile).await?;
+
+        // Full-rate window with drop sampling.
+        agent.perf_clear().await.context("perf_clear")?;
+        let counters_before = counters::fetch_counters(&agent).await?;
+        let started_at = SystemTime::now();
+        let (samples, drop_delta, net_rx_delta, host_pps, sent) =
+            measure_counter_round(cfg, &agent, &ui, &eta, path, window, sample).await?;
+        let stopped_at = SystemTime::now();
+        let _ = counters::counters_delta(&counters_before, &counters::fetch_counters(&agent).await?);
+        ui.permanent(&format!(
+            "    {}/full: dropΔ={drop_delta} net_rxΔ={net_rx_delta} host_pps={host_pps:.0} sent={sent}",
+            fw.as_db()
+        ));
+        if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
+            ui.check_start("写入 full-rate");
+            let cfg_id = formal::insert_just_drop_config(
+                client,
+                exam_id,
+                *fw,
+                host_pps,
+                window.as_secs_f64(),
+                Some(sample.as_millis() as i32),
+                started_at,
+                stopped_at,
+                sent as i64,
             )
-            .await
-            .with_context(|| {
-                format!("flash arm={} kind={}", path.as_str(), kind.as_str())
-            })?;
-            first_flash = false;
+            .await?;
+            let rows: Vec<(SystemTime, i64)> = samples
+                .iter()
+                .map(|s| (s.t, s.drop as i64))
+                .collect();
+            formal::insert_just_drop_data(client, cfg_id, &rows).await?;
+            let msg = agent.request("report").await.context("report")?;
+            let decoded = formal::decode_report_msg(&msg)?;
+            formal::write_perf(client, exam_id, cfg_id, *fw, &decoded).await?;
+            ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
+        }
 
-            for round in 1..=rounds {
-                ui.begin_round();
-                ui.set_eta(&eta.fmt());
-                let result = match kind {
-                    DropKind::Counter => {
-                        run_counter_arm(cfg, &agent, &ui, &eta, *path, window, sample, pg.as_mut())
-                            .await
-                    }
-                    DropKind::Aggregate | DropKind::Gauge | DropKind::Trace => {
-                        let pps = target_pps.context("instr kind needs target_pps")?;
-                        run_instr_arm(cfg, &agent, &ui, &eta, *path, *kind, window, pps, pg.as_mut())
-                            .await
-                    }
-                };
-                if let Err(e) = result {
-                    ui.clear_temp_for_error();
-                    return Err(e).with_context(|| {
-                        format!(
-                            "arm={} kind={} round={round}",
-                            path.as_str(),
-                            kind.as_str()
-                        )
-                    });
-                }
-                eta.consume_fixed(window + Duration::from_millis(DRAIN_MS));
-                ui.set_eta(&eta.fmt());
-                ui.end_round();
-            }
+        // Fixed 800 pps window.
+        agent.perf_clear().await.context("perf_clear")?;
+        let started_at = SystemTime::now();
+        let sent = paced_blast(cfg, &ui, &eta, path, window, FIXED_PPS).await?;
+        tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
+        let stopped_at = SystemTime::now();
+        ui.permanent(&format!(
+            "    {}/800pps: sent={sent}",
+            fw.as_db()
+        ));
+        if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
+            ui.check_start("写入 800pps");
+            let cfg_id = formal::insert_just_drop_config(
+                client,
+                exam_id,
+                *fw,
+                FIXED_PPS,
+                window.as_secs_f64(),
+                None,
+                started_at,
+                stopped_at,
+                sent as i64,
+            )
+            .await?;
+            let msg = agent.request("report").await.context("report")?;
+            let decoded = formal::decode_report_msg(&msg)?;
+            formal::write_perf(client, exam_id, cfg_id, *fw, &decoded).await?;
+            ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
         }
     }
 
-    RoundUi::banner(&format!(
-        "just_drop done kinds={} arms={} flashes={}",
-        kinds.len(),
-        paths.len(),
-        n_flashes
-    ));
+    // Trace one-shot.
+    {
+        let fw = Firmware::XdpT;
+        let profile = profile_for(fw);
+        flash_and_arm(cfg, &agent, &ui, &mut eta, PpsPath::Xdp, profile).await?;
+        agent.perf_clear().await.context("perf_clear")?;
+        let started_at = SystemTime::now();
+        let sent = paced_blast(cfg, &ui, &eta, PpsPath::Xdp, Duration::from_millis(50), 20.0).await?;
+        tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
+        let stopped_at = SystemTime::now();
+        if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
+            ui.check_start("写入 trace");
+            let cfg_id = formal::insert_just_drop_config(
+                client,
+                exam_id,
+                fw,
+                1.0,
+                0.0,
+                None,
+                started_at,
+                stopped_at,
+                sent.max(1) as i64,
+            )
+            .await?;
+            let msg = agent.request("report").await.context("report")?;
+            let decoded = formal::decode_report_msg(&msg)?;
+            formal::write_perf(client, exam_id, cfg_id, fw, &decoded).await?;
+            let n_ev = decoded.trace.as_ref().map(|t| t.events.len()).unwrap_or(0);
+            ui.check_ok(&format!("trace events={n_ev}"));
+        }
+    }
+
+    if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
+        formal::stop_exam(client, exam_id).await?;
+    }
+    RoundUi::banner(&format!("just_drop done arms={}", arms.len()));
     Ok(())
 }
 
-/// Flash once + settle + HAL `drop on`. Measure rounds happen outside.
 async fn flash_and_arm(
     cfg: &FileConfig,
     agent: &AgentClient,
     ui: &RoundUi,
     eta: &mut BudgetEta,
     path: PpsPath,
-    kind: DropKind,
-    formal: bool,
-    first_flash: bool,
-    pg: Option<&mut Client>,
+    profile: &str,
 ) -> Result<()> {
-    let profile = kind.profile(path);
-
     ui.begin_round();
     ui.set_eta(&eta.fmt());
-
-    if first_flash {
-        if let Some(client) = pg.as_ref() {
-            ui.check_start("DROP+CREATE just_drop_*");
-            let pg_opts = PgOpts { formal };
-            pg_dsn::prepare(client, pg_opts, TableSet::JustDrop)
-                .await
-                .context("prepare just_drop")?;
-            ui.check_ok(if formal { "recreated" } else { "ok" });
-        }
-    }
 
     ui.check_pending(&format!("烧录 `{profile}`"));
     ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
@@ -356,113 +318,6 @@ async fn flash_and_arm(
     }
 
     ui.end_round();
-    Ok(())
-}
-
-async fn run_counter_arm(
-    cfg: &FileConfig,
-    agent: &AgentClient,
-    ui: &RoundUi,
-    eta: &BudgetEta,
-    path: PpsPath,
-    window: Duration,
-    sample: Duration,
-    pg: Option<&mut Client>,
-) -> Result<()> {
-    let counters_before = counters::fetch_counters(agent).await?;
-    let started_at = SystemTime::now();
-
-    let (samples, drop_delta, net_rx_delta, host_pps, sent) =
-        measure_counter_round(cfg, agent, ui, eta, path, window, sample).await?;
-    let stopped_at = SystemTime::now();
-    let counters_after = counters::fetch_counters(agent).await?;
-    let counters_json = counters::counters_delta(&counters_before, &counters_after);
-
-    ui.permanent(&format!(
-        "    {}/c: dropΔ={drop_delta} net_rxΔ={net_rx_delta} host_pps={host_pps:.0} sent={sent} samples={}",
-        path.as_str(),
-        samples.len()
-    ));
-
-    if let Some(client) = pg {
-        ui.check_start("写入 postgres");
-        ingest_counter(
-            client,
-            path,
-            host_pps,
-            started_at,
-            stopped_at,
-            sent,
-            &counters_json,
-            &samples,
-        )
-        .await?;
-        ui.check_ok(&format!("1 config, {} samples", samples.len()));
-    }
-    Ok(())
-}
-
-async fn run_instr_arm(
-    cfg: &FileConfig,
-    agent: &AgentClient,
-    ui: &RoundUi,
-    eta: &BudgetEta,
-    path: PpsPath,
-    kind: DropKind,
-    window: Duration,
-    target_pps: f64,
-    pg: Option<&mut Client>,
-) -> Result<()> {
-    let _ = agent.request("perf clear").await;
-    let counters_before = counters::fetch_counters(agent).await?;
-    let started_at = SystemTime::now();
-
-    let sent = paced_blast(cfg, ui, eta, path, window, target_pps).await?;
-    tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
-    let stopped_at = SystemTime::now();
-    let counters_after = counters::fetch_counters(agent).await?;
-    let counters_json = counters::counters_delta(&counters_before, &counters_after);
-
-    let host_pps = sent as f64 / window.as_secs_f64().max(1e-6);
-    ui.permanent(&format!(
-        "    {}/{}: target_pps={target_pps:.0} host_pps={host_pps:.0} sent={sent}",
-        path.as_str(),
-        kind.as_str()
-    ));
-
-    if let Some(client) = pg {
-        ui.check_start("写入 postgres");
-        let run_id = ingest_run_meta(
-            client,
-            path,
-            kind,
-            target_pps,
-            window.as_secs_f64(),
-            started_at,
-            stopped_at,
-            sent,
-            &counters_json,
-        )
-        .await?;
-        match kind {
-            DropKind::Aggregate | DropKind::Gauge | DropKind::Trace => {
-                let msg = agent.request("report").await.context("report")?;
-                client
-                    .execute(
-                        "UPDATE just_drop_run SET report_raw = $1 WHERE id = $2",
-                        &[&msg, &run_id],
-                    )
-                    .await
-                    .context("UPDATE just_drop_run.report_raw")?;
-                ui.check_ok(&format!("run+report_raw bytes≈{}", msg.len()));
-            }
-            DropKind::Counter => unreachable!(),
-        }
-    } else {
-        let _ = agent.request("report").await?;
-    }
-
-    let _ = agent.request("perf clear").await;
     Ok(())
 }
 
@@ -597,6 +452,7 @@ async fn measure_counter_round(
     Ok((samples, drop_delta, net_rx_delta, host_pps, sent))
 }
 
+
 pub(crate) async fn paced_blast(
     cfg: &FileConfig,
     ui: &RoundUi,
@@ -661,88 +517,6 @@ pub(crate) async fn paced_blast(
     Ok(sent)
 }
 
-async fn ingest_counter(
-    client: &mut Client,
-    path: PpsPath,
-    target_pps: f64,
-    started_at: SystemTime,
-    stopped_at: SystemTime,
-    sent: u64,
-    counters: &JsonValue,
-    samples: &[Sample],
-) -> Result<()> {
-    let row = client
-        .query_one(
-            r#"
-            INSERT INTO just_drop_config (
-                fw_type, target_pps, started_at, stopped_at, sent, counters
-            ) VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id
-            "#,
-            &[
-                &path.as_str(),
-                &target_pps,
-                &started_at,
-                &stopped_at,
-                &(sent as i64),
-                counters,
-            ],
-        )
-        .await
-        .context("INSERT just_drop_config")?;
-    let config_id = pg_dsn::config_id_from_row(&row)?;
-
-    for s in samples {
-        client
-            .execute(
-                r#"
-                INSERT INTO just_drop_data (config_id, t, counter_value)
-                VALUES ($1, $2, $3)
-                "#,
-                &[&config_id, &s.t, &(s.drop as i64)],
-            )
-            .await
-            .context("INSERT just_drop_data")?;
-    }
-    Ok(())
-}
-
-async fn ingest_run_meta(
-    client: &mut Client,
-    path: PpsPath,
-    kind: DropKind,
-    target_pps: f64,
-    window_s: f64,
-    started_at: SystemTime,
-    stopped_at: SystemTime,
-    sent: u64,
-    counters: &JsonValue,
-) -> Result<i64> {
-    let row = client
-        .query_one(
-            r#"
-            INSERT INTO just_drop_run (
-                fw_type, drop_site, kind, target_pps, window_s,
-                started_at, stopped_at, sent, counters
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING id
-            "#,
-            &[
-                &path.as_str(),
-                &path.drop_site(),
-                &kind.as_str(),
-                &target_pps,
-                &window_s,
-                &started_at,
-                &stopped_at,
-                &(sent as i64),
-                counters,
-            ],
-        )
-        .await
-        .context("INSERT just_drop_run")?;
-    pg_dsn::config_id_from_row(&row)
-}
 
 fn gen_lan_ip(esp: Ipv4Addr, avoid: &[Ipv4Addr]) -> Ipv4Addr {
     let o = esp.octets();
@@ -756,6 +530,7 @@ fn gen_lan_ip(esp: Ipv4Addr, avoid: &[Ipv4Addr]) -> Ipv4Addr {
     }
     Ipv4Addr::new(o[0], o[1], o[2], if o[3] == 200 { 201 } else { 200 })
 }
+
 
 fn parse_drop_net_rx(line: &str) -> Result<(u64, u64)> {
     let map = counters::parse_counter_map(line)?;

@@ -29,7 +29,7 @@ const SLACK: u64 = 5;
 /// UDP proto key in just_drop `rxcnt` ARRAY.
 const RXCNT_UDP: u32 = 17;
 
-const DEFAULT_ELF: &str = "/Users/nan/bs/xpost/examples/just_drop/just_drop.elf";
+const DEFAULT_ELF: &str = "/Users/nan/bs/xpost/examples/just_xdp/just_drop.elf";
 const REBOOT_SETTLE: Duration = Duration::from_secs(20);
 /// Match drop-xdp formal window: long enough to approach wireless ceiling.
 const PERF_WINDOW: Duration = Duration::from_secs(40);

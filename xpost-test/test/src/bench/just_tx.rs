@@ -1,27 +1,20 @@
-//! `just_tx` — Counter sweep / ~5% OP RTT + Aggregate/Gauge/Trace fixed-pps rounds.
+//! `just_tx` — formal exam: XDP CAG / HAL CAG full pps grid + XDP Trace one-shot.
 //!
-//! Also drives hardcoded `dev` — **flame-chart Trace only**: XDP × 100 pps × 2s × 1
-//! round; writes `/tmp/xpost-dev-flame.report` (no Postgres; never DROPs `just_tx_*`).
+//! Formal (`window_s=30s`): flash → perf-clear → RTT window per pps → decode report → ORM.
+//! No OP early-stop, no same-pps repeats, no `report_raw`, no open-run DROP/TRUNCATE.
 //!
-//! Arms: `hal` (`just-tx-hal-*`) and `xdp` (`just-tx-*` + cold just_tx.elf).
-//! Kinds: `c` → `just_tx_config`/`data`; `a`/`g`/`t` → `just_tx_run.report_raw`
-//! (`OK report <n> b64=…` verbatim; no host decode into agg/gauge/trace tables).
-//! Formal: DROP same-named tables then CREATE empty (`TableSet::JustTx`).
-//!
-//! Sweep grid: 10 steps of `ceiling/10` where ceiling ≈ XDP ~50% loss send rate
-//! (TR3000 hping3+tcpdump calib; HAL ~50% lower — shared grid uses the XDP ceiling).
+//! `dev`: flame Trace only → `/tmp/xpost-dev-flame.report` (no Postgres).
 
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use rand::RngExt;
-use serde_json::Value as JsonValue;
-use tokio_postgres::Client;
 
 use crate::agent::AgentClient;
 use crate::bench::counters;
-use crate::bench::just_drop_pps::{PpsPath, paced_blast};
+use crate::bench::formal::{self, Firmware, TxSample};
+use crate::bench::just_drop_pps::PpsPath;
 use crate::bench::pg_dsn::{self, PgOpts, TableSet};
 use crate::bench::status::{self, BudgetEta, READY_BUDGET, RoundUi};
 use crate::config::FileConfig;
@@ -30,103 +23,23 @@ use crate::harness::Harness;
 const STIM_PORT: u16 = 8080;
 const IPPROTO_UDP: u32 = 17;
 const FLASH_IDLE: Duration = Duration::from_secs(300);
-const PERF_WINDOW: Duration = Duration::from_secs(20);
-const PERF_SMOKE_WINDOW: Duration = Duration::from_secs(5);
-const SWEEP_WINDOW: Duration = Duration::from_secs(12);
-const SWEEP_SMOKE_WINDOW: Duration = Duration::from_secs(4);
+const WINDOW_S: Duration = Duration::from_secs(30);
+const WINDOW_SMOKE: Duration = Duration::from_secs(4);
 const WARMUP: Duration = Duration::from_secs(1);
 const COOLDOWN: Duration = Duration::from_secs(3);
 const DRAIN: Duration = Duration::from_millis(1000);
 const DRAIN_MS: u64 = 200;
-const TARGET_LOSS: f64 = 0.05;
-const LOSS_LO: f64 = 0.04;
-const LOSS_HI: f64 = 0.07;
 const RX_READY_TRIES: usize = 40;
 const RX_READY_BURST: u32 = 64;
-/// Formal sweep: more trials + host-stall retries (DB: XDP loss_std≫HAL when max_gap≫15ms).
-const SWEEP_TRIALS: usize = 5;
-const SWEEP_STALL_RETRIES: usize = 2;
-const DEFAULT_FIXED_PPS: u64 = 800;
-const DEFAULT_TRACE_PPS: u64 = 200;
-const DEFAULT_INSTR_ROUNDS: usize = 10;
-const DEFAULT_INSTR_WINDOW_SECS: u64 = 12;
 
-/// Shared TR3000 send-rate grid (pps) for HAL and XDP.
-/// Ceiling 4000 ≈ XDP ~50% loss (hping3 calib); step = ceiling/10.
 const SWEEP_PPS: &[f64] = &[
     400.0, 800.0, 1200.0, 1600.0, 2000.0, 2400.0, 2800.0, 3200.0, 3600.0, 4000.0,
 ];
 const SWEEP_SMOKE_PPS: &[f64] = &[400.0, 1200.0, 2400.0, 4000.0];
-/// Hardcoded `dev` — flame-chart short Trace capture (XDP only; no DB).
-const DEV_PATHS: &[PpsPath] = &[PpsPath::Xdp];
-/// Unused by flame `dev` (kinds=t only); kept so Counter branch stays compile-clean.
-const DEV_PPS: &[f64] = &[100.0];
-const DEV_SWEEP_WINDOW: Duration = Duration::from_secs(2);
+
 const DEV_FLAME_PPS: f64 = 100.0;
 const DEV_FLAME_WINDOW: Duration = Duration::from_secs(2);
-const DEV_FLAME_ROUNDS: usize = 1;
-/// Written on TR3000 after `report`; scp → Mac `xpost/target/dev-flame.report`.
 const DEV_FLAME_REPORT_PATH: &str = "/tmp/xpost-dev-flame.report";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TxKind {
-    Counter,
-    Aggregate,
-    Gauge,
-    Trace,
-}
-
-impl TxKind {
-    fn parse(s: &str) -> Result<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "c" | "counter" => Ok(Self::Counter),
-            "a" | "aggregate" => Ok(Self::Aggregate),
-            "g" | "gauge" => Ok(Self::Gauge),
-            "t" | "trace" => Ok(Self::Trace),
-            other => bail!("kind must be c|a|g|t, got {other}"),
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Counter => "c",
-            Self::Aggregate => "a",
-            Self::Gauge => "g",
-            Self::Trace => "t",
-        }
-    }
-
-    fn profile(self, path: PpsPath) -> &'static str {
-        match (path, self) {
-            (PpsPath::Xdp, Self::Counter) => "just-tx-c",
-            (PpsPath::Xdp, Self::Aggregate) => "just-tx-a",
-            (PpsPath::Xdp, Self::Gauge) => "just-tx-g",
-            (PpsPath::Xdp, Self::Trace) => "just-tx-t",
-            (PpsPath::Hal, Self::Counter) => "just-tx-hal-c",
-            (PpsPath::Hal, Self::Aggregate) => "just-tx-hal-a",
-            (PpsPath::Hal, Self::Gauge) => "just-tx-hal-g",
-            (PpsPath::Hal, Self::Trace) => "just-tx-hal-t",
-        }
-    }
-}
-
-pub struct JustTxOpts {
-    pub paths: Vec<PpsPath>,
-    pub smoke: bool,
-    pub formal: bool,
-    pub no_pg: bool,
-    pub window_secs: Option<u64>,
-    pub rounds: Option<usize>,
-    /// `JustTx` (formal) or `Dev` (hardcoded debug sink).
-    pub tables: TableSet,
-}
-
-fn exp_name(tables: TableSet) -> &'static str {
-    match tables {
-        TableSet::Dev => "dev",
-        _ => "just_tx",
-    }
-}
 
 #[derive(Clone, Debug)]
 struct ProbeSample {
@@ -146,29 +59,288 @@ struct WindowStats {
     samples: Vec<ProbeSample>,
     device_rxcnt_delta: u64,
     n_t0: u64,
-    /// Counter delta for this window only (changed keys).
-    counters: JsonValue,
-    /// Max wall-clock gap between consecutive successful sends.
+    counters: serde_json::Value,
     max_send_gap: Duration,
-    /// Pacing fell behind schedule (would have burst-caught-up under old logic).
     host_stalled: bool,
 }
 
 impl WindowStats {
-    fn t0_frac(&self) -> f64 {
-        if self.sent == 0 {
-            0.0
-        } else {
-            self.n_t0 as f64 / self.sent as f64
-        }
-    }
-
     fn max_send_gap_ms(&self) -> f64 {
         self.max_send_gap.as_secs_f64() * 1e3
     }
 }
 
-/// Gap above this marks the window as host-interfered (USB/scheduler), not DUT loss.
+fn profile_for(fw: Firmware) -> &'static str {
+    match fw {
+        Firmware::XdpCag => "just-tx-cag",
+        Firmware::XdpT => "just-tx-t",
+        Firmware::Hal => "just-tx-hal-cag",
+    }
+}
+
+fn path_for(fw: Firmware) -> PpsPath {
+    match fw {
+        Firmware::Hal => PpsPath::Hal,
+        _ => PpsPath::Xdp,
+    }
+}
+
+pub struct JustTxOpts {
+    /// Legacy filter: if non-empty, maps xdp→XdpCag, hal→Hal (XdpT always runs last when formal).
+    pub paths: Vec<PpsPath>,
+    pub smoke: bool,
+    pub formal: bool,
+    pub no_pg: bool,
+    pub window_secs: Option<u64>,
+    pub rounds: Option<usize>,
+    pub tables: TableSet,
+    /// Explicit `TRUNCATE exam CASCADE` before this exam.
+    pub formal_clear: bool,
+}
+
+fn exp_name(tables: TableSet) -> &'static str {
+    match tables {
+        TableSet::Dev => "dev",
+        _ => "just_tx",
+    }
+}
+
+
+pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOpts) -> Result<()> {
+    let name = exp_name(opts.tables);
+    let is_dev = matches!(opts.tables, TableSet::Dev);
+    let formal = if is_dev {
+        false
+    } else {
+        opts.formal || cfg.just_tx.formal
+    };
+    let endpoint = cfg
+        .agent
+        .resolved_endpoint()
+        .with_context(|| format!("{name} needs [agent].endpoint in config/default.toml"))?;
+    let agent = AgentClient::new(endpoint.clone());
+    let esp_s = cfg.target.esp_ip.to_string();
+
+    let window = opts
+        .window_secs
+        .map(Duration::from_secs)
+        .unwrap_or(if opts.smoke { WINDOW_SMOKE } else { WINDOW_S });
+    let grid: &[f64] = if opts.smoke { SWEEP_SMOKE_PPS } else { SWEEP_PPS };
+
+    if is_dev {
+        return run_dev_flame(cfg, harness, &agent, &endpoint, &esp_s).await;
+    }
+
+    // Arms: xdp_cag + hal (filterable via opts.paths); xdp_t always last.
+    let mut arms: Vec<Firmware> = Vec::new();
+    if opts.paths.is_empty() {
+        arms.extend([Firmware::XdpCag, Firmware::Hal]);
+    } else {
+        for p in &opts.paths {
+            match p {
+                PpsPath::Xdp => arms.push(Firmware::XdpCag),
+                PpsPath::Hal => arms.push(Firmware::Hal),
+            }
+        }
+    }
+    arms.dedup();
+
+    RoundUi::banner(&format!(
+        "{name} arms={:?} +xdp_t grid={:?} window={}s formal={formal} clear={} agent={endpoint} esp={esp_s} pg={}",
+        arms.iter().map(|a| a.as_db()).collect::<Vec<_>>(),
+        grid.iter().map(|x| *x as i64).collect::<Vec<_>>(),
+        window.as_secs(),
+        opts.formal_clear,
+        !opts.no_pg
+    ));
+
+    let mut pg = if opts.no_pg {
+        None
+    } else {
+        let pg_opts = PgOpts { formal };
+        let client = formal::connect_and_ensure(pg_opts).await?;
+        if opts.formal_clear {
+            formal::clear(&client, pg_opts).await?;
+        }
+        Some(client)
+    };
+
+    let spoof = crate::raw_tx::iface_ipv4(&cfg.probe.iface)
+        .unwrap_or_else(|_| gen_lan_ip(cfg.target.esp_ip, &[cfg.target.esp_ip]));
+    RoundUi::banner(&format!(
+        "  stim_src={spoof} (iface {} IPv4 preferred for HAL ARP)",
+        cfg.probe.iface
+    ));
+
+    let n_flashes = arms.len() + 1; // + xdp_t
+    let mut eta = BudgetEta::new();
+    eta.add_flashes(n_flashes);
+    let per_arm = READY_BUDGET + (WARMUP + window + DRAIN).saturating_mul(grid.len() as u32);
+    eta.add_fixed(per_arm.saturating_mul(arms.len() as u32));
+    eta.add_fixed(READY_BUDGET + Duration::from_secs(5)); // trace one-shot
+
+    let ui = RoundUi::new();
+    let exam_id = if let Some(client) = pg.as_mut() {
+        ui.check_start("INSERT exam");
+        let id = formal::insert_exam(client, Some("just_tx")).await?;
+        ui.check_ok(&format!("exam={id}"));
+        Some(id)
+    } else {
+        None
+    };
+
+    for fw in &arms {
+        ui.begin_round();
+        ui.set_eta(&eta.fmt());
+        let profile = profile_for(*fw);
+        let path = path_for(*fw);
+        ui.check_pending(&format!("烧录 `{profile}`"));
+        ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
+        ui.check_pending("DUT ready");
+        flash_and_ready(cfg, &agent, &ui, &mut eta, path, spoof, profile).await?;
+
+        for &pps in grid {
+            agent.perf_clear().await.context("perf_clear")?;
+            let stats = probe_window(harness, &agent, &ui, &eta, path, spoof, pps, window).await?;
+            log_window(&ui, path, pps as usize, &stats);
+            if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
+                ui.check_start("写入 postgres");
+                let cfg_id = formal::insert_just_tx_config(
+                    client,
+                    exam_id,
+                    *fw,
+                    stats.target_pps,
+                    window.as_secs_f64(),
+                    stats.started_at,
+                    stats.stopped_at,
+                    stats.sent as i64,
+                )
+                .await?;
+                let samples: Vec<TxSample> = stats
+                    .samples
+                    .iter()
+                    .map(|s| TxSample {
+                        t_tx: s.t_tx,
+                        t_rx: s.t_rx,
+                        got_rx: s.got_rx,
+                    })
+                    .collect();
+                formal::insert_just_tx_data(client, cfg_id, &samples).await?;
+                let msg = agent.request("report").await.context("report")?;
+                let decoded = formal::decode_report_msg(&msg)?;
+                formal::write_perf(client, exam_id, cfg_id, *fw, &decoded).await?;
+                ui.check_ok(&format!(
+                    "config={cfg_id} samples={} mask={:#x}",
+                    samples.len(),
+                    decoded.mask
+                ));
+            }
+            eta.consume_fixed(WARMUP + window + DRAIN);
+            ui.set_eta(&eta.fmt());
+            harness.reset_state().await;
+            tokio::time::sleep(COOLDOWN).await;
+        }
+        ui.end_round();
+    }
+
+    // Trace arm: one packet.
+    {
+        ui.begin_round();
+        ui.set_eta(&eta.fmt());
+        let fw = Firmware::XdpT;
+        let profile = profile_for(fw);
+        let path = PpsPath::Xdp;
+        ui.check_pending(&format!("烧录 `{profile}`"));
+        ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
+        ui.check_pending("DUT ready");
+        flash_and_ready(cfg, &agent, &ui, &mut eta, path, spoof, profile).await?;
+        agent.perf_clear().await.context("perf_clear")?;
+        harness.reset_state().await;
+        let started_at = SystemTime::now();
+        let seq = harness.alloc_seq();
+        let t_tx = SystemTime::now();
+        let _ = harness.send_stimulus(spoof, None, seq).await;
+        tokio::time::sleep(DRAIN).await;
+        let sight = harness.take_seq(seq).await;
+        let got_rx = sight.t0_ns.is_some()
+            && sight.t_bounce_ns.or(sight.t_echo_ns).is_some();
+        let stopped_at = SystemTime::now();
+        if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
+            ui.check_start("写入 trace");
+            let cfg_id = formal::insert_just_tx_config(
+                client,
+                exam_id,
+                fw,
+                1.0,
+                0.0,
+                started_at,
+                stopped_at,
+                1,
+            )
+            .await?;
+            formal::insert_just_tx_data(
+                client,
+                cfg_id,
+                &[TxSample {
+                    t_tx,
+                    t_rx: None,
+                    got_rx,
+                }],
+            )
+            .await?;
+            let msg = agent.request("report").await.context("report")?;
+            let decoded = formal::decode_report_msg(&msg)?;
+            formal::write_perf(client, exam_id, cfg_id, fw, &decoded).await?;
+            let n_ev = decoded.trace.as_ref().map(|t| t.events.len()).unwrap_or(0);
+            ui.check_ok(&format!("trace events={n_ev}"));
+        }
+        ui.end_round();
+    }
+
+    if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
+        formal::stop_exam(client, exam_id).await?;
+    }
+
+    RoundUi::banner(&format!("{name} done arms={} grid={}", arms.len(), grid.len()));
+    Ok(())
+}
+
+async fn run_dev_flame(
+    cfg: &FileConfig,
+    _harness: &mut Harness,
+    agent: &AgentClient,
+    endpoint: &str,
+    esp_s: &str,
+) -> Result<()> {
+    RoundUi::banner(&format!(
+        "dev flame Trace XDP @{DEV_FLAME_PPS:.0}pps {}s → {DEV_FLAME_REPORT_PATH} agent={endpoint} esp={esp_s}",
+        DEV_FLAME_WINDOW.as_secs()
+    ));
+    let spoof = crate::raw_tx::iface_ipv4(&cfg.probe.iface)
+        .unwrap_or_else(|_| gen_lan_ip(cfg.target.esp_ip, &[cfg.target.esp_ip]));
+    let mut eta = BudgetEta::new();
+    eta.add_flashes(1);
+    eta.add_fixed(READY_BUDGET + DEV_FLAME_WINDOW);
+    let ui = RoundUi::new();
+    ui.begin_round();
+    let profile = "just-tx-t";
+    flash_and_ready(cfg, agent, &ui, &mut eta, PpsPath::Xdp, spoof, profile).await?;
+    agent.perf_clear().await.context("perf_clear")?;
+    use crate::bench::just_drop_pps::paced_blast;
+    let sent = paced_blast(cfg, &ui, &eta, PpsPath::Xdp, DEV_FLAME_WINDOW, DEV_FLAME_PPS).await?;
+    tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
+    let msg = agent.request("report").await.context("report")?;
+    std::fs::write(DEV_FLAME_REPORT_PATH, msg.as_bytes())
+        .with_context(|| format!("write {DEV_FLAME_REPORT_PATH}"))?;
+    ui.permanent(&format!(
+        "    flame report → {DEV_FLAME_REPORT_PATH} ({} bytes) sent={sent}",
+        msg.len()
+    ));
+    ui.end_round();
+    Ok(())
+}
+
+
 fn host_stall_thresh(pps: f64) -> Duration {
     let period = Duration::from_secs_f64(1.0 / pps.max(1.0));
     (period.saturating_mul(8))
@@ -182,476 +354,6 @@ struct OpPoint {
     loss: f64,
 }
 
-pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOpts) -> Result<()> {
-    let name = exp_name(opts.tables);
-    let is_dev = matches!(opts.tables, TableSet::Dev);
-    // `dev` is always append-only — never honor a formal DROP of just_tx_*.
-    let formal = if is_dev {
-        false
-    } else {
-        opts.formal || cfg.just_tx.formal
-    };
-    let endpoint = cfg
-        .agent
-        .resolved_endpoint()
-        .with_context(|| format!("{name} needs [agent].endpoint in config/default.toml"))?;
-    let agent = AgentClient::new(endpoint.clone());
-    let esp_s = cfg.target.esp_ip.to_string();
-
-    let paths = if is_dev {
-        DEV_PATHS.to_vec()
-    } else if opts.paths.is_empty() {
-        cfg.just_tx
-            .arms
-            .iter()
-            .map(|s| PpsPath::parse(s))
-            .collect::<Result<Vec<_>>>()?
-    } else {
-        opts.paths
-    };
-    if paths.is_empty() {
-        bail!("{name}: no arms");
-    }
-
-    let kinds: Vec<TxKind> = if is_dev {
-        // Flame-only: one XDP Trace window → `/tmp/xpost-dev-flame.report`.
-        vec![TxKind::Trace]
-    } else {
-        cfg.just_tx
-            .kinds
-            .iter()
-            .map(|s| TxKind::parse(s))
-            .collect::<Result<Vec<_>>>()?
-    };
-    if kinds.is_empty() {
-        bail!("{name}: kinds empty (set just_tx.toml kinds)");
-    }
-
-    let (grid, sweep_window, sweep_trials, rounds, op_window) = if is_dev {
-        // No Counter sweep; Trace uses DEV_FLAME_* below.
-        (
-            DEV_PPS,
-            DEV_SWEEP_WINDOW,
-            1usize,
-            0usize,
-            Duration::from_secs(0),
-        )
-    } else {
-        let op_window = opts
-            .window_secs
-            .map(Duration::from_secs)
-            .or_else(|| cfg.just_tx.window_secs.map(Duration::from_secs))
-            .unwrap_or(if opts.smoke {
-                PERF_SMOKE_WINDOW
-            } else {
-                PERF_WINDOW
-            });
-        let sweep_window = if opts.smoke {
-            SWEEP_SMOKE_WINDOW
-        } else {
-            SWEEP_WINDOW
-        };
-        let sweep_trials = if opts.smoke { 1 } else { SWEEP_TRIALS };
-        let rounds = opts.rounds.unwrap_or(if opts.smoke {
-            1
-        } else {
-            cfg.just_tx.rounds.max(1)
-        });
-        let grid: &[f64] = if opts.smoke {
-            SWEEP_SMOKE_PPS
-        } else {
-            SWEEP_PPS
-        };
-        (grid, sweep_window, sweep_trials, rounds, op_window)
-    };
-
-    let fixed_pps = cfg.just_tx.fixed_pps.unwrap_or(DEFAULT_FIXED_PPS) as f64;
-    let (trace_pps, instr_window, instr_rounds) = if is_dev {
-        (DEV_FLAME_PPS, DEV_FLAME_WINDOW, DEV_FLAME_ROUNDS)
-    } else {
-        let trace_pps = cfg.just_tx.trace_pps.unwrap_or(DEFAULT_TRACE_PPS) as f64;
-        let instr_window = Duration::from_secs(
-            cfg.just_tx
-                .instr_window_secs
-                .unwrap_or(DEFAULT_INSTR_WINDOW_SECS),
-        );
-        let instr_rounds = if opts.smoke {
-            1usize
-        } else {
-            cfg.just_tx
-                .instr_rounds
-                .unwrap_or(DEFAULT_INSTR_ROUNDS)
-                .max(1)
-        };
-        (trace_pps, instr_window, instr_rounds)
-    };
-
-    RoundUi::banner(&format!(
-        "{name} arms={:?} kinds={:?} tables={:?} agent={endpoint} esp={esp_s} sweep_grid={:?} sweep_trials={sweep_trials} sweep_win={}s op_win={}s op_rounds={rounds} fixed_pps={fixed_pps:.0} trace_pps={trace_pps:.0} instr_rounds={instr_rounds} instr_win={}s target_loss={:.0}% formal={formal} pg={}",
-        paths.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
-        kinds.iter().map(|k| k.as_str()).collect::<Vec<_>>(),
-        opts.tables,
-        grid.iter().map(|x| *x as i64).collect::<Vec<_>>(),
-        sweep_window.as_secs(),
-        op_window.as_secs(),
-        instr_window.as_secs(),
-        100.0 * TARGET_LOSS,
-        !(is_dev || opts.no_pg)
-    ));
-
-    // `dev` is console-only — never connect Postgres / touch just_tx_* tables.
-    let mut pg = if is_dev || opts.no_pg {
-        None
-    } else {
-        let pg_opts = PgOpts { formal };
-        Some(pg_dsn::connect(pg_opts).await?)
-    };
-
-    let spoof = crate::raw_tx::iface_ipv4(&cfg.probe.iface)
-        .unwrap_or_else(|_| gen_lan_ip(cfg.target.esp_ip, &[cfg.target.esp_ip]));
-    RoundUi::banner(&format!(
-        "  stim_src={spoof} (iface {} IPv4 preferred for HAL ARP)",
-        cfg.probe.iface
-    ));
-
-    let sweep_unit = WARMUP + sweep_window + DRAIN + COOLDOWN;
-    let op_unit = WARMUP + op_window + DRAIN;
-    let counter_arm_fixed = READY_BUDGET
-        + sweep_unit.saturating_mul((grid.len() * sweep_trials) as u32)
-        + op_unit.saturating_mul(rounds as u32);
-    let instr_arm_fixed = READY_BUDGET
-        + (instr_window + Duration::from_millis(DRAIN_MS)).saturating_mul(instr_rounds as u32);
-
-    let n_flashes = kinds.len() * paths.len();
-    let mut eta = BudgetEta::new();
-    eta.add_flashes(n_flashes);
-    for kind in &kinds {
-        let per = match kind {
-            TxKind::Counter => counter_arm_fixed,
-            _ => instr_arm_fixed,
-        };
-        eta.add_fixed(per.saturating_mul(paths.len() as u32));
-    }
-
-    let ui = RoundUi::new();
-    let mut first_round = true;
-
-    for kind in &kinds {
-        for path in &paths {
-            match kind {
-                TxKind::Counter => {
-                    let (op, writes) = run_arm_round(
-                        cfg,
-                        &agent,
-                        harness,
-                        &ui,
-                        &mut eta,
-                        *path,
-                        *kind,
-                        spoof,
-                        grid,
-                        sweep_trials,
-                        sweep_window,
-                        op_window,
-                        rounds,
-                        formal,
-                        opts.tables,
-                        first_round,
-                        pg.as_mut(),
-                    )
-                    .await?;
-                    first_round = false;
-                    RoundUi::banner(&format!(
-                        "  arm {}/c: operating done target_pps={:.0} sweep_loss_med={:.2}% configs={writes}",
-                        path.as_str(),
-                        op.target_pps,
-                        100.0 * op.loss,
-                    ));
-                }
-                TxKind::Aggregate | TxKind::Gauge | TxKind::Trace => {
-                    let pps = if *kind == TxKind::Trace {
-                        trace_pps
-                    } else {
-                        fixed_pps
-                    };
-                    ui.begin_round();
-                    ui.set_eta(&eta.fmt());
-                    if first_round {
-                        if let Some(client) = pg.as_ref() {
-                            ui.check_start("DROP+CREATE just_tx_*");
-                            let pg_opts = PgOpts { formal };
-                            pg_dsn::prepare(client, pg_opts, opts.tables)
-                                .await
-                                .context("prepare tx tables")?;
-                            ui.check_ok(if formal { "recreated" } else { "ok" });
-                        }
-                        first_round = false;
-                    }
-                    let profile = kind.profile(*path);
-                    ui.check_pending(&format!("烧录 `{profile}`"));
-                    ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
-                    ui.check_pending("DUT ready");
-                    flash_and_ready(cfg, &agent, &ui, &mut eta, *path, spoof, profile).await?;
-                    for round in 1..=instr_rounds {
-                        run_instr_arm(
-                            cfg,
-                            &agent,
-                            &ui,
-                            &eta,
-                            *path,
-                            *kind,
-                            instr_window,
-                            pps,
-                            pg.as_mut(),
-                        )
-                        .await?;
-                        RoundUi::banner(&format!(
-                            "  arm {}/{} round {round}/{instr_rounds} @{pps:.0}pps",
-                            path.as_str(),
-                            kind.as_str(),
-                        ));
-                    }
-                    ui.end_round();
-                }
-            }
-        }
-    }
-
-    RoundUi::banner(&format!(
-        "{} done kinds={} arms={} flashes={}",
-        exp_name(opts.tables),
-        kinds.len(),
-        paths.len(),
-        n_flashes
-    ));
-    Ok(())
-}
-
-async fn run_arm_round(
-    cfg: &FileConfig,
-    agent: &AgentClient,
-    harness: &mut Harness,
-    ui: &RoundUi,
-    eta: &mut BudgetEta,
-    path: PpsPath,
-    kind: TxKind,
-    spoof: Ipv4Addr,
-    grid: &[f64],
-    trials: usize,
-    sweep_window: Duration,
-    op_window: Duration,
-    op_rounds: usize,
-    formal: bool,
-    tables: TableSet,
-    first_round: bool,
-    mut pg: Option<&mut Client>,
-) -> Result<(OpPoint, u64)> {
-    ui.begin_round();
-    ui.set_eta(&eta.fmt());
-
-    if first_round {
-        if let Some(client) = pg.as_ref() {
-            let label = match tables {
-                TableSet::Dev => "ensure dev_*",
-                _ => "DROP+CREATE just_tx_*",
-            };
-            ui.check_start(label);
-            let pg_opts = PgOpts { formal };
-            pg_dsn::prepare(client, pg_opts, tables)
-                .await
-                .context("prepare tx tables")?;
-            ui.check_ok(if formal && !matches!(tables, TableSet::Dev) {
-                "recreated"
-            } else {
-                "ok"
-            });
-        }
-    }
-
-    let profile = kind.profile(path);
-    ui.check_pending(&format!("烧录 `{profile}`"));
-    ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
-    ui.check_pending("DUT ready");
-
-    flash_and_ready(cfg, agent, ui, eta, path, spoof, profile).await?;
-
-    let mut writes = 0u64;
-    let mut medians: Vec<(f64, f64)> = Vec::new();
-    let is_dev = matches!(tables, TableSet::Dev);
-    for &pps in grid {
-        let mut losses = Vec::with_capacity(trials);
-        for trial in 1..=trials {
-            let stats = match probe_sweep_trial(
-                harness,
-                agent,
-                ui,
-                eta,
-                path,
-                spoof,
-                pps,
-                sweep_window,
-                is_dev,
-            )
-            .await
-            {
-                Ok(stats) => stats,
-                Err(e) if is_dev => {
-                    // High-rate XDP_TX can hang the DUT; reflash and continue next rate.
-                    ui.permanent(&format!(
-                        "    sweep {} pps={pps:.0} trial={trial}/{trials}: FAIL {e:#} → reflash",
-                        path.as_str(),
-                    ));
-                    flash_and_ready(cfg, agent, ui, eta, path, spoof, profile).await?;
-                    losses.push(1.0);
-                    harness.reset_state().await;
-                    tokio::time::sleep(COOLDOWN).await;
-                    eta.consume_fixed(WARMUP + sweep_window + DRAIN + COOLDOWN);
-                    ui.set_eta(&eta.fmt());
-                    continue;
-                }
-                Err(e) => return Err(e),
-            };
-            ui.permanent(&format!(
-                "    sweep {} pps={pps:.0} trial={trial}/{trials}: sent={} ok={} loss={:.2}% max_gap={:.1}ms{}",
-                path.as_str(),
-                stats.sent,
-                stats.ok,
-                100.0 * stats.loss,
-                stats.max_send_gap_ms(),
-                if stats.host_stalled { " HOST_STALL" } else { "" },
-            ));
-            if is_dev {
-                let mut rtt_ms: Vec<f64> = stats
-                    .samples
-                    .iter()
-                    .filter_map(|s| s.t_rx?.duration_since(s.t_tx).ok())
-                    .map(|d| d.as_secs_f64() * 1e3)
-                    .collect();
-                rtt_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let pct = |q: f64| {
-                    rtt_ms
-                        .get(((rtt_ms.len() as f64 - 1.0) * q).round() as usize)
-                        .copied()
-                        .unwrap_or(f64::NAN)
-                };
-                ui.permanent(&format!(
-                    "      rtt_ms p50={:.2} p90={:.2} p99={:.2} max={:.2}",
-                    pct(0.5),
-                    pct(0.9),
-                    pct(0.99),
-                    pct(1.0)
-                ));
-                ui.permanent(&format!("      countersΔ {}", stats.counters));
-            }
-            losses.push(stats.loss);
-            if let Some(client) = pg.as_mut() {
-                push_config(client, ui, tables, path, &stats).await?;
-                writes += 1;
-            }
-            harness.reset_state().await;
-            tokio::time::sleep(COOLDOWN).await;
-            eta.consume_fixed(WARMUP + sweep_window + DRAIN + COOLDOWN);
-            ui.set_eta(&eta.fmt());
-        }
-        let med = median_f64(&mut losses).unwrap_or(1.0);
-        medians.push((pps, med));
-        ui.permanent(&format!(
-            "    sweep {} pps={pps:.0} loss_med={:.2}%",
-            path.as_str(),
-            100.0 * med
-        ));
-    }
-
-    let op = pick_operating_point(&medians);
-    if op_rounds > 0 {
-        ui.permanent(&format!(
-            "  arm {}: operating target_pps={:.0} sweep_loss_med={:.2}% (band {:.0}%–{:.0}%)",
-            path.as_str(),
-            op.target_pps,
-            100.0 * op.loss,
-            100.0 * LOSS_LO,
-            100.0 * LOSS_HI
-        ));
-    }
-
-    for pair_id in 1..=op_rounds {
-        if pair_id > 1 {
-            ensure_alive(cfg, agent, ui, eta, path, spoof, profile).await?;
-        }
-        let stats =
-            probe_window(harness, agent, ui, eta, path, spoof, op.target_pps, op_window).await?;
-        log_window(ui, path, pair_id, &stats);
-        if let Some(client) = pg.as_mut() {
-            push_config(client, ui, tables, path, &stats).await?;
-            writes += 1;
-        }
-        harness.reset_state().await;
-        eta.consume_fixed(WARMUP + op_window + DRAIN);
-        ui.set_eta(&eta.fmt());
-    }
-
-    ui.end_round();
-    Ok((op, writes))
-}
-
-/// Finished window → push one config row + its packet rows immediately.
-async fn push_config(
-    client: &Client,
-    ui: &RoundUi,
-    tables: TableSet,
-    path: PpsPath,
-    stats: &WindowStats,
-) -> Result<()> {
-    ui.check_start(&format!(
-        "push config @{:.0}pps sent={}",
-        stats.target_pps, stats.sent
-    ));
-    ingest_window(client, tables, path, stats).await?;
-    ui.check_ok(&format!("{} pkts", stats.samples.len()));
-    Ok(())
-}
-
-fn pick_operating_point(medians: &[(f64, f64)]) -> OpPoint {
-    let mut best: Option<OpPoint> = None;
-    for &(pps, loss) in medians {
-        let cand = OpPoint {
-            target_pps: pps,
-            loss,
-        };
-        let better = match best {
-            None => true,
-            Some(b) => {
-                let c_in = (LOSS_LO..=LOSS_HI).contains(&cand.loss);
-                let b_in = (LOSS_LO..=LOSS_HI).contains(&b.loss);
-                if c_in && b_in {
-                    cand.target_pps > b.target_pps
-                } else if c_in {
-                    true
-                } else if b_in {
-                    false
-                } else {
-                    (cand.loss - TARGET_LOSS).abs() < (b.loss - TARGET_LOSS).abs()
-                }
-            }
-        };
-        if better {
-            best = Some(cand);
-        }
-    }
-    let op = best.unwrap_or(OpPoint {
-        target_pps: medians.first().map(|x| x.0).unwrap_or(80.0),
-        loss: 1.0,
-    });
-    if !(LOSS_LO..=LOSS_HI).contains(&op.loss) {
-        eprintln!(
-            "    WARN: operating loss {:.2}% outside [{:.0}%,{:.0}%]; closest to 5%",
-            100.0 * op.loss,
-            100.0 * LOSS_LO,
-            100.0 * LOSS_HI
-        );
-    }
-    op
-}
 
 fn log_window(ui: &RoundUi, path: PpsPath, pair_id: usize, stats: &WindowStats) {
     ui.permanent(&format!(
@@ -678,36 +380,6 @@ fn log_window(ui: &RoundUi, path: PpsPath, pair_id: usize, stats: &WindowStats) 
     }
 }
 
-async fn ensure_alive(
-    cfg: &FileConfig,
-    agent: &AgentClient,
-    ui: &RoundUi,
-    eta: &mut BudgetEta,
-    path: PpsPath,
-    spoof: Ipv4Addr,
-    profile: &str,
-) -> Result<()> {
-    for i in 0..10 {
-        match agent.request("ping").await {
-            Ok(m) if m.contains("OK ping") => return Ok(()),
-            Ok(m) => ui.check_note(&format!("ping try{i}: {m}")),
-            Err(e) => ui.check_note(&format!("ping try{i}: {e:#}")),
-        }
-        if i == 9 {
-            ui.begin_round();
-            ui.set_eta(&eta.fmt());
-            eta.add_flashes(1);
-            eta.add_fixed(READY_BUDGET);
-            ui.check_pending(&format!("烧录 `{profile}`"));
-            ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
-            ui.check_pending("DUT ready");
-            flash_and_ready(cfg, agent, ui, eta, path, spoof, profile).await?;
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-    Ok(())
-}
 
 async fn flash_and_ready(
     cfg: &FileConfig,
@@ -748,176 +420,6 @@ async fn flash_and_ready(
     Ok(())
 }
 
-async fn run_instr_arm(
-    cfg: &FileConfig,
-    agent: &AgentClient,
-    ui: &RoundUi,
-    eta: &BudgetEta,
-    path: PpsPath,
-    kind: TxKind,
-    window: Duration,
-    target_pps: f64,
-    pg: Option<&mut Client>,
-) -> Result<()> {
-    let _ = agent.request("perf clear").await;
-    let counters_before = counters::fetch_counters(agent).await?;
-    let started_at = SystemTime::now();
-
-    let sent = paced_blast(cfg, ui, eta, path, window, target_pps).await?;
-    tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
-    let stopped_at = SystemTime::now();
-    let counters_after = counters::fetch_counters(agent).await?;
-    let counters_json = counters::counters_delta(&counters_before, &counters_after);
-
-    let host_pps = sent as f64 / window.as_secs_f64().max(1e-6);
-    ui.permanent(&format!(
-        "    {}/{}: target_pps={target_pps:.0} host_pps={host_pps:.0} sent={sent}",
-        path.as_str(),
-        kind.as_str()
-    ));
-
-    if let Some(client) = pg {
-        ui.check_start("写入 postgres");
-        let run_id = ingest_run_meta(
-            client,
-            path,
-            kind,
-            target_pps,
-            window.as_secs_f64(),
-            started_at,
-            stopped_at,
-            sent,
-            &counters_json,
-        )
-        .await?;
-        match kind {
-            TxKind::Aggregate | TxKind::Gauge | TxKind::Trace => {
-                let msg = agent.request("report").await.context("report")?;
-                client
-                    .execute(
-                        "UPDATE just_tx_run SET report_raw = $1 WHERE id = $2",
-                        &[&msg, &run_id],
-                    )
-                    .await
-                    .context("UPDATE just_tx_run.report_raw")?;
-                ui.check_ok(&format!("run+report_raw bytes≈{}", msg.len()));
-            }
-            TxKind::Counter => unreachable!(),
-        }
-    } else {
-        let msg = agent.request("report").await.context("report")?;
-        // `dev` flame path: persist for scp → Mac export_flame_svg.
-        std::fs::write(DEV_FLAME_REPORT_PATH, msg.as_bytes())
-            .with_context(|| format!("write {DEV_FLAME_REPORT_PATH}"))?;
-        ui.permanent(&format!(
-            "    flame report → {DEV_FLAME_REPORT_PATH} ({} bytes)",
-            msg.len()
-        ));
-    }
-
-    let _ = agent.request("perf clear").await;
-    Ok(())
-}
-
-async fn ingest_run_meta(
-    client: &Client,
-    path: PpsPath,
-    kind: TxKind,
-    target_pps: f64,
-    window_s: f64,
-    started_at: SystemTime,
-    stopped_at: SystemTime,
-    sent: u64,
-    counters: &JsonValue,
-) -> Result<i64> {
-    let row = client
-        .query_one(
-            r#"
-            INSERT INTO just_tx_run (
-                fw_type, kind, target_pps, window_s,
-                started_at, stopped_at, sent, counters
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING id
-            "#,
-            &[
-                &path.as_str(),
-                &kind.as_str(),
-                &target_pps,
-                &window_s,
-                &started_at,
-                &stopped_at,
-                &(sent as i64),
-                counters,
-            ],
-        )
-        .await
-        .context("INSERT just_tx_run")?;
-    pg_dsn::config_id_from_row(&row)
-}
-
-/// One sweep trial: retry on t0 starvation / host send stalls; keep cleanest attempt.
-async fn probe_sweep_trial(
-    harness: &mut Harness,
-    agent: &AgentClient,
-    ui: &RoundUi,
-    eta: &BudgetEta,
-    path: PpsPath,
-    spoof: Ipv4Addr,
-    pps: f64,
-    sweep_window: Duration,
-    is_dev: bool,
-) -> Result<WindowStats> {
-    let mut best: Option<WindowStats> = None;
-    let attempts = if is_dev {
-        1
-    } else {
-        1 + SWEEP_STALL_RETRIES
-    };
-    for attempt in 0..attempts {
-        let mut stats = probe_window(harness, agent, ui, eta, path, spoof, pps, sweep_window).await?;
-        if stats.sent > 0 && stats.t0_frac() < 0.5 {
-            ui.permanent(&format!(
-                "    sweep_retry_t0: pps={pps:.0} attempt={} t0_frac={:.2}",
-                attempt + 1,
-                stats.t0_frac()
-            ));
-            harness.reset_state().await;
-            tokio::time::sleep(COOLDOWN).await;
-            stats = probe_window(harness, agent, ui, eta, path, spoof, pps, sweep_window).await?;
-        }
-        let replace = match &best {
-            None => true,
-            Some(b) => {
-                (!stats.host_stalled && b.host_stalled)
-                    || (stats.host_stalled == b.host_stalled
-                        && stats.max_send_gap < b.max_send_gap)
-            }
-        };
-        if replace {
-            best = Some(stats.clone());
-        }
-        if !stats.host_stalled {
-            return Ok(stats);
-        }
-        if attempt + 1 < attempts {
-            ui.permanent(&format!(
-                "    sweep_retry_host_stall: pps={pps:.0} attempt={} max_gap={:.1}ms",
-                attempt + 1,
-                stats.max_send_gap_ms()
-            ));
-            harness.reset_state().await;
-            tokio::time::sleep(COOLDOWN).await;
-        }
-    }
-    let stats = best.expect("at least one attempt");
-    if stats.host_stalled {
-        ui.permanent(&format!(
-            "    WARN: keeping stalled window pps={pps:.0} max_gap={:.1}ms after {attempts} attempts",
-            stats.max_send_gap_ms()
-        ));
-    }
-    Ok(stats)
-}
 
 async fn probe_window(
     harness: &mut Harness,
@@ -952,7 +454,7 @@ async fn probe_window(
     }
 
     let before = parse_rxcnt(&agent.request(&format!("rxcnt {IPPROTO_UDP}")).await?)?;
-    let _ = agent.request("perf clear").await;
+    let _ = agent.perf_clear().await;
     let counters_before = counters::fetch_counters(agent).await?;
     harness.reset_state().await;
     let started_at = SystemTime::now();
@@ -1080,14 +582,6 @@ async fn probe_window(
     })
 }
 
-fn median_f64(v: &mut [f64]) -> Option<f64> {
-    if v.is_empty() {
-        return None;
-    }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let idx = (v.len() - 1) / 2;
-    Some(v[idx])
-}
 
 async fn wait_rx_ready(
     cfg: &FileConfig,
@@ -1135,54 +629,6 @@ async fn wait_rx_ready(
     bail!("DUT never counted RX after flash ({})", path.as_str());
 }
 
-async fn ingest_window(
-    client: &Client,
-    tables: TableSet,
-    path: PpsPath,
-    stats: &WindowStats,
-) -> Result<()> {
-    let (cfg_table, data_table) = match tables {
-        TableSet::Dev => ("dev_config", "dev_data"),
-        _ => ("just_tx_config", "just_tx_data"),
-    };
-    let insert_cfg = format!(
-        r#"INSERT INTO {cfg_table} (
-                fw_type, target_pps, started_at, stopped_at, sent, counters
-            ) VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id"#
-    );
-    let row = client
-        .query_one(
-            &insert_cfg,
-            &[
-                &path.as_str(),
-                &stats.target_pps,
-                &stats.started_at,
-                &stats.stopped_at,
-                &(stats.sent as i64),
-                &stats.counters,
-            ],
-        )
-        .await
-        .with_context(|| format!("INSERT {cfg_table}"))?;
-    let config_id = pg_dsn::config_id_from_row(&row)?;
-
-    let insert_data = format!(
-        r#"INSERT INTO {data_table} (config_id, t_tx, t_rx, got_rx)
-                   SELECT * FROM UNNEST($1::bigint[], $2::timestamptz[], $3::timestamptz[], $4::bool[])"#
-    );
-    for chunk in stats.samples.chunks(512) {
-        let ids: Vec<i64> = chunk.iter().map(|_| config_id).collect();
-        let t_txs: Vec<SystemTime> = chunk.iter().map(|s| s.t_tx).collect();
-        let t_rxs: Vec<Option<SystemTime>> = chunk.iter().map(|s| s.t_rx).collect();
-        let got: Vec<bool> = chunk.iter().map(|s| s.got_rx).collect();
-        client
-            .execute(&insert_data, &[&ids, &t_txs, &t_rxs, &got])
-            .await
-            .with_context(|| format!("INSERT {data_table}"))?;
-    }
-    Ok(())
-}
 
 fn gen_lan_ip(esp: Ipv4Addr, avoid: &[Ipv4Addr]) -> Ipv4Addr {
     let o = esp.octets();
@@ -1196,6 +642,7 @@ fn gen_lan_ip(esp: Ipv4Addr, avoid: &[Ipv4Addr]) -> Ipv4Addr {
     }
     Ipv4Addr::new(o[0], o[1], o[2], if o[3] == 200 { 201 } else { 200 })
 }
+
 
 fn parse_rxcnt(line: &str) -> Result<u64> {
     let line = line.trim();

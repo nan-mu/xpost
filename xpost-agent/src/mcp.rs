@@ -114,6 +114,13 @@ impl XpostMcp {
             .await
     }
 
+    #[tool(description = "Clear DUT perf accumulators; await OK perf clear")]
+    async fn perf_clear(&self) -> Result<CallToolResult, McpError> {
+        let shared = self.shared.clone();
+        self.run_op(move || ops::perf_clear(shared.as_ref(), "mcp"))
+            .await
+    }
+
     #[tool(description = "Send one App-mode serial command (e.g. ping, rxcnt 17, drop on)")]
     async fn request(
         &self,

@@ -104,6 +104,9 @@ enum Command {
         #[arg(long, value_parser = ["xdp", "hal"])]
         path: Option<String>,
     },
+    /// Explicit wipe of formal schema: `TRUNCATE exam CASCADE`.
+    #[command(name = "formal-clear")]
+    FormalClear,
     /// Flame Trace short capture: XDP × 100 pps × 2s × 1 → `/tmp/xpost-dev-flame.report`.
     #[command(name = "dev")]
     DevExp,
@@ -244,6 +247,7 @@ async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Re
                 window_secs: args.window_secs,
                 sample_interval_ms: sample_ms,
                 rounds: args.rounds,
+                formal_clear: false,
             },
         )
         .await;
@@ -265,9 +269,14 @@ async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Re
                 window_secs: args.window_secs,
                 rounds: args.rounds,
                 tables: bench::pg_dsn::TableSet::JustTx,
+                formal_clear: false,
             },
         )
         .await;
+    }
+    if let Command::FormalClear = &command {
+        let pg_opts = bench::pg_dsn::PgOpts { formal: true };
+        return bench::formal::formal_clear(pg_opts).await;
     }
     if let Command::DevExp = &command {
         let mut harness = open_harness(cfg).await?;
@@ -282,6 +291,7 @@ async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Re
                 window_secs: None,
                 rounds: None,
                 tables: bench::pg_dsn::TableSet::Dev,
+                formal_clear: false,
             },
         )
         .await;
@@ -331,7 +341,8 @@ async fn dispatch_command(cfg: &FileConfig, args: &Args, command: Command) -> Re
         Command::JustDrop
         | Command::JustDropExp { .. }
         | Command::JustTxExp { .. }
-        | Command::DevExp => {
+        | Command::DevExp
+        | Command::FormalClear => {
             unreachable!("handled earlier")
         }
         Command::Suite => {}

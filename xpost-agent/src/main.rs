@@ -19,7 +19,7 @@ use xpost_serial::{
 };
 
 /// Default XDP ELF for just_drop cold table.
-const DEFAULT_XDP_ELF: &str = "examples/just_drop/just_drop.elf";
+const DEFAULT_XDP_ELF: &str = "examples/just_xdp/just_drop.elf";
 /// Default serial transcript path (tee to stdout).
 const DEFAULT_LOG: &str = "target/xpost-agent/serial.log";
 
@@ -81,6 +81,11 @@ enum Cmd {
     Request {
         /// Command text without trailing newline.
         cmd: String,
+        #[arg(long, default_value_t = 5.0)]
+        timeout_secs: f64,
+    },
+    /// Clear DUT perf accumulators; await `OK perf clear`.
+    PerfClear {
         #[arg(long, default_value_t = 5.0)]
         timeout_secs: f64,
     },
@@ -215,6 +220,23 @@ fn run() -> Result<()> {
             let reply = session
                 .request_timeout(&cmd, Duration::from_secs_f64(timeout_secs))
                 .with_context(|| format!("request `{cmd}`"))?;
+            println!("{reply}");
+            session.close().context("close")?;
+            Ok(())
+        }
+        Cmd::PerfClear { timeout_secs } => {
+            let mut session = open_session(cli.port.as_deref(), &cli.log)?;
+            let reply = session
+                .request_timeout("perf clear", Duration::from_secs_f64(timeout_secs))
+                .context("request `perf clear`")?;
+            if !reply.trim().eq_ignore_ascii_case("OK perf clear")
+                && !reply
+                    .trim()
+                    .to_ascii_lowercase()
+                    .starts_with("ok perf clear")
+            {
+                bail!("unexpected perf clear reply: {reply}");
+            }
             println!("{reply}");
             session.close().context("close")?;
             Ok(())

@@ -65,6 +65,11 @@ impl AgentClient {
         self.post_json("/v1/counters", &serde_json::json!({})).await
     }
 
+    /// Clear DUT perf accumulators; await `OK perf clear`.
+    pub async fn perf_clear(&self) -> Result<String> {
+        self.post_json("/v1/perf_clear", &serde_json::json!({})).await
+    }
+
     /// UDP stim through the agent. Returns `ack` or `no-ack`.
     pub async fn probe(&self, esp: &str, port: u16) -> Result<String> {
         let body = serde_json::json!({ "esp": esp, "port": port });
