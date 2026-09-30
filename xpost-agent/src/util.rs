@@ -1,5 +1,6 @@
 //! Shared logging / formatting helpers for HTTP + ops.
 
+use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -33,8 +34,15 @@ pub fn fmt_bytes(n: u64) -> String {
     }
 }
 
+/// stderr log that never panics on Broken pipe (agent often runs with closed stderr).
+pub fn eprint_line(msg: &str) {
+    let mut err = io::stderr().lock();
+    let _ = writeln!(err, "{msg}");
+    let _ = err.flush();
+}
+
 pub fn log_line(peer: &str, msg: &str) {
-    eprintln!("[{}] [{peer}] {msg}", ts());
+    eprint_line(&format!("[{}] [{peer}] {msg}", ts()));
 }
 
 pub fn file_size(path: &Path) -> Option<u64> {

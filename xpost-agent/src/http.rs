@@ -19,7 +19,7 @@ use tower_http::timeout::TimeoutLayer;
 use crate::mcp::XpostMcp;
 use crate::ops;
 use crate::state::{SharedState, open};
-use crate::util::ts;
+use crate::util::{eprint_line, ts};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(1200);
 
@@ -144,10 +144,10 @@ async fn serve_async(addr: &str, port: Option<&Path>, log: &Path) -> Result<()> 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
-    eprintln!(
+    eprint_line(&format!(
         "[{}] xpost-agent HTTP {addr}  (/health /v1/* /mcp incl. /v1/dut_status)",
         ts()
-    );
+    ));
     serve(listener, app).await.context("axum serve")?;
     Ok(())
 }

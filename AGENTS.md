@@ -21,22 +21,18 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
   (library), `xpost-agent` (CLI), `xpost-build`, `xtask`, `xpost-test`
   (experiment harness; same git tree, separate `Cargo.toml`).
 
-## Host serial / agent
+## Host serial / agent / test
 
-- **`xpost-serial`**: library only — `Session`, `install_xdp` / `list_xdp` / `program` /
-  `request`, `Sink`. Cold install is **by XDP name** (overwrite same name, else append);
-  do not pass raw cold addresses for the normal path.
-- **`xpost-agent/`** (crate `xpost-agent`): CLI. Dispatch stays `cargo xtask agent …`
-  (`--manifest-path xpost-agent/Cargo.toml`). Agent uses `xpost-elf` to read the
-  program name from the XDP ELF, then calls `Session::install_xdp(name, path)`.
-  Long-running mode (`--listen`) serves HTTP JSON `/v1/*` and MCP `/mcp` on one
-  port (shared USB session).
-- **`xpost-test/`**: experiment director. It decides the scenario (load drop or not,
-  send a stimulus, expect `ack` or `no-ack`, then read counters). It calls
-  `xpost-agent` / `xpost-serial`; it does not own the USB session itself while
-  the agent is running.
-- **`--port`**: optional. Omit → pick the unique USB serial port; if zero or many,
-  error and require `--port`.
+- **`xpost-test/`**: **owns the full test workflow** (formal `just_drop` /
+  `just_tx`, `dev`, suite). See rustdoc modules `overview` + `config`. Calls
+  agent HTTP; does not hold the USB session while the agent is running.
+- **`xpost-agent/`**: CLI + `--listen` HTTP `/v1/*` and MCP `/mcp` on one port
+  (shared USB). Dispatch: `cargo xtask agent …`.
+- **`xpost-serial`**: library only — **API** for `Session` / `install_xdp` /
+  `program` / `request` / `Sink` (see that crate’s rustdoc). Cold install is
+  **by XDP name**; do not pass raw cold addresses on the normal path.
+- **`--port`**: optional. Omit → unique USB serial; zero or many → require
+  `--port`.
 
 ## Commands
 
@@ -67,7 +63,7 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 - `config/just_drop.toml`：正式 just_drop（`arms` / `kinds=c|a|g|t` / `fixed_pps` / `trace_pps`）
 - 调试 XDP TX：`run = ["dev"]`（硬编码：XDP × 800/1600/2800/4000 × 1×8s；**无 DB**；固件每 100 包打 `tsflow`；agent `POST /v1/serial_window`）
 - Agent HTTP：`/health`、`/v1/*`（含 `/v1/serial_window`）、`/mcp`
-- 实验步骤固定在代码里：见 `xpost-test` crate 的 `config` / `overview` 模块 rustdoc
+- 实验步骤与全流程：`xpost-test` 的 `overview` / `config` rustdoc；串口 API：`xpost-serial`
 - 正式 `just_tx` 扫速网格：`400…4000` pps（步长 400；ceiling ≈ XDP ~50% 丢包工作点的 hping3 标定）
 
 只跑正式 just_tx：`run = ["just_tx"]`。一次跑全部 formal A/B：`run = ["just_drop", "just_tx"]`。

@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use xpost_serial::{Chip, FileSink, Session};
 
-use crate::util::ts;
+use crate::util::{eprint_line, ts};
 
 /// Don't reprint noisy COUNTERS / `rxcnt` lines more often than this.
 pub const NOISY_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -49,16 +49,20 @@ pub type SharedState = Arc<Mutex<AgentState>>;
 pub fn open(port: Option<&Path>, log: &Path) -> Result<SharedState> {
     let sink = FileSink::create(log, true)
         .with_context(|| format!("create serial log {}", log.display()))?;
-    eprintln!("[{}] xpost-agent serial log {}", ts(), sink.path().display());
+    eprint_line(&format!(
+        "[{}] xpost-agent serial log {}",
+        ts(),
+        sink.path().display()
+    ));
     let session = Session::open(port, Chip::Esp32c3, sink).context("open session")?;
     let root = workspace_root();
     let profiles = load_profiles(&root)?;
-    eprintln!(
+    eprint_line(&format!(
         "[{}] xpost-agent profiles={} from {}",
         ts(),
         profiles.len(),
         root.join("profiles.toml").display()
-    );
+    ));
     for p in &profiles {
         let xdp = match (&p.xdp_name, &p.xdp_elf) {
             (Some(n), Some(e)) => format!(" xdp={n} ({e})"),
@@ -70,7 +74,12 @@ pub fn open(port: Option<&Path>, log: &Path) -> Result<SharedState> {
             .as_ref()
             .map(|a| format!(" build=[{}]", a.join(" ")))
             .unwrap_or_default();
-        eprintln!("[{}]   • {} → {}{xdp}{build}", ts(), p.id, p.bin);
+        eprint_line(&format!(
+            "[{}]   • {} → {}{xdp}{build}",
+            ts(),
+            p.id,
+            p.bin
+        ));
     }
     Ok(Arc::new(Mutex::new(AgentState {
         session,
