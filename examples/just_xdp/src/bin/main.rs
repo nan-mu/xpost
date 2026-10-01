@@ -103,9 +103,9 @@ async fn main(spawner: Spawner) -> ! {
     let (mut rt, report) = XdpRt::init(
         flash,
         &slots,
-        just_drop::mem_map::TABLE,
+        just_xdp::mem_map::TABLE,
         &mut maps,
-        just_drop::mem_map::HELPER_DISPATCHER_BASE,
+        just_xdp::mem_map::HELPER_DISPATCHER_BASE,
     )
     .await
     .expect("XdpRt::init");
@@ -116,7 +116,7 @@ async fn main(spawner: Spawner) -> ! {
     info!(
         "xdp init ok images={} write-bin {:#x} <xdp.elf>",
         n_images,
-        just_drop::mem_map::TABLE.0
+        just_xdp::mem_map::TABLE.0
     );
     for item in &report {
         match item {
