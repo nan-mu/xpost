@@ -64,7 +64,20 @@ Wi-Fi 凭据仍在 `examples/just_xdp/.env`、`examples/just_drop_hal/.env` 与 
 
 TR3000（编译期嵌入 `xpost-test/config/`：`default.toml` + `just_tx.toml` + `just_drop.toml`）：
 
-**正式性能测试永远只跑无参二进制**——不要环境变量、不要子命令、不要 `--formal` / `--path`。改实验：改 TOML → 重编 → scp → `./xpost-test`。
+**用户说「测试 / 跑一下 / 验证」时：默认正式跑，不是冒烟。** 不要加 `--smoke`，不要拆子命令做 smoke gate，
+除非用户明确要冒烟。Mac 侧首选 fish helper（build → scp → ssh 无参跑）：
+
+```bash
+fish -c 'source ~/.config/fish/functions/xpost-test.fish; and xpost-test'
+```
+
+**输出**：stdout/stderr 直接看终端；不要 `> /tmp/…`、`tee`、`tail` 截断日志文件。长跑用
+`block_until_ms: 0` 后台跑，再读终端输出。
+
+**正式性能测试永远只跑无参二进制**——不要环境变量、不要子命令、不要 `--formal` / `--path` /
+`--smoke`。改实验：改 TOML → 重编 → scp → 无参 `./xpost-test`（或上面的 fish helper）。
+
+手工等价步骤（一般不必；优先 fish helper）：
 
 ```bash
 cd xpost-test && cargo build -p test --release
