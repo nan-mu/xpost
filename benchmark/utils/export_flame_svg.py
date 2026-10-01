@@ -32,7 +32,7 @@ from utils.export_speedscope import (
     _parse_report_b64,
     _trace_events_from_payload,
 )
-from utils.experiment.trace_flame import TraceEvent
+from utils.trace_flame import TraceEvent
 
 _ROOT = Path(__file__).resolve().parents[2]
 _OUT = _ROOT / "target"

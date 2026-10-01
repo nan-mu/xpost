@@ -15,7 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from utils.db import read_sql
-from utils.experiment.trace_flame import (
+from utils.trace_flame import (
     HELPER_NAME,
     PROF_SITE,
     TraceEvent,

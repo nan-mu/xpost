@@ -88,18 +88,17 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 
 可选手工 XDP 冷表操作：`cargo xtask agent program|list|clear|request|probe …`。
 
-### PPS / RTT A/B（`benchmark/`）
+### Formal 采集与 `benchmark/` 分析立场
 
-只做**性能**分析。采集由 TR3000 上 `./xpost-test` 写 `formal.*`；笔记本现查，不负责烧录或功能 ACK。
+采集：TR3000 `./xpost-test` → `formal.*`（DDL：`xpost-test/sql/formal.sql`）。`benchmark/`
+**不负责**烧录 / 刺激 / USB；也不再维护「一实验一 notebook」的 Evaluation 路径。
 
-- **`just_tx`**：扫速找 ~5% 丢包工作点后逐包刺激/回包 → `formal.just_tx_config` / `just_tx_data`；`kinds` 含 **c**（RTT）与 **a/g/t**（固定 pps → `just_tx_run` + agg/gauge/trace_summary）。Profile：`just-tx-{c,a,g,t}` / `just-tx-hal-*`
-- **`just_drop`**：`kinds` 含 **c**（满速 → `just_drop_config`/`data`）与 **a/g/t**（固定 pps → `just_drop_run` + agg/gauge/trace_summary）。Profile：`just-drop-{c,a,g,t}` / `just-drop-hal-*`（HAL = Pass XDP + app `drop on`）
-- 笔记：`just_tx.ipynb` / `just_drop.ipynb`；环境与表说明见 `benchmark.utils` 包 docstring
-
-```bash
-cd benchmark && pixi install && pixi run ensure-schema && pixi run kernel
-# 外部常驻 Jupyter Lab；内核选 xpost-benchmark (pixi)
-```
+- **实验**（`just_tx` / `just_drop` / 后续）只是取数窗口；Analysis / Evaluation 应按
+  **指标与 xpost 功能问题**横切（例如 `hal_agg`/`xdp_agg` 同名段在 Pass vs Drop vs TX
+  下是否同事），常跨多个 exam 对比。见 `benchmark/README.md`。
+- 近期：先跑完全部 formal 实验；数据仅作轻量健全性检查。深度作图与章节写作延后，
+  且应对齐 Methodology 的功能分节，而非实验名。
+- `benchmark/backup/` 冻结归档，勿改删。
 
 ## Scope
 
