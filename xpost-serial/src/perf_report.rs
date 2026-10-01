@@ -215,6 +215,9 @@ pub fn format_counters_ok(counters: &BTreeMap<String, i64>) -> String {
     if let Some(v) = counters.get("rx_discarded") {
         parts.push(format!("drop={v}"));
     }
+    if let Some(v) = counters.get("rx_delivered") {
+        parts.push(format!("net_rx={v}"));
+    }
     if let Some(v) = counters.get("tx_failed") {
         parts.push(format!("tx_wifi={v}"));
     }

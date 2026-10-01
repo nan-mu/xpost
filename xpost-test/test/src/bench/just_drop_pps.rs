@@ -536,11 +536,14 @@ fn parse_drop_net_rx(line: &str) -> Result<(u64, u64)> {
     let map = counters::parse_counter_map(line)?;
     let drop = map
         .get("drop")
+        .or_else(|| map.get("rx_discarded"))
+        .or_else(|| map.get("xdp_drop"))
         .and_then(|v| v.as_i64())
-        .context("missing drop=")? as u64;
+        .context("missing drop=/rx_discarded=/xdp_drop=")? as u64;
     let net_rx = map
         .get("net_rx")
+        .or_else(|| map.get("rx_delivered"))
         .and_then(|v| v.as_i64())
-        .context("missing net_rx=")? as u64;
+        .context("missing net_rx=/rx_delivered=")? as u64;
     Ok((drop, net_rx))
 }
