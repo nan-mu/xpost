@@ -159,3 +159,28 @@ App fields like `net_rx` stay in the firmware crate.
 Optional / incomplete: `ext::ringbuf` behind Cargo feature `ringbuf` (currently
 `compile_error!`).
 
+### Function-call invoke (`ext::exec_call`)
+
+Additive `ext` surface (not a second `xdp/ingress` attach). Feature `exec-call`
+exports `xpost::ext::exec_call::invoke(buf)` → reuses `ingress::run` / lease /
+`jalr` IRAM. Network RX remains behind `esp-radio` only.
+
+### `exec_bench` (firmware experiment)
+
+Wi-Fi-free A/B for eBPF execution overhead vs native HAL (HAVM-style compute):
+
+| Arm | Example | Profile | Path |
+|-----|---------|---------|------|
+| eBPF | `examples/exec_bench` | `exec-bench-ebpf` | lease `exec_bench.elf` + `ext::exec_call::invoke` |
+| HAL | `examples/exec_bench_hal` | `exec-bench-hal` | native twins in `exec_bench_common` |
+
+- Shared layout / opcodes: `examples/exec_bench_common` (must match `ebpf/exec_bench.c`)
+- Cold image rebuild: `examples/exec_bench/ebpf/build.sh` → `exec_bench.elf`
+- Primary metric: RV32 **`mcycle`** (UART text). Do **not** use `ext::perf` /
+  `xdp_agg.execution` for Table-1 (µs + esp-radio brackets are the wrong tool).
+- Serial: ready `xpost ready exec_bench`; `bench run <op> <iters>` →
+  `OK bench op=… cycles=… us=… ok=…`
+- Manual flash: agent `FlashProfile` with the profiles above. Host harness wiring
+  is design-only for now — see `examples/exec_bench/HOST_DESIGN.md` (do not edit
+  `xpost-test/**` until that draft is implemented).
+

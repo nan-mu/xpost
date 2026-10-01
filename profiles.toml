@@ -79,6 +79,30 @@ chip = "esp32c3"
 build = ["cargo", "xtask", "just_drop_hal", "build", "--release", "--no-default-features", "--features", "kind-a,kind-g"]
 
 # ---------------------------------------------------------------------------
+# exec_bench — function-call eBPF vs native HAL (no Wi-Fi; mcycle via UART)
+# ---------------------------------------------------------------------------
+
+[[profile]]
+id = "exec-bench-ebpf"
+path = "exec_bench"
+description = "exec_bench eBPF arm: lease exec_bench.elf + ext::exec_call::invoke"
+bin = "examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench"
+partition_table = "examples/exec_bench/partitions.csv"
+chip = "esp32c3"
+xdp_elf = "examples/exec_bench/exec_bench.elf"
+xdp_name = "exec_bench"
+build = ["cargo", "xtask", "exec_bench", "build", "--release"]
+
+[[profile]]
+id = "exec-bench-hal"
+path = "exec_bench_hal"
+description = "exec_bench HAL arm: native twins, same UART bench protocol"
+bin = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal"
+partition_table = "examples/exec_bench_hal/partitions.csv"
+chip = "esp32c3"
+build = ["cargo", "xtask", "exec_bench_hal", "build", "--release"]
+
+# ---------------------------------------------------------------------------
 # Legacy shard aliases (manual flash / smoke; formal uses *-cag / *-t above)
 # ---------------------------------------------------------------------------
 

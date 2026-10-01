@@ -37,6 +37,9 @@ perf-aggregate = ["esp-radio/xdp-observe"]
 perf-gauge = ["esp-radio/xdp-observe"]
 # Trace rings (sole timeline) → `xpost::ext::perf::trace()`.
 perf-trace = ["esp-radio/xdp-observe"]
+# Function-call invoke of a leased XDP image → `xpost::ext::exec_call::invoke`.
+# Additive ext surface; not an ingress attach (esp-radio remains the network path).
+exec-call = []
 
 # Path A defaults for `xpost-build::firmware_codegen` when the firmware crate
 # omits `[package.metadata.xpost]`. Firmware may override map/slots/target;

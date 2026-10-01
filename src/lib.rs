@@ -6,13 +6,15 @@
 //!
 //! Optional performance monitoring: enable `perf-counter` / `perf-aggregate` /
 //! `perf-gauge` / `perf-trace` and read via [`ext::perf`]. Wi-Fi + XDP attach:
-//! enable `esp-radio` and call [`esp_radio::new`].
+//! enable `esp-radio` and call [`esp_radio::new`]. Function-call invoke of a
+//! leased image (no network RX): enable `exec-call` and call
+//! [`ext::exec_call::invoke`].
 //!
 //! Control-plane errors live in [`error`] (one small enum per public entrypoint).
-//! Optional / incomplete feature surface: [`ext`] (`ringbuf`). Board codegen is
-//! **`xpost-build`** (firmware-side). Boot is firmware-first: [`xdp::XdpRt::init`]
-//! scans Flash XDP ELF, creates required maps, then [`xdp::XdpRt::lease`] installs
-//! VMR aliases from image meta.
+//! Optional / incomplete feature surface: [`ext`] (`ringbuf`, `exec_call`). Board
+//! codegen is **`xpost-build`** (firmware-side). Boot is firmware-first:
+//! [`xdp::XdpRt::init`] scans Flash XDP ELF, creates required maps, then
+//! [`xdp::XdpRt::lease`] installs VMR aliases from image meta.
 //!
 //! Current hardware instantiation is ESP32-C3 (RV32IMC). This crate does not claim
 //! architecture-agnostic behavior until additional targets exist. No ESP-IDF, no
@@ -44,8 +46,8 @@
 //!
 //! Soft errors / driver counters: enable `perf-counter` and read
 //! [`ext::perf::counter`]. Wi-Fi+XDP: `esp-radio` feature + [`esp_radio::new`].
-//! Optional `perf-aggregate` / `perf-gauge` / `perf-trace`. Control-plane APIs
-//! return `Result`.
+//! Optional `perf-aggregate` / `perf-gauge` / `perf-trace`. Non-network call:
+//! `exec-call` + [`ext::exec_call::invoke`]. Control-plane APIs return `Result`.
 //!
 //! # Commands (host, repo root)
 //!
@@ -77,7 +79,7 @@ pub mod esp_radio {
 }
 /// Control-plane errors (map + XDP public entrypoints).
 pub mod error;
-/// Feature-gated optional surfaces (`ringbuf`, `ext::perf` backends).
+/// Feature-gated optional surfaces (`ringbuf`, `ext::perf`, `ext::exec_call`).
 pub mod ext;
 /// AOT helper trampoline — not part of the integrator API; see [`helper::helper_dispatcher`].
 #[doc(hidden)]
