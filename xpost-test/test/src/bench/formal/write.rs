@@ -54,7 +54,7 @@ pub async fn insert_just_tx_config(
             INSERT INTO just_tx_config (
                 exam_id, firmware, target_pps, window_s,
                 started_at, stopped_at, sent
-            ) VALUES ($1, $2::firmware, $3, $4, $5, $6, $7)
+            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7)
             RETURNING id
             "#,
             &[
@@ -109,7 +109,7 @@ pub async fn insert_just_drop_config(
             INSERT INTO just_drop_config (
                 exam_id, firmware, target_pps, window_s, sample_interval_ms,
                 started_at, stopped_at, sent
-            ) VALUES ($1, $2::firmware, $3, $4, $5, $6, $7, $8)
+            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8)
             RETURNING id
             "#,
             &[
@@ -181,7 +181,7 @@ async fn write_xdp(
             .execute(
                 r#"
                 INSERT INTO xdp_counter (exam_id, config_id, name, value)
-                VALUES ($1, $2, $3::xdp_counter_name, $4)
+                VALUES ($1, $2, $3::text::xdp_counter_name, $4)
                 ON CONFLICT (config_id, name) DO UPDATE SET value = EXCLUDED.value
                 "#,
                 &[&exam_id, &config_id, name, value],
@@ -201,7 +201,7 @@ async fn write_xdp(
                     exam_id, config_id, name, count, total_ticks, min_ticks, max_ticks,
                     lo, width, buckets
                 ) VALUES (
-                    $1, $2, $3::xdp_agg_name, $4, $5, $6, $7, $8, $9, $10::bigint[]
+                    $1, $2, $3::text::xdp_agg_name, $4, $5, $6, $7, $8, $9, $10::bigint[]
                 )
                 ON CONFLICT (config_id, name) DO UPDATE SET
                     count = EXCLUDED.count,
@@ -234,7 +234,7 @@ async fn write_xdp(
             .execute(
                 r#"
                 INSERT INTO xdp_gauge (exam_id, config_id, name, current, peak)
-                VALUES ($1, $2, $3::xdp_gauge_name, $4, $5)
+                VALUES ($1, $2, $3::text::xdp_gauge_name, $4, $5)
                 ON CONFLICT (config_id, name) DO UPDATE SET
                     current = EXCLUDED.current, peak = EXCLUDED.peak
                 "#,
@@ -260,7 +260,7 @@ async fn write_hal(
             .execute(
                 r#"
                 INSERT INTO hal_counter (exam_id, config_id, name, value)
-                VALUES ($1, $2, $3::hal_counter_name, $4)
+                VALUES ($1, $2, $3::text::hal_counter_name, $4)
                 ON CONFLICT (config_id, name) DO UPDATE SET value = EXCLUDED.value
                 "#,
                 &[&exam_id, &config_id, name, value],
@@ -280,7 +280,7 @@ async fn write_hal(
                     exam_id, config_id, name, count, total_ticks, min_ticks, max_ticks,
                     lo, width, buckets
                 ) VALUES (
-                    $1, $2, $3::hal_agg_name, $4, $5, $6, $7, $8, $9, $10::bigint[]
+                    $1, $2, $3::text::hal_agg_name, $4, $5, $6, $7, $8, $9, $10::bigint[]
                 )
                 ON CONFLICT (config_id, name) DO UPDATE SET
                     count = EXCLUDED.count,
@@ -313,7 +313,7 @@ async fn write_hal(
             .execute(
                 r#"
                 INSERT INTO hal_gauge (exam_id, config_id, name, current, peak)
-                VALUES ($1, $2, $3::hal_gauge_name, $4, $5)
+                VALUES ($1, $2, $3::text::hal_gauge_name, $4, $5)
                 ON CONFLICT (config_id, name) DO UPDATE SET
                     current = EXCLUDED.current, peak = EXCLUDED.peak
                 "#,
@@ -344,7 +344,7 @@ async fn write_trace(
                 r#"
                 INSERT INTO trace_event (
                     exam_id, config_id, seq, kind, t_us, arg0, arg1
-                ) VALUES ($1, $2, $3, $4::perf_trace_kind, $5, $6, $7)
+                ) VALUES ($1, $2, $3, $4::text::perf_trace_kind, $5, $6, $7)
                 ON CONFLICT (config_id, seq) DO NOTHING
                 "#,
                 &[&exam_id, &config_id, &seq_i, &kind, &t_us, &arg0, &arg1],
