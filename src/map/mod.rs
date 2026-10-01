@@ -247,6 +247,19 @@ pub struct MapGuard<'a> {
 }
 
 impl MapGuard<'_> {
+    pub fn name(&self) -> &str {
+        &self.meta.name
+    }
+
+    pub fn map_type(&self) -> MapType {
+        self.meta.map_type
+    }
+
+    /// ARRAY entry count (`max_entries`).
+    pub fn len(&self) -> usize {
+        self.meta.len
+    }
+
     /// Control-plane: read ARRAY element `index` as little-endian u64 (zero-extend).
     pub fn array_get_u64(&self, index: u32) -> Result<u64, MapUseError> {
         if self.meta.map_type != MapType::Array {

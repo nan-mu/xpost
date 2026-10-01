@@ -318,8 +318,10 @@ fn dispatch_serial(line: &str) {
         let on = rest.trim().eq_ignore_ascii_case("on");
         esp_radio::wifi::xdp_tx_set_tsflow(on);
         esp_println::println!("OK tsflow {}", if on { "on" } else { "off" });
-    } else if let Some(rest) = strip_cmd(line, "rxcnt") {
-        print_rxcnt(rest);
+    } else if let Some(rest) = strip_cmd(line, "map dump") {
+        print_map_dump(rest);
+    } else if line.eq_ignore_ascii_case("map dump") {
+        print_map_dump("");
     } else if let Some(rest) = strip_cmd(line, "ack-dest") {
         match parse_ack_dest(rest) {
             Some((ip, port)) => {
@@ -358,31 +360,44 @@ fn print_report() {
     esp_println::println!("ERR report no-perf");
 }
 
-fn print_rxcnt(rest: &str) {
-    let Ok(key) = rest.trim().parse::<u32>() else {
-        esp_println::println!("ERR rxcnt <key>");
+fn print_map_dump(rest: &str) {
+    let name = rest.trim();
+    if name.is_empty() {
+        esp_println::println!("ERR map dump <name>");
         return;
-    };
+    }
     let Some(lock) = xpost::map::MAP_RT.try_get() else {
-        esp_println::println!("ERR rxcnt no-rt");
+        esp_println::println!("ERR map no-rt");
         return;
     };
     let Ok(guard) = lock.try_lock() else {
         esp_println::println!("ERR busy");
         return;
     };
-    let Ok(id) = guard.find("rxcnt") else {
-        esp_println::println!("ERR rxcnt not-found");
+    let Ok(id) = guard.find(name) else {
+        esp_println::println!("ERR map not-found");
         return;
     };
     let Ok(mg) = guard.get(id) else {
-        esp_println::println!("ERR rxcnt get");
+        esp_println::println!("ERR map get");
         return;
     };
-    match mg.array_get_u64(key) {
-        Ok(v) => esp_println::println!("OK rxcnt key={key} value={v}"),
-        Err(_) => esp_println::println!("ERR rxcnt key={key}"),
+    if mg.map_type() != xpost::map::MapType::Array {
+        esp_println::println!("ERR map type");
+        return;
     }
+    let n = mg.len();
+    esp_println::println!("OK map {name} type=array size={n}");
+    for i in 0..n {
+        match mg.array_get_u64(i as u32) {
+            Ok(v) => esp_println::println!("{i} {v}"),
+            Err(_) => {
+                esp_println::println!("ERR map slot={i}");
+                return;
+            }
+        }
+    }
+    esp_println::println!("OK map end");
 }
 
 fn strip_cmd<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {

@@ -245,8 +245,10 @@ fn dispatch_serial(line: &str) {
         xpost::ext::perf::clear_perf();
         NET_RX.store(0, Ordering::Relaxed);
         esp_println::println!("OK perf clear");
-    } else if let Some(rest) = strip_cmd(line, "rxcnt") {
-        print_rxcnt(rest);
+    } else if let Some(rest) = strip_cmd(line, "map dump") {
+        print_map_dump(rest);
+    } else if line.eq_ignore_ascii_case("map dump") {
+        print_map_dump("");
     } else if let Some(rest) = strip_cmd(line, "ack-dest") {
         match parse_ack_dest(rest) {
             Some((ip, port)) => {
@@ -285,17 +287,23 @@ fn print_report() {
     esp_println::println!("ERR report no-perf");
 }
 
-fn print_rxcnt(rest: &str) {
-    let Ok(key) = rest.trim().parse::<u32>() else {
-        esp_println::println!("ERR rxcnt <key>");
-        return;
-    };
-    if key > 255 {
-        esp_println::println!("ERR rxcnt key={key}");
+fn print_map_dump(rest: &str) {
+    let name = rest.trim();
+    if name.is_empty() {
+        esp_println::println!("ERR map dump <name>");
         return;
     }
-    let v = RXCNT[key as usize].load(Ordering::Relaxed);
-    esp_println::println!("OK rxcnt key={key} value={v}");
+    if !name.eq_ignore_ascii_case("rxcnt") {
+        esp_println::println!("ERR map not-found");
+        return;
+    }
+    const N: usize = 256;
+    esp_println::println!("OK map rxcnt type=array size={N}");
+    for i in 0..N {
+        let v = RXCNT[i].load(Ordering::Relaxed);
+        esp_println::println!("{i} {v}");
+    }
+    esp_println::println!("OK map end");
 }
 
 fn strip_cmd<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {

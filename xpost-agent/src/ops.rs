@@ -361,7 +361,13 @@ pub fn request(state: &Mutex<AgentState>, cmd: &str, peer: &str) -> Result<Strin
         bail!("empty request");
     }
     let is_report = cmd.eq_ignore_ascii_case("report") || cmd.eq_ignore_ascii_case("report perf");
-    let noisy = cmd.starts_with("rxcnt") || is_report;
+    let is_map_dump = cmd.len() >= 8 && cmd.as_bytes()[..8].eq_ignore_ascii_case(b"map dump");
+    let noisy = is_map_dump || is_report;
+    let timeout = if is_map_dump {
+        Duration::from_secs(30)
+    } else {
+        Duration::from_secs(5)
+    };
     with_log(peer, "Request", &format!("`{cmd}`"), noisy, state, || {
         let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
         if is_report {
@@ -373,10 +379,22 @@ pub fn request(state: &Mutex<AgentState>, cmd: &str, peer: &str) -> Result<Strin
             Ok(format!("{hdr} b64={b64}"))
         } else {
             g.session
-                .request_timeout(cmd, Duration::from_secs(5))
+                .request_timeout(cmd, timeout)
                 .with_context(|| format!("request `{cmd}`"))
         }
     })
+}
+
+/// Dump a named ARRAY map via DUT `map dump <name>`; returns the multi-line reply.
+pub fn map_dump(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("empty map name");
+    }
+    if name.split_whitespace().nth(1).is_some() {
+        bail!("map name must be a single token");
+    }
+    request(state, &format!("map dump {name}"), peer)
 }
 
 fn base64_encode(bytes: &[u8]) -> String {

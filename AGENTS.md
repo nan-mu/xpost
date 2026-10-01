@@ -28,6 +28,8 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
   agent HTTP; does not hold the USB session while the agent is running.
 - **`xpost-agent/`**: CLI + `--listen` HTTP `/v1/*` and MCP `/mcp` on one port
   (shared USB). Dispatch: `cargo xtask agent …`.
+  Map read: DUT `map dump <name>` (multi-line → `OK map end`); HTTP
+  `GET /v1/map/{name}` / MCP `map_dump`. Do not use legacy `rxcnt <key>`.
 - **`xpost-serial`**: library only — **API** for `Session` / `install_xdp` /
   `program` / `request` / `request_report` / `Sink` (see that crate’s rustdoc).
   Cold install is **by XDP name**; do not pass raw cold addresses on the normal

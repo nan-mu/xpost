@@ -22,7 +22,7 @@ const STIM_PORT: u16 = 8080;
 const STIM_N: u32 = 200;
 /// Quiet window to estimate ambient `drop` rate before asserting stim signal.
 const QUIET: Duration = Duration::from_secs(2);
-/// Drain after fire-and-forget burst before reading counters / rxcnt.
+/// Drain after fire-and-forget burst before reading counters / map dump.
 const BURST_DRAIN: Duration = Duration::from_millis(500);
 /// Allow a few ambient frames in counter deltas.
 const SLACK: u64 = 5;
@@ -181,7 +181,7 @@ async fn phase_drop(
 ) -> Result<(bool, Counters, Counters, u32, u64)> {
     let ambient = quiet_drop_delta(agent).await?;
     let before = parse_counters(&agent.counters().await.context("counters before drop")?)?;
-    let rx_before = parse_rxcnt(&agent.request(&format!("rxcnt {RXCNT_UDP}")).await?)?;
+    let rx_before = agent.map_slot("rxcnt", RXCNT_UDP).await?;
 
     let t0 = Instant::now();
     let sent = agent
@@ -204,7 +204,7 @@ async fn phase_drop(
     }
 
     let after = parse_counters(&agent.counters().await.context("counters after drop")?)?;
-    let rx_after = parse_rxcnt(&agent.request(&format!("rxcnt {RXCNT_UDP}")).await?)?;
+    let rx_after = agent.map_slot("rxcnt", RXCNT_UDP).await?;
     let drop_d = after.drop.saturating_sub(before.drop);
     let rx_d = rx_after.saturating_sub(rx_before);
     // Ambient extrapolation over the burst window (plus sample probes).
@@ -319,17 +319,6 @@ fn parse_counters(line: &str) -> Result<Counters> {
         drop: drop.context("missing drop=")?,
         net_rx: net_rx.context("missing net_rx=")?,
     })
-}
-
-fn parse_rxcnt(line: &str) -> Result<u64> {
-    // OK rxcnt key=17 value=N
-    let line = line.trim();
-    for part in line.split_whitespace() {
-        if let Some(v) = part.strip_prefix("value=") {
-            return v.parse().context("rxcnt value=");
-        }
-    }
-    bail!("rxcnt reply missing value=: {line}");
 }
 
 #[allow(clippy::too_many_arguments)]

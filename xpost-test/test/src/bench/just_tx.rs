@@ -453,7 +453,7 @@ async fn probe_window(
         harness.reset_state().await;
     }
 
-    let before = parse_rxcnt(&agent.request(&format!("rxcnt {IPPROTO_UDP}")).await?)?;
+    let before = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
     let _ = agent.perf_clear().await;
     let counters_before = counters::fetch_counters(agent).await?;
     harness.reset_state().await;
@@ -551,7 +551,7 @@ async fn probe_window(
     }
     ui.check_ok(&format!("{ok_n}/{sent_n} ok"));
 
-    let after = parse_rxcnt(&agent.request(&format!("rxcnt {IPPROTO_UDP}")).await?)?;
+    let after = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
     let counters_after = counters::fetch_counters(agent).await?;
     let sent = seqs.len() as u64;
     let loss = if sent == 0 {
@@ -605,7 +605,7 @@ async fn wait_rx_ready(
         cfg.target.stim_sport,
     )?);
     for i in 0..RX_READY_TRIES {
-        let before = parse_rxcnt(&agent.request(&format!("rxcnt {IPPROTO_UDP}")).await?)?;
+        let before = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
         let n = RX_READY_BURST;
         let raw_c = raw.clone();
         tokio::task::spawn_blocking(move || {
@@ -616,7 +616,7 @@ async fn wait_rx_ready(
         .await
         .context("RX ready burst")?;
         tokio::time::sleep(Duration::from_millis(400)).await;
-        let after = parse_rxcnt(&agent.request(&format!("rxcnt {IPPROTO_UDP}")).await?)?;
+        let after = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
         if after > before {
             ui.check_note(&format!("rxcnt {before}→{after}"));
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -641,20 +641,4 @@ fn gen_lan_ip(esp: Ipv4Addr, avoid: &[Ipv4Addr]) -> Ipv4Addr {
         }
     }
     Ipv4Addr::new(o[0], o[1], o[2], if o[3] == 200 { 201 } else { 200 })
-}
-
-
-fn parse_rxcnt(line: &str) -> Result<u64> {
-    let line = line.trim();
-    let body = line
-        .strip_prefix("OK rxcnt ")
-        .or_else(|| line.strip_prefix("OK RXCNT "))
-        .context("missing OK rxcnt")?;
-    let mut value = None;
-    for part in body.split_whitespace() {
-        if let Some(v) = part.strip_prefix("value=") {
-            value = Some(v.parse().context("value=")?);
-        }
-    }
-    value.context("missing value=")
 }

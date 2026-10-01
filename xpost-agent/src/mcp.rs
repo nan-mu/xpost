@@ -26,6 +26,12 @@ struct RequestArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct MapDumpArgs {
+    /// BPF / firmware map name (e.g. `rxcnt`).
+    name: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ProbeArgs {
     esp: String,
     #[serde(default = "default_probe_port")]
@@ -121,7 +127,7 @@ impl XpostMcp {
             .await
     }
 
-    #[tool(description = "Send one App-mode serial command (e.g. ping, rxcnt 17, drop on)")]
+    #[tool(description = "Send one App-mode serial command (e.g. ping, map dump rxcnt, drop on)")]
     async fn request(
         &self,
         Parameters(args): Parameters<RequestArgs>,
@@ -129,6 +135,17 @@ impl XpostMcp {
         let shared = self.shared.clone();
         let cmd = args.cmd;
         self.run_op(move || ops::request(shared.as_ref(), &cmd, "mcp"))
+            .await
+    }
+
+    #[tool(description = "Dump a named ARRAY map via DUT `map dump <name>`")]
+    async fn map_dump(
+        &self,
+        Parameters(args): Parameters<MapDumpArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let shared = self.shared.clone();
+        let name = args.name;
+        self.run_op(move || ops::map_dump(shared.as_ref(), &name, "mcp"))
             .await
     }
 

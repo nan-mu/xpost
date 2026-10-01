@@ -384,6 +384,8 @@ impl<S: Sink> Session<S> {
     }
 
     /// Write one command line; return first `OK `/`ERR ` reply. Interleaved log stays in transcript.
+    ///
+    /// `map dump <name>` is multi-line: collect until `OK map end` (or a single `ERR ` line).
     pub fn request(&mut self, cmd: &str) -> Result<String> {
         self.request_timeout(cmd, DEFAULT_REQUEST_TIMEOUT)
     }
@@ -398,6 +400,9 @@ impl<S: Sink> Session<S> {
         if line.eq_ignore_ascii_case("report") || line.eq_ignore_ascii_case("report perf") {
             let (hdr, _payload) = self.request_report_timeout(timeout)?;
             return Ok(hdr);
+        }
+        if is_map_dump_cmd(line) {
+            return self.request_map_dump(line, timeout);
         }
         self.emit_io(IoRole::CmdTx, line.to_string());
         {
@@ -435,6 +440,68 @@ impl<S: Sink> Session<S> {
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     self.emit_error("request", format!("timeout waiting for OK/ERR to `{line}`"));
+                    return Err(Error::RequestTimeout(timeout));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Error::Msg("app reader disconnected".into()));
+                }
+            }
+        }
+    }
+
+    /// Collect `map dump` reply: header + `slot value` lines until `OK map end`.
+    fn request_map_dump(&mut self, cmd: &str, timeout: Duration) -> Result<String> {
+        self.emit_io(IoRole::CmdTx, cmd.to_string());
+        {
+            let app = self.app.as_mut().ok_or(Error::Closed)?;
+            let mut w = app.writer.lock().map_err(|_| Error::Msg("writer lock".into()))?;
+            w.write_all(cmd.as_bytes())?;
+            w.write_all(b"\n")?;
+            w.flush()?;
+        }
+        let mut out: Vec<String> = Vec::new();
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.emit_error(
+                    "request",
+                    format!("timeout waiting for OK map end to `{cmd}`"),
+                );
+                return Err(Error::RequestTimeout(timeout));
+            }
+            let app = self.app.as_mut().ok_or(Error::Closed)?;
+            match app.rx.recv_timeout(remaining) {
+                Ok(AppRx::Line(rx)) => {
+                    if rx.starts_with("ERR ") {
+                        self.emit_io(IoRole::CmdRx, rx.clone());
+                        return Ok(rx);
+                    }
+                    if is_map_dump_end(&rx) {
+                        out.push(rx.clone());
+                        self.emit_io(IoRole::CmdRx, rx);
+                        return Ok(out.join("\n"));
+                    }
+                    if rx.starts_with("OK map ") || is_map_dump_entry(&rx) {
+                        out.push(rx.clone());
+                        self.emit_io(IoRole::CmdRx, rx);
+                        continue;
+                    }
+                    self.emit_io(IoRole::UartRx, rx);
+                }
+                Ok(AppRx::Blob(_)) => {
+                    self.emit_error("request", "unexpected binary blob".into());
+                }
+                Ok(AppRx::Died(msg)) => {
+                    self.emit_error("request", msg.clone());
+                    self.stop_app();
+                    return Err(Error::Msg(msg));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.emit_error(
+                        "request",
+                        format!("timeout waiting for OK map end to `{cmd}`"),
+                    );
                     return Err(Error::RequestTimeout(timeout));
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -1061,9 +1128,41 @@ mod tests {
         assert!(!super::is_reply_line("INFO boot"));
         assert!(!super::is_reply_line("ok lower"));
     }
+
+    #[test]
+    fn map_dump_helpers() {
+        assert!(super::is_map_dump_cmd("map dump rxcnt"));
+        assert!(super::is_map_dump_cmd("MAP DUMP counter"));
+        assert!(!super::is_map_dump_cmd("map"));
+        assert!(super::is_map_dump_end("OK map end"));
+        assert!(super::is_map_dump_entry("0 10231"));
+        assert!(super::is_map_dump_entry("255 0"));
+        assert!(!super::is_map_dump_entry("OK map rxcnt type=array size=256"));
+    }
 }
 
-/// Line that completes [`Session::request`].
+/// Line that completes a single-line [`Session::request`].
 pub(crate) fn is_reply_line(line: &str) -> bool {
     line.starts_with("OK ") || line.starts_with("ERR ")
+}
+
+fn is_map_dump_cmd(cmd: &str) -> bool {
+    let c = cmd.trim();
+    c.len() >= 8 && c.as_bytes()[..8].eq_ignore_ascii_case(b"map dump")
+}
+
+fn is_map_dump_end(line: &str) -> bool {
+    line.trim().eq_ignore_ascii_case("OK map end")
+}
+
+/// `slot value` body line of a map dump (decimal slot, then value).
+fn is_map_dump_entry(line: &str) -> bool {
+    let mut parts = line.split_whitespace();
+    let Some(slot) = parts.next() else {
+        return false;
+    };
+    let Some(val) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none() && slot.parse::<u32>().is_ok() && val.parse::<u64>().is_ok()
 }

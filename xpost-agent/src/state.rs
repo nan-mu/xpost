@@ -11,7 +11,7 @@ use xpost_serial::{Chip, FileSink, Session};
 
 use crate::util::{eprint_line, ts};
 
-/// Don't reprint noisy COUNTERS / `rxcnt` lines more often than this.
+/// Don't reprint noisy COUNTERS / `map dump` lines more often than this.
 pub const NOISY_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]

@@ -89,10 +89,21 @@ impl AgentClient {
         Ok(sent)
     }
 
-    /// One serial App-mode request (e.g. `rxcnt 17`).
+    /// One serial App-mode request (e.g. `map dump rxcnt`, `drop on`).
     pub async fn request(&self, cmd: &str) -> Result<String> {
         let body = serde_json::json!({ "cmd": cmd });
         self.post_json("/v1/request", &body).await
+    }
+
+    /// Multi-line ARRAY dump via DUT `map dump <name>`.
+    pub async fn map_dump(&self, name: &str) -> Result<String> {
+        self.request(&format!("map dump {name}")).await
+    }
+
+    /// Read one ARRAY slot from a `map dump` reply.
+    pub async fn map_slot(&self, name: &str, slot: u32) -> Result<u64> {
+        let dump = self.map_dump(name).await?;
+        parse_map_slot(&dump, slot)
     }
 
     /// Host-timestamped UART/cmd transcript for `[since_unix_ms, until_unix_ms]`.
@@ -157,4 +168,30 @@ fn normalize_base(endpoint: &str) -> String {
     } else {
         format!("http://{e}")
     }
+}
+
+/// Parse `slot value` from a multi-line `map dump` reply.
+pub fn parse_map_slot(dump: &str, slot: u32) -> Result<u64> {
+    let dump = dump.trim();
+    if dump.starts_with("ERR ") {
+        bail!("map dump error: {dump}");
+    }
+    for line in dump.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(s) = parts.next() else {
+            continue;
+        };
+        let Some(v) = parts.next() else {
+            continue;
+        };
+        if parts.next().is_some() {
+            continue;
+        }
+        if s.parse::<u32>().ok() == Some(slot) {
+            return v
+                .parse()
+                .with_context(|| format!("map dump slot {slot} value"));
+        }
+    }
+    bail!("map dump missing slot {slot}");
 }

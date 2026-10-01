@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Router, serve};
@@ -47,6 +47,23 @@ impl ApiResp {
             message: e.to_string(),
         }
     }
+}
+
+#[derive(Serialize)]
+struct MapEntryJson {
+    slot: u32,
+    value: u64,
+}
+
+#[derive(Serialize)]
+struct MapDumpResp {
+    ok: bool,
+    name: String,
+    #[serde(rename = "type")]
+    map_type: String,
+    entries: Vec<MapEntryJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -128,6 +145,7 @@ async fn serve_async(addr: &str, port: Option<&Path>, log: &Path) -> Result<()> 
         .route("/counters", post(v1_counters))
         .route("/perf_clear", post(v1_perf_clear))
         .route("/request", post(v1_request))
+        .route("/map/{name}", get(v1_map))
         .route("/serial_window", post(v1_serial_window))
         .route("/probe", post(v1_probe))
         .route("/probe_burst", post(v1_probe_burst))
@@ -216,6 +234,104 @@ async fn v1_request(State(st): State<AppState>, Json(body): Json<RequestBody>) -
     let shared = st.shared.clone();
     let cmd = body.cmd;
     run_blocking(move || ops::request(shared.as_ref(), &cmd, "http")).await
+}
+
+async fn v1_map(
+    State(st): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> (StatusCode, Json<MapDumpResp>) {
+    let shared = st.shared.clone();
+    let name_for_err = name.clone();
+    match tokio::task::spawn_blocking(move || ops::map_dump(shared.as_ref(), &name, "http")).await
+    {
+        Ok(Ok(raw)) => match parse_map_dump_json(&raw) {
+            Ok(resp) => (StatusCode::OK, Json(resp)),
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(MapDumpResp {
+                    ok: false,
+                    name: name_for_err,
+                    map_type: String::new(),
+                    entries: Vec::new(),
+                    message: Some(format!("{e:#}")),
+                }),
+            ),
+        },
+        Ok(Err(e)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(MapDumpResp {
+                ok: false,
+                name: name_for_err,
+                map_type: String::new(),
+                entries: Vec::new(),
+                message: Some(format!("{e:#}")),
+            }),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(MapDumpResp {
+                ok: false,
+                name: name_for_err,
+                map_type: String::new(),
+                entries: Vec::new(),
+                message: Some(format!("join: {e}")),
+            }),
+        ),
+    }
+}
+
+fn parse_map_dump_json(raw: &str) -> anyhow::Result<MapDumpResp> {
+    let raw = raw.trim();
+    if raw.starts_with("ERR ") {
+        anyhow::bail!("{raw}");
+    }
+    let mut lines = raw.lines();
+    let header = lines.next().context("empty map dump")?;
+    // OK map <name> type=array size=N
+    let rest = header
+        .strip_prefix("OK map ")
+        .with_context(|| format!("bad map dump header: {header}"))?;
+    let mut parts = rest.split_whitespace();
+    let name = parts.next().context("map name")?.to_string();
+    let mut map_type = String::new();
+    let mut entries = Vec::new();
+    for part in parts {
+        if let Some(t) = part.strip_prefix("type=") {
+            map_type = t.to_string();
+        }
+    }
+    for line in lines {
+        if line.eq_ignore_ascii_case("OK map end") {
+            break;
+        }
+        let mut p = line.split_whitespace();
+        let Some(slot_s) = p.next() else {
+            continue;
+        };
+        let Some(val_s) = p.next() else {
+            continue;
+        };
+        if p.next().is_some() {
+            continue;
+        }
+        let Ok(slot) = slot_s.parse::<u32>() else {
+            continue;
+        };
+        let Ok(value) = val_s.parse::<u64>() else {
+            continue;
+        };
+        entries.push(MapEntryJson { slot, value });
+    }
+    if map_type.is_empty() {
+        map_type = "array".into();
+    }
+    Ok(MapDumpResp {
+        ok: true,
+        name,
+        map_type,
+        entries,
+        message: None,
+    })
 }
 
 async fn v1_serial_window(
