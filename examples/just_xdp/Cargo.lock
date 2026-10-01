@@ -1378,7 +1378,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "just_drop"
+name = "just_xdp"
 version = "0.1.0"
 dependencies = [
  "critical-section",
