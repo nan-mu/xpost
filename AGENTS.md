@@ -81,10 +81,11 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 - 调试火焰图 Trace（**火焰轨**）：`run = ["dev"]`（硬编码：XDP × `just-tx-t` × 100 pps × 2s × 1
   轮；**无 DB**；report → `/tmp/xpost-dev-flame.report`；Mac scp 到
   `target/dev-flame.report` 后 `pixi run python -m utils.export_flame_svg`）
-- Agent HTTP：`/health`、`/v1/*`（含 `/v1/perf_clear`、`/v1/serial_window`）、`/mcp`
+- Agent HTTP：`/health`、`/v1/*`（含 `/v1/perf_clear`、`/v1/serial_window`、`/v1/map/{name}`）、`/mcp`
 - 实验步骤与全流程：`xpost-test` 的 `overview` / `config` rustdoc；串口 API：`xpost-serial`
 - 正式 `just_tx` 扫速网格：`400…4000` pps（步长 400；ceiling ≈ XDP ~50% 丢包工作点的 hping3 标定）
-- Schema：`xpost-test/sql/formal.sql`；显式清空：`./xpost-test formal-clear`
+- 正式 `just_drop`：同网格；`map dump counter`（IPv4 src 末字节分桶）→ `just_drop_data`
+- Schema：`xpost-test/sql/formal.sql` + `just_drop.sql` / `just_tx.sql`；显式清空：`./xpost-test formal-clear`
 
 只跑正式 just_tx：`run = ["just_tx"]`。一次跑全部 formal A/B：`run = ["just_drop", "just_tx"]`。
 

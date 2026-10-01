@@ -32,7 +32,7 @@
 //!
 //! | `run` | Role | Tables |
 //! |-------|------|--------|
-//! | `just_drop` | `xdp_cag`/`hal` full-rate+800pps + `xdp_t` Trace | `exam` + `just_drop_*` + perf |
+//! | `just_drop` | `xdp_cag`/`hal` PPS grid + Array Map dump + `xdp_t` Trace | `exam` + `just_drop_*` + perf |
 //! | `just_tx` | `xdp_cag`/`hal` full pps grid RTT + `xdp_t` Trace | `exam` + `just_tx_*` + perf |
 //! | `dev` | Flame Trace only: XDP × 100 pps × 2s × 1; report file; **no DB** | — |
 //!
@@ -84,7 +84,7 @@
 //! ## `firewall_echo` / `xdp_forward_echo` / `fw_hash_test` / `hot_load_ctrl`
 //!
 //! See historical pass criteria in this module’s remainder (suite assets under
-//! `test/assets/`, schemas under `sql/`). Prefer formal `just_*` for performance.
+//! `test/assets/`, DDL in `sql/formal.sql`). Prefer formal `just_*` for performance.
 //!
 //! ## Router deps (TR3000)
 //!

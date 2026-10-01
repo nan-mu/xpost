@@ -1,29 +1,36 @@
-//! `just_drop` — formal exam: XDP/HAL CAG (full-rate + 800pps) + XDP Trace one-shot.
+//! Formal `just_drop` — Array Map vs native array overhead (PPS grid).
 //!
-//! Formal `window_s=30s`. No open-run DROP/TRUNCATE; decode report → ORM (no report_raw).
+//! Arms: `xdp_cag` + `hal` over JustTx-aligned PPS grid, then `xdp_t` Trace.
+//! Host stim uses deterministic `source_seed` → IPv4 last-octet buckets into
+//! DUT map/`COUNTER` (`map dump counter`). Correctness is analysis-side
+//! (slack WARN); empty map hard-fails.
 
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
-use rand::RngExt;
 
 use crate::agent::AgentClient;
-use crate::bench::counters;
 use crate::bench::formal::{self, Firmware};
 use crate::bench::pg_dsn::PgOpts;
 use crate::bench::status::{self, BudgetEta, READY_BUDGET, RoundUi};
-use crate::bench::udp_blast;
 use crate::config::FileConfig;
 use crate::raw_tx::{RawTx, iface_mac};
 
 const STIM_PORT: u16 = 8080;
 const FLASH_IDLE: Duration = Duration::from_secs(300);
 const WINDOW_S: Duration = Duration::from_secs(30);
-const WINDOW_SMOKE: Duration = Duration::from_secs(10);
+const WINDOW_SMOKE: Duration = Duration::from_secs(4);
 const DRAIN_MS: u64 = 200;
-const FIXED_PPS: f64 = 800.0;
+const MAP_NAME: &str = "counter";
+const SOURCE_SEED_DEFAULT: i64 = 0x0A11_CE00;
+/// Absolute slot slack for Wi-Fi loss (WARN only).
+const SLOT_SLACK: u64 = 64;
+
+const SWEEP_PPS: &[f64] = &[
+    400.0, 800.0, 1200.0, 1600.0, 2000.0, 2400.0, 2800.0, 3200.0, 3600.0, 4000.0,
+];
+const SWEEP_SMOKE_PPS: &[f64] = &[400.0, 1200.0, 2400.0, 4000.0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PpsPath {
@@ -46,19 +53,6 @@ impl PpsPath {
             Self::Hal => "hal",
         }
     }
-
-    pub fn drop_site(self) -> &'static str {
-        match self {
-            Self::Xdp => "xdp",
-            Self::Hal => "app",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct Sample {
-    t: SystemTime,
-    drop: u64,
 }
 
 pub struct JustDropPpsOpts {
@@ -87,6 +81,25 @@ fn path_for(fw: Firmware) -> PpsPath {
     }
 }
 
+/// Deterministic stim src IP: last octet cycles with seed; avoids DUT own octet.
+pub fn stim_src_ip(seed: i64, pkt_i: u64, esp: Ipv4Addr) -> Ipv4Addr {
+    let o = esp.octets();
+    let mut octet = ((seed as u64).wrapping_add(pkt_i) % 256) as u8;
+    if octet == o[3] {
+        octet = octet.wrapping_add(1);
+    }
+    Ipv4Addr::new(o[0], o[1], o[2], octet)
+}
+
+pub fn expected_buckets(seed: i64, sent: u64, esp: Ipv4Addr) -> [u64; 256] {
+    let mut out = [0u64; 256];
+    for i in 0..sent {
+        let octet = stim_src_ip(seed, i, esp).octets()[3] as usize;
+        out[octet] = out[octet].saturating_add(1);
+    }
+    out
+}
+
 pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Result<()> {
     let endpoint = cfg
         .agent
@@ -99,7 +112,10 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         .window_secs
         .map(Duration::from_secs)
         .unwrap_or(if opts.smoke { WINDOW_SMOKE } else { WINDOW_S });
-    let sample = Duration::from_millis(opts.sample_interval_ms.max(1));
+    let grid: &[f64] = if opts.smoke { SWEEP_SMOKE_PPS } else { SWEEP_PPS };
+    let source_seed = SOURCE_SEED_DEFAULT;
+    let _ = opts.sample_interval_ms;
+    let _ = opts.rounds;
 
     let mut arms: Vec<Firmware> = Vec::new();
     if opts.paths.is_empty() {
@@ -115,10 +131,10 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
     arms.dedup();
 
     RoundUi::banner(&format!(
-        "just_drop arms={:?} +xdp_t window={}s sample={}ms formal={formal} clear={} agent={endpoint} esp={esp_s} pg={}",
+        "just_drop array arms={:?} +xdp_t grid={:?} window={}s seed={source_seed:#x} formal={formal} clear={} agent={endpoint} esp={esp_s} pg={}",
         arms.iter().map(|a| a.as_db()).collect::<Vec<_>>(),
+        grid.iter().map(|p| *p as u32).collect::<Vec<_>>(),
         window.as_secs(),
-        sample.as_millis(),
         opts.formal_clear,
         !opts.no_pg
     ));
@@ -136,8 +152,10 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
 
     let mut eta = BudgetEta::new();
     eta.add_flashes(arms.len() + 1);
-    // full-rate + 800pps per arm
-    eta.add_fixed((READY_BUDGET + window * 2).saturating_mul(arms.len() as u32));
+    eta.add_fixed(
+        (READY_BUDGET + window)
+            .saturating_mul((arms.len() * grid.len()) as u32),
+    );
     eta.add_fixed(READY_BUDGET + Duration::from_secs(5));
 
     let ui = RoundUi::new();
@@ -150,88 +168,76 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         None
     };
 
+    let esp = cfg.target.esp_ip;
+
     for fw in &arms {
         let profile = profile_for(*fw);
         let path = path_for(*fw);
         flash_and_arm(cfg, &agent, &ui, &mut eta, path, profile).await?;
 
-        // Full-rate window with drop sampling.
-        agent.perf_clear().await.context("perf_clear")?;
-        let counters_before = counters::fetch_counters(&agent).await?;
-        let started_at = SystemTime::now();
-        let (samples, drop_delta, net_rx_delta, host_pps, sent) =
-            measure_counter_round(cfg, &agent, &ui, &eta, path, window, sample).await?;
-        let stopped_at = SystemTime::now();
-        let _ = counters::counters_delta(&counters_before, &counters::fetch_counters(&agent).await?);
-        ui.permanent(&format!(
-            "    {}/full: dropΔ={drop_delta} net_rxΔ={net_rx_delta} host_pps={host_pps:.0} sent={sent}",
-            fw.as_db()
-        ));
-        if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
-            ui.check_start("写入 full-rate");
-            let cfg_id = formal::insert_just_drop_config(
-                client,
-                exam_id,
-                *fw,
-                host_pps,
-                window.as_secs_f64(),
-                0,
-                started_at,
-                stopped_at,
-                sent as i64,
-            )
-            .await?;
-            let _ = samples; // legacy drop time-series removed; Array Map dump lands in runner rewrite
-            let msg = agent.request("report").await.context("report")?;
-            let decoded = formal::decode_report_msg(&msg)?;
-            formal::write_perf(
-                client,
-                exam_id,
-                cfg_id,
-                *fw,
-                formal::PerfExperiment::JustDrop,
-                &decoded,
-            )
-            .await?;
-            ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
-        }
+        for &pps in grid {
+            agent.perf_clear().await.context("perf_clear")?;
+            // Clear array state via remount is flash-only; soft-clear not available —
+            // dump before window and subtract for correctness, or rely on fresh flash.
+            // Per-window: flash once per arm, so counters accumulate across pps.
+            // Plan wants per-window state: re-flash is expensive; instead clear by
+            // recording before snapshot and storing delta in just_drop_data.
+            let before = dump_slots(&agent).await.context("map dump before")?;
+            let started_at = SystemTime::now();
+            let sent = paced_multi_src(cfg, &ui, &eta, path, window, pps, source_seed).await?;
+            tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
+            let stopped_at = SystemTime::now();
+            let after = dump_slots(&agent).await.context("map dump after")?;
+            let delta = slot_delta(&before, &after);
+            let sum: u64 = delta.iter().map(|&v| v as u64).sum();
+            if sum == 0 {
+                bail!(
+                    "{} @{pps}: map dump counter sumΔ=0 after sent={sent}",
+                    fw.as_db()
+                );
+            }
+            warn_correctness(source_seed, sent, esp, &delta, fw.as_db(), pps);
 
-        // Fixed 800 pps window.
-        agent.perf_clear().await.context("perf_clear")?;
-        let started_at = SystemTime::now();
-        let sent = paced_blast(cfg, &ui, &eta, path, window, FIXED_PPS).await?;
-        tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
-        let stopped_at = SystemTime::now();
-        ui.permanent(&format!(
-            "    {}/800pps: sent={sent}",
-            fw.as_db()
-        ));
-        if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
-            ui.check_start("写入 800pps");
-            let cfg_id = formal::insert_just_drop_config(
-                client,
-                exam_id,
-                *fw,
-                FIXED_PPS,
-                window.as_secs_f64(),
-                0,
-                started_at,
-                stopped_at,
-                sent as i64,
-            )
-            .await?;
-            let msg = agent.request("report").await.context("report")?;
-            let decoded = formal::decode_report_msg(&msg)?;
-            formal::write_perf(
-                client,
-                exam_id,
-                cfg_id,
-                *fw,
-                formal::PerfExperiment::JustDrop,
-                &decoded,
-            )
-            .await?;
-            ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
+            ui.permanent(&format!(
+                "    {} @{pps:.0}: sent={sent} mapΔ={sum}",
+                fw.as_db()
+            ));
+
+            if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
+                ui.check_start(&format!("写入 @{pps:.0}"));
+                let cfg_id = formal::insert_just_drop_config(
+                    client,
+                    exam_id,
+                    *fw,
+                    pps,
+                    window.as_secs_f64(),
+                    source_seed,
+                    started_at,
+                    stopped_at,
+                    sent as i64,
+                )
+                .await?;
+                let rows: Vec<(i32, i64)> = delta
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, &v)| (slot as i32, v))
+                    .collect();
+                formal::insert_just_drop_data(client, cfg_id, &rows).await?;
+                let msg = agent.request("report").await.context("report")?;
+                let decoded = formal::decode_report_msg(&msg)?;
+                formal::write_perf(
+                    client,
+                    exam_id,
+                    cfg_id,
+                    *fw,
+                    formal::PerfExperiment::JustDrop,
+                    &decoded,
+                )
+                .await?;
+                ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
+            }
+            eta.consume_fixed(window);
+            ui.set_eta(&eta.fmt());
         }
     }
 
@@ -242,7 +248,9 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         flash_and_arm(cfg, &agent, &ui, &mut eta, PpsPath::Xdp, profile).await?;
         agent.perf_clear().await.context("perf_clear")?;
         let started_at = SystemTime::now();
-        let sent = paced_blast(cfg, &ui, &eta, PpsPath::Xdp, Duration::from_millis(50), 20.0).await?;
+        let sent =
+            paced_multi_src(cfg, &ui, &eta, PpsPath::Xdp, Duration::from_millis(50), 20.0, source_seed)
+                .await?;
         tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
         let stopped_at = SystemTime::now();
         if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
@@ -253,7 +261,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
                 fw,
                 1.0,
                 0.0,
-                0,
+                source_seed,
                 started_at,
                 stopped_at,
                 sent.max(1) as i64,
@@ -278,8 +286,87 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
     if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
         formal::stop_exam(client, exam_id).await?;
     }
-    RoundUi::banner(&format!("just_drop done arms={}", arms.len()));
+    RoundUi::banner(&format!(
+        "just_drop done arms={} grid={}",
+        arms.len(),
+        grid.len()
+    ));
     Ok(())
+}
+
+fn warn_correctness(
+    seed: i64,
+    sent: u64,
+    esp: Ipv4Addr,
+    actual_delta: &[i64; 256],
+    arm: &str,
+    pps: f64,
+) {
+    let expected = expected_buckets(seed, sent, esp);
+    let mut bad = 0u32;
+    for (slot, &got) in actual_delta.iter().enumerate() {
+        let exp = expected[slot] as i64;
+        let diff = (got - exp).unsigned_abs();
+        if diff > SLOT_SLACK {
+            bad += 1;
+        }
+    }
+    if bad > 0 {
+        eprintln!(
+            "    WARN: {arm} @{pps:.0} correctness {bad}/256 slots beyond slack={SLOT_SLACK} (Wi-Fi loss expected at high pps)"
+        );
+    }
+}
+
+async fn dump_slots(agent: &AgentClient) -> Result<[i64; 256]> {
+    let raw = agent.map_dump(MAP_NAME).await?;
+    parse_slots(&raw)
+}
+
+fn parse_slots(dump: &str) -> Result<[i64; 256]> {
+    let dump = dump.trim();
+    if dump.starts_with("ERR ") {
+        bail!("map dump error: {dump}");
+    }
+    let mut out = [0i64; 256];
+    let mut seen = 0u32;
+    for line in dump.lines() {
+        if line.starts_with("OK map ") || line.eq_ignore_ascii_case("OK map end") {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(slot_s) = parts.next() else {
+            continue;
+        };
+        let Some(val_s) = parts.next() else {
+            continue;
+        };
+        if parts.next().is_some() {
+            continue;
+        }
+        let Ok(slot) = slot_s.parse::<usize>() else {
+            continue;
+        };
+        let Ok(value) = val_s.parse::<i64>() else {
+            continue;
+        };
+        if slot < 256 {
+            out[slot] = value;
+            seen += 1;
+        }
+    }
+    if seen == 0 {
+        bail!("map dump had no slot lines");
+    }
+    Ok(out)
+}
+
+fn slot_delta(before: &[i64; 256], after: &[i64; 256]) -> [i64; 256] {
+    let mut d = [0i64; 256];
+    for i in 0..256 {
+        d[i] = after[i].saturating_sub(before[i]);
+    }
+    d
 }
 
 async fn flash_and_arm(
@@ -338,148 +425,18 @@ async fn flash_and_arm(
     }
 
     ui.end_round();
+    let _ = cfg;
     Ok(())
 }
 
-async fn measure_counter_round(
-    cfg: &FileConfig,
-    agent: &AgentClient,
-    ui: &RoundUi,
-    eta: &BudgetEta,
-    path: PpsPath,
-    window: Duration,
-    sample: Duration,
-) -> Result<(Vec<Sample>, u64, u64, f64, u64)> {
-    let esp = cfg.target.esp_ip;
-    let esp_mac = cfg.esp_mac_bytes()?;
-    let src_mac = match cfg.src_mac_override()? {
-        Some(m) => m,
-        None => iface_mac(&cfg.probe.iface)?,
-    };
-    let raw = RawTx::open(
-        &cfg.probe.iface,
-        src_mac,
-        esp_mac,
-        esp,
-        STIM_PORT,
-        cfg.target.stim_sport,
-    )
-    .context("RawTx::open")?;
-    let spoof = gen_lan_ip(esp, &[esp]);
-
-    let wall0 = SystemTime::now();
-    let t0 = Instant::now();
-    let first_line = fetch_drop_line(agent, path).await.context("counters t0")?;
-    let first = parse_drop_net_rx(&first_line)?;
-    let mut samples = vec![Sample {
-        t: wall0,
-        drop: first.0,
-    }];
-
-    let blast_handle = tokio::task::spawn_blocking({
-        let raw = Arc::new(raw);
-        move || udp_blast::run_blast_window(raw, spoof, esp, STIM_PORT, window)
-    });
-
-    ui.live_set(
-        &format!("arm={}", path.as_str()),
-        &[
-            ("tx", 0.0, &format!("0/{:.0}s", window.as_secs_f64())),
-            ("drop", 0.0, "dropΔ=0 net_rxΔ=0"),
-        ],
-    );
-    ui.set_eta(&eta.fmt());
-
-    let deadline = t0 + window + Duration::from_millis(DRAIN_MS);
-    while Instant::now() < deadline {
-        tokio::time::sleep(sample).await;
-        let line = fetch_drop_line(agent, path).await.context("counters sample")?;
-        let (drop, net_rx) = parse_drop_net_rx(&line)?;
-        let now = SystemTime::now();
-        samples.push(Sample { t: now, drop });
-        let elapsed = t0.elapsed().as_secs_f64().min(window.as_secs_f64());
-        let tx_frac = (elapsed / window.as_secs_f64().max(1e-6)).clamp(0.0, 1.0);
-        let drop_delta = drop.saturating_sub(first.0);
-        let net_rx_delta = net_rx.saturating_sub(first.1);
-        let drop_frac = if net_rx_delta > 0 {
-            (drop_delta as f64 / net_rx_delta as f64).clamp(0.0, 1.0)
-        } else if drop_delta > 0 {
-            tx_frac
-        } else {
-            0.0
-        };
-        ui.live_set(
-            &format!("arm={}", path.as_str()),
-            &[
-                (
-                    "tx",
-                    tx_frac,
-                    &format!("{:.0}/{:.0}s", elapsed, window.as_secs_f64()),
-                ),
-                (
-                    "drop",
-                    drop_frac,
-                    &format!("dropΔ={drop_delta} net_rxΔ={net_rx_delta}"),
-                ),
-            ],
-        );
-        ui.set_eta(&eta.fmt());
-        if blast_handle.is_finished() {
-            break;
-        }
-    }
-
-    let blast = blast_handle
-        .await
-        .context("blast join")?
-        .context("udp_blast")?;
-    tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
-    let last_line = fetch_drop_line(agent, path).await.context("counters end")?;
-    let last = parse_drop_net_rx(&last_line)?;
-    let t_end = SystemTime::now();
-    if samples
-        .last()
-        .map(|s| s.drop != last.0)
-        .unwrap_or(true)
-    {
-        samples.push(Sample {
-            t: t_end,
-            drop: last.0,
-        });
-    }
-
-    ui.live_clear();
-
-    if last.0 < first.0 {
-        bail!(
-            "counter decreased {} → {} (reboot/wrap?)",
-            first.0,
-            last.0
-        );
-    }
-    let drop_delta = last.0 - first.0;
-    let net_rx_delta = last.1.saturating_sub(first.1);
-    let host_pps = blast.host_pps();
-    let sent = blast.tx_count;
-
-    if path == PpsPath::Xdp && net_rx_delta != 0 {
-        bail!("xdp path: net_rx moved under drop ({net_rx_delta}); stack saw traffic");
-    }
-    if drop_delta == 0 {
-        bail!("drop did not increase during blast");
-    }
-
-    Ok((samples, drop_delta, net_rx_delta, host_pps, sent))
-}
-
-
-pub(crate) async fn paced_blast(
+async fn paced_multi_src(
     cfg: &FileConfig,
     ui: &RoundUi,
     eta: &BudgetEta,
     path: PpsPath,
     window: Duration,
     target_pps: f64,
+    seed: i64,
 ) -> Result<u64> {
     let esp = cfg.target.esp_ip;
     let esp_mac = cfg.esp_mac_bytes()?;
@@ -496,7 +453,6 @@ pub(crate) async fn paced_blast(
         cfg.target.stim_sport,
     )
     .context("RawTx::open")?;
-    let spoof = gen_lan_ip(esp, &[esp]);
 
     let pps = target_pps.max(1.0);
     let interval = Duration::from_secs_f64(1.0 / pps);
@@ -520,6 +476,7 @@ pub(crate) async fn paced_blast(
         if Instant::now() >= deadline {
             break;
         }
+        let spoof = stim_src_ip(seed, sent, esp);
         if raw.send_udp(spoof, esp, STIM_PORT, b"D").is_ok() {
             sent += 1;
         }
@@ -537,41 +494,14 @@ pub(crate) async fn paced_blast(
     Ok(sent)
 }
 
-
-fn gen_lan_ip(esp: Ipv4Addr, avoid: &[Ipv4Addr]) -> Ipv4Addr {
-    let o = esp.octets();
-    let mut rng = rand::rng();
-    for _ in 0..64 {
-        let last = rng.random_range(2u8..=254);
-        let ip = Ipv4Addr::new(o[0], o[1], o[2], last);
-        if !avoid.contains(&ip) && ip != esp {
-            return ip;
-        }
-    }
-    Ipv4Addr::new(o[0], o[1], o[2], if o[3] == 200 { 201 } else { 200 })
-}
-
-
-fn parse_drop_net_rx(line: &str) -> Result<(u64, u64)> {
-    let map = counters::parse_counter_map(line)?;
-    let drop = map
-        .get("drop")
-        .or_else(|| map.get("rx_discarded"))
-        .or_else(|| map.get("xdp_drop"))
-        .and_then(|v| v.as_i64())
-        .context("missing drop=/rx_discarded=/xdp_drop=")? as u64;
-    let net_rx = map
-        .get("net_rx")
-        .or_else(|| map.get("rx_delivered"))
-        .and_then(|v| v.as_i64())
-        .context("missing net_rx=/rx_delivered=")? as u64;
-    Ok((drop, net_rx))
-}
-
-/// HAL app drop lives in firmware `counters` (DROP/NET_RX); XDP uses perf report.
-async fn fetch_drop_line(agent: &AgentClient, path: PpsPath) -> Result<String> {
-    match path {
-        PpsPath::Hal => agent.request("counters").await,
-        PpsPath::Xdp => agent.counters().await,
-    }
+/// Shared by `just_tx` flame helper (legacy import).
+pub(crate) async fn paced_blast(
+    cfg: &FileConfig,
+    ui: &RoundUi,
+    eta: &BudgetEta,
+    path: PpsPath,
+    window: Duration,
+    target_pps: f64,
+) -> Result<u64> {
+    paced_multi_src(cfg, ui, eta, path, window, target_pps, SOURCE_SEED_DEFAULT).await
 }

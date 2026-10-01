@@ -33,8 +33,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 /// UDP port the netstack accepts (same stim surface as just_drop).
 const STIM_PORT: u16 = 8080;
-/// IPPROTO_UDP — matches just_drop `rxcnt` ARRAY key.
-const IPPROTO_UDP: u32 = 17;
 
 /// IRAM slot required by xpost-build link layout; HAL never leases a cold image
 /// (inactive Prog → Pass). Symbol name matches xpost-build `SLOT_SYMBOL`.
@@ -44,12 +42,12 @@ static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
 /// Packets that reached the UDP socket in Pass mode (`drop off`).
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
-/// Stim datagrams discarded in Drop mode (`drop on`) — primary `drop=` for formal.
+/// Stim datagrams discarded in Drop mode — primary `drop=` for formal.
 static DROP: AtomicUsize = AtomicUsize::new(0);
-/// Per-ipproto counters; only UDP (17) is incremented on stim drop/pass classify.
-static RXCNT: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
-/// When true, stim UDP is counted as drop and not ACKed.
-static DROP_ARMED: AtomicBool = AtomicBool::new(false);
+/// Native array mirror of XDP `counter` map: key = IPv4 src last octet.
+static COUNTER: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+/// When true, stim UDP is counted as drop and not ACKed. Formal defaults armed.
+static DROP_ARMED: AtomicBool = AtomicBool::new(true);
 /// Optional fixed ACK destination (host order). Zero address → reply to the sender.
 static ACK_IP: AtomicU32 = AtomicU32::new(0);
 static ACK_PORT: AtomicU32 = AtomicU32::new(0);
@@ -191,8 +189,9 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
         let Ok((n, meta)) = socket.recv_from(&mut buf).await else {
             continue;
         };
-        // Classify as UDP stim (ipproto 17) for rxcnt parity with just_drop.
-        RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
+        if let Some(octet) = ipv4_last_octet(meta.endpoint.addr) {
+            COUNTER[octet as usize].fetch_add(1, Ordering::Relaxed);
+        }
 
         if DROP_ARMED.load(Ordering::Relaxed) {
             DROP.fetch_add(1, Ordering::Relaxed);
@@ -249,6 +248,9 @@ fn dispatch_serial(line: &str) {
         xpost::ext::perf::clear_perf();
         DROP.store(0, Ordering::Relaxed);
         NET_RX.store(0, Ordering::Relaxed);
+        for c in COUNTER.iter() {
+            c.store(0, Ordering::Relaxed);
+        }
         esp_println::println!("OK perf clear");
     } else if let Some(rest) = strip_cmd(line, "map dump") {
         print_map_dump(rest);
@@ -308,14 +310,14 @@ fn print_map_dump(rest: &str) {
         esp_println::println!("ERR map dump <name>");
         return;
     }
-    if !name.eq_ignore_ascii_case("rxcnt") {
+    if !name.eq_ignore_ascii_case("counter") {
         esp_println::println!("ERR map not-found");
         return;
     }
     const N: usize = 256;
-    esp_println::println!("OK map rxcnt type=array size={N}");
+    esp_println::println!("OK map counter type=array size={N}");
     for i in 0..N {
-        let v = RXCNT[i].load(Ordering::Relaxed);
+        let v = COUNTER[i].load(Ordering::Relaxed);
         esp_println::println!("{i} {v}");
     }
     esp_println::println!("OK map end");
@@ -383,4 +385,9 @@ fn ack_endpoint(src: embassy_net::IpAddress, src_port: u16) -> (embassy_net::IpA
     } else {
         (src, src_port)
     }
+}
+
+fn ipv4_last_octet(addr: embassy_net::IpAddress) -> Option<u8> {
+    let embassy_net::IpAddress::Ipv4(v4) = addr;
+    Some(v4.octets()[3])
 }

@@ -26,8 +26,8 @@ const QUIET: Duration = Duration::from_secs(2);
 const BURST_DRAIN: Duration = Duration::from_millis(500);
 /// Allow a few ambient frames in counter deltas.
 const SLACK: u64 = 5;
-/// UDP proto key in just_drop `rxcnt` ARRAY.
-const RXCNT_UDP: u32 = 17;
+/// XDP Array Map name in just_drop.elf.
+const COUNTER_MAP: &str = "counter";
 
 const DEFAULT_ELF: &str = "/Users/nan/bs/xpost/examples/just_xdp/just_drop.elf";
 const REBOOT_SETTLE: Duration = Duration::from_secs(20);
@@ -96,14 +96,14 @@ pub async fn run_just_drop(cfg: &FileConfig, opts: JustDropOpts) -> Result<()> {
         bail!("just-drop phase none failed (want {stim_n} ack + net_rx≈{stim_n})");
     }
 
-    // —— Phase B: drop XDP → burst N, no-ack sample, drop/rxcnt signal ——
+    // —— Phase B: drop XDP → burst N, no-ack sample, counter map signal ——
     info!("phase drop: program {elf}");
     agent.program(&elf).await.context("program")?;
     settle_after_reboot().await;
     let (pass_drop, before_d, after_d, sent, rx_delta) =
         phase_drop(&agent, &esp, stim_n).await.context("phase drop")?;
     eprintln!(
-        "  loaded=drop sent={sent} rxcnt[{RXCNT_UDP}]Δ={rx_delta} drop {}→{} net_rx {}→{} pass={pass_drop}",
+        "  loaded=drop sent={sent} counterΣΔ={rx_delta} drop {}→{} net_rx {}→{} pass={pass_drop}",
         before_d.drop, after_d.drop, before_d.net_rx, after_d.net_rx
     );
     if let Some(client) = pg.as_mut() {
@@ -122,7 +122,7 @@ pub async fn run_just_drop(cfg: &FileConfig, opts: JustDropOpts) -> Result<()> {
     }
     if !pass_drop {
         bail!(
-            "just-drop phase drop failed (want burst + drop/rxcnt signal ≥{stim_n}, net_rx flat)"
+            "just-drop phase drop failed (want burst + counterΣ/drop signal ≥{stim_n}, net_rx flat)"
         );
     }
 
@@ -181,7 +181,7 @@ async fn phase_drop(
 ) -> Result<(bool, Counters, Counters, u32, u64)> {
     let ambient = quiet_drop_delta(agent).await?;
     let before = parse_counters(&agent.counters().await.context("counters before drop")?)?;
-    let rx_before = agent.map_slot("rxcnt", RXCNT_UDP).await?;
+    let rx_before = map_counter_sum(agent).await?;
 
     let t0 = Instant::now();
     let sent = agent
@@ -204,7 +204,7 @@ async fn phase_drop(
     }
 
     let after = parse_counters(&agent.counters().await.context("counters after drop")?)?;
-    let rx_after = agent.map_slot("rxcnt", RXCNT_UDP).await?;
+    let rx_after = map_counter_sum(agent).await?;
     let drop_d = after.drop.saturating_sub(before.drop);
     let rx_d = rx_after.saturating_sub(rx_before);
     // Ambient extrapolation over the burst window (plus sample probes).
@@ -218,10 +218,41 @@ async fn phase_drop(
         && rx_d >= u64::from(stim_n);
     if !pass {
         eprintln!(
-            "  drop detail: ambient_quietΔ={ambient} expected_bg≈{expected_bg} dropΔ={drop_d} signal={drop_signal} rxΔ={rx_d} noacks={noacks}/3"
+            "  drop detail: ambient_quietΔ={ambient} expected_bg≈{expected_bg} dropΔ={drop_d} signal={drop_signal} counterΣΔ={rx_d} noacks={noacks}/3"
         );
     }
     Ok((pass, before, after, sent, rx_d))
+}
+
+async fn map_counter_sum(agent: &AgentClient) -> Result<u64> {
+    let dump = agent.map_dump(COUNTER_MAP).await?;
+    if dump.trim_start().starts_with("ERR ") {
+        bail!("map dump error: {dump}");
+    }
+    let mut sum = 0u64;
+    for line in dump.lines() {
+        if line.starts_with("OK map ") || line.eq_ignore_ascii_case("OK map end") {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(slot_s) = parts.next() else {
+            continue;
+        };
+        let Some(val_s) = parts.next() else {
+            continue;
+        };
+        if parts.next().is_some() {
+            continue;
+        }
+        if slot_s.parse::<u32>().is_err() {
+            continue;
+        }
+        let Ok(v) = val_s.parse::<u64>() else {
+            continue;
+        };
+        sum = sum.saturating_add(v);
+    }
+    Ok(sum)
 }
 
 async fn quiet_drop_delta(agent: &AgentClient) -> Result<u64> {
