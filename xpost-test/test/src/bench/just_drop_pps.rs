@@ -175,20 +175,24 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
                 *fw,
                 host_pps,
                 window.as_secs_f64(),
-                Some(sample.as_millis() as i32),
+                0,
                 started_at,
                 stopped_at,
                 sent as i64,
             )
             .await?;
-            let rows: Vec<(SystemTime, i64)> = samples
-                .iter()
-                .map(|s| (s.t, s.drop as i64))
-                .collect();
-            formal::insert_just_drop_data(client, cfg_id, &rows).await?;
+            let _ = samples; // legacy drop time-series removed; Array Map dump lands in runner rewrite
             let msg = agent.request("report").await.context("report")?;
             let decoded = formal::decode_report_msg(&msg)?;
-            formal::write_perf(client, exam_id, cfg_id, *fw, &decoded).await?;
+            formal::write_perf(
+                client,
+                exam_id,
+                cfg_id,
+                *fw,
+                formal::PerfExperiment::JustDrop,
+                &decoded,
+            )
+            .await?;
             ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
         }
 
@@ -210,7 +214,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
                 *fw,
                 FIXED_PPS,
                 window.as_secs_f64(),
-                None,
+                0,
                 started_at,
                 stopped_at,
                 sent as i64,
@@ -218,7 +222,15 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
             .await?;
             let msg = agent.request("report").await.context("report")?;
             let decoded = formal::decode_report_msg(&msg)?;
-            formal::write_perf(client, exam_id, cfg_id, *fw, &decoded).await?;
+            formal::write_perf(
+                client,
+                exam_id,
+                cfg_id,
+                *fw,
+                formal::PerfExperiment::JustDrop,
+                &decoded,
+            )
+            .await?;
             ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
         }
     }
@@ -241,7 +253,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
                 fw,
                 1.0,
                 0.0,
-                None,
+                0,
                 started_at,
                 stopped_at,
                 sent.max(1) as i64,
@@ -249,7 +261,15 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
             .await?;
             let msg = agent.request("report").await.context("report")?;
             let decoded = formal::decode_report_msg(&msg)?;
-            formal::write_perf(client, exam_id, cfg_id, fw, &decoded).await?;
+            formal::write_perf(
+                client,
+                exam_id,
+                cfg_id,
+                fw,
+                formal::PerfExperiment::JustDrop,
+                &decoded,
+            )
+            .await?;
             let n_ev = decoded.trace.as_ref().map(|t| t.events.len()).unwrap_or(0);
             ui.check_ok(&format!("trace events={n_ev}"));
         }

@@ -88,7 +88,7 @@ pub fn map_trace_kind(kind: u8) -> Option<&'static str> {
     })
 }
 
-/// HAL counter subset (SQL `hal_counter_name`).
+/// HAL counter subset written into experiment `*_hal_counter` tables.
 pub const HAL_COUNTER_NAMES: &[&str] = &[
     "rx_packets",
     "rx_delivered",

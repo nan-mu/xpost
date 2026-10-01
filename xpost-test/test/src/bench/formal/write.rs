@@ -98,7 +98,7 @@ pub async fn insert_just_drop_config(
     firmware: Firmware,
     target_pps: f64,
     window_s: f64,
-    sample_interval_ms: Option<i32>,
+    source_seed: i64,
     started_at: SystemTime,
     stopped_at: SystemTime,
     sent: i64,
@@ -107,7 +107,7 @@ pub async fn insert_just_drop_config(
         .query_one(
             r#"
             INSERT INTO just_drop_config (
-                exam_id, firmware, target_pps, window_s, sample_interval_ms,
+                exam_id, firmware, target_pps, window_s, source_seed,
                 started_at, stopped_at, sent
             ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8)
             RETURNING id
@@ -117,7 +117,7 @@ pub async fn insert_just_drop_config(
                 &firmware.as_db(),
                 &target_pps,
                 &window_s,
-                &sample_interval_ms,
+                &source_seed,
                 &started_at,
                 &stopped_at,
                 &sent,
@@ -131,16 +131,17 @@ pub async fn insert_just_drop_config(
 pub async fn insert_just_drop_data(
     client: &Client,
     config_id: ConfigId,
-    samples: &[(SystemTime, i64)],
+    slots: &[(i32, i64)],
 ) -> Result<()> {
-    for (t, v) in samples {
+    for &(slot, value) in slots {
         client
             .execute(
                 r#"
-                INSERT INTO just_drop_data (config_id, t, counter_value)
+                INSERT INTO just_drop_data (config_id, slot, value)
                 VALUES ($1, $2, $3)
+                ON CONFLICT (config_id, slot) DO UPDATE SET value = EXCLUDED.value
                 "#,
-                &[&config_id, t, v],
+                &[&config_id, &slot, &value],
             )
             .await
             .context("INSERT just_drop_data")?;
@@ -148,16 +149,27 @@ pub async fn insert_just_drop_data(
     Ok(())
 }
 
-/// Write decoded perf sections into xdp_* or hal_* (+ optional trace_event).
+/// Which experiment owns the HAL CAG tables for this write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PerfExperiment {
+    JustTx,
+    JustDrop,
+}
+
+/// Write decoded perf sections into xdp_* or experiment HAL tables (+ optional trace).
 pub async fn write_perf(
     client: &Client,
     exam_id: ExamId,
     config_id: ConfigId,
     firmware: Firmware,
+    experiment: PerfExperiment,
     report: &DecodedReport,
 ) -> Result<()> {
     if firmware.is_hal() {
-        write_hal(client, exam_id, config_id, report).await?;
+        match experiment {
+            PerfExperiment::JustTx => write_just_tx_hal(client, config_id, report).await?,
+            PerfExperiment::JustDrop => write_just_drop_hal(client, config_id, report).await?,
+        }
     } else {
         write_xdp(client, exam_id, config_id, report).await?;
     }
@@ -246,53 +258,89 @@ async fn write_xdp(
     Ok(())
 }
 
-async fn write_hal(
+async fn write_just_tx_hal(
     client: &Client,
-    exam_id: ExamId,
     config_id: ConfigId,
     report: &DecodedReport,
+) -> Result<()> {
+    write_hal_tables(
+        client,
+        config_id,
+        report,
+        "just_tx_hal_counter",
+        "just_tx_hal_agg",
+        "just_tx_hal_gauge",
+    )
+    .await
+}
+
+async fn write_just_drop_hal(
+    client: &Client,
+    config_id: ConfigId,
+    report: &DecodedReport,
+) -> Result<()> {
+    write_hal_tables(
+        client,
+        config_id,
+        report,
+        "just_drop_hal_counter",
+        "just_drop_hal_agg",
+        "just_drop_hal_gauge",
+    )
+    .await
+}
+
+async fn write_hal_tables(
+    client: &Client,
+    config_id: ConfigId,
+    report: &DecodedReport,
+    counter_table: &str,
+    agg_table: &str,
+    gauge_table: &str,
 ) -> Result<()> {
     for name in HAL_COUNTER_NAMES {
         let Some(value) = report.counters.get(*name) else {
             continue;
         };
+        let sql = format!(
+            r#"
+            INSERT INTO {counter_table} (config_id, name, value)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (config_id, name) DO UPDATE SET value = EXCLUDED.value
+            "#
+        );
         client
-            .execute(
-                r#"
-                INSERT INTO hal_counter (exam_id, config_id, name, value)
-                VALUES ($1, $2, $3::text::hal_counter_name, $4)
-                ON CONFLICT (config_id, name) DO UPDATE SET value = EXCLUDED.value
-                "#,
-                &[&exam_id, &config_id, name, value],
-            )
+            .execute(&sql, &[&config_id, name, value])
             .await
-            .with_context(|| format!("INSERT hal_counter {name}"))?;
+            .with_context(|| format!("INSERT {counter_table} {name}"))?;
     }
     for agg in &report.aggregates {
         let Some(db_name) = map_agg_name(&agg.name) else {
             continue;
         };
         let buckets: Vec<i64> = agg.buckets.iter().map(|&b| b as i64).collect();
+        let sql = format!(
+            r#"
+            INSERT INTO {agg_table} (
+                config_id, name, count, total_ticks, min_ticks, max_ticks,
+                lo, width, buckets
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9::bigint[]
+            )
+            ON CONFLICT (config_id, name) DO UPDATE SET
+                count = EXCLUDED.count,
+                total_ticks = EXCLUDED.total_ticks,
+                min_ticks = EXCLUDED.min_ticks,
+                max_ticks = EXCLUDED.max_ticks,
+                lo = EXCLUDED.lo,
+                width = EXCLUDED.width,
+                buckets = EXCLUDED.buckets
+            "#
+        );
         client
             .execute(
-                r#"
-                INSERT INTO hal_agg (
-                    exam_id, config_id, name, count, total_ticks, min_ticks, max_ticks,
-                    lo, width, buckets
-                ) VALUES (
-                    $1, $2, $3::text::hal_agg_name, $4, $5, $6, $7, $8, $9, $10::bigint[]
-                )
-                ON CONFLICT (config_id, name) DO UPDATE SET
-                    count = EXCLUDED.count,
-                    total_ticks = EXCLUDED.total_ticks,
-                    min_ticks = EXCLUDED.min_ticks,
-                    max_ticks = EXCLUDED.max_ticks,
-                    lo = EXCLUDED.lo,
-                    width = EXCLUDED.width,
-                    buckets = EXCLUDED.buckets
-                "#,
+                &sql,
                 &[
-                    &exam_id,
                     &config_id,
                     &db_name,
                     &(agg.count as i64),
@@ -305,22 +353,22 @@ async fn write_hal(
                 ],
             )
             .await
-            .with_context(|| format!("INSERT hal_agg {db_name}"))?;
+            .with_context(|| format!("INSERT {agg_table} {db_name}"))?;
     }
     for (name, (current, peak)) in &report.gauges {
         let label = name.clone();
+        let sql = format!(
+            r#"
+            INSERT INTO {gauge_table} (config_id, name, current, peak)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (config_id, name) DO UPDATE SET
+                current = EXCLUDED.current, peak = EXCLUDED.peak
+            "#
+        );
         client
-            .execute(
-                r#"
-                INSERT INTO hal_gauge (exam_id, config_id, name, current, peak)
-                VALUES ($1, $2, $3::text::hal_gauge_name, $4, $5)
-                ON CONFLICT (config_id, name) DO UPDATE SET
-                    current = EXCLUDED.current, peak = EXCLUDED.peak
-                "#,
-                &[&exam_id, &config_id, name, current, peak],
-            )
+            .execute(&sql, &[&config_id, name, current, peak])
             .await
-            .with_context(|| format!("INSERT hal_gauge {label}"))?;
+            .with_context(|| format!("INSERT {gauge_table} {label}"))?;
     }
     Ok(())
 }

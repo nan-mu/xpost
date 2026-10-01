@@ -1,4 +1,4 @@
-//! Formal schema (`sql/formal.sql`): exam-scoped just_tx / just_drop + perf tables.
+//! Formal schema (`sql/formal.sql` + experiment SQL): exam-scoped tables.
 //!
 //! Open-run path never DROP/TRUNCATE; explicit [`clear`] empties via
 //! `TRUNCATE exam CASCADE`. Decoded report bytes are written through this
@@ -18,11 +18,13 @@ use crate::config;
 pub use decode::{DecodedReport, decode_report_msg};
 pub use names::{Firmware, map_agg_name, map_trace_kind};
 pub use write::{
-    TxSample, insert_exam, insert_just_drop_config, insert_just_drop_data, insert_just_tx_config,
-    insert_just_tx_data, stop_exam, write_perf,
+    PerfExperiment, TxSample, insert_exam, insert_just_drop_config, insert_just_drop_data,
+    insert_just_tx_config, insert_just_tx_data, stop_exam, write_perf,
 };
 
 const FORMAL_SQL: &str = include_str!("../../../../sql/formal.sql");
+const JUST_DROP_SQL: &str = include_str!("../../../../sql/just_drop.sql");
+const JUST_TX_SQL: &str = include_str!("../../../../sql/just_tx.sql");
 
 /// Ensure `formal` schema + tables exist (CREATE IF NOT EXISTS / idempotent types).
 /// Does **not** truncate or drop.
@@ -48,6 +50,14 @@ pub async fn ensure(client: &Client, opts: PgOpts) -> Result<()> {
         .batch_execute(FORMAL_SQL)
         .await
         .with_context(|| format!("ensure formal.sql in {schema}"))?;
+    client
+        .batch_execute(JUST_DROP_SQL)
+        .await
+        .with_context(|| format!("ensure just_drop.sql in {schema}"))?;
+    client
+        .batch_execute(JUST_TX_SQL)
+        .await
+        .with_context(|| format!("ensure just_tx.sql in {schema}"))?;
     info!("formal schema={schema}: ensured (no truncate)");
     Ok(())
 }

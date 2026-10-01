@@ -1,4 +1,6 @@
 -- formal（PGSCHEMA=formal）
+-- Runtime-shared tables only: exam + XDP CAG + trace.
+-- Experiment tables live in just_drop.sql / just_tx.sql.
 -- 开跑路径禁止 DROP/TRUNCATE；旧表由人手工删。
 -- 显式清空：formal-clear → TRUNCATE exam CASCADE。
 -- Types use DO/duplicate_object so ensure-schema is re-runnable.
@@ -27,33 +29,7 @@ EXCEPTION
 END $$;
 
 DO $$ BEGIN
-CREATE TYPE hal_agg_name AS ENUM (
-    'rx_processing',
-    'execution',
-    'dispatch',
-    'post_action',
-    'tx_submission',
-    'tx_block',
-    'helper_execution',
-    'map_operation'
-);
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
 CREATE TYPE xdp_gauge_name AS ENUM (
-    'rx_queue_depth',
-    'tx_queue_depth',
-    'tx_inflight',
-    'trace_buffer_usage'
-);
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-CREATE TYPE hal_gauge_name AS ENUM (
     'rx_queue_depth',
     'tx_queue_depth',
     'tx_inflight',
@@ -117,19 +93,6 @@ EXCEPTION
 END $$;
 
 DO $$ BEGIN
-CREATE TYPE hal_counter_name AS ENUM (
-    'rx_packets',
-    'rx_delivered',
-    'rx_discarded',
-    'tx_submitted',
-    'tx_failed',
-    'tx_completed'
-);
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
 CREATE TYPE perf_trace_kind AS ENUM (
     'rx_begin',
     'xdp_begin',
@@ -183,52 +146,6 @@ CREATE TABLE IF NOT EXISTS exam (
 
 COMMENT ON TABLE exam IS '整场正式跑批；开跑只 INSERT，不自动清空';
 
-CREATE TABLE IF NOT EXISTS just_tx_config (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    exam_id UUID NOT NULL REFERENCES exam (id) ON DELETE CASCADE,
-    firmware firmware NOT NULL,
-    target_pps DOUBLE PRECISION NOT NULL,
-    window_s DOUBLE PRECISION NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL,
-    stopped_at TIMESTAMPTZ NOT NULL,
-    sent BIGINT NOT NULL CHECK (sent >= 0)
-);
-
-CREATE INDEX IF NOT EXISTS just_tx_config_exam ON just_tx_config (exam_id);
-
-CREATE TABLE IF NOT EXISTS just_drop_config (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    exam_id UUID NOT NULL REFERENCES exam (id) ON DELETE CASCADE,
-    firmware firmware NOT NULL,
-    target_pps DOUBLE PRECISION NOT NULL,
-    window_s DOUBLE PRECISION NOT NULL,
-    sample_interval_ms INT CHECK (sample_interval_ms IS NULL OR sample_interval_ms > 0),
-    started_at TIMESTAMPTZ NOT NULL,
-    stopped_at TIMESTAMPTZ NOT NULL,
-    sent BIGINT NOT NULL CHECK (sent >= 0)
-);
-
-CREATE INDEX IF NOT EXISTS just_drop_config_exam ON just_drop_config (exam_id);
-
-CREATE TABLE IF NOT EXISTS just_tx_data (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    config_id UUID NOT NULL REFERENCES just_tx_config (id) ON DELETE CASCADE,
-    t_tx TIMESTAMPTZ NOT NULL,
-    t_rx TIMESTAMPTZ,
-    got_rx BOOLEAN NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS just_tx_data_config ON just_tx_data (config_id);
-
-CREATE TABLE IF NOT EXISTS just_drop_data (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    config_id UUID NOT NULL REFERENCES just_drop_config (id) ON DELETE CASCADE,
-    t TIMESTAMPTZ NOT NULL,
-    counter_value BIGINT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS just_drop_data_config ON just_drop_data (config_id);
-
 CREATE TABLE IF NOT EXISTS xdp_counter (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     exam_id UUID NOT NULL REFERENCES exam (id) ON DELETE CASCADE,
@@ -274,50 +191,6 @@ CREATE TABLE IF NOT EXISTS xdp_gauge (
 
 CREATE INDEX IF NOT EXISTS xdp_gauge_exam ON xdp_gauge (exam_id);
 CREATE INDEX IF NOT EXISTS xdp_gauge_config ON xdp_gauge (config_id);
-
-CREATE TABLE IF NOT EXISTS hal_counter (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    exam_id UUID NOT NULL REFERENCES exam (id) ON DELETE CASCADE,
-    config_id UUID NOT NULL,
-    name hal_counter_name NOT NULL,
-    value BIGINT NOT NULL,
-    UNIQUE (config_id, name)
-);
-
-CREATE INDEX IF NOT EXISTS hal_counter_exam ON hal_counter (exam_id);
-CREATE INDEX IF NOT EXISTS hal_counter_config ON hal_counter (config_id);
-
-CREATE TABLE IF NOT EXISTS hal_agg (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    exam_id UUID NOT NULL REFERENCES exam (id) ON DELETE CASCADE,
-    config_id UUID NOT NULL,
-    name hal_agg_name NOT NULL,
-    count BIGINT NOT NULL,
-    total_ticks BIGINT NOT NULL,
-    min_ticks BIGINT NOT NULL,
-    max_ticks BIGINT NOT NULL,
-    lo BIGINT NOT NULL,
-    width BIGINT NOT NULL,
-    buckets BIGINT[16] NOT NULL,
-    CONSTRAINT hal_agg_buckets_len CHECK (cardinality(buckets) = 16),
-    UNIQUE (config_id, name)
-);
-
-CREATE INDEX IF NOT EXISTS hal_agg_exam ON hal_agg (exam_id);
-CREATE INDEX IF NOT EXISTS hal_agg_config ON hal_agg (config_id);
-
-CREATE TABLE IF NOT EXISTS hal_gauge (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    exam_id UUID NOT NULL REFERENCES exam (id) ON DELETE CASCADE,
-    config_id UUID NOT NULL,
-    name hal_gauge_name NOT NULL,
-    current BIGINT NOT NULL,
-    peak BIGINT NOT NULL,
-    UNIQUE (config_id, name)
-);
-
-CREATE INDEX IF NOT EXISTS hal_gauge_exam ON hal_gauge (exam_id);
-CREATE INDEX IF NOT EXISTS hal_gauge_config ON hal_gauge (config_id);
 
 CREATE TABLE IF NOT EXISTS trace_event (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

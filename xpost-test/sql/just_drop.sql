@@ -1,57 +1,43 @@
--- =============================================================================
--- just_drop — drop 实验表（C 满速序列 + A/G/T 固定 pps 多轮）
---
--- formal：同名旧表 DROP CASCADE 后整表重建（见 pg_dsn），再写入空表。
--- =============================================================================
+-- just_drop — Array Map state experiment (workload-specific).
+-- Loaded after formal.sql (needs exam + firmware).
 
 CREATE TABLE IF NOT EXISTS just_drop_config (
-    id bigserial PRIMARY KEY,
-    fw_type TEXT NOT NULL CHECK (fw_type IN ('xdp', 'hal')),
-    -- 主机侧实测提交速率（blast host_pps）
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    exam_id UUID NOT NULL REFERENCES exam (id) ON DELETE CASCADE,
+    firmware firmware NOT NULL,
     target_pps DOUBLE PRECISION NOT NULL,
+    window_s DOUBLE PRECISION NOT NULL,
+    source_seed BIGINT NOT NULL,
     started_at TIMESTAMPTZ NOT NULL,
     stopped_at TIMESTAMPTZ NOT NULL,
-    sent BIGINT NOT NULL CHECK (sent >= 0),
-    -- 窗口内 counters 变化（仅变化键）；无变化为 {}
-    counters JSONB NOT NULL DEFAULT '{}'::jsonb
+    sent BIGINT NOT NULL CHECK (sent >= 0)
 );
 
--- 采样点：墙钟时刻 + 当时的 drop 计数。
+CREATE INDEX IF NOT EXISTS just_drop_config_exam ON just_drop_config (exam_id);
+
 CREATE TABLE IF NOT EXISTS just_drop_data (
-    id bigserial PRIMARY KEY,
-    config_id BIGINT NOT NULL REFERENCES just_drop_config (id) ON DELETE CASCADE,
-    t TIMESTAMPTZ NOT NULL,
-    counter_value BIGINT NOT NULL
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    config_id UUID NOT NULL REFERENCES just_drop_config (id) ON DELETE CASCADE,
+    slot INT NOT NULL CHECK (slot >= 0 AND slot < 256),
+    value BIGINT NOT NULL,
+    UNIQUE (config_id, slot)
 );
 
 CREATE INDEX IF NOT EXISTS just_drop_data_config ON just_drop_data (config_id);
 
--- ---------------------------------------------------------------------------
--- A / G / T 共用一轮元数据（固定 pps）；C 仍只用上面两张表。
--- drop_site: xdp = XDP_DROP 镜像；app = Pass 后 socket 丢。
--- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS just_drop_run (
-    id bigserial PRIMARY KEY,
-    fw_type TEXT NOT NULL CHECK (fw_type IN ('xdp', 'hal')),
-    drop_site TEXT NOT NULL CHECK (drop_site IN ('xdp', 'app')),
-    kind TEXT NOT NULL CHECK (kind IN ('a', 'g', 't')),
-    target_pps DOUBLE PRECISION NOT NULL,
-    window_s DOUBLE PRECISION NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL,
-    stopped_at TIMESTAMPTZ NOT NULL,
-    sent BIGINT NOT NULL CHECK (sent >= 0),
-    counters JSONB NOT NULL DEFAULT '{}'::jsonb,
-    -- Agent/serial reply verbatim: `OK report <n> b64=…` (no host-side decode).
-    report_raw TEXT
+CREATE TABLE IF NOT EXISTS just_drop_hal_counter (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    config_id UUID NOT NULL REFERENCES just_drop_config (id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    value BIGINT NOT NULL,
+    UNIQUE (config_id, name)
 );
 
-CREATE INDEX IF NOT EXISTS just_drop_run_kind ON just_drop_run (kind, fw_type);
+CREATE INDEX IF NOT EXISTS just_drop_hal_counter_config ON just_drop_hal_counter (config_id);
 
--- Optional offline decode tables (formal path does NOT write these).
-CREATE TABLE IF NOT EXISTS just_drop_agg (
-    id bigserial PRIMARY KEY,
-    run_id BIGINT NOT NULL REFERENCES just_drop_run (id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS just_drop_hal_agg (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    config_id UUID NOT NULL REFERENCES just_drop_config (id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     count BIGINT NOT NULL,
     total_ticks BIGINT NOT NULL,
@@ -59,27 +45,20 @@ CREATE TABLE IF NOT EXISTS just_drop_agg (
     max_ticks BIGINT NOT NULL,
     lo BIGINT NOT NULL,
     width BIGINT NOT NULL,
-    buckets JSONB NOT NULL DEFAULT '[]'::jsonb
+    buckets BIGINT[16] NOT NULL,
+    CONSTRAINT just_drop_hal_agg_buckets_len CHECK (cardinality(buckets) = 16),
+    UNIQUE (config_id, name)
 );
 
-CREATE INDEX IF NOT EXISTS just_drop_agg_run ON just_drop_agg (run_id);
+CREATE INDEX IF NOT EXISTS just_drop_hal_agg_config ON just_drop_hal_agg (config_id);
 
-CREATE TABLE IF NOT EXISTS just_drop_gauge (
-    id bigserial PRIMARY KEY,
-    run_id BIGINT NOT NULL REFERENCES just_drop_run (id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS just_drop_hal_gauge (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    config_id UUID NOT NULL REFERENCES just_drop_config (id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     current BIGINT NOT NULL,
-    peak BIGINT NOT NULL
+    peak BIGINT NOT NULL,
+    UNIQUE (config_id, name)
 );
 
-CREATE INDEX IF NOT EXISTS just_drop_gauge_run ON just_drop_gauge (run_id);
-
-CREATE TABLE IF NOT EXISTS just_drop_trace_summary (
-    id bigserial PRIMARY KEY,
-    run_id BIGINT NOT NULL REFERENCES just_drop_run (id) ON DELETE CASCADE,
-    len BIGINT NOT NULL,
-    dropped BIGINT NOT NULL,
-    kind_hist JSONB NOT NULL DEFAULT '{}'::jsonb
-);
-
-CREATE INDEX IF NOT EXISTS just_drop_trace_summary_run ON just_drop_trace_summary (run_id);
+CREATE INDEX IF NOT EXISTS just_drop_hal_gauge_config ON just_drop_hal_gauge (config_id);

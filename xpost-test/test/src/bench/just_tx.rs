@@ -228,7 +228,15 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                 formal::insert_just_tx_data(client, cfg_id, &samples).await?;
                 let msg = agent.request("report").await.context("report")?;
                 let decoded = formal::decode_report_msg(&msg)?;
-                formal::write_perf(client, exam_id, cfg_id, *fw, &decoded).await?;
+                formal::write_perf(
+                    client,
+                    exam_id,
+                    cfg_id,
+                    *fw,
+                    formal::PerfExperiment::JustTx,
+                    &decoded,
+                )
+                .await?;
                 ui.check_ok(&format!(
                     "config={cfg_id} samples={} mask={:#x}",
                     samples.len(),
@@ -290,7 +298,15 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
             .await?;
             let msg = agent.request("report").await.context("report")?;
             let decoded = formal::decode_report_msg(&msg)?;
-            formal::write_perf(client, exam_id, cfg_id, fw, &decoded).await?;
+            formal::write_perf(
+                client,
+                exam_id,
+                cfg_id,
+                fw,
+                formal::PerfExperiment::JustTx,
+                &decoded,
+            )
+            .await?;
             let n_ev = decoded.trace.as_ref().map(|t| t.events.len()).unwrap_or(0);
             ui.check_ok(&format!("trace events={n_ev}"));
         }
