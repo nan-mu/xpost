@@ -8,13 +8,3 @@ publish = false
 [[bin]]
 name = "xtask"
 path = "src/main.rs"
-
-[dependencies]
-anyhow = { workspace = true, default-features = true }
-clap = { workspace = true }
-prettyplease = "0.2"
-proc-macro2 = "1"
-quote = "1"
-serde = { workspace = true }
-syn = { version = "2", features = ["full", "parsing"] }
-toml = { workspace = true }

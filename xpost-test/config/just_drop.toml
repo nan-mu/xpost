@@ -1,16 +1,9 @@
 # just_drop / just_drop_hal formal knobs (compile-time embed).
 # Selected via default.toml `run = ["just_drop"]`.
 #
-# Formal pipeline (code): Array Map vs native array — flash xdp_cag + hal over
+# Formal pipeline (code): Array Map vs native array — flash each arm over
 # JustTx PPS grid (400…4000), source_seed multi-src stim, map dump counter,
-# then xdp_t Trace. Legacy sample_interval / fixed_pps unused.
+# then xdp_t Trace.
 
 formal = true
-rounds = 1
-sample_interval_ms = 1000
 arms = ["hal", "xdp"]
-kinds = ["c"]
-fixed_pps = 800
-trace_pps = 200
-instr_rounds = 1
-instr_window_secs = 30

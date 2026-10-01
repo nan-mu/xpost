@@ -20,7 +20,6 @@ use crate::raw_tx::{RawTx, iface_mac};
 const STIM_PORT: u16 = 8080;
 const FLASH_IDLE: Duration = Duration::from_secs(300);
 const WINDOW_S: Duration = Duration::from_secs(30);
-const WINDOW_SMOKE: Duration = Duration::from_secs(4);
 const DRAIN_MS: u64 = 200;
 const MAP_NAME: &str = "counter";
 const SOURCE_SEED_DEFAULT: i64 = 0x0A11_CE00;
@@ -30,7 +29,6 @@ const SLOT_SLACK: u64 = 64;
 const SWEEP_PPS: &[f64] = &[
     400.0, 800.0, 1200.0, 1600.0, 2000.0, 2400.0, 2800.0, 3200.0, 3600.0, 4000.0,
 ];
-const SWEEP_SMOKE_PPS: &[f64] = &[400.0, 1200.0, 2400.0, 4000.0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PpsPath {
@@ -56,14 +54,22 @@ impl PpsPath {
 }
 
 pub struct JustDropPpsOpts {
-    pub paths: Vec<PpsPath>,
-    pub smoke: bool,
     pub formal: bool,
-    pub no_pg: bool,
-    pub window_secs: Option<u64>,
-    pub sample_interval_ms: u64,
-    pub rounds: Option<usize>,
-    pub formal_clear: bool,
+}
+
+fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
+    let mut out = Vec::new();
+    for a in arms {
+        match PpsPath::parse(a)? {
+            PpsPath::Xdp => out.push(Firmware::XdpCag),
+            PpsPath::Hal => out.push(Firmware::Hal),
+        }
+    }
+    if out.is_empty() {
+        bail!("just_drop.toml `arms` must list at least one of xdp|hal");
+    }
+    out.dedup();
+    Ok(out)
 }
 
 fn profile_for(fw: Firmware) -> &'static str {
@@ -107,48 +113,21 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         .context("just_drop needs [agent].endpoint in config/default.toml")?;
     let agent = AgentClient::new(endpoint.clone());
     let esp_s = cfg.target.esp_ip.to_string();
-    let formal = opts.formal || cfg.just_drop.formal;
-    let window = opts
-        .window_secs
-        .map(Duration::from_secs)
-        .unwrap_or(if opts.smoke { WINDOW_SMOKE } else { WINDOW_S });
-    let grid: &[f64] = if opts.smoke { SWEEP_SMOKE_PPS } else { SWEEP_PPS };
+    let formal = opts.formal;
+    let window = WINDOW_S;
+    let grid: &[f64] = SWEEP_PPS;
     let source_seed = SOURCE_SEED_DEFAULT;
-    let _ = opts.sample_interval_ms;
-    let _ = opts.rounds;
-
-    let mut arms: Vec<Firmware> = Vec::new();
-    if opts.paths.is_empty() {
-        arms.extend([Firmware::XdpCag, Firmware::Hal]);
-    } else {
-        for p in &opts.paths {
-            match p {
-                PpsPath::Xdp => arms.push(Firmware::XdpCag),
-                PpsPath::Hal => arms.push(Firmware::Hal),
-            }
-        }
-    }
-    arms.dedup();
+    let arms = arms_from_cfg(&cfg.just_drop.arms)?;
 
     RoundUi::banner(&format!(
-        "just_drop array arms={:?} +xdp_t grid={:?} window={}s seed={source_seed:#x} formal={formal} clear={} agent={endpoint} esp={esp_s} pg={}",
+        "just_drop array arms={:?} +xdp_t grid={:?} window={}s seed={source_seed:#x} formal={formal} agent={endpoint} esp={esp_s} pg=true",
         arms.iter().map(|a| a.as_db()).collect::<Vec<_>>(),
         grid.iter().map(|p| *p as u32).collect::<Vec<_>>(),
         window.as_secs(),
-        opts.formal_clear,
-        !opts.no_pg
     ));
 
-    let mut pg = if opts.no_pg {
-        None
-    } else {
-        let pg_opts = PgOpts { formal };
-        let client = formal::connect_and_ensure(pg_opts).await?;
-        if opts.formal_clear {
-            formal::clear(&client, pg_opts).await?;
-        }
-        Some(client)
-    };
+    let pg_opts = PgOpts { formal };
+    let mut pg = Some(formal::connect_and_ensure(pg_opts).await?);
 
     let mut eta = BudgetEta::new();
     eta.add_flashes(arms.len() + 1);

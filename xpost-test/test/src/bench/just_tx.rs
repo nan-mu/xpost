@@ -15,7 +15,7 @@ use crate::agent::AgentClient;
 use crate::bench::counters;
 use crate::bench::formal::{self, Firmware, TxSample};
 use crate::bench::just_drop_pps::PpsPath;
-use crate::bench::pg_dsn::{self, PgOpts, TableSet};
+use crate::bench::pg_dsn::PgOpts;
 use crate::bench::status::{self, BudgetEta, READY_BUDGET, RoundUi};
 use crate::config::FileConfig;
 use crate::harness::Harness;
@@ -24,7 +24,6 @@ const STIM_PORT: u16 = 8080;
 const IPPROTO_UDP: u32 = 17;
 const FLASH_IDLE: Duration = Duration::from_secs(300);
 const WINDOW_S: Duration = Duration::from_secs(30);
-const WINDOW_SMOKE: Duration = Duration::from_secs(4);
 const WARMUP: Duration = Duration::from_secs(1);
 const COOLDOWN: Duration = Duration::from_secs(3);
 const DRAIN: Duration = Duration::from_millis(1000);
@@ -35,7 +34,6 @@ const RX_READY_BURST: u32 = 64;
 const SWEEP_PPS: &[f64] = &[
     400.0, 800.0, 1200.0, 1600.0, 2000.0, 2400.0, 2800.0, 3200.0, 3600.0, 4000.0,
 ];
-const SWEEP_SMOKE_PPS: &[f64] = &[400.0, 1200.0, 2400.0, 4000.0];
 
 const DEV_FLAME_PPS: f64 = 100.0;
 const DEV_FLAME_WINDOW: Duration = Duration::from_secs(2);
@@ -86,34 +84,30 @@ fn path_for(fw: Firmware) -> PpsPath {
 }
 
 pub struct JustTxOpts {
-    /// Legacy filter: if non-empty, maps xdp→XdpCag, hal→Hal (XdpT always runs last when formal).
-    pub paths: Vec<PpsPath>,
-    pub smoke: bool,
+    /// `run = ["dev"]` flame path (no Postgres).
+    pub is_dev: bool,
     pub formal: bool,
-    pub no_pg: bool,
-    pub window_secs: Option<u64>,
-    pub rounds: Option<usize>,
-    pub tables: TableSet,
-    /// Explicit `TRUNCATE exam CASCADE` before this exam.
-    pub formal_clear: bool,
 }
 
-fn exp_name(tables: TableSet) -> &'static str {
-    match tables {
-        TableSet::Dev => "dev",
-        _ => "just_tx",
+fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
+    let mut out = Vec::new();
+    for a in arms {
+        match PpsPath::parse(a)? {
+            PpsPath::Xdp => out.push(Firmware::XdpCag),
+            PpsPath::Hal => out.push(Firmware::Hal),
+        }
     }
+    if out.is_empty() {
+        bail!("just_tx.toml `arms` must list at least one of xdp|hal");
+    }
+    out.dedup();
+    Ok(out)
 }
-
 
 pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOpts) -> Result<()> {
-    let name = exp_name(opts.tables);
-    let is_dev = matches!(opts.tables, TableSet::Dev);
-    let formal = if is_dev {
-        false
-    } else {
-        opts.formal || cfg.just_tx.formal
-    };
+    let name = if opts.is_dev { "dev" } else { "just_tx" };
+    let is_dev = opts.is_dev;
+    let formal = if is_dev { false } else { opts.formal };
     let endpoint = cfg
         .agent
         .resolved_endpoint()
@@ -121,49 +115,25 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     let agent = AgentClient::new(endpoint.clone());
     let esp_s = cfg.target.esp_ip.to_string();
 
-    let window = opts
-        .window_secs
-        .map(Duration::from_secs)
-        .unwrap_or(if opts.smoke { WINDOW_SMOKE } else { WINDOW_S });
-    let grid: &[f64] = if opts.smoke { SWEEP_SMOKE_PPS } else { SWEEP_PPS };
+    let window = WINDOW_S;
+    let grid: &[f64] = SWEEP_PPS;
 
     if is_dev {
         return run_dev_flame(cfg, harness, &agent, &endpoint, &esp_s).await;
     }
 
-    // Arms: xdp_cag + hal (filterable via opts.paths); xdp_t always last.
-    let mut arms: Vec<Firmware> = Vec::new();
-    if opts.paths.is_empty() {
-        arms.extend([Firmware::XdpCag, Firmware::Hal]);
-    } else {
-        for p in &opts.paths {
-            match p {
-                PpsPath::Xdp => arms.push(Firmware::XdpCag),
-                PpsPath::Hal => arms.push(Firmware::Hal),
-            }
-        }
-    }
-    arms.dedup();
+    // Arms from just_tx.toml; xdp_t always last.
+    let arms = arms_from_cfg(&cfg.just_tx.arms)?;
 
     RoundUi::banner(&format!(
-        "{name} arms={:?} +xdp_t grid={:?} window={}s formal={formal} clear={} agent={endpoint} esp={esp_s} pg={}",
+        "{name} arms={:?} +xdp_t grid={:?} window={}s formal={formal} agent={endpoint} esp={esp_s} pg=true",
         arms.iter().map(|a| a.as_db()).collect::<Vec<_>>(),
         grid.iter().map(|x| *x as i64).collect::<Vec<_>>(),
         window.as_secs(),
-        opts.formal_clear,
-        !opts.no_pg
     ));
 
-    let mut pg = if opts.no_pg {
-        None
-    } else {
-        let pg_opts = PgOpts { formal };
-        let client = formal::connect_and_ensure(pg_opts).await?;
-        if opts.formal_clear {
-            formal::clear(&client, pg_opts).await?;
-        }
-        Some(client)
-    };
+    let pg_opts = PgOpts { formal };
+    let mut pg = Some(formal::connect_and_ensure(pg_opts).await?);
 
     let spoof = crate::raw_tx::iface_ipv4(&cfg.probe.iface)
         .unwrap_or_else(|_| gen_lan_ip(cfg.target.esp_ip, &[cfg.target.esp_ip]));
@@ -205,6 +175,18 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
             log_window(&ui, path, pps as usize, &stats);
             if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
                 ui.check_start("写入 postgres");
+                let samples: Vec<TxSample> = stats
+                    .samples
+                    .iter()
+                    .filter(|s| s.got_rx)
+                    .filter_map(|s| {
+                        s.t_rx.map(|t_rx| TxSample {
+                            t_tx: s.t_tx,
+                            t_rx,
+                        })
+                    })
+                    .collect();
+                let ok = samples.len() as i64;
                 let cfg_id = formal::insert_just_tx_config(
                     client,
                     exam_id,
@@ -214,17 +196,9 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                     stats.started_at,
                     stats.stopped_at,
                     stats.sent as i64,
+                    ok,
                 )
                 .await?;
-                let samples: Vec<TxSample> = stats
-                    .samples
-                    .iter()
-                    .map(|s| TxSample {
-                        t_tx: s.t_tx,
-                        t_rx: s.t_rx,
-                        got_rx: s.got_rx,
-                    })
-                    .collect();
                 formal::insert_just_tx_data(client, cfg_id, &samples).await?;
                 let msg = agent.request("report").await.context("report")?;
                 let decoded = formal::decode_report_msg(&msg)?;
@@ -238,8 +212,8 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                 )
                 .await?;
                 ui.check_ok(&format!(
-                    "config={cfg_id} samples={} mask={:#x}",
-                    samples.len(),
+                    "config={cfg_id} ok={ok}/{} mask={:#x}",
+                    stats.sent,
                     decoded.mask
                 ));
             }
@@ -270,11 +244,19 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         let _ = harness.send_stimulus(spoof, None, seq).await;
         tokio::time::sleep(DRAIN).await;
         let sight = harness.take_seq(seq).await;
-        let got_rx = sight.t0_ns.is_some()
-            && sight.t_bounce_ns.or(sight.t_echo_ns).is_some();
+        let t0 = sight.t0_ns;
+        let t1 = sight.t_bounce_ns.or(sight.t_echo_ns);
+        let (got_rx, t_rx) = match (t0, t1) {
+            (Some(a), Some(b)) if b >= a => {
+                let rtt = Duration::from_nanos(b - a);
+                (true, t_tx.checked_add(rtt))
+            }
+            _ => (false, None),
+        };
         let stopped_at = SystemTime::now();
         if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
             ui.check_start("写入 trace");
+            let ok = i64::from(got_rx);
             let cfg_id = formal::insert_just_tx_config(
                 client,
                 exam_id,
@@ -284,18 +266,13 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                 started_at,
                 stopped_at,
                 1,
+                ok,
             )
             .await?;
-            formal::insert_just_tx_data(
-                client,
-                cfg_id,
-                &[TxSample {
-                    t_tx,
-                    t_rx: None,
-                    got_rx,
-                }],
-            )
-            .await?;
+            if let (true, Some(t_rx)) = (got_rx, t_rx) {
+                formal::insert_just_tx_data(client, cfg_id, &[TxSample { t_tx, t_rx }])
+                    .await?;
+            }
             let msg = agent.request("report").await.context("report")?;
             let decoded = formal::decode_report_msg(&msg)?;
             formal::write_perf(

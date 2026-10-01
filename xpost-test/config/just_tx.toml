@@ -1,16 +1,8 @@
 # just_tx / just_tx_hal formal knobs (compile-time embed).
 # Selected via default.toml `run = ["just_tx"]`.
 #
-# Formal pipeline (code): flash xdp_cag + hal over full pps grid (window_s=30),
-# then xdp_t one-packet Trace. No kinds matrix / OP early-stop / report_raw.
-# Flame debug: `run = ["dev"]`.
+# Formal pipeline (code): flash each arm over full pps grid (window_s=30),
+# then xdp_t one-packet Trace. Flame debug: `run = ["dev"]`.
 
 formal = true
-# Legacy fields kept for serde; formal path ignores kinds / rounds / instr_*.
-rounds = 1
 arms = ["hal", "xdp"]
-kinds = ["c"]
-fixed_pps = 800
-trace_pps = 200
-instr_rounds = 1
-instr_window_secs = 30

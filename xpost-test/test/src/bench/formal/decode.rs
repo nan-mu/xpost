@@ -4,8 +4,6 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 
-use super::super::perf_ingest;
-
 pub const COUNTER_WIRE_LEN: usize = 184;
 pub const AGGREGATE_WIRE_LEN: usize = 8 * 176;
 pub const GAUGE_WIRE_LEN: usize = 32;
@@ -145,9 +143,61 @@ fn mask_for_len(len: usize) -> Option<u8> {
     None
 }
 
+/// Agent `request("report")` reply: `OK report <n> b64=…`.
+pub fn parse_report_b64(msg: &str) -> Result<Vec<u8>> {
+    let msg = msg.trim();
+    let b64 = msg
+        .split_whitespace()
+        .find_map(|p| p.strip_prefix("b64="))
+        .context("report reply missing b64=")?;
+    decode_b64(b64)
+}
+
+fn decode_b64(s: &str) -> Result<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let s = s.trim_end_matches('=');
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        let a = val(bytes[i]).context("b64")?;
+        let b = val(bytes[i + 1]).context("b64")?;
+        let c = val(bytes[i + 2]).context("b64")?;
+        let d = val(bytes[i + 3]).context("b64")?;
+        out.push((a << 2) | (b >> 4));
+        out.push((b << 4) | (c >> 2));
+        out.push((c << 6) | d);
+        i += 4;
+    }
+    let rem = bytes.len() - i;
+    if rem == 2 {
+        let a = val(bytes[i]).context("b64")?;
+        let b = val(bytes[i + 1]).context("b64")?;
+        out.push((a << 2) | (b >> 4));
+    } else if rem == 3 {
+        let a = val(bytes[i]).context("b64")?;
+        let b = val(bytes[i + 1]).context("b64")?;
+        let c = val(bytes[i + 2]).context("b64")?;
+        out.push((a << 2) | (b >> 4));
+        out.push((b << 4) | (c >> 2));
+    } else if rem != 0 {
+        bail!("bad b64 remainder");
+    }
+    Ok(out)
+}
+
 /// Decode agent report reply into structured metrics.
 pub fn decode_report_msg(msg: &str) -> Result<DecodedReport> {
-    let payload = perf_ingest::parse_report_b64(msg)?;
+    let payload = parse_report_b64(msg)?;
     decode_payload(&payload)
 }
 

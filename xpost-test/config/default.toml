@@ -1,5 +1,5 @@
 # Compile-time xpost-test defaults (embedded via include_str!).
-# TR3000 formal path: rebuild, scp binary, then always:
+# TR3000 path: rebuild, scp binary, then always:
 #   ./xpost-test
 # No env vars, no CLI flags. Edit `run` to choose which experiments run.
 #
@@ -8,11 +8,12 @@
 #
 # Experiment knobs: just_tx.toml / just_drop.toml only (formal).
 # Debug: run = ["dev"] — hardcoded in code, no knobs file.
+# Wipe: run = ["formal-clear"] → TRUNCATE exam CASCADE.
 
 version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
-# Flame short Trace: `dev`. Formal: just_tx / just_drop.
+# Flame short Trace: `dev`. Formal: just_tx / just_drop. Wipe: formal-clear.
 run = ["just_tx", "just_drop"]
 
 [postgres]
@@ -29,7 +30,6 @@ endpoint = "192.168.110.96:9240"
 [probe]
 iface = "br-lan"
 pair_timeout_ms = 5000
-report_path = "/tmp/test-report.json"
 # Optional Ethernet source MAC override (default: iface hardware address)
 # src_mac = "00:11:22:33:44:55"
 
@@ -43,18 +43,3 @@ reply_port = 18080
 # Stimulus UDP sport; must ≠ reply_port (bounce swaps ports; TC uses dport!=reply).
 stim_sport = 18081
 ctrl_port = 8081
-
-[serve]
-http_listen = "0.0.0.0:19081"
-
-[profiles]
-drop_hal = "drop-hal"
-drop_xdp = "drop-xdp"
-firmware = "firmware"
-# Legacy aliases (= kind-c / cag). Formal just_drop / just_tx pick
-# just-{drop,tx}-cag / just-*-t / just-*-hal-cag from code —
-# these keys are only for other benches / manual flash helpers / `dev`.
-just_drop = "just-drop-cag"
-just_drop_hal = "just-drop-hal-cag"
-just_tx = "just-tx-cag"
-just_tx_hal = "just-tx-hal-cag"

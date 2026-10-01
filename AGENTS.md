@@ -24,8 +24,10 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 ## Host serial / agent / test
 
 - **`xpost-test/`**: **owns the full test workflow** (formal `just_drop` /
-  `just_tx`, `dev`, suite). See rustdoc modules `overview` + `config`. Calls
-  agent HTTP; does not hold the USB session while the agent is running.
+  `just_tx`, `dev`, `formal-clear` via `config/default.toml` `run`). Sole
+  binary entry: bare `./xpost-test` (no CLI flags/subcommands). See rustdoc
+  modules `overview` + `config`. Calls agent HTTP; does not hold the USB
+  session while the agent is running.
 - **`xpost-agent/`**: CLI + `--listen` HTTP `/v1/*` and MCP `/mcp` on one port
   (shared USB). Dispatch: `cargo xtask agent …`.
   Map read: DUT `map dump <name>` (multi-line → `OK map end`); HTTP
@@ -38,7 +40,8 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
   `/v1/perf_clear`). Formal decodes the report and writes exam-scoped tables
   (`sql/formal.sql`: `exam` + `just_*_config/data` + `xdp_*`/`hal_*` +
   `trace_event`) — no `report_raw`. Open-run never DROP/TRUNCATE; explicit
-  wipe is `./xpost-test formal-clear` (`TRUNCATE exam CASCADE`). Trace is the
+  wipe is `run = ["formal-clear"]` in `config/default.toml` then rebuild
+  (`TRUNCATE exam CASCADE`). Trace is the
   **sole timeline**: categorized rings of timestamped events (nest =
   paired Begin/End on the same ring). Flame export is **XDP-only** split
   path charts (`export_flame_svg`: `just_tx-xdp-*-path-rx|path-tx.flame.*`;
@@ -64,8 +67,8 @@ Wi-Fi 凭据仍在 `examples/just_xdp/.env`、`examples/just_drop_hal/.env` 与 
 
 TR3000（编译期嵌入 `xpost-test/config/`：`default.toml` + `just_tx.toml` + `just_drop.toml`）：
 
-**用户说「测试 / 跑一下 / 验证」时：默认正式跑，不是冒烟。** 不要加 `--smoke`，不要拆子命令做 smoke gate，
-除非用户明确要冒烟。Mac 侧首选 fish helper（build → scp → ssh 无参跑）：
+**用户说「测试 / 跑一下 / 验证」时：默认正式跑。** 永远无参 `./xpost-test`；改
+实验改 `config/*.toml` 后重编。Mac 侧首选 fish helper（build → scp → ssh 无参跑）：
 
 ```bash
 fish -c 'source ~/.config/fish/functions/xpost-test.fish; and xpost-test'
@@ -74,8 +77,8 @@ fish -c 'source ~/.config/fish/functions/xpost-test.fish; and xpost-test'
 **输出**：stdout/stderr 直接看终端；不要 `> /tmp/…`、`tee`、`tail` 截断日志文件。长跑用
 `block_until_ms: 0` 后台跑，再读终端输出。
 
-**正式性能测试永远只跑无参二进制**——不要环境变量、不要子命令、不要 `--formal` / `--path` /
-`--smoke`。改实验：改 TOML → 重编 → scp → 无参 `./xpost-test`（或上面的 fish helper）。
+**正式性能测试永远只跑无参二进制**——不要环境变量、不要子命令、不要任何 CLI flags。
+改实验：改 TOML → 重编 → scp → 无参 `./xpost-test`（或上面的 fish helper）。
 
 手工等价步骤（一般不必；优先 fish helper）：
 
@@ -86,19 +89,21 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 ./xpost-test
 ```
 
-- `config/default.toml`：`run = [...]`（跑哪些**实验**）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`、版本与 profiles
-- `config/just_tx.toml` / `just_drop.toml`：formal 开关与 sample 等；流水线固定三固件标签
-  `xdp_cag` / `hal` / `xdp_t`（`window_s=30`；全网格；无 OP 早停）
-- XDP 固件工程：`examples/just_xdp`（原 `just_drop`）；profiles `just-*-cag` /
-  `just-*-t` / `just-*-hal-cag`（features：已有 `kind-a,kind-g` 或 `kind-t`）
+- `config/default.toml`：`run = [...]`（`just_tx` / `just_drop` / `dev` /
+  `formal-clear`）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`
+- `config/just_tx.toml` / `just_drop.toml`：`formal`、`arms`（`xdp`/`hal`）；流水线
+  固定再跑 `xdp_t`（`window_s=30`；全网格；无 OP 早停）
+- XDP 固件工程：`examples/just_xdp`；profiles `just-*-cag` / `just-*-t` /
+  `just-*-hal-cag`（agent `profiles.toml`）
 - 调试火焰图 Trace（**火焰轨**）：`run = ["dev"]`（硬编码：XDP × `just-tx-t` × 100 pps × 2s × 1
   轮；**无 DB**；report → `/tmp/xpost-dev-flame.report`；Mac scp 到
   `target/dev-flame.report` 后 `pixi run python -m utils.export_flame_svg`）
 - Agent HTTP：`/health`、`/v1/*`（含 `/v1/perf_clear`、`/v1/serial_window`、`/v1/map/{name}`）、`/mcp`
 - 实验步骤与全流程：`xpost-test` 的 `overview` / `config` rustdoc；串口 API：`xpost-serial`
-- 正式 `just_tx` 扫速网格：`400…4000` pps（步长 400；ceiling ≈ XDP ~50% 丢包工作点的 hping3 标定）
+- 正式 `just_tx` 扫速网格：`400…4000` pps（步长 400）
 - 正式 `just_drop`：同网格；`map dump counter`（IPv4 src 末字节分桶）→ `just_drop_data`
-- Schema：`xpost-test/sql/formal.sql` + `just_drop.sql` / `just_tx.sql`；显式清空：`./xpost-test formal-clear`
+- Schema：`xpost-test/sql/formal.sql` + `just_drop.sql` / `just_tx.sql`；显式清空：
+  `run = ["formal-clear"]` 后重编再跑
 
 只跑正式 just_tx：`run = ["just_tx"]`。一次跑全部 formal A/B：`run = ["just_drop", "just_tx"]`。
 

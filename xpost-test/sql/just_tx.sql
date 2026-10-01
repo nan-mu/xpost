@@ -1,5 +1,8 @@
 -- just_tx — TX bounce experiment (workload-specific).
 -- Loaded after formal.sql (needs exam + firmware).
+--
+-- just_tx_data holds successful RTT samples only (got_rx=true).
+-- Loss = just_tx_config.sent - just_tx_config.ok.
 
 CREATE TABLE IF NOT EXISTS just_tx_config (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -9,7 +12,8 @@ CREATE TABLE IF NOT EXISTS just_tx_config (
     window_s DOUBLE PRECISION NOT NULL,
     started_at TIMESTAMPTZ NOT NULL,
     stopped_at TIMESTAMPTZ NOT NULL,
-    sent BIGINT NOT NULL CHECK (sent >= 0)
+    sent BIGINT NOT NULL CHECK (sent >= 0),
+    ok BIGINT NOT NULL CHECK (ok >= 0)
 );
 
 CREATE INDEX IF NOT EXISTS just_tx_config_exam ON just_tx_config (exam_id);
@@ -18,8 +22,7 @@ CREATE TABLE IF NOT EXISTS just_tx_data (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     config_id UUID NOT NULL REFERENCES just_tx_config (id) ON DELETE CASCADE,
     t_tx TIMESTAMPTZ NOT NULL,
-    t_rx TIMESTAMPTZ,
-    got_rx BOOLEAN NOT NULL
+    t_rx TIMESTAMPTZ NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS just_tx_data_config ON just_tx_data (config_id);

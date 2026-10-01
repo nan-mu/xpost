@@ -9,11 +9,11 @@ use super::decode::DecodedReport;
 use super::names::{Firmware, HAL_COUNTER_NAMES, map_agg_name, map_trace_kind};
 use super::{ConfigId, ExamId};
 
+/// Successful bounce sample (`t_rx` observed). Loss rows are not stored.
 #[derive(Clone, Debug)]
 pub struct TxSample {
     pub t_tx: SystemTime,
-    pub t_rx: Option<SystemTime>,
-    pub got_rx: bool,
+    pub t_rx: SystemTime,
 }
 
 pub async fn insert_exam(client: &Client, note: Option<&str>) -> Result<ExamId> {
@@ -47,14 +47,15 @@ pub async fn insert_just_tx_config(
     started_at: SystemTime,
     stopped_at: SystemTime,
     sent: i64,
+    ok: i64,
 ) -> Result<ConfigId> {
     let row = client
         .query_one(
             r#"
             INSERT INTO just_tx_config (
                 exam_id, firmware, target_pps, window_s,
-                started_at, stopped_at, sent
-            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7)
+                started_at, stopped_at, sent, ok
+            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8)
             RETURNING id
             "#,
             &[
@@ -65,6 +66,7 @@ pub async fn insert_just_tx_config(
                 &started_at,
                 &stopped_at,
                 &sent,
+                &ok,
             ],
         )
         .await
@@ -72,23 +74,28 @@ pub async fn insert_just_tx_config(
     Ok(row.get(0))
 }
 
+/// Bulk-insert successful RTT samples via `UNNEST` (one round-trip).
 pub async fn insert_just_tx_data(
     client: &Client,
     config_id: ConfigId,
     samples: &[TxSample],
 ) -> Result<()> {
-    for s in samples {
-        client
-            .execute(
-                r#"
-                INSERT INTO just_tx_data (config_id, t_tx, t_rx, got_rx)
-                VALUES ($1, $2, $3, $4)
-                "#,
-                &[&config_id, &s.t_tx, &s.t_rx, &s.got_rx],
-            )
-            .await
-            .context("INSERT just_tx_data")?;
+    if samples.is_empty() {
+        return Ok(());
     }
+    let t_tx: Vec<SystemTime> = samples.iter().map(|s| s.t_tx).collect();
+    let t_rx: Vec<SystemTime> = samples.iter().map(|s| s.t_rx).collect();
+    client
+        .execute(
+            r#"
+            INSERT INTO just_tx_data (config_id, t_tx, t_rx)
+            SELECT $1, u.t_tx, u.t_rx
+            FROM UNNEST($2::timestamptz[], $3::timestamptz[]) AS u(t_tx, t_rx)
+            "#,
+            &[&config_id, &t_tx, &t_rx],
+        )
+        .await
+        .context("INSERT just_tx_data UNNEST")?;
     Ok(())
 }
 

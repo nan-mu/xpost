@@ -6,13 +6,10 @@ license.workspace = true
 
 [dependencies]
 test-common = { path = "../test-common", features = ["user"] }
-test-report = { path = "../test-report" }
 
 anyhow = { workspace = true, default-features = true }
-axum = { workspace = true }
 aya = { workspace = true }
 aya-log = { workspace = true }
-clap = { workspace = true }
 env_logger = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }

@@ -2,47 +2,37 @@
 //! `config/default.toml` + `just_tx.toml` + `just_drop.toml`.
 //!
 //! Files are embedded at compile time; after editing, rebuild and scp to TR3000.
-//! Formal collection is always:
+//! The only runtime entry is bare:
 //!
 //! ```bash
 //! ./xpost-test
 //! ```
 //!
 //! No env vars, no CLI args. `default.toml` `run = [...]` selects **experiment
-//! names** only; steps are hard-coded in Rust, not split across TOML.
+//! names** only; steps are hard-coded in Rust.
 //!
 //! # `run` values
 //!
 //! | Name | What | Postgres tables |
 //! |------|------|-----------------|
-//! | `just_drop` | Formal HAL + XDP: `kinds` includes `c` (full-rate drop series) and `a`/`g`/`t` (fixed pps) | `just_drop_config`/`data`; `just_drop_run` + agg/gauge/trace_summary |
-//! | `just_tx` | Formal HAL + XDP: `kinds` `c` (sweep / ~5% OP RTT) and `a`/`g`/`t` (fixed pps) | `just_tx_config`/`data`; `just_tx_run` + agg/gauge/trace_summary |
+//! | `just_drop` | Formal HAL + XDP PPS grid + Trace | `exam` + `just_drop_*` + `xdp_*` / `*_hal_*` / `trace_event` |
+//! | `just_tx` | Formal HAL + XDP pps grid RTT + Trace | `exam` + `just_tx_config`(sent/ok) / `just_tx_data` + perf |
 //! | `dev` | Flame Trace: XDP × 100 pps × 2s × 1; `/tmp/xpost-dev-flame.report`; no DB | — |
+//! | `formal-clear` | `TRUNCATE exam CASCADE` | wipe only |
 //!
-//! `dev` is fully hard-coded (no separate TOML); never touches Postgres /
-//! `just_tx_*` / `just_drop_*`. **Flame track** (Trace rings) vs formal
-//! **perf track** (`just_tx` kinds `c|a|g` at high pps without Trace flood).
+//! `dev` is fully hard-coded (no separate TOML); never touches Postgres.
 //!
-//! Formal experiments with `formal`: `DROP CASCADE` same-named tables then
-//! recreate. DDL lives under `xpost-test/sql/`.
+//! Formal DDL: `sql/formal.sql` + `just_tx.sql` / `just_drop.sql` (open-run never
+//! DROP/TRUNCATE). Wipe: `run = ["formal-clear"]`.
 //!
 //! ```toml
-//! run = ["dev"]           # flame Trace short capture
-//! # run = ["just_tx"]     # formal high-pps C/A/G (+ optional low-pps T)
+//! run = ["dev"]
+//! # run = ["just_tx"]
 //! # run = ["just_drop", "just_tx"]
+//! # run = ["formal-clear"]
 //! ```
-//!
-//! # Other files
-//!
-//! - `default.toml`: `run`, postgres, agent, DUT, probe, profiles
-//! - `just_drop.toml` / `just_tx.toml`: `arms` / `kinds` (`c|a|g|t`) /
-//!   `fixed_pps` / `trace_pps` / `instr_rounds` / `instr_window_secs`
-//!
-//! # Functional suite (optional)
-//!
-//! `./xpost-test suite` runs fixed `test0`. `./xpost-test dev` is also available.
 
-use std::{net::Ipv4Addr, str::FromStr, sync::OnceLock};
+use std::{net::Ipv4Addr, sync::OnceLock};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -69,7 +59,7 @@ pub fn postgres() -> &'static PostgresConfig {
 pub struct FileConfig {
     #[serde(default = "default_version")]
     pub version: String,
-    /// Ordered benches for bare `./xpost-test`.
+    /// Ordered experiments for bare `./xpost-test`.
     #[serde(default = "default_run")]
     pub run: Vec<String>,
     pub postgres: PostgresConfig,
@@ -79,15 +69,9 @@ pub struct FileConfig {
     #[serde(default)]
     pub agent: AgentConfig,
     #[serde(default)]
-    pub serve: ServeConfig,
-    #[serde(default)]
-    pub profiles: ProfilesConfig,
-    #[serde(default)]
     pub just_drop: BenchPpsConfig,
     #[serde(default)]
     pub just_tx: BenchPpsConfig,
-    #[serde(default)]
-    pub tests: Vec<TestEntry>,
 }
 
 fn default_version() -> String {
@@ -96,30 +80,6 @@ fn default_version() -> String {
 
 fn default_run() -> Vec<String> {
     vec!["dev".into()]
-}
-
-/// Fixed functional suite for `./xpost-test suite` (not selected via `run`).
-fn default_suite_tests() -> Vec<TestEntry> {
-    vec![TestEntry {
-        name: "test0".into(),
-        enabled: true,
-        cases: vec![
-            CaseConfig {
-                id: "drop".into(),
-                src_ip: Ipv4Addr::new(10, 0, 0, 1),
-                dst_ip: None,
-                expect_echo: false,
-                expect_bounce: false,
-            },
-            CaseConfig {
-                id: "tx".into(),
-                src_ip: Ipv4Addr::new(10, 0, 0, 2),
-                dst_ip: None,
-                expect_echo: false,
-                expect_bounce: true,
-            },
-        ],
-    }]
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -168,93 +128,27 @@ impl AgentConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct ServeConfig {
-    #[serde(default = "default_http_listen")]
-    pub http_listen: String,
-}
-
-fn default_http_listen() -> String {
-    "0.0.0.0:19081".into()
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct ProfilesConfig {
-    #[serde(default)]
-    pub drop_hal: Option<String>,
-    #[serde(default)]
-    pub drop_xdp: Option<String>,
-    #[serde(default)]
-    pub firmware: Option<String>,
-    #[serde(default)]
-    pub just_drop: Option<String>,
-    #[serde(default)]
-    pub just_drop_hal: Option<String>,
-    #[serde(default)]
-    pub just_tx: Option<String>,
-    #[serde(default)]
-    pub just_tx_hal: Option<String>,
-}
-
-/// Shared knobs for PPS / RTT arms (rounds, formal, …).
+/// Knobs for formal PPS / RTT arms (`just_tx.toml` / `just_drop.toml`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct BenchPpsConfig {
     #[serde(default = "default_true")]
     pub formal: bool,
-    #[serde(default = "default_pps_rounds")]
-    pub rounds: usize,
-    #[serde(default)]
-    pub window_secs: Option<u64>,
-    #[serde(default = "default_sample_ms")]
-    pub sample_interval_ms: u64,
     #[serde(default = "default_pps_arms")]
     pub arms: Vec<String>,
-    /// `c` / `a` / `g` / `t` for just_drop and just_tx formal matrices.
-    #[serde(default = "default_kinds_c")]
-    pub kinds: Vec<String>,
-    /// Fixed pps for Aggregate / Gauge (A/G).
-    #[serde(default)]
-    pub fixed_pps: Option<u64>,
-    /// Fixed pps for Trace (lower than `fixed_pps`).
-    #[serde(default)]
-    pub trace_pps: Option<u64>,
-    /// Rounds for A/G/T (Counter still uses `rounds` / sweep trials).
-    #[serde(default)]
-    pub instr_rounds: Option<usize>,
-    /// Window seconds for A/G/T.
-    #[serde(default)]
-    pub instr_window_secs: Option<u64>,
 }
 
 fn default_true() -> bool {
     true
 }
-fn default_pps_rounds() -> usize {
-    3
-}
-fn default_sample_ms() -> u64 {
-    1000
-}
 fn default_pps_arms() -> Vec<String> {
     vec!["hal".into(), "xdp".into()]
-}
-fn default_kinds_c() -> Vec<String> {
-    vec!["c".into()]
 }
 
 impl Default for BenchPpsConfig {
     fn default() -> Self {
         Self {
             formal: true,
-            rounds: default_pps_rounds(),
-            window_secs: None,
-            sample_interval_ms: default_sample_ms(),
             arms: default_pps_arms(),
-            kinds: default_kinds_c(),
-            fixed_pps: None,
-            trace_pps: None,
-            instr_rounds: None,
-            instr_window_secs: None,
         }
     }
 }
@@ -264,25 +158,18 @@ pub struct ProbeConfig {
     pub iface: String,
     #[serde(default = "default_pair_timeout_ms")]
     pub pair_timeout_ms: u64,
-    #[serde(default = "default_report_path")]
-    pub report_path: String,
     #[serde(default)]
     pub src_mac: Option<String>,
 }
 
 fn default_pair_timeout_ms() -> u64 {
-    2000
-}
-
-fn default_report_path() -> String {
-    "/tmp/test-report.json".into()
+    5000
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TargetConfig {
     pub esp_ip: Ipv4Addr,
-    #[serde(default)]
-    pub vip_ip: Option<Ipv4Addr>,
+    pub vip_ip: Ipv4Addr,
     pub esp_mac: String,
     #[serde(default = "default_echo_port")]
     pub echo_port: u16,
@@ -307,31 +194,6 @@ fn default_ctrl_port() -> u16 {
     8081
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct TestEntry {
-    pub name: String,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub cases: Vec<CaseConfig>,
-}
-
-fn default_enabled() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CaseConfig {
-    pub id: String,
-    pub src_ip: Ipv4Addr,
-    #[serde(default)]
-    pub dst_ip: Option<Ipv4Addr>,
-    #[serde(default)]
-    pub expect_echo: bool,
-    #[serde(default)]
-    pub expect_bounce: bool,
-}
-
 #[derive(Debug, Deserialize)]
 struct DefaultFile {
     #[serde(default = "default_version")]
@@ -344,10 +206,6 @@ struct DefaultFile {
     target: TargetConfig,
     #[serde(default)]
     agent: AgentConfig,
-    #[serde(default)]
-    serve: ServeConfig,
-    #[serde(default)]
-    profiles: ProfilesConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -363,15 +221,13 @@ struct JustDropFile {
 }
 
 impl FileConfig {
-    /// Load and merge the compile-time TOMLs.
     pub fn embedded() -> Result<Self> {
         let def: DefaultFile =
             toml::from_str(EMBEDDED_DEFAULT).context("parse config/default.toml")?;
-        let tx: JustTxFile =
+        let just_tx: JustTxFile =
             toml::from_str(EMBEDDED_JUST_TX).context("parse config/just_tx.toml")?;
-        let drop: JustDropFile =
+        let just_drop: JustDropFile =
             toml::from_str(EMBEDDED_JUST_DROP).context("parse config/just_drop.toml")?;
-
         let cfg = Self {
             version: def.version,
             run: def.run,
@@ -379,11 +235,8 @@ impl FileConfig {
             probe: def.probe,
             target: def.target,
             agent: def.agent,
-            serve: def.serve,
-            profiles: def.profiles,
-            just_drop: drop.bench,
-            just_tx: tx.bench,
-            tests: default_suite_tests(),
+            just_drop: just_drop.bench,
+            just_tx: just_tx.bench,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -395,61 +248,25 @@ impl FileConfig {
         }
         for name in &self.run {
             match name.as_str() {
-                "just_tx" | "just_drop" | "dev" | "suite" => {}
-                "just-tx" | "just-drop" | "just-tx-pps" | "just-tx-rtt" | "just-drop-pps" => {
-                    bail!(
-                        "default.toml `run` entry {name:?} is not an experiment name; use just_tx / just_drop / dev (see `config` module docs)"
-                    )
-                }
+                "just_tx" | "just_drop" | "dev" | "formal-clear" => {}
                 other => bail!(
-                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / dev (see `config` module docs)"
+                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / dev / formal-clear"
                 ),
             }
-        }
-        if self.probe.iface.is_empty() {
-            bail!("probe.iface must be set");
-        }
-        if self.postgres.host.is_empty() {
-            bail!("postgres.host must be set");
-        }
-        parse_mac(&self.target.esp_mac).context("dut.esp_mac")?;
-        if let Some(ref m) = self.probe.src_mac {
-            parse_mac(m).context("probe.src_mac")?;
         }
         Ok(())
     }
 
     pub fn esp_mac_bytes(&self) -> Result<[u8; 6]> {
-        parse_mac(&self.target.esp_mac)
+        parse_mac(&self.target.esp_mac).context("dut.esp_mac")
     }
 
     pub fn src_mac_override(&self) -> Result<Option<[u8; 6]>> {
         match &self.probe.src_mac {
-            Some(s) => Ok(Some(parse_mac(s)?)),
-            None => Ok(None),
+            Some(s) if !s.is_empty() => Ok(Some(parse_mac(s).context("probe.src_mac")?)),
+            _ => Ok(None),
         }
     }
-}
-
-/// Parse `aa:bb:cc:dd:ee:ff` or `aa-bb-cc-dd-ee-ff`.
-pub fn parse_mac(s: &str) -> Result<[u8; 6]> {
-    let sep = if s.contains(':') {
-        ':'
-    } else if s.contains('-') {
-        '-'
-    } else {
-        bail!("MAC must use : or - separators: {s}");
-    };
-    let parts: Vec<&str> = s.split(sep).collect();
-    if parts.len() != 6 {
-        bail!("MAC must have 6 octets: {s}");
-    }
-    let mut out = [0u8; 6];
-    for (i, p) in parts.iter().enumerate() {
-        out[i] =
-            u8::from_str_radix(p, 16).with_context(|| format!("bad MAC octet '{p}' in {s}"))?;
-    }
-    Ok(out)
 }
 
 pub fn format_mac(mac: &[u8; 6]) -> String {
@@ -459,10 +276,14 @@ pub fn format_mac(mac: &[u8; 6]) -> String {
     )
 }
 
-impl FromStr for FileConfig {
-    type Err = anyhow::Error;
-
-    fn from_str(_s: &str) -> Result<Self> {
-        bail!("FileConfig::from_str removed; use FileConfig::embedded()")
+fn parse_mac(s: &str) -> Result<[u8; 6]> {
+    let parts: Vec<_> = s.split(':').collect();
+    if parts.len() != 6 {
+        bail!("MAC must be 6 colon-separated hex octets, got {s:?}");
     }
+    let mut out = [0u8; 6];
+    for (i, p) in parts.iter().enumerate() {
+        out[i] = u8::from_str_radix(p, 16).with_context(|| format!("MAC octet {p:?}"))?;
+    }
+    Ok(out)
 }

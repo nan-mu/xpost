@@ -1,17 +1,16 @@
-//! # `xpost-test` — TR3000 formal / functional harness
+//! # `xpost-test` — TR3000 formal / flame harness
 //!
-//! This crate owns the **end-to-end test workflow**. Mac-side USB is owned by
-//! `xpost-agent` (HTTP `/v1/*`); low-level serial types live in **`xpost-serial`**
-//! (see that crate’s rustdoc for `Session` / `install_xdp` / `Sink` — API only).
+//! This crate owns the **end-to-end experiment workflow**. Mac-side USB is owned by
+//! `xpost-agent` (HTTP `/v1/*`); low-level serial types live in **`xpost-serial`**.
 //!
-//! Binary name: **`xpost-test`**. Compile-time config:
+//! Binary name: **`xpost-test`**. Compile-time config only:
 //! [`config/default.toml`](../../config/default.toml) +
 //! [`just_tx.toml`](../../config/just_tx.toml) +
 //! [`just_drop.toml`](../../config/just_drop.toml). Knobs: [`config`].
 //!
-//! # Formal performance path (primary)
+//! # Sole entry
 //!
-//! Always on TR3000, **no env / no CLI flags**:
+//! Always on TR3000, **no env / no CLI flags / no subcommands**:
 //!
 //! ```text
 //! Mac (USB ESP)                         TR3000                         Postgres
@@ -24,23 +23,19 @@
 //! ```
 //!
 //! 1. Mac: `cargo xtask agent --listen 0.0.0.0:9240 --no-monitor`
-//! 2. Edit `config/default.toml` `run = ["just_drop"]` and/or `["just_tx"]`
-//!    (steps are fixed in Rust; TOML only selects experiments + knobs).
+//! 2. Edit `config/default.toml` `run = ["just_drop"]` and/or `["just_tx"]` /
+//!    `["dev"]` / `["formal-clear"]` (steps fixed in Rust; TOML selects experiments).
 //! 3. Rebuild → scp → on TR3000: `./xpost-test`
-//! 4. Analysis on Mac: `benchmark/` notebooks (`just_drop.ipynb` / `just_tx.ipynb`),
-//!    kernel `xpost-benchmark` — see `benchmark.utils` package docstring.
 //!
 //! | `run` | Role | Tables |
 //! |-------|------|--------|
 //! | `just_drop` | `xdp_cag`/`hal` PPS grid + Array Map dump + `xdp_t` Trace | `exam` + `just_drop_*` + perf |
-//! | `just_tx` | `xdp_cag`/`hal` full pps grid RTT + `xdp_t` Trace | `exam` + `just_tx_*` + perf |
+//! | `just_tx` | `xdp_cag`/`hal` pps grid RTT + `xdp_t` Trace | `exam` + `just_tx_*` (sent/ok; success RTT) + perf |
 //! | `dev` | Flame Trace only: XDP × 100 pps × 2s × 1; report file; **no DB** | — |
+//! | `formal-clear` | `TRUNCATE exam CASCADE` | wipe |
 //!
-//! Agent profile flash builds firmware + optional XDP ELF from `profiles.toml`.
-//! Serial read face on DUT: `report` / `perf clear` (binary metrics via xpost `ext::perf`)
-//! (esp-radio only **calls** `EspRadioTrace`; storage is xpost `ext::perf`).
-//! Formal decodes report → exam-scoped tables (`sql/formal.sql`); no `report_raw`.
-//! Open-run never DROP/TRUNCATE; wipe with `./xpost-test formal-clear`.
+//! Formal DDL: `sql/formal.sql` (shared) + `just_tx.sql` / `just_drop.sql`.
+//! Open-run never DROP/TRUNCATE; wipe with `run = ["formal-clear"]`.
 //!
 //! # Topology
 //!
@@ -53,11 +48,7 @@
 //!      RAW + TC; agent on Mac flashes DUT
 //! ```
 //!
-//! - Deploy **`xpost-test`** to TR3000; do not ssh the gateway for harness runs.
-//! - Mac flashes via agent; does not own the stimulus path.
-//! - DUT Wi-Fi credentials: `examples/just_xdp/.env` (and HAL / just_tx_hal).
-//!
-//! # Stimulus contract (formal + suite)
+//! # Stimulus contract
 //!
 //! | Item | Convention |
 //! |------|------------|
@@ -67,24 +58,10 @@
 //!
 //! # Build / deploy
 //!
-//! Container toolchain under `xpost-test/` (see `rust-toolchain.toml`):
-//!
 //! ```bash
 //! cd xpost-test && cargo build -p test --release
 //! scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 //! ```
-//!
-//! # Functional suite / legacy benches (secondary)
-//!
-//! - `./xpost-test suite` — fixed `test0`
-//! - Hidden subcommands (`drop-xdp`, `echo`, `wl-*`, `rate-*`, `serve`, …): older
-//!   profiles / UDP `:8081` control plane; not the formal PPS A/B path.
-//! - Protocol matrices for those benches remain below for maintainers.
-//!
-//! ## `firewall_echo` / `xdp_forward_echo` / `fw_hash_test` / `hot_load_ctrl`
-//!
-//! See historical pass criteria in this module’s remainder (suite assets under
-//! `test/assets/`, DDL in `sql/formal.sql`). Prefer formal `just_*` for performance.
 //!
 //! ## Router deps (TR3000)
 //!
@@ -92,11 +69,6 @@
 //! opkg update && opkg install kmod-sched-bpf kmod-sched-core ip-full
 //! ip link   # confirm probe.iface (often br-lan)
 //! ```
-//!
-//! ## Precision
-//!
-//! Deltas use TC `bpf_ktime_get_ns` only. Results are over-the-air RTT/PPS as seen
-//! from TR3000 — relative comparisons, not on-chip cycle counts.
 
 #![allow(dead_code)]
 
