@@ -267,6 +267,10 @@ fn dispatch_serial(line: &str) {
     } else if line.eq_ignore_ascii_case("drop off") {
         DROP_ARMED.store(false, Ordering::Relaxed);
         esp_println::println!("OK drop off");
+    } else if line.eq_ignore_ascii_case("counters") {
+        let drop = DROP.load(Ordering::Relaxed);
+        let net_rx = NET_RX.load(Ordering::Relaxed);
+        esp_println::println!("OK counters drop={drop} net_rx={net_rx}");
     } else {
         esp_println::println!("ERR unknown");
     }

@@ -349,7 +349,7 @@ async fn measure_counter_round(
 
     let wall0 = SystemTime::now();
     let t0 = Instant::now();
-    let first_line = agent.counters().await.context("counters t0")?;
+    let first_line = fetch_drop_line(agent, path).await.context("counters t0")?;
     let first = parse_drop_net_rx(&first_line)?;
     let mut samples = vec![Sample {
         t: wall0,
@@ -373,7 +373,7 @@ async fn measure_counter_round(
     let deadline = t0 + window + Duration::from_millis(DRAIN_MS);
     while Instant::now() < deadline {
         tokio::time::sleep(sample).await;
-        let line = agent.counters().await.context("counters sample")?;
+        let line = fetch_drop_line(agent, path).await.context("counters sample")?;
         let (drop, net_rx) = parse_drop_net_rx(&line)?;
         let now = SystemTime::now();
         samples.push(Sample { t: now, drop });
@@ -414,7 +414,7 @@ async fn measure_counter_round(
         .context("blast join")?
         .context("udp_blast")?;
     tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
-    let last_line = agent.counters().await.context("counters end")?;
+    let last_line = fetch_drop_line(agent, path).await.context("counters end")?;
     let last = parse_drop_net_rx(&last_line)?;
     let t_end = SystemTime::now();
     if samples
@@ -546,4 +546,12 @@ fn parse_drop_net_rx(line: &str) -> Result<(u64, u64)> {
         .and_then(|v| v.as_i64())
         .context("missing net_rx=/rx_delivered=")? as u64;
     Ok((drop, net_rx))
+}
+
+/// HAL app drop lives in firmware `counters` (DROP/NET_RX); XDP uses perf report.
+async fn fetch_drop_line(agent: &AgentClient, path: PpsPath) -> Result<String> {
+    match path {
+        PpsPath::Hal => agent.request("counters").await,
+        PpsPath::Xdp => agent.counters().await,
+    }
 }
