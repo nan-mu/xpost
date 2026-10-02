@@ -31,10 +31,11 @@
 //! |-------|------|--------|
 //! | `just_drop` | `xdp_cag`/`hal` PPS grid + Array Map dump + `xdp_t` Trace | `exam` + `just_drop_*` + perf |
 //! | `just_tx` | `xdp_cag`/`hal` pps grid RTT + `xdp_t` Trace | `exam` + `just_tx_*` (sent/ok; success RTT) + perf |
+//! | `firewall` | Hash blacklist size×hit/miss PPS grid + Trace | `exam` + `firewall_*` + perf |
 //! | `dev` | Flame Trace only: XDP × 100 pps × 2s × 1; report file; **no DB** | — |
 //! | `formal-clear` | `TRUNCATE exam CASCADE` | wipe |
 //!
-//! Formal DDL: `sql/formal.sql` (shared) + `just_tx.sql` / `just_drop.sql`.
+//! Formal DDL: `sql/formal.sql` (shared) + `just_tx.sql` / `just_drop.sql` / `firewall.sql`.
 //! Open-run never DROP/TRUNCATE; wipe with `run = ["formal-clear"]`.
 //!
 //! # Topology

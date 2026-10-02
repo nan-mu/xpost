@@ -1,0 +1,18 @@
+[target.riscv32imc-unknown-none-elf]
+runner = "espflash flash --monitor --chip esp32c3"
+# Scheme B: plain `cargo build` → rust-lld via wrapper → embed `.xpost.mem`.
+linker = "../../xpost-build/xpost-link"
+
+[env]
+ESP_LOG="info"
+
+[build]
+rustflags = [
+  "-C", "force-frame-pointers",
+  "-Z", "stack-protector=all",
+]
+
+target = "riscv32imc-unknown-none-elf"
+
+[unstable]
+build-std = ["alloc", "core"]

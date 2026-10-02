@@ -65,7 +65,7 @@ cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
 Cursor MCP 示例 URL：`http://127.0.0.1:9240/mcp`。
 Wi-Fi 凭据仍在 `examples/just_xdp/.env`、`examples/just_drop_hal/.env` 与 `examples/just_tx_hal/.env`（`WIFI_SSID` / `WIFI_PASS`）。
 
-TR3000（编译期嵌入 `xpost-test/config/`：`default.toml` + `just_tx.toml` + `just_drop.toml`）：
+TR3000（编译期嵌入 `xpost-test/config/`：`default.toml` + `just_tx.toml` + `just_drop.toml` + `firewall.toml`）：
 
 **用户说「测试 / 跑一下 / 验证」时：默认正式跑。** 永远无参 `./xpost-test`；改
 实验改 `config/*.toml` 后重编。Mac 侧首选 fish helper（build → scp → ssh 无参跑）：
@@ -89,12 +89,14 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 ./xpost-test
 ```
 
-- `config/default.toml`：`run = [...]`（`just_tx` / `just_drop` / `dev` /
+- `config/default.toml`：`run = [...]`（`just_tx` / `just_drop` / `firewall` / `dev` /
   `formal-clear`）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`
 - `config/just_tx.toml` / `just_drop.toml`：`formal`、`arms`（`xdp`/`hal`）；流水线
   固定再跑 `xdp_t`（`window_s=30`；全网格；无 OP 早停）
-- XDP 固件工程：`examples/just_xdp`；profiles `just-*-cag` / `just-*-t` /
-  `just-*-hal-cag`（agent `profiles.toml`）
+- `config/firewall.toml`：hash blacklist `sizes` / `traffic` hit|miss；profiles
+  `firewall-cag` / `firewall-hal-cag` / `firewall-t`
+- XDP 固件工程：`examples/just_xdp`、`examples/firewall`；profiles `just-*-cag` /
+  `just-*-t` / `just-*-hal-cag` / `firewall-*`（agent `profiles.toml`）
 - 调试火焰图 Trace（**火焰轨**）：`run = ["dev"]`（硬编码：XDP × `just-tx-t` × 100 pps × 2s × 1
   轮；**无 DB**；report → `/tmp/xpost-dev-flame.report`；Mac scp 到
   `target/dev-flame.report` 后 `pixi run python -m utils.export_flame_svg`）
@@ -102,10 +104,10 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 - 实验步骤与全流程：`xpost-test` 的 `overview` / `config` rustdoc；串口 API：`xpost-serial`
 - 正式 `just_tx` 扫速网格：`400…4000` pps（步长 400）
 - 正式 `just_drop`：同网格；`map dump counter`（IPv4 src 末字节分桶）→ `just_drop_data`
-- Schema：`xpost-test/sql/formal.sql` + `just_drop.sql` / `just_tx.sql`；显式清空：
+- Schema：`xpost-test/sql/formal.sql` + `just_drop.sql` / `just_tx.sql` / `firewall.sql`；显式清空：
   `run = ["formal-clear"]` 后重编再跑
 
-只跑正式 just_tx：`run = ["just_tx"]`。一次跑全部 formal A/B：`run = ["just_drop", "just_tx"]`。
+只跑正式 just_tx：`run = ["just_tx"]`。firewall：`run = ["firewall"]`。一次跑全部 formal A/B：`run = ["just_drop", "just_tx"]`。
 
 可选手工 XDP 冷表操作：`cargo xtask agent program|list|clear|request|probe …`。
 

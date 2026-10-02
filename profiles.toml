@@ -79,6 +79,41 @@ chip = "esp32c3"
 build = ["cargo", "xtask", "just_drop_hal", "build", "--release", "--no-default-features", "--features", "kind-a,kind-g"]
 
 # ---------------------------------------------------------------------------
+# Formal firewall (hash-map blacklist) — Experiment 3
+# ---------------------------------------------------------------------------
+
+[[profile]]
+id = "firewall-cag"
+path = "firewall"
+description = "firewall XDP C+A+G (kind-a,kind-g) + cold firewall.elf — DB tag xdp_cag"
+bin = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
+partition_table = "examples/firewall/partitions.csv"
+chip = "esp32c3"
+xdp_elf = "examples/firewall/firewall.elf"
+xdp_name = "firewall"
+build = ["cargo", "xtask", "firewall", "build", "--release", "--no-default-features", "--features", "kind-a,kind-g"]
+
+[[profile]]
+id = "firewall-t"
+path = "firewall"
+description = "firewall XDP Trace (kind-t) + cold firewall.elf — DB tag xdp_t"
+bin = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
+partition_table = "examples/firewall/partitions.csv"
+chip = "esp32c3"
+xdp_elf = "examples/firewall/firewall.elf"
+xdp_name = "firewall"
+build = ["cargo", "xtask", "firewall", "build", "--release", "--no-default-features", "--features", "kind-t"]
+
+[[profile]]
+id = "firewall-hal-cag"
+path = "firewall_hal"
+description = "firewall_hal C+A+G (kind-a,kind-g); app hash blacklist — DB tag hal"
+bin = "examples/firewall_hal/target/riscv32imc-unknown-none-elf/release/firewall_hal"
+partition_table = "examples/firewall_hal/partitions.csv"
+chip = "esp32c3"
+build = ["cargo", "xtask", "firewall_hal", "build", "--release", "--no-default-features", "--features", "kind-a,kind-g"]
+
+# ---------------------------------------------------------------------------
 # Legacy shard aliases (manual flash / smoke; formal uses *-cag / *-t above)
 # ---------------------------------------------------------------------------
 

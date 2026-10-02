@@ -161,6 +161,45 @@ pub async fn insert_just_drop_data(
 pub enum PerfExperiment {
     JustTx,
     JustDrop,
+    Firewall,
+}
+
+pub async fn insert_firewall_config(
+    client: &Client,
+    exam_id: ExamId,
+    firmware: Firmware,
+    blacklist_size: i32,
+    traffic: &str,
+    target_pps: f64,
+    window_s: f64,
+    started_at: SystemTime,
+    stopped_at: SystemTime,
+    sent: i64,
+) -> Result<ConfigId> {
+    let row = client
+        .query_one(
+            r#"
+            INSERT INTO firewall_config (
+                exam_id, firmware, blacklist_size, traffic, target_pps, window_s,
+                started_at, stopped_at, sent
+            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING id
+            "#,
+            &[
+                &exam_id,
+                &firmware.as_db(),
+                &blacklist_size,
+                &traffic,
+                &target_pps,
+                &window_s,
+                &started_at,
+                &stopped_at,
+                &sent,
+            ],
+        )
+        .await
+        .context("INSERT firewall_config")?;
+    Ok(row.get(0))
 }
 
 /// Write decoded perf sections into xdp_* or experiment HAL tables (+ optional trace).
@@ -176,6 +215,7 @@ pub async fn write_perf(
         match experiment {
             PerfExperiment::JustTx => write_just_tx_hal(client, config_id, report).await?,
             PerfExperiment::JustDrop => write_just_drop_hal(client, config_id, report).await?,
+            PerfExperiment::Firewall => write_firewall_hal(client, config_id, report).await?,
         }
     } else {
         write_xdp(client, exam_id, config_id, report).await?;
@@ -293,6 +333,22 @@ async fn write_just_drop_hal(
         "just_drop_hal_counter",
         "just_drop_hal_agg",
         "just_drop_hal_gauge",
+    )
+    .await
+}
+
+async fn write_firewall_hal(
+    client: &Client,
+    config_id: ConfigId,
+    report: &DecodedReport,
+) -> Result<()> {
+    write_hal_tables(
+        client,
+        config_id,
+        report,
+        "firewall_hal_counter",
+        "firewall_hal_agg",
+        "firewall_hal_gauge",
     )
     .await
 }
