@@ -1,8 +1,8 @@
-//! Server reply encoding ↔ client reply parsing.
+//! Server reply encoding ↔ client reply parsing (OK + all ERR domains).
 
 use crate::r#type::command::Command;
-use crate::r#type::reply::{OkReply, ServerError};
-use crate::server::reply::{write_error, write_ok};
+use crate::r#type::reply::{MapError, OkReply, PerfError, ServerError, SyntaxError};
+use crate::server::reply::{WireError, write_error, write_ok};
 
 fn encode_ok(reply: &OkReply<'_>) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -14,7 +14,7 @@ fn encode_ok(reply: &OkReply<'_>) -> Vec<u8> {
     buf
 }
 
-fn encode_err(error: &ServerError) -> Vec<u8> {
+fn encode_err(error: &(impl WireError + ?Sized)) -> Vec<u8> {
     let mut buf = Vec::new();
     write_error(error, |chunk| {
         buf.extend_from_slice(chunk);
@@ -47,21 +47,28 @@ fn roundtrip_ok(cmd: Command<'_>, reply: OkReply<'_>) {
     assert_ok_eq(&parsed, &reply);
 }
 
-fn assert_server_err_eq(got: &ServerError, expect: &ServerError) {
-    match (got, expect) {
-        (ServerError::Unknown, ServerError::Unknown)
-        | (ServerError::Timeout, ServerError::Timeout)
-        | (ServerError::Logic, ServerError::Logic)
-        | (ServerError::Busy, ServerError::Busy)
-        | (ServerError::Unsupported, ServerError::Unsupported) => {}
-        _ => panic!("server error variant mismatch"),
-    }
+fn roundtrip_server_err(cmd: &Command<'_>, err: ServerError) {
+    let raw = encode_err(&err);
+    let parsed = ServerError::try_from((raw.as_slice(), cmd)).expect("parse ServerError");
+    assert!(core::mem::discriminant(&parsed) == core::mem::discriminant(&err));
 }
 
-fn roundtrip_server_err(cmd: Command<'_>, err: ServerError) {
+fn roundtrip_map_err(cmd: &Command<'_>, err: MapError) {
     let raw = encode_err(&err);
-    let parsed = ServerError::try_from((raw.as_slice(), &cmd)).expect("parse encoded ERR");
-    assert_server_err_eq(&parsed, &err);
+    let parsed = MapError::try_from((raw.as_slice(), cmd)).expect("parse MapError");
+    assert!(core::mem::discriminant(&parsed) == core::mem::discriminant(&err));
+}
+
+fn roundtrip_perf_err(cmd: &Command<'_>, err: PerfError) {
+    let raw = encode_err(&err);
+    let parsed = PerfError::try_from((raw.as_slice(), cmd)).expect("parse PerfError");
+    assert!(core::mem::discriminant(&parsed) == core::mem::discriminant(&err));
+}
+
+fn roundtrip_syntax_err(cmd: &Command<'_>, err: SyntaxError) {
+    let raw = encode_err(&err);
+    let parsed = SyntaxError::try_from((raw.as_slice(), cmd)).expect("parse SyntaxError");
+    assert!(core::mem::discriminant(&parsed) == core::mem::discriminant(&err));
 }
 
 #[test]
@@ -103,7 +110,6 @@ fn ok_update_map() {
 
 #[test]
 fn ok_init() {
-    // Unsolicited settle line; host waits via GetInit (no UART request).
     roundtrip_ok(Command::GetInit, OkReply::Init);
 }
 
@@ -136,26 +142,70 @@ fn ok_get_perf_blob() {
 }
 
 #[test]
-fn err_server_unknown() {
-    roundtrip_server_err(Command::Ping, ServerError::Unknown);
+fn err_server_all() {
+    let cmd = Command::Ping;
+    for err in [
+        ServerError::Unknown,
+        ServerError::Timeout,
+        ServerError::Logic,
+        ServerError::Busy,
+        ServerError::Unsupported,
+    ] {
+        roundtrip_server_err(&cmd, err);
+    }
 }
 
 #[test]
-fn err_server_timeout() {
-    roundtrip_server_err(Command::GetPerf, ServerError::Timeout);
+fn err_map_all() {
+    let cmd = Command::GetMap { name: "counter" };
+    for err in [
+        MapError::NameNotFound,
+        MapError::KeyNotFound,
+        MapError::InvalidName,
+        MapError::InvalidKey,
+        MapError::InvalidValue,
+        MapError::Full,
+        MapError::Unsupported,
+        MapError::BufferTooSmall,
+    ] {
+        roundtrip_map_err(&cmd, err);
+    }
 }
 
 #[test]
-fn err_server_logic() {
-    roundtrip_server_err(Command::EnableXdp, ServerError::Logic);
+fn err_perf_all() {
+    let cmd = Command::GetPerf;
+    for err in [
+        PerfError::Unavailable,
+        PerfError::Unsupported,
+        PerfError::BufferTooSmall,
+    ] {
+        roundtrip_perf_err(&cmd, err);
+    }
 }
 
 #[test]
-fn err_server_busy() {
-    roundtrip_server_err(Command::DisableXdp, ServerError::Busy);
+fn err_syntax_all() {
+    let cmd = Command::Ping;
+    for err in [
+        SyntaxError::BadArity,
+        SyntaxError::InvalidUtf8,
+        SyntaxError::LineTooLong,
+    ] {
+        roundtrip_syntax_err(&cmd, err);
+    }
 }
 
 #[test]
-fn err_server_unsupported() {
-    roundtrip_server_err(Command::ClearPerf, ServerError::Unsupported);
+fn err_domains_do_not_cross_parse() {
+    let map_line = encode_err(&MapError::NameNotFound);
+    let cmd = Command::GetMap { name: "x" };
+    assert!(ServerError::try_from((map_line.as_slice(), &cmd)).is_err());
+    assert!(PerfError::try_from((map_line.as_slice(), &cmd)).is_err());
+    assert!(SyntaxError::try_from((map_line.as_slice(), &cmd)).is_err());
+    assert!(MapError::try_from((map_line.as_slice(), &cmd)).is_ok());
+
+    let perf_line = encode_err(&PerfError::Unavailable);
+    assert!(MapError::try_from((perf_line.as_slice(), &Command::GetPerf)).is_err());
+    assert!(ServerError::try_from((perf_line.as_slice(), &Command::GetPerf)).is_err());
 }

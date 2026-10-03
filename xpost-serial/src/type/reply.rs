@@ -40,6 +40,7 @@ pub trait ErrReply {}
 /// Domain failures are peers ([`MapError`] and [`PerfError`]), never payloads of
 /// this enum. See the [wire contract](super#device-error-contract). A timeout
 /// reported by the device is distinct from the host's local waiting deadline.
+#[derive(Clone, Copy)]
 pub enum ServerError {
     /// `ERR unknown`: an empty or unrecognized request, including `get init`.
     Unknown,
@@ -60,6 +61,7 @@ impl ErrReply for ServerError {}
 ///
 /// These describe what failed, without wrapping an operation or another error.
 /// General device timeouts and logic failures remain [`ServerError`] values.
+#[derive(Clone, Copy)]
 pub enum MapError {
     /// `ERR map name-not-found`: no map exists under the requested name.
     NameNotFound,
@@ -85,6 +87,7 @@ impl ErrReply for MapError {}
 /// Performance-domain failures shared by get and clear operations.
 ///
 /// General device timeouts and logic failures remain [`ServerError`] values.
+#[derive(Clone, Copy)]
 pub enum PerfError {
     /// `ERR perf unavailable`: the required performance facility is not enabled.
     Unavailable,
@@ -95,6 +98,22 @@ pub enum PerfError {
 }
 
 impl ErrReply for PerfError {}
+
+/// Request-line syntax failures (not map/perf/domain execution).
+///
+/// Firmware request parsers emit these wire lines for arity/utf8/length
+/// problems. Empty/unknown requests use [`ServerError::Unknown`] instead.
+#[derive(Clone, Copy)]
+pub enum SyntaxError {
+    /// `ERR bad-arity`
+    BadArity,
+    /// `ERR invalid-utf8`
+    InvalidUtf8,
+    /// `ERR line-too-long`
+    LineTooLong,
+}
+
+impl ErrReply for SyntaxError {}
 
 pub enum MapKind {
     Array { size: u32 },

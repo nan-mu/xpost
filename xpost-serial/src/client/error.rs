@@ -8,7 +8,7 @@ use core::fmt;
 use std::io;
 use std::time::Duration;
 
-use crate::r#type::reply::{ErrReply, OkReply, ServerError};
+use crate::r#type::reply::{ErrReply, MapError, OkReply, PerfError, ServerError, SyntaxError};
 
 /// App-mode request outcome. Callers pick `E: `[`ErrReply`] (and the `From`s
 /// required by the request path).
@@ -67,6 +67,41 @@ impl fmt::Display for ServerError {
 
 impl std::error::Error for ServerError {}
 
+impl fmt::Debug for MapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NameNotFound => f.write_str("NameNotFound"),
+            Self::KeyNotFound => f.write_str("KeyNotFound"),
+            Self::InvalidName => f.write_str("InvalidName"),
+            Self::InvalidKey => f.write_str("InvalidKey"),
+            Self::InvalidValue => f.write_str("InvalidValue"),
+            Self::Full => f.write_str("Full"),
+            Self::Unsupported => f.write_str("Unsupported"),
+            Self::BufferTooSmall => f.write_str("BufferTooSmall"),
+        }
+    }
+}
+
+impl fmt::Debug for PerfError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("Unavailable"),
+            Self::Unsupported => f.write_str("Unsupported"),
+            Self::BufferTooSmall => f.write_str("BufferTooSmall"),
+        }
+    }
+}
+
+impl fmt::Debug for SyntaxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BadArity => f.write_str("BadArity"),
+            Self::InvalidUtf8 => f.write_str("InvalidUtf8"),
+            Self::LineTooLong => f.write_str("LineTooLong"),
+        }
+    }
+}
+
 /// Business-deadline arm of request `select!`.
 pub struct RequestTimeout(pub Duration);
 
@@ -124,6 +159,9 @@ pub trait RequestError:
     ErrReply
     + From<ParseError>
     + From<ServerError>
+    + From<MapError>
+    + From<PerfError>
+    + From<SyntaxError>
     + From<RequestTimeout>
     + From<Interrupted>
     + From<io::Error>
@@ -134,6 +172,9 @@ impl<T> RequestError for T where
     T: ErrReply
         + From<ParseError>
         + From<ServerError>
+        + From<MapError>
+        + From<PerfError>
+        + From<SyntaxError>
         + From<RequestTimeout>
         + From<Interrupted>
         + From<io::Error>

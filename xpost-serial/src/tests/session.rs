@@ -1,7 +1,7 @@
 //! End-to-end App-mode branches over injectable memory IO.
 
 use crate::client::{Command, OkReply};
-use crate::r#type::reply::ServerError;
+use crate::r#type::reply::{MapError, PerfError, ServerError, SyntaxError};
 use crate::server::reply::ReplyWriter;
 use crate::tests::harness::{TestError, with_session};
 
@@ -243,6 +243,59 @@ fn err_unsupported() {
                 Err(TestError::Server(ServerError::Unsupported)) => {}
                 Err(e) => panic!("expected Unsupported, got {e:?}"),
                 Ok(_) => panic!("expected Unsupported, got Ok"),
+            }
+        },
+    );
+}
+
+#[test]
+fn err_map_name_not_found() {
+    with_session(
+        |b| {
+            b.on_get_map(|_: &str, reply: ReplyWriter<'_>| {
+                reply.error(&MapError::NameNotFound);
+            })
+            .build()
+        },
+        |client| {
+            match client.request::<TestError>(&Command::GetMap { name: "missing" }) {
+                Err(TestError::Map(MapError::NameNotFound)) => {}
+                Err(e) => panic!("expected Map::NameNotFound, got {e:?}"),
+                Ok(_) => panic!("expected Map::NameNotFound, got Ok"),
+            }
+        },
+    );
+}
+
+#[test]
+fn err_perf_unavailable() {
+    with_session(
+        |b| {
+            b.on_get_perf(|reply: ReplyWriter<'_>| reply.error(&PerfError::Unavailable))
+                .build()
+        },
+        |client| {
+            match client.request::<TestError>(&Command::GetPerf) {
+                Err(TestError::Perf(PerfError::Unavailable)) => {}
+                Err(e) => panic!("expected Perf::Unavailable, got {e:?}"),
+                Ok(_) => panic!("expected Perf::Unavailable, got Ok"),
+            }
+        },
+    );
+}
+
+#[test]
+fn err_syntax_bad_arity() {
+    with_session(
+        |b| {
+            b.on_ping(|reply: ReplyWriter<'_>| reply.error(&SyntaxError::BadArity))
+                .build()
+        },
+        |client| {
+            match client.request::<TestError>(&Command::Ping) {
+                Err(TestError::Syntax(SyntaxError::BadArity)) => {}
+                Err(e) => panic!("expected Syntax::BadArity, got {e:?}"),
+                Ok(_) => panic!("expected Syntax::BadArity, got Ok"),
             }
         },
     );

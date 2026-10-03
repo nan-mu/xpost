@@ -3,6 +3,7 @@
 use std::sync::OnceLock;
 
 use crate::client::{Command, OkReply};
+use crate::r#type::reply::MapError;
 use crate::server::reply::ReplyWriter;
 use crate::tests::harness::{TestError, with_session_logged};
 
@@ -28,10 +29,13 @@ fn capture_full_session_log() -> &'static [String] {
                     })
                     .on_clear_perf(|reply: ReplyWriter<'_>| reply.ok(OkReply::ClearPerf))
                     .on_get_map(|name: &str, reply: ReplyWriter<'_>| {
-                        assert_eq!(name, "counter");
-                        reply.get_map(MAP_BLOB.len(), |write| {
-                            write(MAP_BLOB).unwrap();
-                        });
+                        if name == "counter" {
+                            reply.get_map(MAP_BLOB.len(), |write| {
+                                write(MAP_BLOB).unwrap();
+                            });
+                        } else {
+                            reply.error(&MapError::NameNotFound);
+                        }
                     })
                     .on_get_perf(|reply: ReplyWriter<'_>| {
                         reply.get_perf(PERF_BLOB.len(), |write| {
@@ -70,6 +74,12 @@ fn capture_full_session_log() -> &'static [String] {
                 client
                     .request::<TestError>(&Command::GetPerf)
                     .expect("GetPerf");
+                // One ERR exchange: map name missing (cmd tx + uart ERR; no cmd ← OK).
+                match client.request::<TestError>(&Command::GetMap { name: "nope" }) {
+                    Err(TestError::Map(MapError::NameNotFound)) => {}
+                    Err(e) => panic!("expected map name-not-found for log, got {e:?}"),
+                    Ok(_) => panic!("expected map name-not-found for log, got Ok"),
+                }
             },
         )
     })
@@ -185,7 +195,7 @@ fn log_records_perf_ops() {
 
 #[test]
 fn log_session_order_is_global() {
-    // Coarse end-to-end order across the whole capture (init → … → get perf).
+    // Coarse end-to-end order across the whole capture (init → … → get perf → ERR).
     let log = bodies(capture_full_session_log());
     assert_in_order(
         &log,
@@ -208,6 +218,20 @@ fn log_session_order_is_global() {
             "[cmd] ← OK get map",
             "[cmd] → get perf",
             "[cmd] ← OK get perf",
+            "[cmd] → get map nope",
+            "[uart] ERR map name-not-found",
+        ],
+    );
+}
+
+#[test]
+fn log_records_map_err() {
+    let log = bodies(capture_full_session_log());
+    assert_in_order(
+        &log,
+        &[
+            "[cmd] → get map nope",
+            "[uart] ERR map name-not-found",
         ],
     );
 }

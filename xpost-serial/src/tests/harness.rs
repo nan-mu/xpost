@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::client::error::{Interrupted, ParseError, RequestTimeout};
 use crate::client::{MemoryPair, MemoryServer, SerialHandler};
-use crate::r#type::reply::{ErrReply, ServerError};
+use crate::r#type::reply::{ErrReply, MapError, PerfError, ServerError, SyntaxError};
 use crate::server::serial::{DefaultHandler, RequestHandler, SerialHandlerBuilder};
 use crate::server::SerialHandler as ServerHandler;
 
@@ -22,6 +22,9 @@ pub type TestBuilder = SerialHandlerBuilder<ReadFn, WriteFn, DefaultHandler, 128
 pub enum TestError {
     Parse(ParseError),
     Server(ServerError),
+    Map(MapError),
+    Perf(PerfError),
+    Syntax(SyntaxError),
     Timeout(RequestTimeout),
     Interrupted,
     Io(io::Error),
@@ -38,6 +41,24 @@ impl From<ParseError> for TestError {
 impl From<ServerError> for TestError {
     fn from(e: ServerError) -> Self {
         Self::Server(e)
+    }
+}
+
+impl From<MapError> for TestError {
+    fn from(e: MapError) -> Self {
+        Self::Map(e)
+    }
+}
+
+impl From<PerfError> for TestError {
+    fn from(e: PerfError) -> Self {
+        Self::Perf(e)
+    }
+}
+
+impl From<SyntaxError> for TestError {
+    fn from(e: SyntaxError) -> Self {
+        Self::Syntax(e)
     }
 }
 
@@ -64,6 +85,9 @@ impl fmt::Debug for TestError {
         match self {
             Self::Parse(e) => write!(f, "Parse({e})"),
             Self::Server(e) => write!(f, "Server({e:?})"),
+            Self::Map(e) => write!(f, "Map({e:?})"),
+            Self::Perf(e) => write!(f, "Perf({e:?})"),
+            Self::Syntax(e) => write!(f, "Syntax({e:?})"),
             Self::Timeout(e) => write!(f, "Timeout({e})"),
             Self::Interrupted => write!(f, "Interrupted"),
             Self::Io(e) => write!(f, "Io({e})"),

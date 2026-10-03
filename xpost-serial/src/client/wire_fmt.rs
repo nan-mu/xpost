@@ -1,4 +1,4 @@
-//! Host-side wire codecs: [`Command`] Display; [`OkReply`] / [`ServerError`] TryFrom.
+//! Host-side wire codecs: [`Command`] Display; OK / ERR TryFrom.
 //!
 //! Reply decode takes the outbound [`Command`] plus a complete reply slice —
 //! match only the shape expected for that command (no stream search).
@@ -12,12 +12,13 @@ use crate::{
         reply::{
             parse_clear_map_reply, parse_clear_perf_reply, parse_disable_xdp_reply,
             parse_enable_xdp_reply, parse_err_reply, parse_get_map_reply, parse_get_perf_reply,
-            parse_init_reply, parse_ping_reply, parse_update_map_reply,
+            parse_init_reply, parse_map_err_reply, parse_perf_err_reply, parse_ping_reply,
+            parse_syntax_err_reply, parse_update_map_reply,
         },
     },
     r#type::{
         command::Command,
-        reply::{OkReply, ServerError},
+        reply::{MapError, OkReply, PerfError, ServerError, SyntaxError},
     },
 };
 
@@ -74,6 +75,30 @@ impl<'a> TryFrom<(&'a [u8], &Command<'_>)> for ServerError {
 
     fn try_from((raw, cmd): (&'a [u8], &Command<'_>)) -> Result<Self, Self::Error> {
         parse_err_reply(raw, cmd)
+    }
+}
+
+impl<'a> TryFrom<(&'a [u8], &Command<'_>)> for MapError {
+    type Error = ParseError;
+
+    fn try_from((raw, cmd): (&'a [u8], &Command<'_>)) -> Result<Self, Self::Error> {
+        parse_map_err_reply(raw, cmd)
+    }
+}
+
+impl<'a> TryFrom<(&'a [u8], &Command<'_>)> for PerfError {
+    type Error = ParseError;
+
+    fn try_from((raw, cmd): (&'a [u8], &Command<'_>)) -> Result<Self, Self::Error> {
+        parse_perf_err_reply(raw, cmd)
+    }
+}
+
+impl<'a> TryFrom<(&'a [u8], &Command<'_>)> for SyntaxError {
+    type Error = ParseError;
+
+    fn try_from((raw, cmd): (&'a [u8], &Command<'_>)) -> Result<Self, Self::Error> {
+        parse_syntax_err_reply(raw, cmd)
     }
 }
 

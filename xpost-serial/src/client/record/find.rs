@@ -6,7 +6,7 @@ use crate::client::error::{ParseError, RequestError};
 use crate::client::record::{Entry, SharedRecordInner};
 use crate::client::reply;
 use crate::r#type::command::Command;
-use crate::r#type::reply::{OkReply, ServerError};
+use crate::r#type::reply::{MapError, OkReply, PerfError, ServerError, SyntaxError};
 
 /// Indices into the append-only record (no borrows).
 pub(crate) enum Found {
@@ -134,15 +134,28 @@ where
 
 fn wire_err_line<E>(line: &[u8], cmd: &Command<'_>) -> Option<E>
 where
-    E: From<ParseError> + From<ServerError>,
+    E: From<ParseError>
+        + From<ServerError>
+        + From<MapError>
+        + From<PerfError>
+        + From<SyntaxError>,
 {
     if !trim_ascii(line).starts_with(b"ERR ") {
         return None;
     }
-    match ServerError::try_from((line, cmd)) {
-        Ok(e) => Some(e.into()),
-        Err(e) => Some(e.into()),
+    if let Ok(e) = ServerError::try_from((line, cmd)) {
+        return Some(e.into());
     }
+    if let Ok(e) = MapError::try_from((line, cmd)) {
+        return Some(e.into());
+    }
+    if let Ok(e) = PerfError::try_from((line, cmd)) {
+        return Some(e.into());
+    }
+    if let Ok(e) = SyntaxError::try_from((line, cmd)) {
+        return Some(e.into());
+    }
+    Some(ParseError::InvalidSyntax.into())
 }
 
 fn trim_ascii(line: &[u8]) -> &[u8] {

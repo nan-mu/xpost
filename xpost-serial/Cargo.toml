@@ -10,8 +10,10 @@ description = "Host serial/flash backend for xpost-agent (USB-UART + espflash)"
 [workspace]
 
 [features]
-default = ["dev", "client", "server"]
-# Allows `client` and `server` together (round-trip unit tests under `src/tests`).
+# No defaults — dependents must opt in (`client` or `server`). See crate docs.
+default = []
+# Allows `client` and `server` together (in-crate tests under `src/tests`).
+# Run: cargo test --features "dev,client,server"
 dev = []
 # Host USB control plane (serial + flash tasks). Mutually exclusive with `server`
 # unless `dev` is also enabled.

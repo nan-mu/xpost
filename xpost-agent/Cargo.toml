@@ -28,7 +28,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 toml = "0.8"
 tower-http = { version = "0.6", features = ["timeout"] }
-xpost-serial = { path = "../xpost-serial" }
+xpost-serial = { path = "../xpost-serial", default-features = false, features = ["client"] }
 
 [profile.release]
 lto = false

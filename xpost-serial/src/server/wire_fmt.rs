@@ -10,7 +10,7 @@ use super::{
 };
 use crate::r#type::{
     command::Command,
-    reply::{MapError, OkReply, PerfError, ServerError},
+    reply::{MapError, OkReply, PerfError, ServerError, SyntaxError},
 };
 
 impl<'a> TryFrom<&'a [u8]> for Command<'a> {
@@ -66,13 +66,23 @@ impl WireError for PerfError {
     }
 }
 
+impl WireError for SyntaxError {
+    fn wire_line(&self) -> &'static [u8] {
+        match self {
+            Self::BadArity => b"ERR bad-arity\n",
+            Self::InvalidUtf8 => b"ERR invalid-utf8\n",
+            Self::LineTooLong => b"ERR line-too-long\n",
+        }
+    }
+}
+
 impl WireError for ParseCommandError {
     fn wire_line(&self) -> &'static [u8] {
         match self {
             Self::Empty | Self::Unknown => b"ERR unknown\n",
-            Self::BadArity => b"ERR bad-arity\n",
-            Self::InvalidUtf8 => b"ERR invalid-utf8\n",
-            Self::TooLong => b"ERR line-too-long\n",
+            Self::BadArity => SyntaxError::BadArity.wire_line(),
+            Self::InvalidUtf8 => SyntaxError::InvalidUtf8.wire_line(),
+            Self::TooLong => SyntaxError::LineTooLong.wire_line(),
         }
     }
 }

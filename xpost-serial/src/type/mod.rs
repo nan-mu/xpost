@@ -122,12 +122,14 @@
 //! transport before exchanging further replies.
 //!
 //! Local host parse failures implement [`reply::ErrReply`] separately from wire
-//! errors, as do host waiting timeouts. The client parses general
-//! [`reply::ServerError`] wire lines; map / perf domain ERR parsers remain
-//! separate from that general path.
+//! errors, as do host waiting timeouts. The client parses flat wire ERR domains
+//! ([`reply::ServerError`], [`reply::MapError`], [`reply::PerfError`],
+//! [`reply::SyntaxError`]) without folding one into another.
 
 pub mod command;
 pub mod reply;
 
 pub use command::{Command as WireCommand, GET_INIT_TIMEOUT};
-pub use reply::{ErrReply, MapEntry, MapError, MapKey, MapKind, OkReply, PerfError, ServerError};
+pub use reply::{
+    ErrReply, MapEntry, MapError, MapKey, MapKind, OkReply, PerfError, ServerError, SyntaxError,
+};
