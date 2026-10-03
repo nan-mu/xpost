@@ -32,7 +32,7 @@
 //! | [`DisableXdp`](reply::OkReply::DisableXdp) | `OK disable xdp` |
 //! | [`ClearMap`](reply::OkReply::ClearMap) | `OK clear map` |
 //! | [`ClearPerf`](reply::OkReply::ClearPerf) | `OK clear perf` |
-//! | [`UpdateMap`](reply::OkReply::UpdateMap) | `OK update map` (optional `n=<N>`) |
+//! | [`UpdateMap`](reply::OkReply::UpdateMap) | `OK update map` |
 //! | [`GetMap`](reply::OkReply::GetMap) | `OK get map <n>` + `n` blob bytes |
 //! | [`GetPerf`](reply::OkReply::GetPerf) | `OK get perf <n>` + `n` blob bytes |
 //! | [`Init`](reply::OkReply::Init) | `OK init` (unsolicited; see below) |
@@ -69,7 +69,8 @@
 //! `ERR get perf no-perf`). Recognized shape collapses to
 //! [`ServerError::Unknown`](reply::ServerError::Unknown) for now (`why` discarded).
 //! Local host parse failures are a separate [`reply::ErrReply`] implementor on
-//! the client (`ParseError`), not a wire variant.
+//! the client (`client::error::ParseError`), not a wire variant. App-mode
+//! `request` returns `Result<OkReply, E>` with `E: ErrReply`.
 
 pub mod command;
 pub mod reply;
