@@ -128,19 +128,17 @@ mod ops;
 mod state;
 mod util;
 
-use std::io::ErrorKind;
-use std::net::UdpSocket;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use xpost_serial::{
-    Chip, FileSink, InstallOutcome, JUST_DROP_TABLE, Session, xdp_name_from_file,
-};
+use xpost_serial::client::Command;
 
-/// Default XDP ELF for just_drop cold table.
+use crate::ops::oneshot;
+use crate::state::{open_handler, workspace_root};
+
+/// Default XDP ELF for flash xdp.
 const DEFAULT_XDP_ELF: &str = "examples/just_xdp/just_drop.elf";
 /// Default serial transcript path (tee to stdout).
 const DEFAULT_LOG: &str = "target/xpost-agent/serial.log";
@@ -170,68 +168,110 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Install XDP ELF into the cold table by program name (overwrite or append).
-    Program {
-        /// Path to XDP ELF (`xdp.elf` / `<stem>.elf`).
-        #[arg(long, default_value = DEFAULT_XDP_ELF)]
-        elf: PathBuf,
-        /// Cold table absolute base (default just_drop `0x310000`).
-        #[arg(long, default_value_t = JUST_DROP_TABLE.base, value_parser = parse_u32_arg)]
-        table_base: u32,
-        /// Cold table length (default just_drop `0x10000`).
-        #[arg(long, default_value_t = JUST_DROP_TABLE.len, value_parser = parse_u32_arg)]
-        table_len: u32,
-        /// Max container size (default `0x1000`).
-        #[arg(long, default_value_t = JUST_DROP_TABLE.image_capacity as u32, value_parser = parse_u32_arg)]
-        capacity: u32,
+    /// Flash firmware and/or XDP cold-table images.
+    Flash {
+        #[command(subcommand)]
+        kind: FlashCmd,
     },
-    /// List XDP ELF entries currently in the cold table.
-    List {
-        #[arg(long, default_value_t = JUST_DROP_TABLE.base, value_parser = parse_u32_arg)]
-        table_base: u32,
-        #[arg(long, default_value_t = JUST_DROP_TABLE.len, value_parser = parse_u32_arg)]
-        table_len: u32,
-    },
-    /// Erase the entire cold table (all XDP ELF containers).
+    /// Clear XDP cold table or a named map / perf.
     Clear {
-        #[arg(long, default_value_t = JUST_DROP_TABLE.base, value_parser = parse_u32_arg)]
-        table_base: u32,
-        #[arg(long, default_value_t = JUST_DROP_TABLE.len, value_parser = parse_u32_arg)]
-        table_len: u32,
+        #[command(subcommand)]
+        kind: ClearCmd,
     },
-    /// Send one App-mode line; print first OK/ERR reply.
-    Request {
+    /// Get XDP list, map blob, perf blob, or serial window.
+    Get {
+        #[command(subcommand)]
+        kind: GetCmd,
+    },
+    /// Enable App XDP.
+    Enable {
+        #[command(subcommand)]
+        kind: EnableCmd,
+    },
+    /// Disable App XDP.
+    Disable {
+        #[command(subcommand)]
+        kind: DisableCmd,
+    },
+    /// Update a map entry.
+    Update {
+        #[command(subcommand)]
+        kind: UpdateCmd,
+    },
+    /// Debug: one App command line.
+    Run {
         /// Command text without trailing newline.
         cmd: String,
-        #[arg(long, default_value_t = 5.0)]
-        timeout_secs: f64,
-    },
-    /// Clear DUT perf accumulators; await `OK perf clear`.
-    PerfClear {
-        #[arg(long, default_value_t = 5.0)]
-        timeout_secs: f64,
-    },
-    /// Send one UDP stimulus to the firmware and wait for `ACK`.
-    ///
-    /// Timeout prints `no-ack` (expected when drop XDP is loaded).
-    Probe {
-        /// Firmware IPv4 address.
-        esp: String,
-        /// Firmware UDP port (just_drop stim port).
-        #[arg(long, default_value_t = 8080)]
-        port: u16,
-        #[arg(long, default_value_t = 2.0)]
-        timeout_secs: f64,
     },
 }
 
-fn parse_u32_arg(s: &str) -> std::result::Result<u32, String> {
-    let t = s.trim();
-    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        u32::from_str_radix(hex, 16).map_err(|e| e.to_string())
-    } else {
-        t.parse().map_err(|e| format!("{e}"))
-    }
+#[derive(Subcommand, Debug)]
+enum FlashCmd {
+    /// Build + flash firmware profile (does not install xdp.elf).
+    Fw {
+        #[arg(long)]
+        profile_id: String,
+    },
+    /// Write XDP ELF into the cold table.
+    Xdp {
+        #[arg(long, default_value = DEFAULT_XDP_ELF)]
+        elf: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ClearCmd {
+    /// Clear cold-table XDP image(s). `name=*` clears all.
+    Xdp {
+        #[arg(long)]
+        name: String,
+    },
+    /// App ClearMap.
+    Map {
+        map_name: String,
+    },
+    /// App ClearPerf.
+    Perf,
+}
+
+#[derive(Subcommand, Debug)]
+enum GetCmd {
+    /// List cold-table XDP images.
+    Xdp,
+    /// App GetMap → `OK get map <n> b64=…`.
+    Map {
+        map_name: String,
+    },
+    /// App GetPerf → `OK get perf <n> b64=…`.
+    Perf,
+    /// Transcript lines in a host unix-ms window.
+    Serial {
+        #[arg(long)]
+        since_unix_ms: u64,
+        #[arg(long)]
+        until_unix_ms: u64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum EnableCmd {
+    Xdp,
+}
+
+#[derive(Subcommand, Debug)]
+enum DisableCmd {
+    Xdp,
+}
+
+#[derive(Subcommand, Debug)]
+enum UpdateCmd {
+    Map {
+        map_name: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        value: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -242,13 +282,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-fn open_session(port: Option<&Path>, log: &Path) -> Result<Session<FileSink>> {
-    let sink = FileSink::create(log, true)
-        .with_context(|| format!("create serial log {}", log.display()))?;
-    eprintln!("xpost-agent serial log {}", sink.path().display());
-    Session::open(port, Chip::Esp32c3, sink).context("open session")
 }
 
 fn run() -> Result<()> {
@@ -263,140 +296,69 @@ fn run() -> Result<()> {
     let Some(cmd) = cli.cmd else {
         bail!("subcommand required (or pass --listen ADDR)");
     };
-    match cmd {
-        Cmd::Program {
-            elf,
-            table_base,
-            table_len,
-            capacity,
-        } => {
-            if !elf.is_file() {
-                bail!("xdp.elf not found: {}", elf.display());
-            }
-            let name = xdp_name_from_file(&elf)
-                .with_context(|| format!("parse name from {}", elf.display()))?;
-            let mut session = open_session(cli.port.as_deref(), &cli.log)?;
-            session.cold_table = xpost_serial::ColdTable {
-                base: table_base,
-                len: table_len,
-                image_capacity: capacity as usize,
-            };
-            session.image_capacity = capacity as usize;
-            let outcome = session
-                .install_xdp(&name, &elf)
-                .with_context(|| format!("install_xdp `{name}` {}", elf.display()))?;
-            match outcome {
-                InstallOutcome::Overwritten { offset } => {
-                    println!("overwritten name={name} table_off={offset:#x}");
-                }
-                InstallOutcome::Created { offset } => {
-                    println!("created name={name} table_off={offset:#x}");
-                }
-            }
-            session.close().context("close")?;
-            Ok(())
-        }
-        Cmd::List {
-            table_base,
-            table_len,
-        } => {
-            let mut session = open_session(cli.port.as_deref(), &cli.log)?;
-            session.cold_table = xpost_serial::ColdTable {
-                base: table_base,
-                len: table_len,
-                image_capacity: JUST_DROP_TABLE.image_capacity,
-            };
-            let entries = session.list_xdp().context("list_xdp")?;
-            if entries.is_empty() {
-                println!("(empty cold table)");
-            } else {
-                for e in &entries {
-                    println!(
-                        "name={} offset={:#x} len={:#x}",
-                        e.name, e.offset, e.len
-                    );
-                }
-            }
-            session.close().context("close")?;
-            Ok(())
-        }
-        Cmd::Clear {
-            table_base,
-            table_len,
-        } => {
-            let mut session = open_session(cli.port.as_deref(), &cli.log)?;
-            session.cold_table = xpost_serial::ColdTable {
-                base: table_base,
-                len: table_len,
-                image_capacity: JUST_DROP_TABLE.image_capacity,
-            };
-            session.clear_xdp().context("clear_xdp")?;
-            println!(
-                "cleared cold table base={table_base:#x} len={table_len:#x}"
-            );
-            session.close().context("close")?;
-            Ok(())
-        }
-        Cmd::Request { cmd, timeout_secs } => {
-            let mut session = open_session(cli.port.as_deref(), &cli.log)?;
-            let reply = session
-                .request_timeout(&cmd, Duration::from_secs_f64(timeout_secs))
-                .with_context(|| format!("request `{cmd}`"))?;
-            println!("{reply}");
-            session.close().context("close")?;
-            Ok(())
-        }
-        Cmd::PerfClear { timeout_secs } => {
-            let mut session = open_session(cli.port.as_deref(), &cli.log)?;
-            let reply = session
-                .request_timeout("perf clear", Duration::from_secs_f64(timeout_secs))
-                .context("request `perf clear`")?;
-            if !reply.trim().eq_ignore_ascii_case("OK perf clear")
-                && !reply
-                    .trim()
-                    .to_ascii_lowercase()
-                    .starts_with("ok perf clear")
-            {
-                bail!("unexpected perf clear reply: {reply}");
-            }
-            println!("{reply}");
-            session.close().context("close")?;
-            Ok(())
-        }
-        Cmd::Probe {
-            esp,
-            port,
-            timeout_secs,
-        } => {
-            let got = probe_ack(&esp, port, Duration::from_secs_f64(timeout_secs))?;
-            println!("{got}");
-            Ok(())
-        }
-    }
-}
 
-/// One datagram to the DUT. Returns `ack` or `no-ack`.
-pub(crate) fn probe_ack(esp: &str, port: u16, timeout: Duration) -> Result<&'static str> {
-    let sock = UdpSocket::bind("0.0.0.0:0").context("bind probe socket")?;
-    sock.set_read_timeout(Some(timeout))
-        .context("set probe timeout")?;
-    let dest = format!("{esp}:{port}");
-    sock.send_to(b"STIM\n", &dest)
-        .with_context(|| format!("send stim to {dest}"))?;
-    let mut buf = [0u8; 64];
-    match sock.recv_from(&mut buf) {
-        Ok((n, from)) => {
-            let msg = String::from_utf8_lossy(&buf[..n]);
-            let msg = msg.trim_end();
-            if msg.starts_with("ACK") {
-                Ok("ack")
-            } else {
-                bail!("unexpected payload from {from}: {msg}");
+    let handler = open_handler(cli.port.as_deref(), &cli.log)?;
+    let result = match cmd {
+        Cmd::Flash { kind } => match kind {
+            FlashCmd::Fw { profile_id } => {
+                let root = workspace_root();
+                oneshot::flash_fw_profile(&handler, &root, &profile_id)
             }
+            FlashCmd::Xdp { elf } => oneshot::flash_xdp(&handler, &elf),
+        },
+        Cmd::Clear { kind } => match kind {
+            ClearCmd::Xdp { name } => {
+                let name = name.trim();
+                if name.is_empty() {
+                    bail!("missing --name");
+                }
+                let names = if name == "*" {
+                    Vec::new()
+                } else {
+                    vec![name.to_string()]
+                };
+                oneshot::clear_xdp(&handler, names)
+            }
+            ClearCmd::Map { map_name } => {
+                oneshot::app(&handler, &Command::ClearMap { name: &map_name })
+            }
+            ClearCmd::Perf => oneshot::app(&handler, &Command::ClearPerf),
+        },
+        Cmd::Get { kind } => match kind {
+            GetCmd::Xdp => oneshot::get_xdp(&handler),
+            GetCmd::Map { map_name } => {
+                oneshot::app(&handler, &Command::GetMap { name: &map_name })
+            }
+            GetCmd::Perf => oneshot::app(&handler, &Command::GetPerf),
+            GetCmd::Serial {
+                since_unix_ms,
+                until_unix_ms,
+            } => oneshot::get_serial(&handler, since_unix_ms, until_unix_ms),
+        },
+        Cmd::Enable { kind: EnableCmd::Xdp } => {
+            oneshot::app(&handler, &Command::EnableXdp)
         }
-        Err(e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => {
-            Ok("no-ack")
-        }
-        Err(e) => Err(e).context("recv ack"),
-    }
+        Cmd::Disable {
+            kind: DisableCmd::Xdp,
+        } => oneshot::app(&handler, &Command::DisableXdp),
+        Cmd::Update {
+            kind: UpdateCmd::Map {
+                map_name,
+                key,
+                value,
+            },
+        } => oneshot::app(
+            &handler,
+            &Command::UpdateMap {
+                name: &map_name,
+                key: key.as_bytes(),
+                value: value.as_bytes(),
+            },
+        ),
+        Cmd::Run { cmd } => oneshot::run_line(&handler, &cmd),
+    };
+    let msg = result?;
+    println!("{msg}");
+    handler.shutdown();
+    Ok(())
 }

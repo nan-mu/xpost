@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::timeout::TimeoutLayer;
 
 use crate::mcp::XpostMcp;
-use crate::ops;
+use crate::ops::{self, MapKv};
 use crate::state::{SharedState, open};
 use crate::util::{eprint_line, ts};
 
@@ -49,63 +49,54 @@ impl ApiResp {
     }
 }
 
-#[derive(Serialize)]
-struct MapEntryJson {
-    slot: u32,
-    value: u64,
-}
-
-#[derive(Serialize)]
-struct MapDumpResp {
-    ok: bool,
-    name: String,
-    #[serde(rename = "type")]
-    map_type: String,
-    entries: Vec<MapEntryJson>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-}
-
 #[derive(Deserialize)]
-struct FlashBody {
+struct FlashFwBody {
     profile_id: String,
 }
 
 #[derive(Deserialize)]
-struct ProgramBody {
+struct FlashXdpBody {
     elf: String,
 }
 
 #[derive(Deserialize)]
-struct RequestBody {
+struct ClearXdpBody {
+    /// Required: `"*"` | `"prog"` | `["a","b"]`.
+    name: ClearXdpName,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ClearXdpName {
+    One(String),
+    Many(Vec<String>),
+}
+
+#[derive(Deserialize)]
+struct UpdateMapBody {
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    entries: Option<Vec<MapEntryBody>>,
+}
+
+#[derive(Deserialize)]
+struct MapEntryBody {
+    key: String,
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct RunBody {
     cmd: String,
 }
 
 #[derive(Deserialize)]
-struct ProbeBody {
-    esp: String,
-    #[serde(default = "default_probe_port")]
-    port: u16,
-}
-
-#[derive(Deserialize)]
-struct ProbeBurstBody {
-    esp: String,
-    #[serde(default = "default_probe_port")]
-    port: u16,
-    count: u32,
-}
-
-#[derive(Deserialize)]
-struct SerialWindowBody {
-    /// Inclusive start, unix epoch milliseconds (host clock).
+struct SerialBody {
     since_unix_ms: u64,
-    /// Inclusive end, unix epoch milliseconds (host clock).
     until_unix_ms: u64,
-}
-
-fn default_probe_port() -> u16 {
-    8080
 }
 
 pub fn serve_http(addr: &str, port: Option<&Path>, log: &Path) -> Result<()> {
@@ -138,17 +129,19 @@ async fn serve_async(addr: &str, port: Option<&Path>, log: &Path) -> Result<()> 
     let v1 = Router::new()
         .route("/status", get(v1_status))
         .route("/dut_status", get(v1_dut_status))
-        .route("/flash_profile", post(v1_flash_profile))
-        .route("/program", post(v1_program))
-        .route("/clear", post(v1_clear))
-        .route("/list", get(v1_list))
-        .route("/counters", post(v1_counters))
-        .route("/perf_clear", post(v1_perf_clear))
-        .route("/request", post(v1_request))
-        .route("/map/{name}", get(v1_map))
-        .route("/serial_window", post(v1_serial_window))
-        .route("/probe", post(v1_probe))
-        .route("/probe_burst", post(v1_probe_burst))
+        .route("/flash/fw", post(v1_flash_fw))
+        .route("/flash/xdp", post(v1_flash_xdp))
+        .route("/clear/xdp", post(v1_clear_xdp))
+        .route("/get/xdp", get(v1_get_xdp))
+        .route("/enable/xdp", post(v1_enable_xdp))
+        .route("/disable/xdp", post(v1_disable_xdp))
+        .route("/clear/map/{map_name}", post(v1_clear_map))
+        .route("/get/map/{map_name}", get(v1_get_map))
+        .route("/update/map/{map_name}", post(v1_update_map))
+        .route("/clear/perf", post(v1_clear_perf))
+        .route("/get/perf", get(v1_get_perf))
+        .route("/get/serial", post(v1_get_serial))
+        .route("/run", post(v1_run))
         .with_state(app_state);
 
     let app = Router::new()
@@ -164,7 +157,7 @@ async fn serve_async(addr: &str, port: Option<&Path>, log: &Path) -> Result<()> 
         .await
         .with_context(|| format!("bind {addr}"))?;
     eprint_line(&format!(
-        "[{}] xpost-agent HTTP {addr}  (/health /v1/* /mcp incl. /v1/dut_status)",
+        "[{}] xpost-agent HTTP {addr}  (/health /v1/* /mcp)",
         ts()
     ));
     serve(listener, app).await.context("axum serve")?;
@@ -195,164 +188,136 @@ where
     }
 }
 
-async fn v1_flash_profile(
-    State(st): State<AppState>,
-    Json(body): Json<FlashBody>,
-) -> Json<ApiResp> {
+async fn v1_flash_fw(State(st): State<AppState>, Json(body): Json<FlashFwBody>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     let id = body.profile_id;
-    run_blocking(move || ops::flash_profile(shared.as_ref(), &id, "http")).await
+    run_blocking(move || ops::flash_fw(shared.as_ref(), &id, "http")).await
 }
 
-async fn v1_program(State(st): State<AppState>, Json(body): Json<ProgramBody>) -> Json<ApiResp> {
+async fn v1_flash_xdp(State(st): State<AppState>, Json(body): Json<FlashXdpBody>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     let elf = body.elf;
-    run_blocking(move || ops::program(shared.as_ref(), &elf, "http")).await
+    run_blocking(move || ops::flash_xdp(shared.as_ref(), &elf, "http")).await
 }
 
-async fn v1_clear(State(st): State<AppState>) -> Json<ApiResp> {
-    let shared = st.shared.clone();
-    run_blocking(move || ops::clear_xdp(shared.as_ref(), "http")).await
+fn clear_xdp_names(name: ClearXdpName) -> Result<Vec<String>, String> {
+    match name {
+        ClearXdpName::One(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                return Err("missing name".into());
+            }
+            if s == "*" {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![s.to_string()])
+            }
+        }
+        ClearXdpName::Many(v) => {
+            if v.is_empty() {
+                return Err("missing name".into());
+            }
+            if v.len() == 1 && v[0].trim() == "*" {
+                return Ok(Vec::new());
+            }
+            Ok(v.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        }
+    }
 }
 
-async fn v1_list(State(st): State<AppState>) -> Json<ApiResp> {
-    let shared = st.shared.clone();
-    run_blocking(move || ops::list_xdp(shared.as_ref(), "http")).await
-}
-
-async fn v1_counters(State(st): State<AppState>) -> Json<ApiResp> {
-    let shared = st.shared.clone();
-    run_blocking(move || ops::counters(shared.as_ref(), "http")).await
-}
-
-async fn v1_perf_clear(State(st): State<AppState>) -> Json<ApiResp> {
-    let shared = st.shared.clone();
-    run_blocking(move || ops::perf_clear(shared.as_ref(), "http")).await
-}
-
-async fn v1_request(State(st): State<AppState>, Json(body): Json<RequestBody>) -> Json<ApiResp> {
-    let shared = st.shared.clone();
-    let cmd = body.cmd;
-    run_blocking(move || ops::request(shared.as_ref(), &cmd, "http")).await
-}
-
-async fn v1_map(
+async fn v1_clear_xdp(
     State(st): State<AppState>,
-    AxumPath(name): AxumPath<String>,
-) -> (StatusCode, Json<MapDumpResp>) {
-    let shared = st.shared.clone();
-    let name_for_err = name.clone();
-    match tokio::task::spawn_blocking(move || ops::map_dump(shared.as_ref(), &name, "http")).await
-    {
-        Ok(Ok(raw)) => match parse_map_dump_json(&raw) {
-            Ok(resp) => (StatusCode::OK, Json(resp)),
-            Err(e) => (
-                StatusCode::BAD_GATEWAY,
-                Json(MapDumpResp {
-                    ok: false,
-                    name: name_for_err,
-                    map_type: String::new(),
-                    entries: Vec::new(),
-                    message: Some(format!("{e:#}")),
-                }),
-            ),
-        },
-        Ok(Err(e)) => (
-            StatusCode::BAD_GATEWAY,
-            Json(MapDumpResp {
-                ok: false,
-                name: name_for_err,
-                map_type: String::new(),
-                entries: Vec::new(),
-                message: Some(format!("{e:#}")),
-            }),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(MapDumpResp {
-                ok: false,
-                name: name_for_err,
-                map_type: String::new(),
-                entries: Vec::new(),
-                message: Some(format!("join: {e}")),
-            }),
-        ),
-    }
-}
-
-fn parse_map_dump_json(raw: &str) -> anyhow::Result<MapDumpResp> {
-    let raw = raw.trim();
-    if raw.starts_with("ERR ") {
-        anyhow::bail!("{raw}");
-    }
-    let mut lines = raw.lines();
-    let header = lines.next().context("empty map dump")?;
-    // OK map <name> type=array size=N
-    let rest = header
-        .strip_prefix("OK map ")
-        .with_context(|| format!("bad map dump header: {header}"))?;
-    let mut parts = rest.split_whitespace();
-    let name = parts.next().context("map name")?.to_string();
-    let mut map_type = String::new();
-    let mut entries = Vec::new();
-    for part in parts {
-        if let Some(t) = part.strip_prefix("type=") {
-            map_type = t.to_string();
-        }
-    }
-    for line in lines {
-        if line.eq_ignore_ascii_case("OK map end") {
-            break;
-        }
-        let mut p = line.split_whitespace();
-        let Some(slot_s) = p.next() else {
-            continue;
-        };
-        let Some(val_s) = p.next() else {
-            continue;
-        };
-        if p.next().is_some() {
-            continue;
-        }
-        let Ok(slot) = slot_s.parse::<u32>() else {
-            continue;
-        };
-        let Ok(value) = val_s.parse::<u64>() else {
-            continue;
-        };
-        entries.push(MapEntryJson { slot, value });
-    }
-    if map_type.is_empty() {
-        map_type = "array".into();
-    }
-    Ok(MapDumpResp {
-        ok: true,
-        name,
-        map_type,
-        entries,
-        message: None,
-    })
-}
-
-async fn v1_serial_window(
-    State(st): State<AppState>,
-    Json(body): Json<SerialWindowBody>,
+    body: Result<Json<ClearXdpBody>, axum::extract::rejection::JsonRejection>,
 ) -> Json<ApiResp> {
+    let Json(body) = match body {
+        Ok(j) => j,
+        Err(e) => return Json(ApiResp::err(format!("missing name: {e}"))),
+    };
+    let names = match clear_xdp_names(body.name) {
+        Ok(n) => n,
+        Err(e) => return Json(ApiResp::err(e)),
+    };
+    let shared = st.shared.clone();
+    run_blocking(move || ops::clear_xdp(shared.as_ref(), names, "http")).await
+}
+
+async fn v1_get_xdp(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::get_xdp(shared.as_ref(), "http")).await
+}
+
+async fn v1_enable_xdp(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::enable_xdp(shared.as_ref(), "http")).await
+}
+
+async fn v1_disable_xdp(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::disable_xdp(shared.as_ref(), "http")).await
+}
+
+async fn v1_clear_map(
+    State(st): State<AppState>,
+    AxumPath(map_name): AxumPath<String>,
+) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::clear_map(shared.as_ref(), &map_name, "http")).await
+}
+
+async fn v1_get_map(
+    State(st): State<AppState>,
+    AxumPath(map_name): AxumPath<String>,
+) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::get_map(shared.as_ref(), &map_name, "http")).await
+}
+
+async fn v1_update_map(
+    State(st): State<AppState>,
+    AxumPath(map_name): AxumPath<String>,
+    Json(body): Json<UpdateMapBody>,
+) -> Json<ApiResp> {
+    let entries = match (&body.key, &body.value, &body.entries) {
+        (Some(k), Some(v), None) => vec![MapKv {
+            key: k.clone(),
+            value: v.clone(),
+        }],
+        (_, _, Some(list)) if !list.is_empty() => list
+            .iter()
+            .map(|e| MapKv {
+                key: e.key.clone(),
+                value: e.value.clone(),
+            })
+            .collect(),
+        _ => {
+            return Json(ApiResp::err(
+                "body must be {\"key\",\"value\"} or {\"entries\":[…]}",
+            ));
+        }
+    };
+    let shared = st.shared.clone();
+    run_blocking(move || ops::update_map(shared.as_ref(), &map_name, &entries, "http")).await
+}
+
+async fn v1_clear_perf(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::clear_perf(shared.as_ref(), "http")).await
+}
+
+async fn v1_get_perf(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::get_perf(shared.as_ref(), "http")).await
+}
+
+async fn v1_get_serial(State(st): State<AppState>, Json(body): Json<SerialBody>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     let since = body.since_unix_ms;
     let until = body.until_unix_ms;
-    run_blocking(move || ops::serial_window(shared.as_ref(), since, until, "http")).await
+    run_blocking(move || ops::get_serial(shared.as_ref(), since, until, "http")).await
 }
 
-async fn v1_probe(Json(body): Json<ProbeBody>) -> Json<ApiResp> {
-    let esp = body.esp;
-    let port = body.port;
-    run_blocking(move || ops::probe(&esp, port, "http")).await
-}
-
-async fn v1_probe_burst(Json(body): Json<ProbeBurstBody>) -> Json<ApiResp> {
-    let esp = body.esp;
-    let port = body.port;
-    let count = body.count;
-    run_blocking(move || ops::probe_burst_op(&esp, port, count, "http")).await
+async fn v1_run(State(st): State<AppState>, Json(body): Json<RunBody>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    let cmd = body.cmd;
+    run_blocking(move || ops::run_cmd(shared.as_ref(), &cmd, "http")).await
 }

@@ -1,16 +1,16 @@
-//! Synchronous USB / probe operations shared by HTTP and MCP.
+//! Synchronous USB operations shared by HTTP, MCP, and CLI.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::Command as ProcCommand;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use xpost_serial::{Image, JUST_DROP_TABLE, XdpImage, xdp_name_from_file};
+use xpost_serial::client::flash::xdp_name_from_file;
+use xpost_serial::client::{Command, FlashOp, FlashResult, OkReply};
 
-use crate::state::{AgentState, NOISY_LOG_EVERY, ProfileEntry};
+use crate::state::{AgentError, AgentState, NOISY_LOG_EVERY, ProfileEntry};
 use crate::util::{file_size, fmt_bytes, fmt_dur, log_line, truncate};
-use crate::{probe_ack, probe_burst};
 
 fn maybe_log_noisy(state: &Mutex<AgentState>, noisy: bool) -> bool {
     if !noisy {
@@ -66,48 +66,51 @@ fn with_log(
     }
 }
 
+fn lock(state: &Mutex<AgentState>) -> Result<std::sync::MutexGuard<'_, AgentState>> {
+    state.lock().map_err(|_| anyhow::anyhow!("handler lock"))
+}
+
+fn req<'a>(g: &'a AgentState, cmd: &Command<'_>) -> Result<OkReply<'a>> {
+    g.handler
+        .request::<AgentError>(cmd)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 pub fn get_status() -> String {
     "idle".into()
 }
 
-const READY_NEEDLE: &str = "xpost ready";
-
-fn clear_dut_ready(g: &mut AgentState) {
-    g.dut_ready = false;
-    g.dut_ready_line = None;
-}
-
-fn note_uart_lines(g: &mut AgentState, lines: &[String]) {
-    for line in lines {
-        if line.contains(READY_NEEDLE) {
-            g.dut_ready = true;
-            g.dut_ready_line = Some(line.clone());
+/// Ping settle: `ready` on OK ping, else `booting`.
+pub fn dut_status(state: &Mutex<AgentState>) -> Result<String> {
+    let g = lock(state)?;
+    match req(&g, &Command::Ping) {
+        Ok(OkReply::Ping) => Ok("ready".into()),
+        Ok(_) => Ok("ready".into()),
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if msg.contains("timeout") || msg.contains("busy") || msg.contains("interrupted") {
+                Ok("booting".into())
+            } else {
+                Ok(format!("booting ({msg})"))
+            }
         }
     }
 }
 
-/// Drain pending UART and report DUT boot readiness (`ready …` or `booting`).
-pub fn dut_status(state: &Mutex<AgentState>) -> Result<String> {
-    let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
-    let lines = g.session.drain_uart().context("drain_uart")?;
-    note_uart_lines(&mut g, &lines);
-    if g.dut_ready {
-        let line = g.dut_ready_line.as_deref().unwrap_or(READY_NEEDLE);
-        Ok(format!("ready {line}"))
-    } else {
-        Ok("booting".into())
-    }
+pub fn flash_fw(state: &Mutex<AgentState>, profile_id: &str, peer: &str) -> Result<String> {
+    with_log(
+        peer,
+        "FlashFw",
+        &format!("profile=`{profile_id}`"),
+        false,
+        state,
+        || flash_fw_inner(state, profile_id, peer),
+    )
 }
 
-pub fn flash_profile(state: &Mutex<AgentState>, profile_id: &str, peer: &str) -> Result<String> {
-    with_log(peer, "FlashProfile", &format!("profile=`{profile_id}`"), false, state, || {
-        flash_profile_inner(state, profile_id, peer)
-    })
-}
-
-fn flash_profile_inner(state: &Mutex<AgentState>, id: &str, peer: &str) -> Result<String> {
+fn flash_fw_inner(state: &Mutex<AgentState>, id: &str, peer: &str) -> Result<String> {
     let (root, entry) = {
-        let g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
+        let g = lock(state)?;
         let entry = g
             .profiles
             .iter()
@@ -131,83 +134,25 @@ fn flash_profile_inner(state: &Mutex<AgentState>, id: &str, peer: &str) -> Resul
         bail!("partitions not found: {}", partitions.display());
     }
     let fw_sz = file_size(&firmware).unwrap_or(0);
-    let xdp_path = entry.xdp_elf.as_ref().map(|p| root.join(p));
-    if let Some(ref xp) = xdp_path
-        && !xp.is_file()
-    {
-        bail!("xdp elf not found: {}", xp.display());
-    }
-    let xdp_name_owned = match (&entry.xdp_name, &xdp_path) {
-        (Some(n), _) => Some(n.clone()),
-        (None, Some(xp)) => Some(
-            xdp_name_from_file(xp)
-                .with_context(|| format!("xdp name from {}", xp.display()))?,
-        ),
-        _ => None,
-    };
-    let xdp_sz = xdp_path
-        .as_ref()
-        .and_then(|p| file_size(p))
-        .unwrap_or(0);
-
     log_line(
         peer,
         &format!(
-            "[fw] profile `{id}`: {} ({})  [part] {}",
+            "[fw] profile `{id}`: {} ({})  [part] {}  (no xdp install)",
             firmware.display(),
             fmt_bytes(fw_sz),
             partitions.display(),
         ),
     );
-    if let (Some(n), Some(p)) = (&xdp_name_owned, &xdp_path) {
-        log_line(
-            peer,
-            &format!(
-                "[xdp] profile `{id}`: name={n} {} ({})",
-                p.display(),
-                fmt_bytes(xdp_sz)
-            ),
-        );
-    } else {
-        log_line(peer, &format!("[xdp] profile `{id}`: (none)"));
-    }
 
-    let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
-    clear_dut_ready(&mut g);
-    g.session.cold_table = JUST_DROP_TABLE;
-    g.session.image_capacity = JUST_DROP_TABLE.image_capacity;
-    let xdp = match (&xdp_name_owned, &xdp_path) {
-        (Some(name), Some(path)) => Some(XdpImage {
-            name: name.as_str(),
-            path: path.as_path(),
-        }),
-        _ => None,
-    };
-    let img = Image {
-        firmware: firmware.as_path(),
-        partitions: partitions.as_path(),
-        xdp,
-    };
+    let g = lock(state)?;
     let t_flash = Instant::now();
-    log_line(
-        peer,
-        &format!(
-            "[fw]+[xdp] profile `{id}`: USB program (cold_table={:#x}+{:#x}) — watch [fw]/[part]/[xdp]/[reset]/[uart]/[cmd] below",
-            JUST_DROP_TABLE.base, JUST_DROP_TABLE.len
-        ),
-    );
-    g.session
-        .program(&img)
-        .with_context(|| format!("program profile `{id}`"))?;
+    g.handler
+        .flash(FlashOp::Fw {
+            firmware: firmware.display().to_string(),
+            partitions: partitions.display().to_string(),
+        })
+        .with_context(|| format!("flash fw profile `{id}`"))?;
     let flash_dur = t_flash.elapsed();
-    log_line(
-        peer,
-        &format!(
-            "[reset] profile `{id}`: program+reset done in {} (build {})",
-            fmt_dur(flash_dur),
-            fmt_dur(build_dur)
-        ),
-    );
     Ok(format!(
         "flashed profile={id} fw={} build={} flash={}",
         fmt_bytes(fw_sz),
@@ -236,7 +181,7 @@ fn run_profile_build(root: &Path, entry: &ProfileEntry, peer: &str) -> Result<Du
         ),
     );
     let t0 = Instant::now();
-    let status = Command::new(prog)
+    let status = ProcCommand::new(prog)
         .args(args)
         .current_dir(root)
         .status()
@@ -258,8 +203,8 @@ fn run_profile_build(root: &Path, entry: &ProfileEntry, peer: &str) -> Result<Du
     Ok(elapsed)
 }
 
-pub fn program(state: &Mutex<AgentState>, elf: &str, peer: &str) -> Result<String> {
-    with_log(peer, "Program", &format!("elf={elf}"), false, state, || {
+pub fn flash_xdp(state: &Mutex<AgentState>, elf: &str, peer: &str) -> Result<String> {
+    with_log(peer, "FlashXdp", &format!("elf={elf}"), false, state, || {
         let path = PathBuf::from(elf.trim());
         if !path.is_file() {
             bail!("elf not found: {}", path.display());
@@ -267,134 +212,346 @@ pub fn program(state: &Mutex<AgentState>, elf: &str, peer: &str) -> Result<Strin
         let name = xdp_name_from_file(&path)
             .with_context(|| format!("parse name from {}", path.display()))?;
         let sz = file_size(&path).unwrap_or(0);
-        let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
-        clear_dut_ready(&mut g);
-        g.session.cold_table = JUST_DROP_TABLE;
-        g.session.image_capacity = JUST_DROP_TABLE.image_capacity;
+        let g = lock(state)?;
         let outcome = g
-            .session
-            .install_xdp(&name, &path)
-            .with_context(|| format!("install_xdp `{name}`"))?;
-        g.session
-            .reset_to_app()
-            .context("reset_to_app after program")?;
-        Ok(match outcome {
-            xpost_serial::InstallOutcome::Overwritten { offset } => {
-                format!(
+            .handler
+            .flash(FlashOp::Xdp {
+                name: name.clone(),
+                path: path.display().to_string(),
+            })
+            .with_context(|| format!("flash xdp `{name}`"))?;
+        match outcome {
+            FlashResult::Install(xpost_serial::InstallOutcome::Overwritten { offset }) => {
+                Ok(format!(
                     "overwritten name={name} offset={offset:#x} size={}",
                     fmt_bytes(sz)
-                )
+                ))
             }
-            xpost_serial::InstallOutcome::Created { offset } => {
-                format!(
-                    "created name={name} offset={offset:#x} size={}",
-                    fmt_bytes(sz)
-                )
-            }
-        })
-    })
-}
-
-pub fn clear_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
-    with_log(peer, "Clear", "", false, state, || {
-        let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
-        clear_dut_ready(&mut g);
-        g.session.cold_table = JUST_DROP_TABLE;
-        g.session.clear_xdp().context("clear_xdp")?;
-        g.session.reset_to_app().context("reset_to_app after clear")?;
-        Ok("cleared".into())
-    })
-}
-
-pub fn list_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
-    with_log(peer, "List", "", false, state, || {
-        let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
-        g.session.cold_table = JUST_DROP_TABLE;
-        let entries = g.session.list_xdp().context("list_xdp")?;
-        if entries.is_empty() {
-            Ok("(empty cold table)".into())
-        } else {
-            let mut lines = Vec::with_capacity(entries.len());
-            for e in &entries {
-                lines.push(format!(
-                    "name={} offset={:#x} len={:#x}",
-                    e.name, e.offset, e.len
-                ));
-            }
-            Ok(lines.join("\n"))
+            FlashResult::Install(xpost_serial::InstallOutcome::Created { offset }) => Ok(format!(
+                "created name={name} offset={offset:#x} size={}",
+                fmt_bytes(sz)
+            )),
+            FlashResult::Done => Ok(format!("done name={name} size={}", fmt_bytes(sz))),
+            FlashResult::List(_) => bail!("unexpected list result from flash xdp"),
         }
     })
 }
 
-pub fn counters(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
-    with_log(peer, "Counters", "", true, state, || {
-        let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
-        let (_hdr, payload) = g
-            .session
-            .request_report_timeout(Duration::from_secs(5))
-            .context("request report for counters")?;
-        let report = xpost_serial::decode_perf_report(&payload).context("decode report")?;
-        Ok(xpost_serial::format_counters_ok(&report.counters))
-    })
-}
-
-/// Clear DUT perf accumulators (`perf clear`); await `OK perf clear` with timeout.
-pub fn perf_clear(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
-    with_log(peer, "PerfClear", "", false, state, || {
-        let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
-        let reply = g
-            .session
-            .request_timeout("perf clear", Duration::from_secs(5))
-            .context("request `perf clear`")?;
-        if !reply.trim().eq_ignore_ascii_case("OK perf clear")
-            && !reply.trim().to_ascii_lowercase().starts_with("ok perf clear")
-        {
-            bail!("unexpected perf clear reply: {reply}");
-        }
-        Ok(reply)
-    })
-}
-
-pub fn request(state: &Mutex<AgentState>, cmd: &str, peer: &str) -> Result<String> {
-    let cmd = cmd.trim();
-    if cmd.is_empty() {
-        bail!("empty request");
-    }
-    let is_report = cmd.eq_ignore_ascii_case("report") || cmd.eq_ignore_ascii_case("report perf");
-    let is_map_dump = cmd.len() >= 8 && cmd.as_bytes()[..8].eq_ignore_ascii_case(b"map dump");
-    let noisy = is_map_dump || is_report;
-    let timeout = if is_map_dump {
-        Duration::from_secs(30)
+/// `names`: after normalizing body — `"*"` → clear all; otherwise named list.
+pub fn clear_xdp(state: &Mutex<AgentState>, names: Vec<String>, peer: &str) -> Result<String> {
+    let summary = if names.is_empty() {
+        "*".into()
     } else {
-        Duration::from_secs(5)
+        names.join(",")
     };
-    with_log(peer, "Request", &format!("`{cmd}`"), noisy, state, || {
-        let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
-        if is_report {
-            let (hdr, payload) = g
-                .session
-                .request_report_timeout(Duration::from_secs(5))
-                .context("request report")?;
-            let b64 = base64_encode(&payload);
-            Ok(format!("{hdr} b64={b64}"))
-        } else {
-            g.session
-                .request_timeout(cmd, timeout)
-                .with_context(|| format!("request `{cmd}`"))
+    with_log(peer, "ClearXdp", &summary, false, state, || {
+        let g = lock(state)?;
+        g.handler
+            .flash(FlashOp::Clear { names })
+            .context("clear xdp")?;
+        Ok(format!("cleared {summary}"))
+    })
+}
+
+pub fn get_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
+    with_log(peer, "GetXdp", "", false, state, || {
+        let g = lock(state)?;
+        match g.handler.flash(FlashOp::List).context("get xdp")? {
+            FlashResult::List(entries) if entries.is_empty() => Ok("(empty cold table)".into()),
+            FlashResult::List(entries) => {
+                let mut lines = Vec::with_capacity(entries.len());
+                for e in &entries {
+                    lines.push(format!(
+                        "name={} offset={:#x} len={:#x}",
+                        e.name, e.offset, e.len
+                    ));
+                }
+                Ok(lines.join("\n"))
+            }
+            FlashResult::Done | FlashResult::Install(_) => {
+                bail!("unexpected flash result from get xdp")
+            }
         }
     })
 }
 
-/// Dump a named ARRAY map via DUT `map dump <name>`; returns the multi-line reply.
-pub fn map_dump(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
+pub fn enable_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
+    with_log(peer, "EnableXdp", "", false, state, || {
+        let g = lock(state)?;
+        req(&g, &Command::EnableXdp)?;
+        Ok("OK enable xdp".into())
+    })
+}
+
+pub fn disable_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
+    with_log(peer, "DisableXdp", "", false, state, || {
+        let g = lock(state)?;
+        req(&g, &Command::DisableXdp)?;
+        Ok("OK disable xdp".into())
+    })
+}
+
+pub fn clear_map(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
         bail!("empty map name");
     }
-    if name.split_whitespace().nth(1).is_some() {
-        bail!("map name must be a single token");
+    with_log(peer, "ClearMap", name, false, state, || {
+        let g = lock(state)?;
+        req(&g, &Command::ClearMap { name })?;
+        Ok("OK clear map".into())
+    })
+}
+
+pub fn get_map(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("empty map name");
     }
-    request(state, &format!("map dump {name}"), peer)
+    with_log(peer, "GetMap", name, true, state, || {
+        let g = lock(state)?;
+        match req(&g, &Command::GetMap { name })? {
+            OkReply::GetMap { blob } => {
+                let b64 = base64_encode(blob);
+                Ok(format!("OK get map {} b64={b64}", blob.len()))
+            }
+            _ => bail!("unexpected reply for get map"),
+        }
+    })
+}
+
+pub struct MapKv {
+    pub key: String,
+    pub value: String,
+}
+
+pub fn update_map(
+    state: &Mutex<AgentState>,
+    name: &str,
+    entries: &[MapKv],
+    peer: &str,
+) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("empty map name");
+    }
+    if entries.is_empty() {
+        bail!("no map entries to update");
+    }
+    with_log(
+        peer,
+        "UpdateMap",
+        &format!("{name} n={}", entries.len()),
+        false,
+        state,
+        || {
+            let g = lock(state)?;
+            let mut n = 0usize;
+            for e in entries {
+                let key = e.key.as_bytes();
+                let value = e.value.as_bytes();
+                req(
+                    &g,
+                    &Command::UpdateMap {
+                        name,
+                        key,
+                        value,
+                    },
+                )?;
+                n += 1;
+            }
+            Ok(format!("OK update map n={n}"))
+        },
+    )
+}
+
+pub fn clear_perf(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
+    with_log(peer, "ClearPerf", "", false, state, || {
+        let g = lock(state)?;
+        req(&g, &Command::ClearPerf)?;
+        Ok("OK clear perf".into())
+    })
+}
+
+pub fn get_perf(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
+    with_log(peer, "GetPerf", "", true, state, || {
+        let g = lock(state)?;
+        match req(&g, &Command::GetPerf)? {
+            OkReply::GetPerf { blob } => {
+                let b64 = base64_encode(blob);
+                Ok(format!("OK get perf {} b64={b64}", blob.len()))
+            }
+            _ => bail!("unexpected reply for get perf"),
+        }
+    })
+}
+
+pub fn get_serial(
+    state: &Mutex<AgentState>,
+    since_unix_ms: u64,
+    until_unix_ms: u64,
+    peer: &str,
+) -> Result<String> {
+    with_log(
+        peer,
+        "GetSerial",
+        &format!("ms={since_unix_ms}..{until_unix_ms}"),
+        false,
+        state,
+        || {
+            let g = lock(state)?;
+            // Touch UART briefly so late lines land in the transcript.
+            let _ = g.handler.request::<AgentError>(&Command::Ping);
+            let since = UNIX_EPOCH + Duration::from_millis(since_unix_ms);
+            let until = UNIX_EPOCH + Duration::from_millis(until_unix_ms);
+            let lines = g
+                .handler
+                .lines_in_range(since, until)
+                .context("lines_in_range")?;
+            Ok(format!(
+                "OK get serial n={} since_ms={since_unix_ms} until_ms={until_unix_ms}\n{}",
+                lines.len(),
+                lines.join("\n")
+            ))
+        },
+    )
+}
+
+/// Debug escape hatch: parse one App line → Command; first OK/ERR only.
+/// Not the supported path for get map/perf framing.
+pub fn run_cmd(state: &Mutex<AgentState>, cmd: &str, peer: &str) -> Result<String> {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        bail!("empty cmd");
+    }
+    let owned = cmd.to_string();
+    with_log(peer, "Run", &format!("`{owned}`"), false, state, move || {
+        let parsed = parse_app_command(&owned)?;
+        let g = lock(state)?;
+        match &parsed {
+            ParsedCmd::Ping => {
+                req(&g, &Command::Ping)?;
+                Ok("OK ping".into())
+            }
+            ParsedCmd::EnableXdp => {
+                req(&g, &Command::EnableXdp)?;
+                Ok("OK enable xdp".into())
+            }
+            ParsedCmd::DisableXdp => {
+                req(&g, &Command::DisableXdp)?;
+                Ok("OK disable xdp".into())
+            }
+            ParsedCmd::ClearMap { name } => {
+                req(&g, &Command::ClearMap { name })?;
+                Ok("OK clear map".into())
+            }
+            ParsedCmd::GetMap { name } => match req(&g, &Command::GetMap { name })? {
+                OkReply::GetMap { blob } => {
+                    Ok(format!("OK get map {} b64={}", blob.len(), base64_encode(blob)))
+                }
+                _ => bail!("unexpected get map reply"),
+            },
+            ParsedCmd::UpdateMap { name, key, value } => {
+                req(
+                    &g,
+                    &Command::UpdateMap {
+                        name,
+                        key: key.as_bytes(),
+                        value: value.as_bytes(),
+                    },
+                )?;
+                Ok("OK update map".into())
+            }
+            ParsedCmd::ClearPerf => {
+                req(&g, &Command::ClearPerf)?;
+                Ok("OK clear perf".into())
+            }
+            ParsedCmd::GetPerf => match req(&g, &Command::GetPerf)? {
+                OkReply::GetPerf { blob } => {
+                    Ok(format!("OK get perf {} b64={}", blob.len(), base64_encode(blob)))
+                }
+                _ => bail!("unexpected get perf reply"),
+            },
+        }
+    })
+}
+
+enum ParsedCmd<'a> {
+    Ping,
+    EnableXdp,
+    DisableXdp,
+    ClearMap { name: &'a str },
+    GetMap { name: &'a str },
+    UpdateMap {
+        name: &'a str,
+        key: &'a str,
+        value: &'a str,
+    },
+    ClearPerf,
+    GetPerf,
+}
+
+fn parse_app_command(line: &str) -> Result<ParsedCmd<'_>> {
+    let mut parts = line.split_whitespace();
+    let verb = parts.next().context("empty command")?;
+    let eq = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+
+    if eq(verb, "ping") {
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::Ping);
+    }
+
+    let target = parts.next().context("ERR unknown")?;
+    if eq(verb, "enable") && eq(target, "xdp") {
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::EnableXdp);
+    }
+    if eq(verb, "disable") && eq(target, "xdp") {
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::DisableXdp);
+    }
+    if eq(verb, "clear") && eq(target, "perf") {
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::ClearPerf);
+    }
+    if eq(verb, "get") && eq(target, "perf") {
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::GetPerf);
+    }
+    if eq(verb, "clear") && eq(target, "map") {
+        let name = parts.next().context("ERR bad-arity")?;
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::ClearMap { name });
+    }
+    if eq(verb, "get") && eq(target, "map") {
+        let name = parts.next().context("ERR bad-arity")?;
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::GetMap { name });
+    }
+    if eq(verb, "update") && eq(target, "map") {
+        let name = parts.next().context("ERR bad-arity")?;
+        let key = parts.next().context("ERR bad-arity")?;
+        let value = parts.next().context("ERR bad-arity")?;
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::UpdateMap { name, key, value });
+    }
+    bail!("ERR unknown")
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -421,79 +578,152 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// Return sink transcript lines whose host timestamp falls in `[since_unix_ms, until_unix_ms]`.
-///
-/// Also drains pending UART into the sink first so late `tsflow` lines are visible.
-pub fn serial_window(
-    state: &Mutex<AgentState>,
-    since_unix_ms: u64,
-    until_unix_ms: u64,
-    peer: &str,
-) -> Result<String> {
-    use std::time::{Duration, UNIX_EPOCH};
-    with_log(
-        peer,
-        "SerialWindow",
-        &format!("ms={since_unix_ms}..{until_unix_ms}"),
-        false,
-        state,
-        || {
-            let mut g = state.lock().map_err(|_| anyhow::anyhow!("session lock"))?;
-            let _ = g.session.drain_uart();
-            let since = UNIX_EPOCH + Duration::from_millis(since_unix_ms);
-            let until = UNIX_EPOCH + Duration::from_millis(until_unix_ms);
-            let lines = g.session.serial_window(since, until);
-            Ok(format!(
-                "OK serial_window n={} since_ms={since_unix_ms} until_ms={until_unix_ms}\n{}",
-                lines.len(),
-                lines.join("\n")
-            ))
-        },
-    )
-}
+/// CLI helpers that operate on an owned handler (no shared state).
+pub mod oneshot {
+    use super::*;
+    use xpost_serial::SerialHandler;
 
-pub fn probe(esp: &str, port: u16, peer: &str) -> Result<String> {
-    let t0 = Instant::now();
-    log_line(peer, &format!("→ Probe {esp}:{port}"));
-    match probe_ack(esp, port, Duration::from_secs(2)) {
-        Ok(got) => {
-            log_line(
-                peer,
-                &format!("← Probe ok in {} — {got}", fmt_dur(t0.elapsed())),
-            );
-            Ok(got.into())
+    pub fn flash_xdp(h: &SerialHandler, elf: &Path) -> Result<String> {
+        if !elf.is_file() {
+            bail!("elf not found: {}", elf.display());
         }
-        Err(e) => {
-            log_line(
-                peer,
-                &format!("✗ Probe failed in {}: {e:#}", fmt_dur(t0.elapsed())),
-            );
-            Err(e)
+        let name = xdp_name_from_file(elf)
+            .with_context(|| format!("parse name from {}", elf.display()))?;
+        let sz = file_size(elf).unwrap_or(0);
+        match h.flash(FlashOp::Xdp {
+            name: name.clone(),
+            path: elf.display().to_string(),
+        })? {
+            FlashResult::Install(xpost_serial::InstallOutcome::Overwritten { offset }) => {
+                Ok(format!(
+                    "overwritten name={name} offset={offset:#x} size={}",
+                    fmt_bytes(sz)
+                ))
+            }
+            FlashResult::Install(xpost_serial::InstallOutcome::Created { offset }) => Ok(format!(
+                "created name={name} offset={offset:#x} size={}",
+                fmt_bytes(sz)
+            )),
+            _ => bail!("unexpected flash xdp result"),
         }
     }
-}
 
-pub fn probe_burst_op(esp: &str, port: u16, count: u32, peer: &str) -> Result<String> {
-    if count == 0 || count > 100_000 {
-        bail!("burst count out of range: {count}");
+    pub fn clear_xdp(h: &SerialHandler, names: Vec<String>) -> Result<String> {
+        let summary = if names.is_empty() {
+            "*".into()
+        } else {
+            names.join(",")
+        };
+        h.flash(FlashOp::Clear { names })?;
+        Ok(format!("cleared {summary}"))
     }
-    let t0 = Instant::now();
-    log_line(peer, &format!("→ ProbeBurst {esp}:{port}:{count}"));
-    match probe_burst(esp, port, count) {
-        Ok(sent) => {
-            let msg = format!("sent={sent}");
-            log_line(
-                peer,
-                &format!("← ProbeBurst ok in {} — {msg}", fmt_dur(t0.elapsed())),
-            );
-            Ok(msg)
+
+    pub fn get_xdp(h: &SerialHandler) -> Result<String> {
+        match h.flash(FlashOp::List)? {
+            FlashResult::List(entries) if entries.is_empty() => Ok("(empty cold table)".into()),
+            FlashResult::List(entries) => Ok(entries
+                .iter()
+                .map(|e| format!("name={} offset={:#x} len={:#x}", e.name, e.offset, e.len))
+                .collect::<Vec<_>>()
+                .join("\n")),
+            _ => bail!("unexpected flash result from get xdp"),
         }
-        Err(e) => {
-            log_line(
-                peer,
-                &format!("✗ ProbeBurst failed in {}: {e:#}", fmt_dur(t0.elapsed())),
-            );
-            Err(e)
+    }
+
+    pub fn app(h: &SerialHandler, cmd: &Command<'_>) -> Result<String> {
+        match h.request::<AgentError>(cmd).map_err(|e| anyhow::anyhow!("{e}"))? {
+            OkReply::Ping => Ok("OK ping".into()),
+            OkReply::EnableXdp => Ok("OK enable xdp".into()),
+            OkReply::DisableXdp => Ok("OK disable xdp".into()),
+            OkReply::ClearMap => Ok("OK clear map".into()),
+            OkReply::ClearPerf => Ok("OK clear perf".into()),
+            OkReply::UpdateMap => Ok("OK update map".into()),
+            OkReply::GetMap { blob } => {
+                Ok(format!("OK get map {} b64={}", blob.len(), base64_encode(blob)))
+            }
+            OkReply::GetPerf { blob } => {
+                Ok(format!("OK get perf {} b64={}", blob.len(), base64_encode(blob)))
+            }
+            OkReply::Init => Ok("OK init".into()),
         }
+    }
+
+    pub fn get_serial(h: &SerialHandler, since_unix_ms: u64, until_unix_ms: u64) -> Result<String> {
+        let _ = h.request::<AgentError>(&Command::Ping);
+        let since = UNIX_EPOCH + Duration::from_millis(since_unix_ms);
+        let until = UNIX_EPOCH + Duration::from_millis(until_unix_ms);
+        let lines = h.lines_in_range(since, until)?;
+        Ok(format!(
+            "OK get serial n={} since_ms={since_unix_ms} until_ms={until_unix_ms}\n{}",
+            lines.len(),
+            lines.join("\n")
+        ))
+    }
+
+    pub fn run_line(h: &SerialHandler, line: &str) -> Result<String> {
+        let line = line.trim();
+        if line.is_empty() {
+            bail!("empty cmd");
+        }
+        let parsed = parse_app_command(line)?;
+        match parsed {
+            ParsedCmd::Ping => app(h, &Command::Ping),
+            ParsedCmd::EnableXdp => app(h, &Command::EnableXdp),
+            ParsedCmd::DisableXdp => app(h, &Command::DisableXdp),
+            ParsedCmd::ClearMap { name } => app(h, &Command::ClearMap { name }),
+            ParsedCmd::GetMap { name } => app(h, &Command::GetMap { name }),
+            ParsedCmd::UpdateMap { name, key, value } => app(
+                h,
+                &Command::UpdateMap {
+                    name,
+                    key: key.as_bytes(),
+                    value: value.as_bytes(),
+                },
+            ),
+            ParsedCmd::ClearPerf => app(h, &Command::ClearPerf),
+            ParsedCmd::GetPerf => app(h, &Command::GetPerf),
+        }
+    }
+
+    pub fn flash_fw_profile(h: &SerialHandler, root: &Path, id: &str) -> Result<String> {
+        let profiles = {
+            let path = std::env::var("XPOST_PROFILES")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| root.join("profiles.toml"));
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("read profiles {}", path.display()))?;
+            let file: ProfilesToml = toml::from_str(&text)
+                .with_context(|| format!("parse profiles {}", path.display()))?;
+            file.profiles
+        };
+        let entry = profiles
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .with_context(|| format!("unknown profile `{id}`"))?;
+        let build_dur = run_profile_build(root, &entry, "cli")?;
+        let firmware = root.join(&entry.bin);
+        let partitions = root.join(&entry.partition_table);
+        if !firmware.is_file() {
+            bail!("firmware not found: {}", firmware.display());
+        }
+        let fw_sz = file_size(&firmware).unwrap_or(0);
+        let t0 = Instant::now();
+        h.flash(FlashOp::Fw {
+            firmware: firmware.display().to_string(),
+            partitions: partitions.display().to_string(),
+        })?;
+        Ok(format!(
+            "flashed profile={id} fw={} build={} flash={}",
+            fmt_bytes(fw_sz),
+            fmt_dur(build_dur),
+            fmt_dur(t0.elapsed())
+        ))
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ProfilesToml {
+        #[serde(default, rename = "profile")]
+        profiles: Vec<ProfileEntry>,
     }
 }
