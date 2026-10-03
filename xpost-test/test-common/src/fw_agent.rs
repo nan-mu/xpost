@@ -25,18 +25,6 @@ pub const AGENT_PROBE: u32 = 13;
 pub const AGENT_PROBE_BURST: u32 = 14;
 /// Serial App-mode request; body = command text; message = OK/ERR line.
 pub const AGENT_REQUEST: u32 = 15;
-/// Install XDP ELF by path (UTF-8 body = absolute or workspace-relative path).
-pub const AGENT_PROGRAM: u32 = 10;
-/// Erase cold table.
-pub const AGENT_CLEAR: u32 = 11;
-/// Serial `counters` → OK line in response message.
-pub const AGENT_COUNTERS: u32 = 12;
-/// UDP stim; body `esp` or `esp:port`; message `ack` / `no-ack`.
-pub const AGENT_PROBE: u32 = 13;
-/// Fire-and-forget N STIMs; body `esp:port:count`; message `sent=N`.
-pub const AGENT_PROBE_BURST: u32 = 14;
-/// Serial App-mode request; body = command text; message = OK/ERR line.
-pub const AGENT_REQUEST: u32 = 15;
 
 pub const EXEC_SUBMIT_JOB: u32 = 101;
 pub const EXEC_GET_JOB: u32 = 102;
@@ -150,11 +138,6 @@ fn put_varint(out: &mut [u8], mut i: usize, mut x: u64) -> Option<usize> {
         out[i] = b | 0x80;
         i += 1;
     }
-}
-
-/// Protobuf wire tag for wire type 0 (varint): `(field << 3) | 0`.
-fn tag_varint(field: u32) -> u64 {
-    u64::from(field) << 3
 }
 
 /// Protobuf wire tag for wire type 0 (varint): `(field << 3) | 0`.

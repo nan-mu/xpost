@@ -500,15 +500,12 @@ pub fn fmt_short(d: Duration) -> String {
     }
 }
 
-/// Poll agent `/v1/dut_status` until UART shows `xpost ready`, or fall back to
-/// `ping` after a short grace (XDP_DROP can delay/ starve the ready println).
+/// Poll agent `/v1/dut_status` until UART shows `ready` (agent may ping internally).
 pub async fn settle_checklist(ui: &RoundUi, agent: &AgentClient, budget: Duration) -> Result<()> {
     let label = format!("settle ≤{}s", budget.as_secs());
     ui.check_activate(&label);
     let start = Instant::now();
     let mut last = String::from("booting");
-    /// Prefer UART ready; after this, ping is enough to leave settle.
-    const PING_AFTER: Duration = Duration::from_secs(3);
     loop {
         match agent.dut_status().await {
             Ok(msg) => {
@@ -528,17 +525,6 @@ pub async fn settle_checklist(ui: &RoundUi, agent: &AgentClient, budget: Duratio
             Err(e) => {
                 let left = budget.saturating_sub(start.elapsed());
                 ui.check_note(&format!("dut_status err: {e:#} · {} left", fmt_short(left)));
-            }
-        }
-
-        if start.elapsed() >= PING_AFTER {
-            match agent.request("ping").await {
-                Ok(m) if m.contains("OK ping") => {
-                    ui.check_ok(&format!("ping-ok (uart={last})"));
-                    return Ok(());
-                }
-                Ok(m) => ui.check_note(&format!("ping: {m}")),
-                Err(e) => ui.check_note(&format!("ping: {e:#}")),
             }
         }
 
@@ -573,9 +559,9 @@ pub async fn flash_idle(
     ui.set_eta(&eta.fmt());
     let t0 = Instant::now();
     agent
-        .flash_profile(profile)
+        .flash_fw(profile)
         .await
-        .with_context(|| format!("FlashProfile `{profile}`"))?;
+        .with_context(|| format!("flash/fw `{profile}`"))?;
     ui.check_note("waiting agent idle");
     let wait = agent.wait_idle(budget);
     tokio::pin!(wait);
