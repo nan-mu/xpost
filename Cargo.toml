@@ -75,7 +75,6 @@ helper_length = 0x200
 xpost-macros     = { path = "xpost-macros" }
 xpost-elf        = { path = "xpost-elf" }
 xpost-type       = { path = "xpost-type" }
-xpost-elf        = { path = "xpost-elf" }
 log              = "0.4.27"
 critical-section = "1.2.0"
 heapless         = "0.9.3"

@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::client::error::{Error, Result};
 use crate::client::port::Port;
-use crate::client::serial::Log;
+use crate::client::serial::{InterruptTx, Log};
 use crate::r#type::ops::{Flash, FlashOp};
 
 /// Default partition label for the XDP flash span (`partitions.csv` Name column).
@@ -161,9 +161,14 @@ impl FlashConfig {
 }
 
 /// Spawn flash worker on shared [`Port`] (open-per-op download).
-pub fn spawn(cfg: FlashConfig, port: Arc<Port>, log: Arc<Log>) -> FlashHandle {
+pub fn spawn(
+    cfg: FlashConfig,
+    port: Arc<Port>,
+    log: Arc<Log>,
+    interrupt: InterruptTx,
+) -> FlashHandle {
     let (tx, rx) = mpsc::unbounded_channel();
-    let join = tokio::spawn(worker(cfg, port, log, rx));
+    let join = tokio::spawn(worker(cfg, port, log, interrupt, rx));
     FlashHandle {
         tx,
         join: Some(join),
@@ -174,6 +179,7 @@ async fn worker(
     cfg: FlashConfig,
     port: Arc<Port>,
     log: Arc<Log>,
+    interrupt: InterruptTx,
     mut rx: mpsc::UnboundedReceiver<FlashReq>,
 ) {
     while let Some(req) = rx.recv().await {
@@ -183,20 +189,29 @@ async fn worker(
                 let cfg = cfg.clone();
                 let port = Arc::clone(&port);
                 let log = Arc::clone(&log);
-                let result = tokio::task::spawn_blocking(move || run_op(&port, &cfg, &log, &op))
-                    .map(|join| {
-                        join.unwrap_or_else(|e| Err(Error::Msg(format!("flash join: {e}"))))
-                    })
-                    .await;
+                let interrupt = interrupt.clone();
+                let result =
+                    tokio::task::spawn_blocking(move || run_op(&port, &cfg, &log, &interrupt, &op))
+                        .map(|join| {
+                            join.unwrap_or_else(|e| Err(Error::Msg(format!("flash join: {e}"))))
+                        })
+                        .await;
                 let _ = resp.send(result);
             }
         }
     }
 }
 
-fn run_op(port: &Port, cfg: &FlashConfig, log: &Log, op: &FlashOp) -> Result<FlashResult> {
-    // Log only — do not wait on App UART. Flash is disruptive; firmware must
-    // not rely on pre-flash control-plane state.
+fn run_op(
+    port: &Port,
+    cfg: &FlashConfig,
+    log: &Log,
+    interrupt: &InterruptTx,
+    op: &FlashOp,
+) -> Result<FlashResult> {
+    // Kick App UART select (if any) so it can drop and release the gate; then
+    // take download. Do not wait for a serial ack — flash is disruptive.
+    let _ = interrupt.try_send(());
     log.write_line(&Flash::Begin(op.clone()).to_string());
     let result = match op {
         FlashOp::Fw {

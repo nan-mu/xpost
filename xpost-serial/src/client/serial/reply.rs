@@ -10,9 +10,7 @@ use crate::r#type::reply::{
 };
 
 use crate::client::error::{Error, Result};
-
-/// Cap per-read wait so flash interrupt can run between polls (RefCell / port release).
-const POLL_SLICE: Duration = Duration::from_millis(50);
+use crate::client::serial::uart::Event;
 
 /// Reply plus optional binary payload (`get perf`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,44 +19,41 @@ pub struct ReplyMsg {
     pub blob: Option<Vec<u8>>,
 }
 
-type ReadLine<'a> = dyn FnMut(Duration) -> Result<Option<String>> + 'a;
-type ReadExact<'a> = dyn FnMut(usize, Duration) -> Result<Vec<u8>> + 'a;
+type Wait<'a> = dyn FnMut(Duration) -> Result<Event> + 'a;
 
-fn slice(remaining: Duration) -> Duration {
-    if remaining < POLL_SLICE {
-        remaining
-    } else {
-        POLL_SLICE
+fn remap_timeout(err: Error, full: Duration) -> Error {
+    match err {
+        Error::RequestTimeout(_) => Error::RequestTimeout(full),
+        other => other,
     }
 }
 
 /// Wait for a single-line `OK`/`ERR` (or `get perf` header+blob / `get map` dump).
+///
+/// `wait` must be a block-select: business / interrupt / timeout (see [`crate::client::serial::uart::Uart::select`]).
 pub fn collect_reply(
-    read_line: &mut ReadLine<'_>,
-    read_exact: &mut ReadExact<'_>,
+    wait: &mut Wait<'_>,
     want_map: bool,
     want_perf: bool,
     timeout: Duration,
-    interrupt: &mut dyn FnMut() -> bool,
 ) -> Result<ReplyMsg> {
     if want_map {
-        return collect_get_map(read_line, timeout, interrupt);
+        return collect_get_map(wait, timeout);
     }
     if want_perf {
-        return collect_get_perf(read_line, read_exact, timeout, interrupt);
+        return collect_get_perf(wait, timeout);
     }
     let deadline = Instant::now() + timeout;
     loop {
-        if interrupt() {
-            return Err(Error::Interrupted);
-        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(Error::RequestTimeout(timeout));
         }
-        match read_line(slice(remaining))? {
-            None => continue,
-            Some(line) => {
+        match wait(remaining).map_err(|e| remap_timeout(e, timeout))? {
+            Event::Blob(_) => {
+                return Err(Error::Msg("unexpected binary blob".into()));
+            }
+            Event::Line(line) => {
                 if !is_reply_prefix(&line) {
                     continue;
                 }
@@ -78,24 +73,17 @@ pub fn collect_reply(
     }
 }
 
-fn collect_get_map(
-    read_line: &mut ReadLine<'_>,
-    timeout: Duration,
-    interrupt: &mut dyn FnMut() -> bool,
-) -> Result<ReplyMsg> {
+fn collect_get_map(wait: &mut Wait<'_>, timeout: Duration) -> Result<ReplyMsg> {
     let deadline = Instant::now() + timeout;
     let mut header: Option<(String, crate::r#type::reply::MapKind)> = None;
     let mut entries = Vec::new();
     loop {
-        if interrupt() {
-            return Err(Error::Interrupted);
-        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(Error::RequestTimeout(timeout));
         }
-        let Some(line) = read_line(slice(remaining))? else {
-            continue;
+        let Event::Line(line) = wait(remaining).map_err(|e| remap_timeout(e, timeout))? else {
+            return Err(Error::Msg("unexpected binary blob during get map".into()));
         };
         if line.starts_with("ERR ") {
             let reply = parse_reply_line(&line)
@@ -141,60 +129,55 @@ fn collect_get_map(
     }
 }
 
-fn collect_get_perf(
-    read_line: &mut ReadLine<'_>,
-    read_exact: &mut ReadExact<'_>,
-    timeout: Duration,
-    interrupt: &mut dyn FnMut() -> bool,
-) -> Result<ReplyMsg> {
+fn collect_get_perf(wait: &mut Wait<'_>, timeout: Duration) -> Result<ReplyMsg> {
     let deadline = Instant::now() + timeout;
     let len = loop {
-        if interrupt() {
-            return Err(Error::Interrupted);
-        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(Error::RequestTimeout(timeout));
         }
-        let Some(line) = read_line(slice(remaining))? else {
-            continue;
-        };
-        if !is_reply_prefix(&line) {
-            continue;
-        }
-        if line.starts_with("ERR ") {
-            let reply = parse_reply_line(&line)
-                .map_err(|e| Error::Msg(format!("bad err `{line}`: {e}")))?;
-            return Ok(ReplyMsg { reply, blob: None });
-        }
-        match parse_reply_line(&line) {
-            Ok(Reply::Ok(OkReply::GetPerf { len })) => break len,
-            Ok(other) => {
-                return Err(Error::Msg(format!(
-                    "expected OK get perf, got {other}"
-                )));
+        match wait(remaining).map_err(|e| remap_timeout(e, timeout))? {
+            Event::Blob(_) => {
+                return Err(Error::Msg("unexpected blob before get perf header".into()));
             }
-            Err(e) => return Err(Error::Msg(format!("bad get perf header `{line}`: {e}"))),
+            Event::Line(line) => {
+                if !is_reply_prefix(&line) {
+                    continue;
+                }
+                if line.starts_with("ERR ") {
+                    let reply = parse_reply_line(&line)
+                        .map_err(|e| Error::Msg(format!("bad err `{line}`: {e}")))?;
+                    return Ok(ReplyMsg { reply, blob: None });
+                }
+                match parse_reply_line(&line) {
+                    Ok(Reply::Ok(OkReply::GetPerf { len })) => break len,
+                    Ok(other) => {
+                        return Err(Error::Msg(format!(
+                            "expected OK get perf, got {other}"
+                        )));
+                    }
+                    Err(e) => {
+                        return Err(Error::Msg(format!("bad get perf header `{line}`: {e}")));
+                    }
+                }
+            }
         }
     };
-    if interrupt() {
-        return Err(Error::Interrupted);
-    }
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(Error::RequestTimeout(timeout));
     }
-    let blob = read_exact(len, remaining)?;
-    if blob.len() != len {
-        return Err(Error::Msg(format!(
+    match wait(remaining).map_err(|e| remap_timeout(e, timeout))? {
+        Event::Blob(blob) if blob.len() == len => Ok(ReplyMsg {
+            reply: Reply::Ok(OkReply::GetPerf { len }),
+            blob: Some(blob),
+        }),
+        Event::Blob(blob) => Err(Error::Msg(format!(
             "get perf blob len {} != header {len}",
             blob.len()
-        )));
+        ))),
+        Event::Line(s) => Err(Error::Msg(format!("expected blob, got line: {s}"))),
     }
-    Ok(ReplyMsg {
-        reply: Reply::Ok(OkReply::GetPerf { len }),
-        blob: Some(blob),
-    })
 }
 
 /// Build a synthetic ERR for host-side failures (not from DUT).

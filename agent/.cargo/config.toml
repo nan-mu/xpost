@@ -1,3 +1,0 @@
-# Override parent workspace RV32 default (just_drop host).
-[build]
-target = "aarch64-apple-darwin"

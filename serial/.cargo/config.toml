@@ -1,4 +1,0 @@
-# Host override for parent workspace's riscv32imc `build.target`.
-# Apple Silicon Mac (just_drop host): aarch64-apple-darwin
-[build]
-target = "aarch64-apple-darwin"

@@ -31,6 +31,7 @@ pub(crate) const FLASH_SECTOR: u32 = 0x1000;
 pub(crate) const READ_BLOCK: u32 = 0x1000;
 pub(crate) const READ_MAX_IN_FLIGHT: u32 = 64;
 pub(crate) const RESET_TO_APP_SETTLE: Duration = Duration::from_millis(800);
+/// Reader-thread wake only — never the business request deadline.
 pub(crate) const PORT_IO_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Paired serial + flash handles sharing one [`Port`] (open-per-op).
@@ -51,12 +52,23 @@ pub struct OpenOptions<'a> {
 impl Client {
     /// Resolve USB port, bind App + flash handles (no long-lived fd on the port).
     ///
-    /// App requests are sync atomic (`Port::with_app`). Flash opens download mode
-    /// per op (`Port::with_download`). Matches idf-monitor pause-before-flash.
+    /// App: `serial` module (`Uart` select = business / interrupt / timeout).
+    /// Flash: signals interrupt then `Port::with_download`.
     pub fn open(opts: OpenOptions<'_>) -> Result<Self> {
         let port = Arc::new(Port::resolve(opts.port, opts.chip)?);
-        let serial = serial::open(Arc::clone(&port), opts.log_path, opts.tee_stdout)?;
-        let flash = flash::spawn(opts.flash, Arc::clone(&port), serial.log_arc());
+        let (interrupt_tx, interrupt_rx) = serial::interrupt_channel();
+        let serial = serial::open(
+            Arc::clone(&port),
+            opts.log_path,
+            opts.tee_stdout,
+            interrupt_rx,
+        )?;
+        let flash = flash::spawn(
+            opts.flash,
+            Arc::clone(&port),
+            serial.log_arc(),
+            interrupt_tx,
+        );
         Ok(Self {
             port,
             serial,

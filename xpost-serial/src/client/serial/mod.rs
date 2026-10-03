@@ -1,20 +1,26 @@
-//! App-mode serial: sync atomic request (open → cmd → reply → close).
+//! App-mode serial: `serialport` + transcript [`Log`], sync request via UART select.
+//!
+//! Replaces the old `port::app` session. External API stays ordinary (`request` /
+//! `drain`); waiting is block-select: business / interrupt / timeout.
 
 mod log;
 mod reply;
+mod uart;
 
 pub use log::Log;
 pub use reply::perf::{self, Report, decode as decode_perf, mask_for_len};
 pub use reply::ReplyMsg;
+pub use uart::{Event, Uart};
 
-use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crossbeam_channel::{Receiver, Sender};
+
 use crate::client::error::{Error, Result};
 use crate::client::port::Port;
-use crate::client::{DEFAULT_REQUEST_TIMEOUT, GET_MAP_TIMEOUT};
+use crate::client::{BAUD, DEFAULT_REQUEST_TIMEOUT, GET_MAP_TIMEOUT};
 use crate::r#type::ops::Command;
 use crate::r#type::reply::is_reply_prefix;
 
@@ -24,11 +30,17 @@ use self::reply::collect_reply;
 pub struct SerialHandle {
     port: Arc<Port>,
     log: Arc<Log>,
+    /// Flash worker signals here before taking the port gate.
+    interrupt_rx: Receiver<()>,
 }
 
 impl SerialHandle {
-    pub fn new(port: Arc<Port>, log: Arc<Log>) -> Self {
-        Self { port, log }
+    pub fn new(port: Arc<Port>, log: Arc<Log>, interrupt_rx: Receiver<()>) -> Self {
+        Self {
+            port,
+            log,
+            interrupt_rx,
+        }
     }
 
     pub fn log(&self) -> &Log {
@@ -58,24 +70,36 @@ impl SerialHandle {
         let line = cmd.to_string();
         self.log.write_line(&format!("[cmd] → {line}"));
         let log = Arc::clone(&self.log);
-        let result = self.port.with_app(|mut app| {
-            app.write_line(&line)?;
-            let app = RefCell::new(app);
-            let mut read_line = |t| app.borrow_mut().read_line(t);
-            let mut read_exact = |n, t| app.borrow_mut().read_exact(n, t);
-            // Port is exclusive for this op; flash cannot steal mid-request.
-            let mut interrupt = || false;
+        let interrupt = self.interrupt_rx.clone();
+        let name = self.port.name().to_string();
+        let result = self.port.with_gate(|| {
+            let mut uart = Uart::open(&name, BAUD, interrupt)?;
+            uart.write_line(&line)?;
+            let mut wait = |t| {
+                let ev = uart.select(t)?;
+                if let Event::Line(ref l) = ev {
+                    if is_reply_prefix(l) {
+                        log.write_line(&format!("[cmd] ← {l}"));
+                    } else {
+                        log.write_line(&format!("[uart] {l}"));
+                    }
+                }
+                Ok(ev)
+            };
             collect_reply(
-                &mut read_line,
-                &mut read_exact,
+                &mut wait,
                 cmd.is_get_map(),
                 cmd.is_get_perf(),
                 req_timeout,
-                &mut interrupt,
             )
         });
         match &result {
-            Ok(msg) => log.write_line(&format!("[cmd] ← {}", msg.reply)),
+            Ok(msg) => {
+                // Header already logged in wait; note final OK shape for get map / perf.
+                if cmd.is_get_map() || cmd.is_get_perf() {
+                    log.write_line(&format!("[cmd] ← {}", msg.reply));
+                }
+            }
             Err(e) => log.write_line(&format!("[err] request: {e}")),
         }
         result
@@ -84,17 +108,23 @@ impl SerialHandle {
     /// Best-effort drain of pending UART into the log.
     pub fn drain(&self) -> Result<()> {
         let log = Arc::clone(&self.log);
-        self.port.with_app(|mut app| {
+        let interrupt = self.interrupt_rx.clone();
+        let name = self.port.name().to_string();
+        self.port.with_gate(|| {
+            let uart = Uart::open(&name, BAUD, interrupt)?;
             loop {
-                match app.read_line(Duration::from_millis(1)) {
-                    Ok(Some(line)) => {
+                match uart.select(Duration::from_millis(1)) {
+                    Ok(Event::Line(line)) => {
                         if is_reply_prefix(&line) {
                             log.write_line(&format!("[cmd] ← {line}"));
                         } else {
                             log.write_line(&format!("[uart] {line}"));
                         }
                     }
-                    _ => break,
+                    Ok(Event::Blob(_)) => {}
+                    Err(Error::RequestTimeout(_)) => break,
+                    Err(Error::Interrupted) => break,
+                    Err(e) => return Err(e),
                 }
             }
             Ok(())
@@ -110,8 +140,20 @@ impl SerialHandle {
     }
 }
 
-/// Create log + bind to an already-resolved [`Port`].
-pub fn open(port: Arc<Port>, log_path: &Path, tee_stdout: bool) -> Result<SerialHandle> {
+/// Create log + interrupt channel end; bind to an already-resolved [`Port`].
+pub fn open(
+    port: Arc<Port>,
+    log_path: &Path,
+    tee_stdout: bool,
+    interrupt_rx: Receiver<()>,
+) -> Result<SerialHandle> {
     let log = Arc::new(Log::create(log_path, tee_stdout)?);
-    Ok(SerialHandle::new(port, log))
+    Ok(SerialHandle::new(port, log, interrupt_rx))
+}
+
+/// Flash side of the interrupt pair (try-send before taking the port gate).
+pub type InterruptTx = Sender<()>;
+
+pub fn interrupt_channel() -> (InterruptTx, Receiver<()>) {
+    crossbeam_channel::bounded(1)
 }

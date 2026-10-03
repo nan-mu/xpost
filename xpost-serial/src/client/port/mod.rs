@@ -1,13 +1,10 @@
-//! USB serial port: open-per-op for App UART and espflash download.
+//! USB serial port identity + exclusive gate for App UART vs espflash download.
 //!
-//! Matches Espressif host practice (idf-monitor pauses / closes before flash;
-//! espflash flash then monitor). Neither App nor download holds the fd across
-//! unrelated operations — callers use [`Port::with_app`] / [`Port::with_download`].
+//! App I/O lives in [`crate::client::serial`] (`Uart` + `Log`). This module only
+//! resolves the device and serializes opens (idf-monitor pause-before-flash style).
 
-mod app;
 mod download;
 
-pub use app::AppSession;
 pub use download::Downloader;
 
 use std::path::{Path, PathBuf};
@@ -46,18 +43,21 @@ impl Port {
         &self.name
     }
 
+    pub fn baud(&self) -> u32 {
+        self.baud
+    }
+
     pub fn chip(&self) -> Chip {
         self.chip
     }
 
-    /// Open App UART, run `f`, close. Atomic vs other [`Self::with_app`] / [`Self::with_download`] callers.
-    pub fn with_app<R>(&self, f: impl FnOnce(AppSession) -> Result<R>) -> Result<R> {
+    /// Hold the exclusive gate while `f` runs (App UART or any non-download use).
+    pub fn with_gate<R>(&self, f: impl FnOnce() -> Result<R>) -> Result<R> {
         let _gate = self
             .gate
             .lock()
             .map_err(|_| Error::Msg("port gate poisoned".into()))?;
-        let app = AppSession::open(&self.name, self.baud)?;
-        f(app)
+        f()
     }
 
     /// Open download-mode flasher, run `f` (usually ends in [`Downloader::reset_to_app`]).
