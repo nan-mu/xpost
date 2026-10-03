@@ -109,6 +109,7 @@ impl<R, W, H: RequestHandler, const N: usize> SerialHandlerBuilder<R, W, H, N> {
             handler: self.handler,
             used: 0,
             overflow: false,
+            started: false,
         }
     }
 }
@@ -131,6 +132,7 @@ pub struct SerialHandler<R, W, H = DefaultHandler, const N: usize = 128> {
     handler: H,
     used: usize,
     overflow: bool,
+    started: bool,
 }
 
 impl<R, W, const N: usize> SerialHandler<R, W, DefaultHandler, N> {
@@ -164,6 +166,31 @@ where
     W: FnMut(&[u8]) -> Result<(), Infallible>,
     H: RequestHandler,
 {
+    /// Emit unsolicited `OK init` once (same contract as [`Self::run`] entry).
+    pub fn start(&mut self) {
+        if self.started {
+            return;
+        }
+        infallible(write_ok(&OkReply::Init, &mut self.write));
+        self.started = true;
+    }
+
+    /// Drain all currently available RX bytes synchronously (host / test driver).
+    ///
+    /// Calls [`Self::start`] on first use. Returns `false` if a callback broke
+    /// binary framing (same terminal condition as [`Self::run`]).
+    pub fn pump(&mut self) -> bool {
+        self.start();
+        loop {
+            let Some(byte) = (self.read)() else {
+                return true;
+            };
+            if !self.receive(byte) {
+                return false;
+            }
+        }
+    }
+
     /// Consume the configured handler and service UART requests in Embassy.
     ///
     /// Start only after firmware initialization: sends `OK init` on entry.
@@ -176,7 +203,7 @@ where
     /// more responses are sent then: firmware must restore transport framing
     /// before starting another session. Dropping the future drops owned captures.
     pub async fn run(mut self) {
-        infallible(write_ok(&OkReply::Init, &mut self.write));
+        self.start();
         loop {
             let mut idle = false;
             for _ in 0..64 {

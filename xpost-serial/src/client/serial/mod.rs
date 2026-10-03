@@ -8,19 +8,19 @@ pub mod perf;
 pub use perf::{Report, decode as decode_perf, mask_for_len};
 
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use futures::FutureExt;
 
 use crate::client::error::{Interrupted, RequestError, RequestTimeout};
-use crate::client::port::Port;
+use crate::client::port::AppLink;
 use crate::client::record::{Found, SharedRecord, WriteRecord};
 use crate::client::{DEFAULT_REQUEST_TIMEOUT, GET_MAP_TIMEOUT};
 use crate::r#type::command::{Command, GET_INIT_TIMEOUT};
 
 /// Occupy App UART, exchange one command (or host-only wait), release fd on return.
 pub(crate) async fn run_op<E>(
-    port: &Port,
+    link: &AppLink,
     record: &SharedRecord,
     cmd: &Command<'_>,
 ) -> core::result::Result<Found, E>
@@ -33,20 +33,23 @@ where
         _ => DEFAULT_REQUEST_TIMEOUT,
     };
 
-    let mut uart = port.open_uart(Arc::clone(record))?;
+    let mut uart = link.open_uart(Arc::clone(record))?;
     {
         let mut rec = record.lock();
         cmd.write_to(&mut rec);
     }
     // GetInit: open reader only — never serialize / write a UART verb.
+    // Floor slightly in the past so a boot `OK init` racing the open is accepted.
     let after = match cmd {
-        Command::GetInit => SystemTime::now(),
+        Command::GetInit => SystemTime::now()
+            .checked_sub(Duration::from_millis(500))
+            .unwrap_or(SystemTime::UNIX_EPOCH),
         _ => uart.write_command(cmd.to_string().as_str())?,
     };
 
     let found = tokio::select! {
         biased;
-        _ = port.interrupt().wait().fuse() => Err(Interrupted.into()),
+        _ = link.interrupt().wait().fuse() => Err(Interrupted.into()),
         _ = tokio::time::sleep(req_timeout).fuse() => {
             Err(RequestTimeout(req_timeout).into())
         }

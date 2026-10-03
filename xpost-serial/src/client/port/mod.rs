@@ -4,11 +4,20 @@
 //! drop. App `serial::request` runs under `tokio::select!`; interrupt/timeout
 //! returns early so the session drops and flash can open download.
 
+mod byte_port;
 mod download;
+mod link;
 mod uart;
 
+#[cfg(all(test, feature = "dev"))]
+pub mod memory;
+
 pub use download::Downloader;
+pub(crate) use link::AppLink;
 pub use uart::{Command, Interrupt, Uart};
+
+#[cfg(all(test, feature = "dev"))]
+pub use memory::{MemoryClient, MemoryPair, MemoryServer};
 
 use crate::client::record::SharedRecord;
 
@@ -120,7 +129,7 @@ impl Port {
             .gate
             .lock()
             .map_err(|_| std::io::Error::other("port gate poisoned"))?;
-        let uart = Uart::open(&self.name, self.baud, record)?;
+        let uart = Uart::open_usb(&self.name, self.baud, record)?;
         Ok(UartSession { _gate: gate, uart })
     }
 

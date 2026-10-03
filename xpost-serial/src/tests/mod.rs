@@ -1,4 +1,6 @@
-//! Round-trip wire tests that need both `client` and `server` (`dev` feature).
+//! Round-trip and injectable-IO session tests (`dev` + `client` + `server`).
 
 mod command;
+mod harness;
 mod reply;
+mod session;

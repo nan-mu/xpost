@@ -14,8 +14,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use futures::executor::block_on;
-
 pub use crate::r#type::command::Command;
 pub use crate::r#type::reply::OkReply;
 pub use error::{Interrupted, ParseError, RequestError, RequestTimeout, Result};
@@ -24,9 +22,12 @@ pub use flash::{
 };
 pub use ops::{Chip, FlashOp};
 pub use port::Port;
+#[cfg(all(test, feature = "dev"))]
+pub use port::{MemoryClient, MemoryPair, MemoryServer};
 pub use serial::{Report, decode_perf, mask_for_len};
 
 use flash::FlashWorker;
+use port::AppLink;
 use record::{SharedRecord, SharedRecordInner};
 
 // —— shared client constants (single source) ——
@@ -50,11 +51,11 @@ pub struct OpenOptions<'a> {
     pub flash: FlashConfig,
 }
 
-/// Unified host control-plane handle (App UART + flash worker).
+/// Unified host control-plane handle (App UART + optional flash worker).
 pub struct SerialHandler {
-    port: Arc<Port>,
+    link: AppLink,
     record: SharedRecord,
-    flash: FlashWorker,
+    flash: Option<FlashWorker>,
 }
 
 impl SerialHandler {
@@ -64,15 +65,28 @@ impl SerialHandler {
         let record = SharedRecordInner::create(opts.log_path, opts.tee_stdout)?;
         let flash = flash::spawn(opts.flash, Arc::clone(&port), Arc::clone(&record));
         Ok(Self {
-            port,
+            link: AppLink::Usb(port),
             record,
-            flash,
+            flash: Some(flash),
         })
     }
 
-    /// Stop the flash worker and release this handler.
+    /// App-only memory link for injectable-IO tests (`dev` + `cfg(test)`).
+    /// No flash worker / log file.
+    #[cfg(all(test, feature = "dev"))]
+    pub fn open_memory(client: MemoryClient) -> Self {
+        Self {
+            link: AppLink::Memory(client),
+            record: SharedRecordInner::create_memory(),
+            flash: None,
+        }
+    }
+
+    /// Stop the flash worker (if any) and release this handler.
     pub fn shutdown(self) {
-        self.flash.shutdown();
+        if let Some(flash) = self.flash {
+            flash.shutdown();
+        }
     }
 
     /// Send one App wire [`Command`] and wait for the matching reply.
@@ -80,13 +94,16 @@ impl SerialHandler {
     where
         E: RequestError,
     {
-        let found = block_on(serial::run_op::<E>(&self.port, &self.record, cmd))?;
+        let found = block_fut(serial::run_op::<E>(&self.link, &self.record, cmd))?;
         self.record.materialize_ok::<E>(&found)
     }
 
     /// Run a download-mode [`FlashOp`] (not an App-mode wire reply).
     pub fn flash(&self, op: FlashOp) -> io::Result<FlashResult> {
-        self.flash.call(op)
+        self.flash
+            .as_ref()
+            .ok_or_else(|| io::Error::other("flash worker not available on this link"))?
+            .call(op)
     }
 
     pub fn lines_in_range(&self, since: SystemTime, until: SystemTime) -> io::Result<Vec<String>> {
@@ -94,6 +111,19 @@ impl SerialHandler {
     }
 
     pub fn port(&self) -> &Port {
-        &self.port
+        self.link
+            .port()
+            .expect("SerialHandler::port requires a USB App link")
+    }
+}
+
+fn block_fut<F: core::future::Future>(fut: F) -> F::Output {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(fut),
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime for App request")
+            .block_on(fut),
     }
 }

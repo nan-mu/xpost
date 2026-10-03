@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
-use serialport::SerialPort;
 use tokio::sync::Notify;
 
+use super::byte_port::{AppBytePort, open_usb};
 use crate::client::PORT_IO_TIMEOUT;
 use crate::client::record::SharedRecord;
 
@@ -97,7 +97,7 @@ impl Interrupt {
 
 /// Short-lived App UART. Reader thread continuously writes into [`SharedRecord`].
 pub struct Uart {
-    writer: Option<Box<dyn SerialPort>>,
+    writer: Option<Box<dyn AppBytePort>>,
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
@@ -113,17 +113,21 @@ impl Drop for Uart {
 }
 
 impl Uart {
-    /// Open App UART (caller must already hold [`super::Port`]'s gate).
+    /// Open App UART over a host USB serial device.
     ///
     /// Spawns a reader that appends every framed line/blob into `record` until drop.
-    pub(crate) fn open(name: &str, baud: u32, record: SharedRecord) -> io::Result<Self> {
-        let port = serialport::new(name, baud)
-            .timeout(PORT_IO_TIMEOUT)
-            .open()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        let writer = port
-            .try_clone()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    pub(crate) fn open_usb(name: &str, baud: u32, record: SharedRecord) -> io::Result<Self> {
+        Self::open_port(open_usb(name, baud)?, record)
+    }
+
+    /// Open App UART over any cloneable [`AppBytePort`] (USB or memory).
+    pub(crate) fn open_port(
+        mut port: Box<dyn AppBytePort>,
+        record: SharedRecord,
+    ) -> io::Result<Self> {
+        port.set_timeout(PORT_IO_TIMEOUT)?;
+        let mut writer = port.try_clone_box()?;
+        writer.set_timeout(PORT_IO_TIMEOUT)?;
         let stop = Arc::new(AtomicBool::new(false));
         let stop_t = Arc::clone(&stop);
         let join = thread::spawn(move || reader_loop(port, record, stop_t));
@@ -148,7 +152,7 @@ impl Uart {
     }
 }
 
-fn reader_loop(port: Box<dyn SerialPort>, record: SharedRecord, stop: Arc<AtomicBool>) {
+fn reader_loop(port: Box<dyn AppBytePort>, record: SharedRecord, stop: Arc<AtomicBool>) {
     let mut reader = BufReader::new(port);
     let mut buf = String::new();
     while !stop.load(Ordering::Acquire) {
@@ -180,7 +184,7 @@ fn reader_loop(port: Box<dyn SerialPort>, record: SharedRecord, stop: Arc<Atomic
 }
 
 fn read_exact_wake(
-    reader: &mut BufReader<Box<dyn SerialPort>>,
+    reader: &mut BufReader<Box<dyn AppBytePort>>,
     n: usize,
     stop: &AtomicBool,
 ) -> std::io::Result<Vec<u8>> {

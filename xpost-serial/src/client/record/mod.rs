@@ -36,6 +36,15 @@ impl SharedRecordInner {
         }))
     }
 
+    /// In-memory transcript only (no log file). Test harness under `dev`.
+    #[cfg(all(test, feature = "dev"))]
+    pub fn create_memory() -> SharedRecord {
+        Arc::new(Self {
+            inner: Mutex::new(Record::memory()),
+            notify: Notify::new(),
+        })
+    }
+
     pub fn lock(&self) -> MutexGuard<'_, Record> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -97,11 +106,11 @@ impl Entry {
     }
 }
 
-/// File tee + in-memory stable byte store.
+/// Optional file tee + in-memory stable byte store.
 #[derive(Debug)]
 pub(crate) struct Record {
-    file: File,
-    path: PathBuf,
+    file: Option<File>,
+    path: Option<PathBuf>,
     tee_stdout: bool,
     /// Append-only; each `Box` is immovable on the heap.
     payloads: Vec<Box<[u8]>>,
@@ -148,12 +157,24 @@ impl Record {
             .write(true)
             .open(&path)?;
         Ok(Self {
-            file,
-            path,
+            file: Some(file),
+            path: Some(path),
             tee_stdout,
             payloads: Vec::new(),
             entries: Vec::new(),
         })
+    }
+
+    /// Stable slabs only; file tee disabled.
+    #[cfg(all(test, feature = "dev"))]
+    pub fn memory() -> Self {
+        Self {
+            file: None,
+            path: None,
+            tee_stdout: false,
+            payloads: Vec::new(),
+            entries: Vec::new(),
+        }
     }
 
     pub fn payload(&self, i: usize) -> Option<&[u8]> {
@@ -211,8 +232,10 @@ impl Record {
     fn append_file_at(&mut self, at: SystemTime, line: &str) {
         let ts = rfc3339_millis(at);
         let full = format!("{ts} {line}");
-        let _ = writeln!(self.file, "{full}");
-        let _ = self.file.flush();
+        if let Some(file) = self.file.as_mut() {
+            let _ = writeln!(file, "{full}");
+            let _ = file.flush();
+        }
         if self.tee_stdout {
             let mut out = io::stdout().lock();
             let _ = writeln!(out, "{full}");
@@ -221,7 +244,10 @@ impl Record {
     }
 
     pub fn lines_in_range(&self, since: SystemTime, until: SystemTime) -> io::Result<Vec<String>> {
-        let file = File::open(&self.path)?;
+        let Some(path) = self.path.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let file = File::open(path)?;
         let reader = BufReader::new(file);
         let mut out = Vec::new();
         for line in reader.lines() {

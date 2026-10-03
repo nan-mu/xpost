@@ -5,7 +5,7 @@
 //! | _(always)_ | `r#type` — line protocol (`Command` / `Reply`), `no_std`, no `alloc` |
 //! | `client` | `client` — sync App UART + flash task, host USB |
 //! | `server` (default) | `server` — parse request / build reply (firmware side) |
-//! | `dev` | allow `client` + `server` together (round-trip tests) |
+//! | `dev` | allow `client` + `server` together; memory harness only under `cfg(test)` |
 //!
 //! Without `dev`, `client` and `server` are mutually exclusive.
 
