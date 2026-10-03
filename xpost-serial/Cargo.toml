@@ -10,8 +10,11 @@ description = "Host serial/flash backend for xpost-agent (USB-UART + espflash)"
 [workspace]
 
 [features]
-default = ["server"]
-# Host USB control plane (serial + flash tasks). Mutually exclusive with `server`.
+default = ["dev", "client", "server"]
+# Allows `client` and `server` together (round-trip unit tests under `src/tests`).
+dev = []
+# Host USB control plane (serial + flash tasks). Mutually exclusive with `server`
+# unless `dev` is also enabled.
 client = [
     "dep:esp-idf-part",
     "dep:espflash",

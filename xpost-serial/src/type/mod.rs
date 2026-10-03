@@ -122,9 +122,9 @@
 //! transport before exchanging further replies.
 //!
 //! Local host parse failures implement [`reply::ErrReply`] separately from wire
-//! errors, as do host waiting timeouts. The current client's ERR parser is still
-//! a stub and its error formatting requires adaptation to these new variants;
-//! this contract describes firmware output, not completed client support.
+//! errors, as do host waiting timeouts. The client parses general
+//! [`reply::ServerError`] wire lines; map / perf domain ERR parsers remain
+//! separate from that general path.
 
 pub mod command;
 pub mod reply;

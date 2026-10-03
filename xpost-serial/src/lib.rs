@@ -3,15 +3,16 @@
 //! | Feature | Contents |
 //! |---------|----------|
 //! | _(always)_ | `r#type` — line protocol (`Command` / `Reply`), `no_std`, no `alloc` |
-//! | `client` (default) | `client` — sync App UART + flash task, host USB |
-//! | `server` | `server` — parse request / build reply (firmware side) |
+//! | `client` | `client` — sync App UART + flash task, host USB |
+//! | `server` (default) | `server` — parse request / build reply (firmware side) |
+//! | `dev` | allow `client` + `server` together (round-trip tests) |
 //!
-//! `client` and `server` are mutually exclusive.
+//! Without `dev`, `client` and `server` are mutually exclusive.
 
 #![cfg_attr(not(feature = "client"), no_std)]
 
-#[cfg(all(feature = "client", feature = "server"))]
-compile_error!("features `client` and `server` are mutually exclusive");
+#[cfg(all(feature = "client", feature = "server", not(feature = "dev")))]
+compile_error!("features `client` and `server` are mutually exclusive; enable `dev` to combine them");
 
 pub mod r#type;
 
@@ -20,6 +21,9 @@ pub mod client;
 
 #[cfg(feature = "server")]
 pub mod server;
+
+#[cfg(all(test, feature = "dev", feature = "client", feature = "server"))]
+mod tests;
 
 pub use r#type::{command, reply};
 

@@ -3,7 +3,7 @@
 //! | Module | Role |
 //! |--------|------|
 //! | [`ok`] | `OK` fixed (`fixed_ok!`) + variable (`get map` / `get perf`) |
-//! | [`err`] | `ERR` (interface stub) |
+//! | [`err`] | `ERR` general ([`ServerError`](crate::r#type::reply::ServerError)) |
 //! | [`map`] / [`perf`] | temporary variable-OK bodies (to fold into [`ok`]) |
 
 pub mod err;
