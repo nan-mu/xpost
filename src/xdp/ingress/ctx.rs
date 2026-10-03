@@ -10,12 +10,9 @@
 
 /// Compile-time logical port table (stable across SoCs; not Linux ifindex).
 pub(crate) const IFINDEX_WIFI: u32 = 0;
-/// Wired NIC — reserved stub on ESP32-C3.
-#[allow(dead_code)]
-pub(crate) const IFINDEX_WIRED: u32 = 1;
 
 #[repr(C)]
-pub struct XdpMd {
+pub(crate) struct XdpMd {
     pub data: *mut u8,
     pub data_end: *mut u8,
     pub data_meta: u32,
@@ -23,9 +20,6 @@ pub struct XdpMd {
     pub rx_queue_index: u32,
     pub egress_ifindex: u32,
 }
-
-/// Alias used by the XDP image invoke path.
-pub(crate) type XdpContext = XdpMd;
 
 impl XdpMd {
     /// Build a wifi-ingress context over `buf`.

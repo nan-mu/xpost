@@ -26,9 +26,6 @@ target/
 **/.DS_Store
 
 # Local DUT secrets (track config.example.toml instead)
-/# Local DUT secrets (track config.example.toml instead)
 /config.toml
-examples/*/config.toml
-!**/.cargo/config.toml
 examples/*/config.toml
 !**/.cargo/config.toml

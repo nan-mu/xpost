@@ -10,7 +10,7 @@ pub const MAX_CONTAINER_SIZE: usize = 4096;
 /// `.xpost.meta` size limit.
 pub const MAX_META_SIZE: usize = 1024;
 /// Map capacity profile limit.
-pub const MAX_ENTRIES: u32 = 64;
+pub const MAX_ENTRIES: u32 = 256;
 
 const ELF32_EHDR_SIZE: u16 = 52;
 const ELF32_SHDR_SIZE: usize = 40;
@@ -24,9 +24,7 @@ const SHT_XPOST_IMAGE: u32 = 0x8000_0002;
 /// Fixed `.shstrtab` bytes (36).
 pub const SECTION_NAMES: &[u8] = b"\0.xpost.meta\0.xpost.image\0.shstrtab\0";
 
-const IDENT: [u8; 16] = [
-    0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-];
+const IDENT: [u8; 16] = [0x7f, b'E', b'L', b'F', 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 /// One MapDescriptorV0 on the wire.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,10 +135,7 @@ pub fn build_container(
             0,
         ],
     )?;
-    push_shdr(
-        &mut out,
-        [26, 3, 0, 0, names_off as u32, 36, 0, 0, 1, 0],
-    )?;
+    push_shdr(&mut out, [26, 3, 0, 0, names_off as u32, 36, 0, 0, 1, 0])?;
 
     extend(&mut out, &meta)?;
     extend(&mut out, image)?;
@@ -182,8 +177,10 @@ fn encode_metadata(
     }
 
     let mut data = heapless::Vec::<u8, MAX_META_SIZE>::new();
-    data.push(XPOST_VERSION).map_err(|_| EncodeError::BufferFull)?;
-    data.push(metadata.machine).map_err(|_| EncodeError::BufferFull)?;
+    data.push(XPOST_VERSION)
+        .map_err(|_| EncodeError::BufferFull)?;
+    data.push(metadata.machine)
+        .map_err(|_| EncodeError::BufferFull)?;
     push_u16le(&mut data, metadata.maps.len() as u16)?;
     push_u32le(&mut data, metadata.helper_address)?;
     push_cstring4(&mut data, metadata.name.as_str())?;
@@ -220,7 +217,8 @@ fn encode_map(
 
     let mark = out.len();
     push_cstring4(out, item.name.as_str())?;
-    out.push(item.map_type).map_err(|_| EncodeError::BufferFull)?;
+    out.push(item.map_type)
+        .map_err(|_| EncodeError::BufferFull)?;
     push_u24le(out, item.len)?;
     push_u32le(out, item.map_vma)?;
     push_u32le(out, key.len() as u32)?;
@@ -339,7 +337,8 @@ fn push_u24le(out: &mut heapless::Vec<u8, MAX_META_SIZE>, v: u32) -> Result<(), 
     if v > 0xFF_FFFF {
         return Err(EncodeError::BadMapLen);
     }
-    out.push((v & 0xFF) as u8).map_err(|_| EncodeError::BufferFull)?;
+    out.push((v & 0xFF) as u8)
+        .map_err(|_| EncodeError::BufferFull)?;
     out.push(((v >> 8) & 0xFF) as u8)
         .map_err(|_| EncodeError::BufferFull)?;
     out.push(((v >> 16) & 0xFF) as u8)
@@ -347,12 +346,18 @@ fn push_u24le(out: &mut heapless::Vec<u8, MAX_META_SIZE>, v: u32) -> Result<(), 
     Ok(())
 }
 
-fn extend(out: &mut heapless::Vec<u8, MAX_CONTAINER_SIZE>, bytes: &[u8]) -> Result<(), EncodeError> {
+fn extend(
+    out: &mut heapless::Vec<u8, MAX_CONTAINER_SIZE>,
+    bytes: &[u8],
+) -> Result<(), EncodeError> {
     out.extend_from_slice(bytes)
         .map_err(|_| EncodeError::BufferFull)
 }
 
-fn extend_meta(out: &mut heapless::Vec<u8, MAX_META_SIZE>, bytes: &[u8]) -> Result<(), EncodeError> {
+fn extend_meta(
+    out: &mut heapless::Vec<u8, MAX_META_SIZE>,
+    bytes: &[u8],
+) -> Result<(), EncodeError> {
     out.extend_from_slice(bytes)
         .map_err(|_| EncodeError::BufferFull)
 }

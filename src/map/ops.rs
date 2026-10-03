@@ -16,8 +16,9 @@ use crate::map::{
 };
 
 /// Linux `bpf_map_update_elem` flags (low bits).
-pub(crate) const BPF_NOEXIST: u64 = 1;
-pub(crate) const BPF_EXIST: u64 = 2;
+pub const BPF_ANY: u64 = 0;
+pub const BPF_NOEXIST: u64 = 1;
+pub const BPF_EXIST: u64 = 2;
 
 /// BPF map operation failure (Linux-aligned errno via [`MapOpError::errno`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,8 +38,8 @@ impl MapOpError {
         match self {
             Self::NotFound | Self::Exists => {}
             Self::Busy | Self::InvalidArg | Self::NoMem | Self::Unsupported => {
-                #[cfg(feature = "trace-counter")]
-                crate::ext::trace::counter::inc_helper_map();
+                #[cfg(feature = "perf-counter")]
+                crate::ext::perf::counter::inc_helper_map();
             }
         }
     }
@@ -98,8 +99,8 @@ pub(crate) fn helper_lookup(map: usize, key: usize) -> usize {
         return p;
     }
     let Some(id) = resolve_map_id(map) else {
-        #[cfg(feature = "trace-counter")]
-        crate::ext::trace::counter::inc_helper_unresolved();
+        #[cfg(feature = "perf-counter")]
+        crate::ext::perf::counter::inc_helper_unresolved();
         return 0;
     };
     let key = key as *const u8;

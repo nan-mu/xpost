@@ -289,13 +289,7 @@ fn handle_map_crud<'a>(pkt: &[u8], val_buf: &'a mut [u8; 32]) -> (u32, u32, &'a 
         },
         map_crud::KIND_UPDATE => {
             let flags = if op.flags == 0 { BPF_ANY } else { op.flags };
-            // HASH value is u64 hit counter; empty wire value → insert 0.
-            let zero = [0u8; 8];
-            let value = if op.value.is_empty() {
-                &zero[..]
-            } else {
-                op.value
-            };
+            let value = if op.value.is_empty() { &[1u8][..] } else { op.value };
             match maps.hash_update(idx, op.key, value, flags) {
                 Ok(()) => (STATUS_OK, kind, &[]),
                 Err(MapUseError::Exists) => (STATUS_CONFLICT, kind, &[]),
@@ -358,12 +352,6 @@ fn dispatch_serial(line: &str) {
             Ok(()) => esp_println::println!("OK blacklist clear"),
             Err(e) => esp_println::println!("ERR blacklist clear {e}"),
         }
-    } else if line.eq_ignore_ascii_case("xdp off") || line.eq_ignore_ascii_case("disable xdp") {
-        xpost::xdp::disable_xdp();
-        esp_println::println!("OK xdp off");
-    } else if line.eq_ignore_ascii_case("xdp on") || line.eq_ignore_ascii_case("enable xdp") {
-        xpost::xdp::enable_xdp();
-        esp_println::println!("OK xdp on");
     } else if let Some(rest) = strip_cmd(line, "map dump") {
         print_map_dump(rest);
     } else if line.eq_ignore_ascii_case("map dump") {
@@ -460,32 +448,9 @@ fn print_map_dump(rest: &str) {
         xpost::map::MapType::Hash => {
             let n = guard.hash_len(id).unwrap_or(0);
             esp_println::println!("OK map {name} type=hash size={n} cap={}", mg.len());
-            let mut err = false;
-            let _ = guard.hash_for_each(id, |key, val| {
-                if err {
-                    return;
-                }
-                if key.len() != 4 {
-                    esp_println::println!("ERR map key-len={}", key.len());
-                    err = true;
-                    return;
-                }
-                let v = value_u64(val);
-                esp_println::println!("{}.{}.{}.{} {v}", key[0], key[1], key[2], key[3]);
-            });
-            if err {
-                return;
-            }
             esp_println::println!("OK map end");
         }
     }
-}
-
-fn value_u64(val: &[u8]) -> u64 {
-    let mut b = [0u8; 8];
-    let n = val.len().min(8);
-    b[..n].copy_from_slice(&val[..n]);
-    u64::from_le_bytes(b)
 }
 
 fn strip_cmd<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {

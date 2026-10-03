@@ -117,15 +117,36 @@ fn parse_field_type(input: ParseStream<'_>) -> Result<(FieldKind, usize)> {
             input.parse::<Token![>]>()?;
             let le = id == "le";
             match ty.to_string().as_str() {
-                "u16" => Ok((if le { FieldKind::LeU16 } else { FieldKind::BeU16 }, 2)),
+                "u16" => Ok((
+                    if le {
+                        FieldKind::LeU16
+                    } else {
+                        FieldKind::BeU16
+                    },
+                    2,
+                )),
                 "u24" => {
                     if !le {
                         return Err(Error::new(ty.span(), "only le<u24> is supported"));
                     }
                     Ok((FieldKind::LeU24, 3))
                 }
-                "u32" => Ok((if le { FieldKind::LeU32 } else { FieldKind::BeU32 }, 4)),
-                "u64" => Ok((if le { FieldKind::LeU64 } else { FieldKind::BeU64 }, 8)),
+                "u32" => Ok((
+                    if le {
+                        FieldKind::LeU32
+                    } else {
+                        FieldKind::BeU32
+                    },
+                    4,
+                )),
+                "u64" => Ok((
+                    if le {
+                        FieldKind::LeU64
+                    } else {
+                        FieldKind::BeU64
+                    },
+                    8,
+                )),
                 _ => Err(Error::new(ty.span(), "supported: u16, u24, u32, u64")),
             }
         }

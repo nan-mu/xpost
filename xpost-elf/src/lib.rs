@@ -1,4 +1,4 @@
-//! Compact ELF V0 decode + firmware mem-map contract blob (`XPM1`).
+//! Compact ELF V0 decode/encode + firmware mem-map contract blob (`XPM1`).
 //!
 //! Compact ELF layout：EHDR | SHT×4 | `.xpost.meta` | image | names | pad | digest。
 //!
@@ -12,11 +12,15 @@
 
 #![no_std]
 
+#[path = "encode.rs"]
+mod compact;
 mod mem_map;
 
-pub use mem_map::{
-    MAGIC, MemMapError, MemMapV0, SECTION_NAME, WIRE_SIZE, decode, encode,
+pub use compact::{
+    EncodeError, ImageMetadataV0, MAX_CONTAINER_SIZE, MAX_ENTRIES, MAX_META_SIZE, MapDescriptorV0,
+    SECTION_NAMES, build_container,
 };
+pub use mem_map::{MAGIC, MemMapError, MemMapV0, SECTION_NAME, WIRE_SIZE, decode, encode};
 
 use sha2::{Digest, Sha256};
 
@@ -118,7 +122,9 @@ pub enum ScanOutcome {
     /// 无法判断容器边界，调用方应终止扫描。
     HardFail,
     /// 容器长度可信，但内容不是合法 V0 profile；调用方按 `file_len` 跳过。
-    SoftSkip { file_len: usize },
+    SoftSkip {
+        file_len: usize,
+    },
     Ok(ParsedContainer),
 }
 
@@ -492,14 +498,9 @@ fn verify_digest(
     }
     let digest = ImageDigest::from_bytes(buf)?;
     let mut hasher = Sha256::new();
-    if !visit_bytes(
-        src,
-        at + layout.image_offset,
-        layout.image_size,
-        |chunk| {
-            hasher.update(chunk);
-        },
-    ) {
+    if !visit_bytes(src, at + layout.image_offset, layout.image_size, |chunk| {
+        hasher.update(chunk);
+    }) {
         return None;
     }
     let computed: [u8; 32] = hasher.finalize().into();

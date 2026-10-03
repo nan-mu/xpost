@@ -251,27 +251,32 @@ fn parse_xdp_table(meta: &toml::Table) -> Result<Option<XdpTableMeta>> {
     let Some(t) = meta.get("xdp_table").and_then(|v| v.as_table()) else {
         return Ok(XpostMetadata::default_esp32c3().xdp_table);
     };
-    let flash_base = t
-        .get("flash_base")
-        .and_then(|v| v.as_integer())
-        .unwrap_or(0) as usize;
-    let flash_len = t
-        .get("flash_len")
-        .and_then(|v| v.as_integer())
-        .ok_or_else(|| anyhow::anyhow!("xdp_table.flash_len required"))? as usize;
-    let image_capacity = t
-        .get("image_capacity")
-        .and_then(|v| v.as_integer())
-        .ok_or_else(|| anyhow::anyhow!("xdp_table.image_capacity required"))?
-        as usize;
-    let image_count = t
-        .get("image_count")
-        .and_then(|v| v.as_integer())
-        .map(|n| n as usize);
     let partition = t
         .get("partition")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let image_capacity =
+        t.get("image_capacity")
+            .and_then(|v| v.as_integer())
+            .ok_or_else(|| anyhow::anyhow!("xdp_table.image_capacity required"))? as usize;
+    let image_count = t
+        .get("image_count")
+        .and_then(|v| v.as_integer())
+        .map(|n| n as usize);
+    // flash_base / flash_len: optional when `partition` is set (filled from partitions.csv).
+    let flash_base = t
+        .get("flash_base")
+        .and_then(|v| v.as_integer())
+        .map(|n| n as usize)
+        .unwrap_or(0);
+    let flash_len = t
+        .get("flash_len")
+        .and_then(|v| v.as_integer())
+        .map(|n| n as usize)
+        .unwrap_or(0);
+    if partition.is_none() && flash_len == 0 {
+        bail!("xdp_table needs `partition` (partitions.csv) or flash_len");
+    }
     Ok(Some(XdpTableMeta {
         flash_base,
         flash_len,
@@ -382,37 +387,39 @@ fn merge_metadata(base: &mut XpostMetadata, over: &XpostMetadata) {
 }
 
 fn layout_from_metadata(meta: &XpostMetadata) -> Result<Layout> {
-    let iram_base = meta
-        .target
-        .iram_base
-        .ok_or_else(|| anyhow::anyhow!("metadata.xpost.target.iram_base required without layout.toml"))?;
-    let arena_end = meta
-        .target
-        .arena_end
-        .ok_or_else(|| anyhow::anyhow!("metadata.xpost.target.arena_end required without layout.toml"))?;
-    let helper_len = meta
-        .target
-        .helper_length
-        .ok_or_else(|| anyhow::anyhow!("metadata.xpost.target.helper_length required without layout.toml"))?;
+    let iram_base = meta.target.iram_base.ok_or_else(|| {
+        anyhow::anyhow!("metadata.xpost.target.iram_base required")
+    })?;
+    let helper_len = meta.target.helper_length.ok_or_else(|| {
+        anyhow::anyhow!("metadata.xpost.target.helper_length required")
+    })?;
 
     if meta.slots.is_empty() {
         bail!("metadata.xpost.slots empty");
     }
+    if let Some(t) = &meta.xdp_table
+        && t.partition.is_some()
+        && t.flash_len == 0
+    {
+        bail!("xdp_table.partition set but flash_len still 0 (need partitions.csv)");
+    }
+    // Default: helper-only IRAM patch window. Slot buffers are firmware-owned
+    // (base 0 = not pinned by custom-sections.x).
+    let arena_end = iram_base + helper_len;
     let helper = Region {
         base: iram_base,
         length: helper_len,
     };
-    let mut cursor = iram_base + helper_len;
-    let mut hot_regions = Vec::with_capacity(meta.slots.len());
-    for s in &meta.slots {
-        hot_regions.push(HotRegion {
+    let hot_regions = meta
+        .slots
+        .iter()
+        .map(|s| HotRegion {
             name: s.name.clone(),
-            base: cursor,
+            base: 0,
             length: s.length,
             mount: s.mount,
-        });
-        cursor += s.length;
-    }
+        })
+        .collect();
     Ok(Layout {
         iram_base,
         arena_end,

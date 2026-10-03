@@ -346,8 +346,6 @@ pub(crate) fn on_tx_done(ok: bool) {
     }
     #[cfg(not(feature = "xdp-observe"))]
     let _ = ok;
-    #[cfg(not(feature = "xdp-observe"))]
-    let _ = ok;
     if TX_NEED_DONE
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n > 0).then_some(n - 1)

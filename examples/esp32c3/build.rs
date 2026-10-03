@@ -1,30 +1,5 @@
-use std::env;
-use std::path::PathBuf;
-
-use xpost_build::{SyncMode, SyncRequest, codegen};
-
 fn main() {
     linker_be_nice();
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    println!(
-        "cargo:rerun-if-changed={}",
-        manifest_dir.join("layout.toml").display()
-    );
-    let crate_manifest = manifest_dir.join("../../Cargo.toml");
-    let req = SyncRequest {
-        mode: SyncMode::Default,
-        crate_manifest: &crate_manifest,
-        board_dir: Some(&manifest_dir),
-        out_dir: &out_dir,
-        contract_out: None,
-        elf_path: None,
-    };
-    codegen(&req).unwrap();
-    println!(
-        "cargo:rustc-link-arg=-T{}",
-        out_dir.join("custom-sections.x").display()
-    );
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
 }

@@ -12,22 +12,14 @@ This package also includes a low-level [IEEE 802.15.4] driver for the ESP32-C6 a
 
 Note that this crate currently requires you to enable the `unstable` feature on `esp-hal`.
 
-## Local fork: early RX ingress (native XDP)
+## Local fork: native XDP
 
-Optional features (this tree only):
-
-| Feature | Role |
-| --- | --- |
-| `rx-ingress` | [`wifi::Prog`] attach, Pass/Drop, counter callbacks |
-| `rx-ingress-tx` | + same-iface zero-copy Tx (`esp_wifi_internal_tx_by_ref`) |
-
-Call `wifi::attach_prog` **once**, **before** `wifi::new` / Wi-Fi start (one-shot;
-second attach fails). See `wifi` / `xdp` module docs.
-
-Recommended typecheck (esp32c3):
+This tree adds optional `xdp` / `xdp-observe` features. Details live in the
+[`wifi::xdp`](src/wifi/xdp/mod.rs) module rustdoc (Pass / Drop / Tx, EspRadioTrace
+call-sites, no local TxStats storage).
 
 ```bash
-cargo check -p esp-radio --features esp32c3,wifi,unstable,rx-ingress-tx
+cargo check -p esp-radio --features esp32c3,wifi,unstable,xdp
 # or from xpost workspace: cargo check-esp-radio-xdp
 ```
 

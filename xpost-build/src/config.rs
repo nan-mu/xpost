@@ -140,7 +140,6 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
     let mut hw_selftest = false;
     let mut map_crud = false;
     let mut net_test = false;
-    let mut net_echo = false;
     let mut cold_boot = false;
     let mut seeds: Vec<SeedSpec> = Vec::new();
 
@@ -200,11 +199,6 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
                 hot_load = true;
                 net_test = true;
             }
-            "drop_xdp" => {
-                map_crud = true;
-                hot_load = true;
-                net_test = true;
-            }
             "tail_call_abc" => {
                 cold_boot = true;
                 map_crud = true;
@@ -215,23 +209,12 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
                 map_crud = true;
                 hot_load = true;
                 net_test = true;
-                net_echo = true;
             }
             "drop_xdp" => {
                 net_test = true;
             }
-            "xdp_forward_echo" => {
-                net_test = true;
-                net_echo = true;
-            }
-            "firewall_echo" => {
-                net_test = true;
-                net_echo = true;
-            }
-            "bare_echo" => {
-                net_test = true;
-                net_echo = true;
-            }
+            "xdp_forward_echo" => net_test = true,
+            "firewall_echo" => net_test = true,
             _ => {}
         }
 
@@ -404,7 +387,6 @@ pub fn generate(manifest_dir: &Path, out_dir: &Path) -> Result<ConfigGen> {
     enabled.insert("firewall_array_seed", firewall_array_seed);
     enabled.insert("map_crud", map_crud);
     enabled.insert("xdp_rx", xdp_rx);
-    enabled.insert("net_echo", net_echo);
     enabled.insert("hw_selftest", hw_selftest);
     enabled.insert("cold_boot", cold_boot);
 

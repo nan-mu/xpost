@@ -70,21 +70,3 @@ pub fn parse_addr_value(v: &toml::Value, key: &str, map_name: &str) -> usize {
     }
     panic!("[maps.{map_name}].{key}: expected integer or hex string");
 }
-
-pub fn parse_addr_value(v: &toml::Value, key: &str, map_name: &str) -> usize {
-    if let Some(i) = v.as_integer() {
-        assert!(i >= 0, "[maps.{map_name}].{key} must be non-negative");
-        return i as usize;
-    }
-    if let Some(s) = v.as_str() {
-        let s = s.trim();
-        let addr = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-            usize::from_str_radix(hex, 16)
-        } else {
-            s.parse::<usize>()
-        };
-        return addr
-            .unwrap_or_else(|e| panic!("[maps.{map_name}].{key}: invalid address `{s}`: {e}"));
-    }
-    panic!("[maps.{map_name}].{key}: expected integer or hex string");
-}

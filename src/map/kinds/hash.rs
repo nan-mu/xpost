@@ -2,7 +2,10 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use core::{alloc::Layout, hash::{Hash, Hasher}};
+use core::{
+    alloc::Layout,
+    hash::{Hash, Hasher},
+};
 
 use allocator_api2::{alloc::AllocError, boxed::Box};
 use hashbrown::HashMap;
@@ -137,6 +140,17 @@ impl MapOps for BpfHashMap {
         } else {
             Err(MapOpError::NotFound)
         }
+    }
+}
+
+impl BpfHashMap {
+    /// Control-plane: drop every entry (capacity unchanged).
+    pub(crate) fn clear(&mut self) {
+        self.table.clear();
+    }
+
+    pub(crate) fn len_used(&self) -> usize {
+        self.table.len()
     }
 }
 

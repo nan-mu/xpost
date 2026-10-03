@@ -52,8 +52,25 @@ pub extern "C" fn helper_dispatcher(
 // IRAM: runs inside the XDP flight (IRQs off); flash cache misses here stall Wi-Fi.
 #[esp_hal::ram]
 fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> usize {
-    #[cfg(feature = "trace-timestamp")]
-    crate::ext::trace::timestamp::helper_enter(idx);
+    #[cfg(feature = "perf-trace")]
+    crate::ext::perf::trace().push(
+        crate::ext::perf::trace::EventKind::HelperEnter,
+        idx as u32,
+        0,
+    );
+    #[cfg(feature = "perf-aggregate")]
+    crate::ext::perf::aggregate::helper_enter();
+    #[cfg(feature = "perf-aggregate")]
+    let is_map = matches!(
+        idx,
+        HelperIdx::BPF_FUNC_MAP_LOOKUP_ELEM
+            | HelperIdx::BPF_FUNC_MAP_UPDATE_ELEM
+            | HelperIdx::BPF_FUNC_MAP_DELETE_ELEM
+    );
+    #[cfg(feature = "perf-aggregate")]
+    if is_map {
+        crate::ext::perf::aggregate::map_enter();
+    }
     let ret = match idx {
         HelperIdx::BPF_FUNC_MAP_LOOKUP_ELEM => inner::map_lookup_elem::inner(a1, a2),
         HelperIdx::BPF_FUNC_MAP_UPDATE_ELEM => inner::map_update_elem::inner(a1, a2, a3, a4),
@@ -65,7 +82,17 @@ fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
         // Deleted / deferred / unsupported helpers: fail closed.
         _ => usize::MAX,
     };
-    #[cfg(feature = "trace-timestamp")]
-    crate::ext::trace::timestamp::helper_leave(idx);
+    #[cfg(feature = "perf-aggregate")]
+    if is_map {
+        crate::ext::perf::aggregate::map_leave();
+    }
+    #[cfg(feature = "perf-aggregate")]
+    crate::ext::perf::aggregate::helper_leave();
+    #[cfg(feature = "perf-trace")]
+    crate::ext::perf::trace().push(
+        crate::ext::perf::trace::EventKind::HelperLeave,
+        idx as u32,
+        0,
+    );
     ret
 }

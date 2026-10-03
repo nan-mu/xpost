@@ -236,21 +236,21 @@ fn dispatch_serial(line: &str) {
     let line = line.trim();
     if line.eq_ignore_ascii_case("ping") {
         esp_println::println!("OK ping");
-    } else if line.eq_ignore_ascii_case("counters") || line.eq_ignore_ascii_case("report counters")
-    {
-        print_counters();
-    } else if line.eq_ignore_ascii_case("agg") {
-        print_agg();
-    } else if line.eq_ignore_ascii_case("gauge") {
-        print_gauge();
-    } else if line.eq_ignore_ascii_case("trace") {
-        print_trace_summary();
-    } else if line.eq_ignore_ascii_case("trace clear") {
-        #[cfg(feature = "kind-t")]
-        xpost::ext::perf::trace().clear();
-        esp_println::println!("OK trace clear");
+    } else if line.eq_ignore_ascii_case("report") || line.eq_ignore_ascii_case("report perf") {
+        print_report();
     } else if line.eq_ignore_ascii_case("perf clear") {
-        perf_clear();
+        #[cfg(any(
+            feature = "kind-c",
+            feature = "kind-a",
+            feature = "kind-g",
+            feature = "kind-t"
+        ))]
+        xpost::ext::perf::clear_perf();
+        DROP.store(0, Ordering::Relaxed);
+        NET_RX.store(0, Ordering::Relaxed);
+        for c in COUNTER.iter() {
+            c.store(0, Ordering::Relaxed);
+        }
         esp_println::println!("OK perf clear");
     } else if let Some(rest) = strip_cmd(line, "map dump") {
         print_map_dump(rest);
@@ -280,173 +280,28 @@ fn dispatch_serial(line: &str) {
     }
 }
 
-#[allow(
-    clippy::large_stack_frames,
-    reason = "single long println! of many counter fields"
-)]
-fn print_counters() {
-    let t = xpost::ext::perf::counter();
-    // `drop=` is app-layer DROP (formal primary); EspRadioTrace fields follow just_drop.
-    esp_println::println!(
-        "OK counters drop={} failed_tx={} tx_bad_buf={} tx_token={} tx_wifi={} tx_wifi_rc={} net_rx={} inactive_skip={} reentry={} stack_misalign={} bad_md={} helper_unresolved={} helper_map={} pool_drop_misalign={} map_lock={} tx_enq={} tx_pend={} tx_inflight={} tx_drain_ok={} tx_nomem_wait={} tx_cap_wait={} tx_enq_claim={} tx_enq_ring={} tx_done={} tx_done_fail={} tx_grp_src={} tx_ns_ref={} tx_ns_free={} tx_no_retain={} tx_flush={} tx_last_rc={} rx_packets={} xdp_invocations={} xdp_pass={} xdp_drop={} xdp_tx={} xdp_aborted={} rx_delivered={} rx_queue_overflow={} runtime_errors={}",
-        DROP.load(Ordering::Relaxed),
-        t.failed_tx_count(),
-        t.failed_tx_bad_buf_count(),
-        t.failed_tx_token_count(),
-        t.failed_tx_wifi_count(),
-        t.failed_tx_wifi_last_rc(),
-        NET_RX.load(Ordering::Relaxed),
-        t.inactive_skip(),
-        t.reentry(),
-        t.stack_misalign(),
-        t.bad_md(),
-        t.helper_unresolved(),
-        t.helper_map(),
-        t.pool_drop_misalign(),
-        "no-rt",
-        t.tx_enq(),
-        t.tx_pend(),
-        t.tx_inflight(),
-        t.tx_drain_ok(),
-        t.tx_nomem_wait(),
-        t.tx_cap_wait(),
-        t.tx_enq_claim(),
-        t.tx_enq_ring(),
-        t.tx_done(),
-        t.tx_done_fail(),
-        t.tx_grp_src(),
-        t.tx_ns_ref(),
-        t.tx_ns_free(),
-        t.tx_no_retain(),
-        t.tx_flush(),
-        t.tx_last_rc(),
-        t.rx_packets(),
-        t.xdp_invocations(),
-        t.xdp_pass(),
-        t.xdp_drop(),
-        t.xdp_tx(),
-        t.xdp_aborted(),
-        t.rx_delivered(),
-        t.rx_queue_overflow(),
-        t.runtime_errors(),
-    );
-}
-
-fn print_agg() {
-    #[cfg(feature = "kind-a")]
+fn print_report() {
+    #[cfg(any(
+        feature = "kind-c",
+        feature = "kind-a",
+        feature = "kind-g",
+        feature = "kind-t"
+    ))]
     {
-        // Single OK line so agent `request` captures every hist (first OK wins).
-        let a = xpost::ext::perf::aggregate();
-        esp_println::print!("OK agg");
-        for (name, snap) in [
-            ("rx_processing", a.rx_processing.snapshot()),
-            ("xdp_execution", a.xdp_execution.snapshot()),
-            ("xdp_dispatch", a.xdp_dispatch.snapshot()),
-            ("post_action", a.post_action.snapshot()),
-        ] {
-            esp_println::print!(
-                " | {name} count={} total={} min={} max={} lo={} width={} buckets=",
-                snap.count,
-                snap.total_ticks,
-                snap.min_ticks,
-                snap.max_ticks,
-                snap.lo,
-                snap.width
-            );
-            for (i, b) in snap.buckets.iter().enumerate() {
-                if i > 0 {
-                    esp_println::print!(",");
-                }
-                esp_println::print!("{b}");
-            }
-        }
-        esp_println::println!();
+        let n = xpost::ext::perf::report_payload_len();
+        esp_println::println!("OK report {n}");
+        xpost::ext::perf::report_perf(|chunk| {
+            esp_println::Printer::write_bytes(chunk);
+            Ok::<(), core::convert::Infallible>(())
+        });
     }
-    #[cfg(not(feature = "kind-a"))]
-    esp_println::println!("ERR agg feature=kind-a required");
-}
-
-fn print_gauge() {
-    #[cfg(feature = "kind-g")]
-    {
-        let g = xpost::ext::perf::gauge();
-        esp_println::println!(
-            "OK gauge rx_queue_depth={},{} tx_queue_depth={},{} tx_inflight={},{} trace_buffer_usage={},{}",
-            g.rx_queue_depth.current(),
-            g.rx_queue_depth.peak(),
-            g.tx_queue_depth.current(),
-            g.tx_queue_depth.peak(),
-            g.tx_inflight.current(),
-            g.tx_inflight.peak(),
-            g.trace_buffer_usage.current(),
-            g.trace_buffer_usage.peak(),
-        );
-    }
-    #[cfg(not(feature = "kind-g"))]
-    esp_println::println!("ERR gauge feature=kind-g required");
-}
-
-fn print_trace_summary() {
-    #[cfg(feature = "kind-t")]
-    {
-        let t = xpost::ext::perf::trace();
-        esp_println::println!(
-            "OK trace len={} dropped={} cap={}",
-            t.len(),
-            t.dropped(),
-            xpost::ext::perf::TRACE_CAP
-        );
-    }
-    #[cfg(not(feature = "kind-t"))]
-    esp_println::println!("ERR trace feature=kind-t required");
-}
-
-fn print_trace_dump() {
-    #[cfg(feature = "kind-t")]
-    {
-        let t = xpost::ext::perf::trace();
-        let mut buf = [xpost::ext::perf::Event::default(); xpost::ext::perf::TRACE_CAP];
-        let n = t.snapshot(&mut buf);
-        esp_println::print!(
-            "OK tracedump len={} dropped={} cap={}",
-            n,
-            t.dropped(),
-            xpost::ext::perf::TRACE_CAP
-        );
-        for ev in buf.iter().take(n) {
-            let name = match xpost::ext::perf::EventKind::from_u8(ev.kind) {
-                Some(xpost::ext::perf::EventKind::RxBegin) => "RxBegin",
-                Some(xpost::ext::perf::EventKind::XdpBegin) => "XdpBegin",
-                Some(xpost::ext::perf::EventKind::XdpEnd) => "XdpEnd",
-                Some(xpost::ext::perf::EventKind::RxEnd) => "RxEnd",
-                Some(xpost::ext::perf::EventKind::SlowExecution) => "SlowExecution",
-                Some(xpost::ext::perf::EventKind::RxOverflow) => "RxOverflow",
-                Some(xpost::ext::perf::EventKind::RuntimeError) => "RuntimeError",
-                Some(xpost::ext::perf::EventKind::UserMarker) => "UserMarker",
-                None => "Unknown",
-            };
-            esp_println::print!(
-                " | {name} t_us={} arg0={} arg1={}",
-                ev.t_us, ev.arg0, ev.arg1
-            );
-        }
-        esp_println::println!();
-    }
-    #[cfg(not(feature = "kind-t"))]
-    esp_println::println!("ERR tracedump feature=kind-t required");
-}
-
-fn perf_clear() {
-    #[cfg(feature = "kind-c")]
-    xpost::ext::perf::counter().reset_all();
-    #[cfg(feature = "kind-a")]
-    xpost::ext::perf::aggregate().reset_all();
-    #[cfg(feature = "kind-g")]
-    xpost::ext::perf::gauge().reset_all();
-    #[cfg(feature = "kind-t")]
-    xpost::ext::perf::trace().clear();
-    DROP.store(0, Ordering::Relaxed);
-    NET_RX.store(0, Ordering::Relaxed);
+    #[cfg(not(any(
+        feature = "kind-c",
+        feature = "kind-a",
+        feature = "kind-g",
+        feature = "kind-t"
+    )))]
+    esp_println::println!("ERR report no-perf");
 }
 
 fn print_map_dump(rest: &str) {
