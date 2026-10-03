@@ -152,6 +152,16 @@ impl BpfHashMap {
     pub(crate) fn len_used(&self) -> usize {
         self.table.len()
     }
+
+    /// Control-plane: visit each occupied entry (key/value byte slices).
+    pub(crate) fn for_each<F: FnMut(&[u8], &[u8])>(&self, mut f: F) {
+        for (k, v) in self.table.iter() {
+            f(
+                &k.data[..k.len as usize],
+                &v.data[..self.value_size],
+            );
+        }
+    }
 }
 
 unsafe fn drop_hash(ptr: *mut u8) {

@@ -7,6 +7,8 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+use core::convert::Infallible;
+
 use alloc::string::ToString;
 use portable_atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -20,7 +22,11 @@ use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use heapless::FnvIndexMap;
 use log::{error, info};
 use static_cell::StaticCell;
+use xpost::app_ctrl;
 use xpost::xdp::Slot;
+#[allow(unused_imports)] // PerfError only when no kind-* feature
+use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
+use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
 use firewall_hal::map_crud::{
     self, MapCrudAck, STATUS_BAD, STATUS_CONFLICT, STATUS_NOT_FOUND, STATUS_OK,
@@ -82,11 +88,11 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
-    spawner.spawn(serial_task(usb_rx).unwrap());
-    Timer::after(Duration::from_millis(1200)).await;
-    esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
 
     let _slot = core::ptr::addr_of!(xdp_slot);
+
+    spawner.spawn(control_serial(usb_rx).unwrap());
+    esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
 
     let wifi_cfg = esp_radio::wifi::ControllerConfig::default()
         .with_dynamic_tx_buf_num(128)
@@ -292,148 +298,135 @@ fn handle_map_crud<'a>(pkt: &[u8], val_buf: &'a mut [u8; 8]) -> (u32, u32, &'a [
     }
 }
 
-#[embassy_executor::task]
-async fn serial_task(
-    mut rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
-) {
-    let mut line = [0u8; 80];
-    let mut len = 0usize;
-    loop {
-        match rx.read_byte() {
-            Ok(b) => {
-                if b == b'\n' || b == b'\r' {
-                    if len > 0 {
-                        let text = core::str::from_utf8(&line[..len]).unwrap_or("");
-                        dispatch_serial(text);
-                        len = 0;
-                    }
-                } else if len < line.len() {
-                    line[len] = b;
-                    len += 1;
+
+serial_task! {
+    fn control_serial(
+        rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+    ) {
+        let mut rx = rx;
+        SerialHandler::builder(
+            move || match rx.read_byte() {
+                Ok(b) => Some(b),
+                Err(_) => None,
+            },
+            |bytes| {
+                esp_println::Printer::write_bytes(bytes);
+                Ok::<(), Infallible>(())
+            },
+            [0u8; 128],
+        )
+        .on_ping(|reply: ReplyWriter<'_>| reply.ok(OkReply::Ping))
+        .on_enable_xdp(|reply: ReplyWriter<'_>| reply.error(&ServerError::Unsupported))
+        .on_disable_xdp(|reply: ReplyWriter<'_>| reply.error(&ServerError::Unsupported))
+        .on_clear_map(|name: &str, reply: ReplyWriter<'_>| {
+            if name != MAP_BLACKLIST {
+                reply.error(&MapError::NameNotFound);
+                return;
+            }
+            critical_section::with(|cs| BLACKLIST.borrow(cs).borrow_mut().clear());
+            reply.ok(OkReply::ClearMap);
+        })
+        .on_get_map(|name: &str, reply: ReplyWriter<'_>| {
+            if name != MAP_BLACKLIST {
+                reply.error(&MapError::NameNotFound);
+                return;
+            }
+            critical_section::with(|cs| {
+                let map = BLACKLIST.borrow(cs).borrow();
+                let size = map.len() as u32;
+                let cap = MAX_BLACKLIST as u32;
+                let mut len = app_ctrl::hash_header_len(size, cap);
+                for (k, v) in map.iter() {
+                    len += app_ctrl::hash_entry_len(&k.to_be_bytes(), &[*v]);
                 }
+                reply.get_map(len, |write| {
+                    let mut emit = |chunk: &[u8]| {
+                        let _ = write(chunk);
+                    };
+                    app_ctrl::write_hash_header(size, cap, &mut emit);
+                    for (k, v) in map.iter() {
+                        app_ctrl::write_hash_entry(&k.to_be_bytes(), &[*v], &mut emit);
+                    }
+                });
+            });
+        })
+        .on_update_map(
+            |name: &str, key: &[u8], value: &[u8], reply: ReplyWriter<'_>| {
+                if name != MAP_BLACKLIST {
+                    reply.error(&MapError::NameNotFound);
+                    return;
+                }
+                let Some(ip) = app_ctrl::parse_ipv4_token(key) else {
+                    reply.error(&MapError::InvalidKey);
+                    return;
+                };
+                let Some(val) = app_ctrl::parse_u64_token(value) else {
+                    reply.error(&MapError::InvalidValue);
+                    return;
+                };
+                if val > u64::from(u8::MAX) {
+                    reply.error(&MapError::InvalidValue);
+                    return;
+                }
+                let k = u32::from_be_bytes(ip);
+                let ok = critical_section::with(|cs| {
+                    BLACKLIST.borrow(cs).borrow_mut().insert(k, val as u8).is_ok()
+                });
+                if ok {
+                    reply.ok(OkReply::UpdateMap);
+                } else {
+                    reply.error(&MapError::Full);
+                }
+            },
+        )
+        .on_clear_perf(|reply: ReplyWriter<'_>| {
+            #[cfg(any(
+                feature = "kind-c",
+                feature = "kind-a",
+                feature = "kind-g",
+                feature = "kind-t"
+            ))]
+            {
+                xpost::ext::perf::clear_perf();
+                reply.ok(OkReply::ClearPerf);
             }
-            Err(_) => Timer::after(Duration::from_millis(10)).await,
-        }
+            #[cfg(not(any(
+                feature = "kind-c",
+                feature = "kind-a",
+                feature = "kind-g",
+                feature = "kind-t"
+            )))]
+            {
+                reply.error(&PerfError::Unavailable);
+            }
+        })
+        .on_get_perf(|reply: ReplyWriter<'_>| {
+            #[cfg(any(
+                feature = "kind-c",
+                feature = "kind-a",
+                feature = "kind-g",
+                feature = "kind-t"
+            ))]
+            {
+                let n = xpost::ext::perf::report_payload_len();
+                reply.get_perf(n, |write| {
+                    xpost::ext::perf::report_perf(write);
+                });
+            }
+            #[cfg(not(any(
+                feature = "kind-c",
+                feature = "kind-a",
+                feature = "kind-g",
+                feature = "kind-t"
+            )))]
+            {
+                reply.error(&PerfError::Unavailable);
+            }
+        })
+        .build()
     }
 }
 
-fn dispatch_serial(line: &str) {
-    let line = line.trim();
-    if line.eq_ignore_ascii_case("ping") {
-        esp_println::println!("OK ping");
-    } else if line.eq_ignore_ascii_case("report") || line.eq_ignore_ascii_case("report perf") {
-        print_report();
-    } else if line.eq_ignore_ascii_case("perf clear") {
-        #[cfg(any(
-            feature = "kind-c",
-            feature = "kind-a",
-            feature = "kind-g",
-            feature = "kind-t"
-        ))]
-        xpost::ext::perf::clear_perf();
-        DROP.store(0, Ordering::Relaxed);
-        NET_RX.store(0, Ordering::Relaxed);
-        esp_println::println!("OK perf clear");
-    } else if line.eq_ignore_ascii_case("blacklist clear") {
-        critical_section::with(|cs| BLACKLIST.borrow(cs).borrow_mut().clear());
-        esp_println::println!("OK blacklist clear");
-    } else if line.eq_ignore_ascii_case("counters") {
-        let drop = DROP.load(Ordering::Relaxed);
-        let net_rx = NET_RX.load(Ordering::Relaxed);
-        esp_println::println!("OK counters drop={drop} net_rx={net_rx}");
-    } else if let Some(rest) = strip_cmd(line, "ack-dest") {
-        match parse_ack_dest(rest) {
-            Some((ip, port)) => {
-                ACK_IP.store(ip, Ordering::Relaxed);
-                ACK_PORT.store(u32::from(port), Ordering::Relaxed);
-                esp_println::println!("OK ack-dest {rest}");
-            }
-            None => esp_println::println!("ERR ack-dest <ipv4> <port>"),
-        }
-    } else {
-        esp_println::println!("ERR unknown");
-    }
-}
-
-fn print_report() {
-    #[cfg(any(
-        feature = "kind-c",
-        feature = "kind-a",
-        feature = "kind-g",
-        feature = "kind-t"
-    ))]
-    {
-        let n = xpost::ext::perf::report_payload_len();
-        esp_println::println!("OK report {n}");
-        xpost::ext::perf::report_perf(|chunk| {
-            esp_println::Printer::write_bytes(chunk);
-            Ok::<(), core::convert::Infallible>(())
-        });
-    }
-    #[cfg(not(any(
-        feature = "kind-c",
-        feature = "kind-a",
-        feature = "kind-g",
-        feature = "kind-t"
-    )))]
-    esp_println::println!("ERR report no-perf");
-}
-
-fn strip_cmd<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {
-    let rest = line.get(cmd.len()..)?;
-    if !line[..cmd.len()].eq_ignore_ascii_case(cmd) {
-        return None;
-    }
-    let rest = rest.trim_start();
-    if rest.is_empty() {
-        None
-    } else {
-        Some(rest)
-    }
-}
-
-fn parse_ack_dest(rest: &str) -> Option<(u32, u16)> {
-    let mut parts = rest.split_whitespace();
-    let ip = parse_v4(parts.next()?)?;
-    let port: u16 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() || port == 0 {
-        return None;
-    }
-    Some((ip, port))
-}
-
-fn parse_v4(s: &str) -> Option<u32> {
-    let mut out = 0u32;
-    let mut parts = 0u8;
-    let mut acc = 0u32;
-    let mut digits = 0u8;
-    for b in s.bytes() {
-        if b == b'.' {
-            if digits == 0 || parts >= 3 {
-                return None;
-            }
-            out = (out << 8) | acc;
-            acc = 0;
-            digits = 0;
-            parts += 1;
-        } else if b.is_ascii_digit() {
-            digits += 1;
-            if digits > 3 {
-                return None;
-            }
-            acc = acc * 10 + u32::from(b - b'0');
-            if acc > 255 {
-                return None;
-            }
-        } else {
-            return None;
-        }
-    }
-    if parts != 3 || digits == 0 {
-        return None;
-    }
-    Some((out << 8) | acc)
-}
 
 fn ack_endpoint(src: embassy_net::IpAddress, src_port: u16) -> (embassy_net::IpAddress, u16) {
     let ip = ACK_IP.load(Ordering::Relaxed);

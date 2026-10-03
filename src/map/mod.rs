@@ -5,6 +5,7 @@
 
 pub(crate) mod alias;
 pub(crate) mod builder;
+pub mod dump;
 pub(crate) mod heap;
 pub(crate) mod kinds;
 pub(crate) mod ops;
@@ -298,6 +299,116 @@ impl MapRt {
         }
         let map = unsafe { meta.storage.as_ref::<hash::BpfHashMap>() };
         Ok(map.len_used())
+    }
+
+    /// Control-plane: HASH value size in bytes.
+    pub fn hash_value_size(&self, idx: MapIdx) -> Result<usize, MapUseError> {
+        let meta = self.meta.get(idx).ok_or(MapUseError::NotFound)?;
+        if meta.map_type != MapType::Hash {
+            return Err(MapUseError::TypeMismatch);
+        }
+        let map = unsafe { meta.storage.as_ref::<hash::BpfHashMap>() };
+        Ok(map.value_size)
+    }
+
+    /// Control-plane: visit each occupied HASH entry.
+    pub fn hash_for_each<F>(&self, idx: MapIdx, f: F) -> Result<(), MapUseError>
+    where
+        F: FnMut(&[u8], &[u8]),
+    {
+        let meta = self.meta.get(idx).ok_or(MapUseError::NotFound)?;
+        if meta.map_type != MapType::Hash {
+            return Err(MapUseError::TypeMismatch);
+        }
+        let map = unsafe { meta.storage.as_ref::<hash::BpfHashMap>() };
+        map.for_each(f);
+        Ok(())
+    }
+
+    /// Control-plane ARRAY update: write `value` as little-endian bytes (truncated/zero-extended
+    /// to the map's `value_size`).
+    pub fn array_set_u64(
+        &mut self,
+        idx: MapIdx,
+        index: u32,
+        value: u64,
+    ) -> Result<(), MapUseError> {
+        let meta = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
+        if meta.map_type != MapType::Array {
+            return Err(MapUseError::TypeMismatch);
+        }
+        let map = unsafe { meta.storage.as_mut::<array::BpfArrayMap>() };
+        let key = index;
+        let bytes = value.to_le_bytes();
+        let n = map.value_size.min(8);
+        let mut buf = [0u8; 8];
+        buf[..n].copy_from_slice(&bytes[..n]);
+        MapOps::update(
+            map,
+            &key as *const u32 as *const u8,
+            buf.as_ptr(),
+            0,
+        )
+        .map_err(map_op_to_use)
+    }
+
+    /// Control-plane: zero every ARRAY element (capacity unchanged).
+    pub fn array_clear(&mut self, idx: MapIdx) -> Result<(), MapUseError> {
+        let meta = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
+        if meta.map_type != MapType::Array {
+            return Err(MapUseError::TypeMismatch);
+        }
+        let map = unsafe { meta.storage.as_mut::<array::BpfArrayMap>() };
+        map.clear();
+        Ok(())
+    }
+
+    /// Byte length of the App-mode `get map` ASCII blob for `idx`.
+    pub fn map_blob_len(&self, idx: MapIdx) -> Result<usize, MapUseError> {
+        let map_type = self.meta.get(idx).ok_or(MapUseError::NotFound)?.map_type;
+        match map_type {
+            MapType::Array => {
+                let mg = self.get(idx)?;
+                let size = mg.len() as u32;
+                Ok(dump::array_blob_len(size, |i| {
+                    mg.array_get_u64(i).unwrap_or(0)
+                }))
+            }
+            MapType::Hash => {
+                let cap = self.get(idx)?.len() as u32;
+                let size = self.hash_len(idx)? as u32;
+                let mut len = dump::hash_header_len(size, cap);
+                self.hash_for_each(idx, |key, value| {
+                    len += dump::hash_entry_len(key, value);
+                })?;
+                Ok(len)
+            }
+        }
+    }
+
+    /// Stream the App-mode `get map` ASCII blob for `idx` into `write`.
+    pub fn write_map_blob(
+        &self,
+        idx: MapIdx,
+        mut write: impl FnMut(&[u8]),
+    ) -> Result<(), MapUseError> {
+        let map_type = self.meta.get(idx).ok_or(MapUseError::NotFound)?.map_type;
+        match map_type {
+            MapType::Array => {
+                let mg = self.get(idx)?;
+                let size = mg.len() as u32;
+                dump::write_array_blob(size, |i| mg.array_get_u64(i).unwrap_or(0), &mut write);
+                Ok(())
+            }
+            MapType::Hash => {
+                let cap = self.get(idx)?.len() as u32;
+                let size = self.hash_len(idx)? as u32;
+                dump::write_hash_header(size, cap, &mut write);
+                self.hash_for_each(idx, |key, value| {
+                    dump::write_hash_entry(key, value, &mut write);
+                })
+            }
+        }
     }
 
     pub(crate) fn add_user(&mut self, idx: MapIdx) -> Result<(), MapUseError> {
