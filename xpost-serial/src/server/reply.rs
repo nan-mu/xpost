@@ -1,64 +1,36 @@
-//! Build wire [`Reply`] values for the DUT App.
+//! Build wire replies for the server App.
+//!
+//! TODO: re-enable builders once they write via `ServerError` / `OkReply` without `alloc`.
+//! Previous API used owned `String`/`Vec` and has been commented out.
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use core::fmt;
 
-use crate::r#type::reply::{ErrReply, MapDump, MapEntry, MapKind, OkReply, Reply};
+use crate::r#type::reply::ServerError;
+
+impl fmt::Display for ServerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown => f.write_str("ERR unknown"),
+        }
+    }
+}
+
+/*
+use crate::r#type::reply::{OkReply, ServerError};
 
 pub mod ok {
     use super::*;
 
-    pub fn ping() -> Reply {
-        Reply::Ok(OkReply::Ping)
+    pub fn ping() -> OkReply<'static> {
+        OkReply::Ping
     }
-    pub fn enable_xdp() -> Reply {
-        Reply::Ok(OkReply::EnableXdp)
-    }
-    pub fn disable_xdp() -> Reply {
-        Reply::Ok(OkReply::DisableXdp)
-    }
-    pub fn clear_map() -> Reply {
-        Reply::Ok(OkReply::ClearMap)
-    }
-    pub fn clear_perf() -> Reply {
-        Reply::Ok(OkReply::ClearPerf)
-    }
-    pub fn update_map() -> Reply {
-        Reply::Ok(OkReply::UpdateMap { n: None })
-    }
-    pub fn update_map_n(n: u32) -> Reply {
-        Reply::Ok(OkReply::UpdateMap { n: Some(n) })
-    }
-    pub fn get_perf(len: usize) -> Reply {
-        Reply::Ok(OkReply::GetPerf { len })
-    }
-    pub fn get_map_array(name: &str, size: u32, entries: Vec<MapEntry>) -> Reply {
-        Reply::Ok(OkReply::GetMap(MapDump {
-            name: String::from(name),
-            kind: MapKind::Array { size },
-            entries,
-        }))
-    }
-    pub fn get_map_hash(name: &str, size: u32, cap: u32, entries: Vec<MapEntry>) -> Reply {
-        Reply::Ok(OkReply::GetMap(MapDump {
-            name: String::from(name),
-            kind: MapKind::Hash { size, cap },
-            entries,
-        }))
-    }
+    // … get_map should for-loop write entries at the call site …
 }
 
-pub fn err(cmd: &str, why: &str) -> Reply {
-    Reply::Err(ErrReply {
-        cmd: String::from(cmd),
-        why: String::from(why),
-    })
+pub fn unknown() -> ServerError {
+    ServerError::Unknown
 }
+*/
 
-/// `ERR unknown` (no why token).
-pub fn unknown() -> Reply {
-    Reply::Err(ErrReply {
-        cmd: String::from("unknown"),
-        why: String::new(),
-    })
-}
+/// Placeholder so the module compiles while builders are stubbed.
+pub fn stub_todo() {}

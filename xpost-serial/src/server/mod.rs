@@ -1,14 +1,21 @@
-//! DUT / App-mode side: parse request lines and build replies.
+//! Server / App-mode side: parse request lines and build replies.
 
+mod command;
 mod reply;
 
-pub use reply::{err, ok, unknown};
+// Parse / builders temporarily stubbed.
+#[allow(unused_imports)]
+pub use command::stub_todo as command_stub;
+#[allow(unused_imports)]
+pub use reply::stub_todo;
 
-use crate::r#type::command::{Command, ParseCommandError, parse_command};
+pub use command::ParseCommandError;
+
+use crate::r#type::command::Command;
 
 /// Parse one App-mode request line into a wire [`Command`].
 ///
-/// Unknown → `Err(ParseCommandError::Unknown)` (caller should reply `ERR unknown`).
-pub fn dispatch(line: &str) -> Result<Command, ParseCommandError> {
-    parse_command(line)
+/// Temporarily stubbed — see [`command`] module (commented parse).
+pub fn dispatch(_line: &[u8]) -> Result<Command<'_>, ParseCommandError> {
+    Err(ParseCommandError::Unknown)
 }
