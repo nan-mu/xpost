@@ -15,8 +15,8 @@ use tokio_postgres::Client;
 use crate::bench::pg_dsn::PgOpts;
 use crate::config;
 
-pub use decode::decode_report_msg;
-pub use names::Firmware;
+pub use decode::{DecodedReport, decode_report_msg};
+pub use names::{Firmware, map_agg_name, map_trace_kind};
 pub use write::{
     PerfExperiment, TxSample, insert_exam, insert_just_drop_config, insert_just_drop_data,
     insert_just_tx_config, insert_just_tx_data, stop_exam, write_perf,

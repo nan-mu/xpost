@@ -1,0 +1,11 @@
+# firewall / firewall_hal formal knobs (compile-time embed).
+# Selected via default.toml `run = ["firewall"]`.
+#
+# Hash-map blacklist: flash each arm, MapCrud seed sizes, hit/miss traffic
+# over JustTx PPS grid (400…4000), then xdp_t Trace.
+# Compact ELF V0 max_entries=256 → sizes capped accordingly.
+
+formal = true
+arms = ["hal", "xdp"]
+sizes = [50, 100, 200]
+traffic = ["hit", "miss"]

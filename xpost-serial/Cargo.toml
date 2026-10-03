@@ -9,15 +9,35 @@ description = "Host serial/flash backend for xpost-agent (USB-UART + espflash)"
 # Independent host workspace (parent defaults to RV32).
 [workspace]
 
-[dependencies]
-anyhow = "1"
-esp-idf-part = "0.6"
-espflash = { version = "4.6", default-features = false, features = ["serialport"] }
-log = "0.4"
-serialport = "4.6"
-thiserror = "2"
-xpost-elf = { path = "../xpost-elf" }
+[features]
+# No defaults — dependents must opt in (`client` or `server`). See crate docs.
+default = []
+# Allows `client` and `server` together (in-crate tests under `src/tests`).
+# Run: cargo test --features "dev,client,server"
+dev = []
+# Host USB control plane (serial + flash tasks). Mutually exclusive with `server`
+# unless `dev` is also enabled.
+client = [
+    "dep:esp-idf-part",
+    "dep:espflash",
+    "dep:futures",
+    "dep:log",
+    "dep:serialport",
+    "dep:tokio",
+    "dep:winnow",
+    "dep:xpost-elf",
+]
+# Server / App-mode dispatch + reply generation (no host USB deps).
+server = ["dep:winnow", "dep:embassy-executor", "dep:embassy-time"]
 
-[dev-dependencies]
-heapless = "0.9"
-tempfile = "3"
+[dependencies]
+embassy-executor = { version = "0.10", default-features = false, optional = true }
+embassy-time = { version = "0.5", default-features = false, optional = true }
+esp-idf-part = { version = "0.6", optional = true }
+espflash = { version = "4.6", default-features = false, features = ["serialport"], optional = true }
+futures = { version = "0.3", optional = true }
+log = { version = "0.4", optional = true }
+serialport = { version = "4.6", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"], optional = true }
+winnow = { version = "1", default-features = false, features = ["ascii"], optional = true }
+xpost-elf = { path = "../xpost-elf", optional = true }

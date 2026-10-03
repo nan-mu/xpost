@@ -2237,9 +2237,11 @@ dependencies = [
  "anyhow",
  "esp-idf-part",
  "espflash",
+ "futures",
  "log",
  "serialport",
  "thiserror",
+ "tokio",
  "xpost-elf",
 ]
 

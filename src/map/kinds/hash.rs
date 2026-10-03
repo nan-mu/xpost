@@ -143,6 +143,17 @@ impl MapOps for BpfHashMap {
     }
 }
 
+impl BpfHashMap {
+    /// Control-plane: drop every entry (capacity unchanged).
+    pub(crate) fn clear(&mut self) {
+        self.table.clear();
+    }
+
+    pub(crate) fn len_used(&self) -> usize {
+        self.table.len()
+    }
+}
+
 unsafe fn drop_hash(ptr: *mut u8) {
     unsafe { crate::map::heap::reclaim_talc_box::<BpfHashMap>(ptr, "BpfHashMap") };
 }

@@ -115,6 +115,11 @@ impl RawResource {
         unsafe { &*(self.ptr as *const T) }
     }
 
+    #[inline]
+    pub(crate) unsafe fn as_mut<T>(&mut self) -> &mut T {
+        unsafe { &mut *(self.ptr as *mut T) }
+    }
+
     pub(crate) fn build(
         ptr: *mut u8,
         layout: Layout,

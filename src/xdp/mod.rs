@@ -172,7 +172,7 @@ impl XdpRt {
                     Err(MapUseError::NotFound) => {
                         maps.create(MapBuilder::from_meta(spec))?;
                     }
-                    Err(MapUseError::TypeMismatch) => {
+                    Err(_) => {
                         return Err(XdpInitError::MapCheck(MapCheckError::TypeMismatch));
                     }
                 }

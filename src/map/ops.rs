@@ -16,8 +16,9 @@ use crate::map::{
 };
 
 /// Linux `bpf_map_update_elem` flags (low bits).
-pub(crate) const BPF_NOEXIST: u64 = 1;
-pub(crate) const BPF_EXIST: u64 = 2;
+pub const BPF_ANY: u64 = 0;
+pub const BPF_NOEXIST: u64 = 1;
+pub const BPF_EXIST: u64 = 2;
 
 /// BPF map operation failure (Linux-aligned errno via [`MapOpError::errno`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
