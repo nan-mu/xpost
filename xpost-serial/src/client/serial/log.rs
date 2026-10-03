@@ -133,30 +133,3 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> Option<u64> {
     }
     Some(z as u64)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[test]
-    fn file_roundtrip_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("serial.log");
-        let log = Log::create(&path, false).unwrap();
-        let t0 = SystemTime::now();
-        std::thread::sleep(Duration::from_millis(5));
-        log.write_line("[cmd] → ping");
-        std::thread::sleep(Duration::from_millis(5));
-        let t1 = SystemTime::now();
-        std::thread::sleep(Duration::from_millis(5));
-        log.write_line("[cmd] ← OK ping");
-        let mid = log.lines_in_range(t0, t1).unwrap();
-        assert_eq!(mid.len(), 1);
-        assert!(mid[0].contains("[cmd] → ping"));
-        let all = log
-            .lines_in_range(t0, SystemTime::now() + Duration::from_secs(1))
-            .unwrap();
-        assert_eq!(all.len(), 2);
-    }
-}

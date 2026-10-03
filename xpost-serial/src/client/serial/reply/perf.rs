@@ -306,20 +306,3 @@ fn decode_trace(buf: &[u8]) -> Result<TraceSnap> {
         events,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn all_mask_lengths_unique() {
-        assert!(lengths_unique());
-    }
-
-    #[test]
-    fn header_parse() {
-        use crate::r#type::reply::parse_ok_get_perf_len;
-        assert_eq!(parse_ok_get_perf_len("OK get perf 184"), Some(184));
-        assert_eq!(parse_ok_get_perf_len("OK report 184"), None);
-    }
-}

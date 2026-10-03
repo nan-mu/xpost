@@ -2,9 +2,9 @@
 //!
 //! | Feature | Contents |
 //! |---------|----------|
-//! | _(always)_ | [`r#type`] — line protocol (`Command` / `Reply`) |
-//! | `client` (default) | [`client`] — serial + flash threads, host USB |
-//! | `server` | [`server`] — parse request / build reply (DUT side) |
+//! | _(always)_ | `r#type` — line protocol (`Command` / `Reply`) |
+//! | `client` (default) | `client` — sync App UART + flash task, host USB |
+//! | `server` | `server` — parse request / build reply (DUT side) |
 //!
 //! `client` and `server` are mutually exclusive.
 

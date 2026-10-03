@@ -1,4 +1,4 @@
-//! Host-only impls for [`crate::r#type::ops`] (Display / Debug / helpers).
+//! Host-only impls for `crate::r#type::ops` (Display / Debug / helpers).
 
 use core::fmt;
 

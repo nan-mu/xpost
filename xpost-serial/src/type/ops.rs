@@ -7,7 +7,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Unified host command. App variants map to wire lines; [`Command::Flash`] is
-/// flash→serial interrupt / log only (never written to DUT UART).
+/// a host-side lifecycle log marker (never written to DUT UART).
 #[derive(Clone, PartialEq, Eq)]
 pub enum Command {
     Ping,
@@ -70,7 +70,7 @@ pub enum FlashOp {
         /// Empty = clear all (`*`).
         names: Vec<String>,
     },
-    /// Read cold table (download); still interrupts App UART.
+    /// Read the XDP table through an exclusive download-mode session.
     List,
 }
 

@@ -60,7 +60,7 @@ impl Downloader {
         Ok(())
     }
 
-    /// Flash app ELF bytes, then overwrite partition table at [`PART_TABLE_OFFSET`].
+    /// Flash app ELF bytes, then overwrite partition table at `PART_TABLE_OFFSET`.
     pub fn flash_firmware(&mut self, firmware_elf: &[u8], part_bin: &[u8]) -> Result<()> {
         let chip = self.flasher.chip();
         let xtal = chip.xtal_frequency(self.flasher.connection())?;

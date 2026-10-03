@@ -50,7 +50,7 @@ impl Port {
         self.chip
     }
 
-    /// Open App UART, run `f`, close. Atomic vs other [`Self::with_*`] callers.
+    /// Open App UART, run `f`, close. Atomic vs other [`Self::with_app`] / [`Self::with_download`] callers.
     pub fn with_app<R>(&self, f: impl FnOnce(AppSession) -> Result<R>) -> Result<R> {
         let _gate = self
             .gate
