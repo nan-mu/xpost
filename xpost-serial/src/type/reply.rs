@@ -11,18 +11,18 @@ pub enum OkReply<'a> {
     DisableXdp,
     ClearMap,
     ClearPerf,
-    /// Header only — body lines stay in the record for the caller to for-loop.
+    /// `OK get map <n>` + `n` blob bytes (same framing as [`Self::GetPerf`]).
     GetMap {
-        name: &'a str,
-        kind: MapKind,
-        entries: &'a [MapEntry<'a>],
+        blob: &'a [u8],
     },
     UpdateMap,
+    /// `OK get perf <n>` + `n` blob bytes.
     GetPerf {
         blob: &'a [u8],
     },
-    /// Host-only ack (e.g. flash). Never appears on the server wire.
-    Done,
+    /// Unsolicited: server emits `OK init` after App-mode init finishes.
+    /// Not a response to any [`crate::r#type::command::Command`].
+    Init,
 }
 
 /// Reply-error surface: local parse vs server `ERR` implement separately.
@@ -49,7 +49,7 @@ pub enum MapKey<'a> {
     Hash(&'a [u8]),
 }
 
-/// One `get map` body line.
+/// One decoded map entry (blob payload decode; not a wire line by itself).
 pub struct MapEntry<'a> {
     pub key: MapKey<'a>,
     /// Raw value token (not parsed to integers).
