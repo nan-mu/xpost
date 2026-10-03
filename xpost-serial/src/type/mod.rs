@@ -7,10 +7,10 @@
 //! Parsing / formatting are **not** in this module: server parses requests and
 //! builds replies; client formats requests and parses replies.
 //!
-//! # [`command::Command`] — request line
+//! # [`command::Command`] — request / host wait
 //!
-//! | Variant | Wire |
-//! |---------|------|
+//! | Variant | Wire / host |
+//! |---------|-------------|
 //! | [`Ping`](command::Command::Ping) | `ping` |
 //! | [`EnableXdp`](command::Command::EnableXdp) | `enable xdp` |
 //! | [`DisableXdp`](command::Command::DisableXdp) | `disable xdp` |
@@ -19,9 +19,16 @@
 //! | [`UpdateMap`](command::Command::UpdateMap) | `update map <name> <key> <value>` |
 //! | [`ClearPerf`](command::Command::ClearPerf) | `clear perf` |
 //! | [`GetPerf`](command::Command::GetPerf) | `get perf` |
+//! | [`GetInit`](command::Command::GetInit) | **no wire** — host record wait only |
 //!
 //! `UpdateMap`: ARRAY `key` = decimal slot, `value` = `u64` token; HASH `key` =
 //! dotted IPv4 (as bytes), `value` = `u64` token.
+//!
+//! **[`GetInit`](command::Command::GetInit)** must never be written to UART and
+//! must never be produced by server request parsing. Host `request(GetInit)`
+//! (or equivalent) only looks for / waits until `OK init` appears in the
+//! transcript, with deadline [`command::GET_INIT_TIMEOUT`]. Success is
+//! [`OkReply::Init`](reply::OkReply::Init).
 //!
 //! # [`reply::OkReply`] — success
 //!
@@ -58,10 +65,11 @@
 //!
 //! **`OK init` (unsolicited)**
 //!
-//! Not triggered by any [`command::Command`]. After App-mode initialization
-//! finishes, the server emits `OK init` on its own so the host can detect
-//! settle / ready (e.g. post-flash boot). Treat as a spontaneous UART line,
-//! not a `request` reply.
+//! After App-mode initialization finishes, the server emits `OK init` on its
+//! own (no request line). The host observes it via
+//! [`Command::GetInit`](command::Command::GetInit) as a **record wait** only —
+//! never by sending a command on the wire. Deadline:
+//! [`command::GET_INIT_TIMEOUT`].
 //!
 //! # [`reply::ServerError`] — DUT `ERR`
 //!
@@ -75,5 +83,5 @@
 pub mod command;
 pub mod reply;
 
-pub use command::Command as WireCommand;
+pub use command::{Command as WireCommand, GET_INIT_TIMEOUT};
 pub use reply::{ErrReply, MapEntry, MapKey, MapKind, OkReply, ServerError};

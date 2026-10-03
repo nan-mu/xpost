@@ -1,8 +1,21 @@
-//! Wire requests: App-mode line command shapes. `no_std`, no `alloc`.
+//! Wire / host request shapes. `no_std`, no `alloc`.
 //!
-//! Parsing lives on the server side; host formatting lives on the client.
+//! Parsing of UART request lines lives on the server; host formatting of
+//! **wire** variants lives on the client. [`Command::GetInit`] is host-only
+//! (never serialized).
 
-/// App-mode line command (server UART).
+use core::time::Duration;
+
+/// Host wait for unsolicited [`crate::r#type::reply::OkReply::Init`] when using
+/// [`Command::GetInit`]. Not a UART deadline for a request line.
+pub const GET_INIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// App-mode command shape.
+///
+/// Most variants are UART request lines. [`GetInit`](Command::GetInit) is
+/// **host-only**: it must never be written to the serial port; the host only
+/// scans / waits on the transcript for `OK init` (deadline
+/// [`GET_INIT_TIMEOUT`]).
 pub enum Command<'a> {
     Ping,
     EnableXdp,
@@ -20,4 +33,7 @@ pub enum Command<'a> {
     },
     ClearPerf,
     GetPerf,
+    /// Wait for unsolicited `OK init` in the host record. **Not a wire verb** —
+    /// must not be sent on UART; server must not parse a request into this.
+    GetInit,
 }

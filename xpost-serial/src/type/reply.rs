@@ -20,8 +20,10 @@ pub enum OkReply<'a> {
     GetPerf {
         blob: &'a [u8],
     },
-    /// Unsolicited: server emits `OK init` after App-mode init finishes.
-    /// Not a response to any [`crate::r#type::command::Command`].
+    /// Unsolicited `OK init` after App-mode init finishes.
+    ///
+    /// Host obtains this via [`crate::r#type::command::Command::GetInit`] as a
+    /// transcript wait only — there is no UART request line.
     Init,
 }
 
