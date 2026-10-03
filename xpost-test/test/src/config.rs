@@ -1,5 +1,5 @@
 //! Compile-time TOML for the `xpost-test` binary:
-//! `config/default.toml` + `just_tx.toml` + `just_drop.toml` + `firewall.toml`.
+//! `config/default.toml` + `just_tx.toml` + `just_drop.toml`.
 //!
 //! Files are embedded at compile time; after editing, rebuild and scp to TR3000.
 //! The only runtime entry is bare:
@@ -17,20 +17,18 @@
 //! |------|------|-----------------|
 //! | `just_drop` | Formal HAL + XDP PPS grid + Trace | `exam` + `just_drop_*` + `xdp_*` / `*_hal_*` / `trace_event` |
 //! | `just_tx` | Formal HAL + XDP pps grid RTT + Trace | `exam` + `just_tx_config`(sent/ok) / `just_tx_data` + perf |
-//! | `firewall` | Hash blacklist size×hit/miss PPS grid + Trace | `exam` + `firewall_*` + perf |
 //! | `dev` | Flame Trace: XDP × 100 pps × 2s × 1; `/tmp/xpost-dev-flame.report`; no DB | — |
 //! | `formal-clear` | `TRUNCATE exam CASCADE` | wipe only |
 //!
 //! `dev` is fully hard-coded (no separate TOML); never touches Postgres.
 //!
-//! Formal DDL: `sql/formal.sql` + `just_tx.sql` / `just_drop.sql` / `firewall.sql`
-//! (open-run never DROP/TRUNCATE). Wipe: `run = ["formal-clear"]`.
+//! Formal DDL: `sql/formal.sql` + `just_tx.sql` / `just_drop.sql` (open-run never
+//! DROP/TRUNCATE). Wipe: `run = ["formal-clear"]`.
 //!
 //! ```toml
 //! run = ["dev"]
 //! # run = ["just_tx"]
 //! # run = ["just_drop", "just_tx"]
-//! # run = ["firewall"]
 //! # run = ["formal-clear"]
 //! ```
 
@@ -42,7 +40,6 @@ use serde::Deserialize;
 const EMBEDDED_DEFAULT: &str = include_str!("../../config/default.toml");
 const EMBEDDED_JUST_TX: &str = include_str!("../../config/just_tx.toml");
 const EMBEDDED_JUST_DROP: &str = include_str!("../../config/just_drop.toml");
-const EMBEDDED_FIREWALL: &str = include_str!("../../config/firewall.toml");
 
 static POSTGRES: OnceLock<PostgresConfig> = OnceLock::new();
 
@@ -75,8 +72,6 @@ pub struct FileConfig {
     pub just_drop: BenchPpsConfig,
     #[serde(default)]
     pub just_tx: BenchPpsConfig,
-    #[serde(default)]
-    pub firewall: FirewallConfig,
 }
 
 fn default_version() -> String {
@@ -142,30 +137,11 @@ pub struct BenchPpsConfig {
     pub arms: Vec<String>,
 }
 
-/// Knobs for hash-map firewall formal (`firewall.toml`).
-#[derive(Debug, Clone, Deserialize)]
-pub struct FirewallConfig {
-    #[serde(default = "default_true")]
-    pub formal: bool,
-    #[serde(default = "default_pps_arms")]
-    pub arms: Vec<String>,
-    #[serde(default = "default_fw_sizes")]
-    pub sizes: Vec<u32>,
-    #[serde(default = "default_fw_traffic")]
-    pub traffic: Vec<String>,
-}
-
 fn default_true() -> bool {
     true
 }
 fn default_pps_arms() -> Vec<String> {
     vec!["hal".into(), "xdp".into()]
-}
-fn default_fw_sizes() -> Vec<u32> {
-    vec![50, 100, 200]
-}
-fn default_fw_traffic() -> Vec<String> {
-    vec!["hit".into(), "miss".into()]
 }
 
 impl Default for BenchPpsConfig {
@@ -173,17 +149,6 @@ impl Default for BenchPpsConfig {
         Self {
             formal: true,
             arms: default_pps_arms(),
-        }
-    }
-}
-
-impl Default for FirewallConfig {
-    fn default() -> Self {
-        Self {
-            formal: true,
-            arms: default_pps_arms(),
-            sizes: default_fw_sizes(),
-            traffic: default_fw_traffic(),
         }
     }
 }
@@ -255,12 +220,6 @@ struct JustDropFile {
     bench: BenchPpsConfig,
 }
 
-#[derive(Debug, Deserialize)]
-struct FirewallFile {
-    #[serde(flatten)]
-    bench: FirewallConfig,
-}
-
 impl FileConfig {
     pub fn embedded() -> Result<Self> {
         let def: DefaultFile =
@@ -269,8 +228,6 @@ impl FileConfig {
             toml::from_str(EMBEDDED_JUST_TX).context("parse config/just_tx.toml")?;
         let just_drop: JustDropFile =
             toml::from_str(EMBEDDED_JUST_DROP).context("parse config/just_drop.toml")?;
-        let firewall: FirewallFile =
-            toml::from_str(EMBEDDED_FIREWALL).context("parse config/firewall.toml")?;
         let cfg = Self {
             version: def.version,
             run: def.run,
@@ -280,7 +237,6 @@ impl FileConfig {
             agent: def.agent,
             just_drop: just_drop.bench,
             just_tx: just_tx.bench,
-            firewall: firewall.bench,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -292,24 +248,10 @@ impl FileConfig {
         }
         for name in &self.run {
             match name.as_str() {
-                "just_tx" | "just_drop" | "firewall" | "dev" | "formal-clear" => {}
+                "just_tx" | "just_drop" | "dev" | "formal-clear" => {}
                 other => bail!(
-                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / firewall / dev / formal-clear"
+                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / dev / formal-clear"
                 ),
-            }
-        }
-        for t in &self.firewall.traffic {
-            match t.as_str() {
-                "hit" | "miss" => {}
-                other => bail!("firewall.toml traffic entry must be hit|miss, got {other:?}"),
-            }
-        }
-        if self.firewall.sizes.is_empty() {
-            bail!("firewall.toml `sizes` must be non-empty");
-        }
-        for &n in &self.firewall.sizes {
-            if n == 0 || n > 256 {
-                bail!("firewall.toml size {n} out of 1..=256 (Compact ELF V0 max_entries)");
             }
         }
         Ok(())

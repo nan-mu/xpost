@@ -1,9 +1,46 @@
 //! Formal `just_drop` — Array Map vs native array overhead (PPS grid).
 //!
-//! Arms: `xdp_cag` + `hal` over JustTx-aligned PPS grid, then `xdp_t` Trace.
-//! Host stim uses deterministic `source_seed` → IPv4 last-octet buckets into
-//! DUT map/`COUNTER` (`map dump counter`). Correctness is analysis-side
-//! (slack WARN); empty map hard-fails.
+//! 目的：测量 DUT 上 **array map 读写** 的耗时（相对 native array / HAL 对照）。
+//!
+//! ```text
+//! just_drop:
+//!   for fw in {hal, xdp_cag}:
+//!     agent flash fw
+//!     for rate in {400, 800, …, 4000}:
+//!       agent clear perf
+//!       agent clear map(counter)
+//!       agent enable xdp
+//!       sent rate 30s
+//!       agent disable xdp
+//!       agent get map(counter)
+//!       agent get perf
+//!       upload to db
+//!
+//!   agent flash xdp_t
+//!   agent clear perf
+//!   sent 1
+//!   agent get perf
+//!   upload to db
+//! ```
+//!
+//! # 数据处理
+//!
+//! 每格写入 `just_drop_config` + `just_drop_data`（DDL：`sql/just_drop.sql`）。
+//! Perf（`agent get perf`）另落共享 / HAL CAG 表，不在此列。
+//!
+//! `just_drop_config`：
+//! - `exam_id` — 本轮 `exam` 行
+//! - `firmware` — 当前 `fw`（`hal` / `xdp_cag` / `xdp_t`）
+//! - `target_pps` — 网格 `rate`（Trace 臂为占位）
+//! - `window_s` — 刺激时长（网格 30；Trace 臂为 0）
+//! - `source_seed` — 多源 stim 的确定性种子（末字节分桶）
+//! - `started_at` / `stopped_at` — 该格刺激墙钟起止
+//! - `sent` — 主机实际发出的包数
+//!
+//! `just_drop_data`（每 slot 一行，0..255）：
+//! - `config_id` — 所属 `just_drop_config`
+//! - `slot` — IPv4 源地址末字节（分桶下标）
+//! - `value` — 该格结束后 `agent get map(counter)` 读到的槽值（清零后刺激，故为本格增量）
 
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant, SystemTime};
@@ -20,6 +57,7 @@ use crate::raw_tx::{RawTx, iface_mac};
 const STIM_PORT: u16 = 8080;
 const FLASH_IDLE: Duration = Duration::from_secs(300);
 const WINDOW_S: Duration = Duration::from_secs(30);
+const WINDOW_SMOKE: Duration = Duration::from_secs(4);
 const DRAIN_MS: u64 = 200;
 const MAP_NAME: &str = "counter";
 const SOURCE_SEED_DEFAULT: i64 = 0x0A11_CE00;
@@ -29,6 +67,7 @@ const SLOT_SLACK: u64 = 64;
 const SWEEP_PPS: &[f64] = &[
     400.0, 800.0, 1200.0, 1600.0, 2000.0, 2400.0, 2800.0, 3200.0, 3600.0, 4000.0,
 ];
+const SWEEP_SMOKE_PPS: &[f64] = &[400.0, 1200.0, 2400.0, 4000.0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PpsPath {
@@ -54,22 +93,14 @@ impl PpsPath {
 }
 
 pub struct JustDropPpsOpts {
+    pub paths: Vec<PpsPath>,
+    pub smoke: bool,
     pub formal: bool,
-}
-
-fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
-    let mut out = Vec::new();
-    for a in arms {
-        match PpsPath::parse(a)? {
-            PpsPath::Xdp => out.push(Firmware::XdpCag),
-            PpsPath::Hal => out.push(Firmware::Hal),
-        }
-    }
-    if out.is_empty() {
-        bail!("just_drop.toml `arms` must list at least one of xdp|hal");
-    }
-    out.dedup();
-    Ok(out)
+    pub no_pg: bool,
+    pub window_secs: Option<u64>,
+    pub sample_interval_ms: u64,
+    pub rounds: Option<usize>,
+    pub formal_clear: bool,
 }
 
 fn profile_for(fw: Firmware) -> &'static str {
@@ -113,21 +144,48 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         .context("just_drop needs [agent].endpoint in config/default.toml")?;
     let agent = AgentClient::new(endpoint.clone());
     let esp_s = cfg.target.esp_ip.to_string();
-    let formal = opts.formal;
-    let window = WINDOW_S;
-    let grid: &[f64] = SWEEP_PPS;
+    let formal = opts.formal || cfg.just_drop.formal;
+    let window = opts
+        .window_secs
+        .map(Duration::from_secs)
+        .unwrap_or(if opts.smoke { WINDOW_SMOKE } else { WINDOW_S });
+    let grid: &[f64] = if opts.smoke { SWEEP_SMOKE_PPS } else { SWEEP_PPS };
     let source_seed = SOURCE_SEED_DEFAULT;
-    let arms = arms_from_cfg(&cfg.just_drop.arms)?;
+    let _ = opts.sample_interval_ms;
+    let _ = opts.rounds;
+
+    let mut arms: Vec<Firmware> = Vec::new();
+    if opts.paths.is_empty() {
+        arms.extend([Firmware::XdpCag, Firmware::Hal]);
+    } else {
+        for p in &opts.paths {
+            match p {
+                PpsPath::Xdp => arms.push(Firmware::XdpCag),
+                PpsPath::Hal => arms.push(Firmware::Hal),
+            }
+        }
+    }
+    arms.dedup();
 
     RoundUi::banner(&format!(
-        "just_drop array arms={:?} +xdp_t grid={:?} window={}s seed={source_seed:#x} formal={formal} agent={endpoint} esp={esp_s} pg=true",
+        "just_drop array arms={:?} +xdp_t grid={:?} window={}s seed={source_seed:#x} formal={formal} clear={} agent={endpoint} esp={esp_s} pg={}",
         arms.iter().map(|a| a.as_db()).collect::<Vec<_>>(),
         grid.iter().map(|p| *p as u32).collect::<Vec<_>>(),
         window.as_secs(),
+        opts.formal_clear,
+        !opts.no_pg
     ));
 
-    let pg_opts = PgOpts { formal };
-    let mut pg = Some(formal::connect_and_ensure(pg_opts).await?);
+    let mut pg = if opts.no_pg {
+        None
+    } else {
+        let pg_opts = PgOpts { formal };
+        let client = formal::connect_and_ensure(pg_opts).await?;
+        if opts.formal_clear {
+            formal::clear(&client, pg_opts).await?;
+        }
+        Some(client)
+    };
 
     let mut eta = BudgetEta::new();
     eta.add_flashes(arms.len() + 1);
@@ -227,9 +285,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         flash_and_arm(cfg, &agent, &ui, &mut eta, PpsPath::Xdp, profile).await?;
         agent.perf_clear().await.context("perf_clear")?;
         let started_at = SystemTime::now();
-        let sent =
-            paced_multi_src(cfg, &ui, &eta, PpsPath::Xdp, Duration::from_millis(50), 20.0, source_seed)
-                .await?;
+        let sent = send_one(cfg, source_seed).await?;
         tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
         let stopped_at = SystemTime::now();
         if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
@@ -243,7 +299,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
                 source_seed,
                 started_at,
                 stopped_at,
-                sent.max(1) as i64,
+                sent as i64,
             )
             .await?;
             let msg = agent.request("report").await.context("report")?;
@@ -471,6 +527,29 @@ async fn paced_multi_src(
     }
     ui.live_clear();
     Ok(sent)
+}
+
+/// Trace arm: one multi-src-shaped UDP to DUT echo port.
+async fn send_one(cfg: &FileConfig, seed: i64) -> Result<u64> {
+    let esp = cfg.target.esp_ip;
+    let esp_mac = cfg.esp_mac_bytes()?;
+    let src_mac = match cfg.src_mac_override()? {
+        Some(m) => m,
+        None => iface_mac(&cfg.probe.iface)?,
+    };
+    let raw = RawTx::open(
+        &cfg.probe.iface,
+        src_mac,
+        esp_mac,
+        esp,
+        STIM_PORT,
+        cfg.target.stim_sport,
+    )
+    .context("RawTx::open")?;
+    let spoof = stim_src_ip(seed, 0, esp);
+    raw.send_udp(spoof, esp, STIM_PORT, b"D")
+        .context("send_one")?;
+    Ok(1)
 }
 
 /// Shared by `just_tx` flame helper (legacy import).

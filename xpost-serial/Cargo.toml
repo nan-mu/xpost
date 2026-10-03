@@ -9,15 +9,33 @@ description = "Host serial/flash backend for xpost-agent (USB-UART + espflash)"
 # Independent host workspace (parent defaults to RV32).
 [workspace]
 
-[dependencies]
-anyhow = "1"
-esp-idf-part = "0.6"
-espflash = { version = "4.6", default-features = false, features = ["serialport"] }
-log = "0.4"
-serialport = "4.6"
-thiserror = "2"
-xpost-elf = { path = "../xpost-elf" }
+[features]
+default = ["client"]
+# Host USB control plane (serial + flash tasks). Mutually exclusive with `server`.
+client = [
+    "dep:anyhow",
+    "dep:crossbeam-channel",
+    "dep:esp-idf-part",
+    "dep:espflash",
+    "dep:futures",
+    "dep:log",
+    "dep:serialport",
+    "dep:thiserror",
+    "dep:tokio",
+    "dep:xpost-elf",
+]
+# DUT / App-mode dispatch + reply generation (no host USB deps).
+server = []
 
-[dev-dependencies]
-heapless = "0.9"
-tempfile = "3"
+[dependencies]
+# `type` is always available (no_std + alloc). Host deps are client-only.
+anyhow = { version = "1", optional = true }
+crossbeam-channel = { version = "0.5", optional = true }
+esp-idf-part = { version = "0.6", optional = true }
+espflash = { version = "4.6", default-features = false, features = ["serialport"], optional = true }
+futures = { version = "0.3", optional = true }
+log = { version = "0.4", optional = true }
+serialport = { version = "4.6", optional = true }
+thiserror = { version = "2", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"], optional = true }
+xpost-elf = { path = "../xpost-elf", optional = true }

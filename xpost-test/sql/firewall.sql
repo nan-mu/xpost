@@ -16,6 +16,17 @@ CREATE TABLE IF NOT EXISTS firewall_config (
 
 CREATE INDEX IF NOT EXISTS firewall_config_exam ON firewall_config (exam_id);
 
+-- Per-key blacklist counts after a cell (`agent get map(blacklist)`).
+CREATE TABLE IF NOT EXISTS firewall_data (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    config_id UUID NOT NULL REFERENCES firewall_config (id) ON DELETE CASCADE,
+    key_ip INET NOT NULL,
+    value BIGINT NOT NULL,
+    UNIQUE (config_id, key_ip)
+);
+
+CREATE INDEX IF NOT EXISTS firewall_data_config ON firewall_data (config_id);
+
 CREATE TABLE IF NOT EXISTS firewall_hal_counter (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     config_id UUID NOT NULL REFERENCES firewall_config (id) ON DELETE CASCADE,

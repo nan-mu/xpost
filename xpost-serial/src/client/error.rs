@@ -1,4 +1,6 @@
-//! Library errors.
+//! Client-side errors.
+
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -6,12 +8,6 @@ use thiserror::Error;
 pub enum Error {
     #[error("{0}")]
     Msg(String),
-
-    #[error("not in app mode (current: {0})")]
-    NotApp(String),
-
-    #[error("not in download mode (current: {0})")]
-    NotDownload(String),
 
     #[error("session closed")]
     Closed,
@@ -29,7 +25,10 @@ pub enum Error {
     VerifyLen { wrote: usize, read: usize },
 
     #[error("request timeout after {0:?}")]
-    RequestTimeout(std::time::Duration),
+    RequestTimeout(Duration),
+
+    #[error("interrupted by flash")]
+    Interrupted,
 
     #[error(transparent)]
     Io(#[from] std::io::Error),

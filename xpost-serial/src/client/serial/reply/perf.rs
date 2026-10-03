@@ -1,7 +1,4 @@
-//! Binary `report` payload layout (must match `xpost::ext::perf` report encode).
-//!
-//! Sections in order C → A → G → T; absent features omit the section.
-//! Total length uniquely identifies the feature mask.
+//! `get perf` framing + binary payload decode (matches `xpost::ext::perf`).
 
 use std::collections::BTreeMap;
 
@@ -12,7 +9,6 @@ pub const AGGREGATE_WIRE_LEN: usize = 8 * 176;
 pub const GAUGE_WIRE_LEN: usize = 32;
 pub const TRACE_CAP: usize = 256;
 pub const TRACE_APP_CAP: usize = 64;
-/// Dual-ring T section: n_radio, dropped_radio, n_app, dropped_app, radio[CAP], app[APP_CAP].
 pub const TRACE_WIRE_LEN: usize = 16 + TRACE_CAP * 16 + TRACE_APP_CAP * 16;
 
 pub const MASK_C: u8 = 1 << 0;
@@ -27,7 +23,6 @@ const SECTION_LEN: [(u8, usize); 4] = [
     (MASK_T, TRACE_WIRE_LEN),
 ];
 
-/// Payload length for a feature mask.
 pub fn payload_len_for_mask(mask: u8) -> usize {
     SECTION_LEN
         .iter()
@@ -36,7 +31,6 @@ pub fn payload_len_for_mask(mask: u8) -> usize {
         .sum()
 }
 
-/// Invert length → mask; `None` if unknown.
 pub fn mask_for_len(len: usize) -> Option<u8> {
     for mask in 0u8..=0x0f {
         if payload_len_for_mask(mask) == len {
@@ -46,7 +40,6 @@ pub fn mask_for_len(len: usize) -> Option<u8> {
     None
 }
 
-/// True when all 16 lengths are unique.
 pub fn lengths_unique() -> bool {
     let mut seen = BTreeMap::new();
     for mask in 0u8..=0x0f {
@@ -160,12 +153,11 @@ pub struct TraceSnap {
     pub dropped: u32,
     pub app_len: u32,
     pub app_dropped: u32,
-    /// Radio ring then app ring (caller may re-sort by `t_us`).
     pub events: Vec<TraceEvent>,
 }
 
 pub fn decode(payload: &[u8]) -> Result<Report> {
-    let mask = mask_for_len(payload.len()).context("unknown report payload length")?;
+    let mask = mask_for_len(payload.len()).context("unknown get-perf payload length")?;
     let mut off = 0usize;
     let mut report = Report {
         mask,
@@ -192,63 +184,9 @@ pub fn decode(payload: &[u8]) -> Result<Report> {
         off = end;
     }
     if off != payload.len() {
-        bail!("report decode leftover {} bytes", payload.len() - off);
+        bail!("get-perf decode leftover {} bytes", payload.len() - off);
     }
     Ok(report)
-}
-
-/// Format Counter section as legacy `OK counters k=v …` for existing parsers.
-pub fn format_counters_ok(counters: &BTreeMap<String, i64>) -> String {
-    let mut parts = Vec::with_capacity(counters.len());
-    // Prefer stable wire order when present.
-    for name in COUNTER_NAMES {
-        if let Some(v) = counters.get(name) {
-            parts.push(format!("{name}={v}"));
-        }
-    }
-    for (k, v) in counters {
-        if !COUNTER_NAMES.contains(&k.as_str()) {
-            parts.push(format!("{k}={v}"));
-        }
-    }
-    // Compatibility aliases used by older parsers / notebooks.
-    if let Some(v) = counters.get("rx_discarded") {
-        parts.push(format!("drop={v}"));
-    }
-    if let Some(v) = counters.get("rx_delivered") {
-        parts.push(format!("net_rx={v}"));
-    }
-    if let Some(v) = counters.get("tx_failed") {
-        parts.push(format!("tx_wifi={v}"));
-    }
-    if let Some(v) = counters.get("tx_fail_bad_buf") {
-        parts.push(format!("tx_bad_buf={v}"));
-    }
-    if let Some(v) = counters.get("tx_fail_token") {
-        parts.push(format!("tx_token={v}"));
-    }
-    if let Some(v) = counters.get("tx_wifi_last_rc") {
-        parts.push(format!("tx_wifi_rc={v}"));
-    }
-    if let Some(v) = counters.get("tx_submitted") {
-        parts.push(format!("tx_drain_ok={v}"));
-    }
-    if let Some(v) = counters.get("tx_enq_fail_claim") {
-        parts.push(format!("tx_enq_claim={v}"));
-    }
-    if let Some(v) = counters.get("tx_enq_fail_ring") {
-        parts.push(format!("tx_enq_ring={v}"));
-    }
-    if let Some(v) = counters.get("tx_completed") {
-        parts.push(format!("tx_done={v}"));
-    }
-    if let Some(v) = counters.get("tx_air_done_fail") {
-        parts.push(format!("tx_done_fail={v}"));
-    }
-    if let Some(v) = counters.get("tx_wifi_last_rc") {
-        parts.push(format!("tx_last_rc={v}"));
-    }
-    format!("OK counters {}", parts.join(" "))
 }
 
 fn u32_le(buf: &[u8]) -> u32 {
@@ -367,42 +305,4 @@ fn decode_trace(buf: &[u8]) -> Result<TraceSnap> {
         app_dropped,
         events,
     })
-}
-
-/// Parse `OK report <n>` header.
-pub fn parse_ok_report_len(line: &str) -> Option<usize> {
-    let line = line.trim();
-    let rest = line.strip_prefix("OK report ")?;
-    rest.split_whitespace().next()?.parse().ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn all_mask_lengths_unique() {
-        assert!(lengths_unique());
-    }
-
-    #[test]
-    fn known_combo_lengths() {
-        assert_eq!(payload_len_for_mask(MASK_C), 184);
-        assert_eq!(payload_len_for_mask(MASK_G), 32);
-        assert_eq!(payload_len_for_mask(MASK_C | MASK_G), 216);
-        assert_eq!(payload_len_for_mask(MASK_T), 2056);
-        assert_eq!(
-            payload_len_for_mask(MASK_C | MASK_A | MASK_G | MASK_T),
-            184 + 1408 + 32 + 2056
-        );
-    }
-
-    #[test]
-    fn counter_roundtrip_zeros() {
-        let buf = [0u8; COUNTER_WIRE_LEN];
-        let c = decode_counters(&buf).unwrap();
-        assert_eq!(c.len(), COUNTER_NAMES.len());
-        let report = decode(&buf).unwrap();
-        assert_eq!(report.mask, MASK_C);
-    }
 }

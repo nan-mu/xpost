@@ -1,0 +1,57 @@
+# Compile-time xpost-test defaults (embedded via include_str!).
+# TR3000 formal path: rebuild, scp binary, then always:
+#   ./xpost-test
+# No env vars, no CLI flags. Edit `run` to choose which experiments run.
+#
+# Mac side: cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
+# Agent HTTP: /health, /v1/* (harness), /mcp (Cursor MCP). endpoint = host:port (http:// inferred).
+#
+# Experiment knobs: just_tx.toml / just_drop.toml only (formal).
+# Debug: run = ["dev"] — hardcoded in code, no knobs file.
+
+version = "1"
+
+# Ordered experiments for bare `./xpost-test`.
+# Formal: just_tx / just_drop. Fast debug: dev (own tables, hardcoded).
+run = ["just_drop"]
+
+[postgres]
+host = "192.168.110.96"
+port = 5432
+user = "nan"
+password = "22332233"
+dbname = "postgres"
+formal_schema = "formal"
+
+[agent]
+endpoint = "192.168.110.96:9240"
+
+[probe]
+iface = "br-lan"
+pair_timeout_ms = 5000
+report_path = "/tmp/test-report.json"
+# Optional Ethernet source MAC override (default: iface hardware address)
+# src_mac = "00:11:22:33:44:55"
+
+[dut]
+esp_ip = "192.168.110.106"
+vip_ip = "192.168.110.200"
+# From firmware `[Init][STA] mac=…`
+esp_mac = "dc:1e:d5:e5:e0:c8"
+echo_port = 8080
+reply_port = 18080
+# Stimulus UDP sport; must ≠ reply_port (bounce swaps ports; TC uses dport!=reply).
+stim_sport = 18081
+ctrl_port = 8081
+
+[serve]
+http_listen = "0.0.0.0:19081"
+
+[profiles]
+drop_hal = "drop-hal"
+drop_xdp = "drop-xdp"
+firmware = "firmware"
+just_drop = "just-drop"
+just_drop_hal = "just-drop-hal"
+just_tx = "just-tx"
+just_tx_hal = "just-tx-hal"

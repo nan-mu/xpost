@@ -111,6 +111,11 @@ fn tag_varint(field: u64) -> u64 {
     field << 3
 }
 
+/// Protobuf wire tag for wire type 0 (varint): `(field << 3) | 0`.
+fn tag_varint(field: u64) -> u64 {
+    field << 3
+}
+
 fn skip_field(buf: &[u8], i: &mut usize, wt: u32) -> Result<(), DecodeError> {
     match wt {
         0 => {

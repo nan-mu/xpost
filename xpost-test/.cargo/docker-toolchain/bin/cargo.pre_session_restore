@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Path-toolchain shims under .cargo/docker-toolchain/bin/{cargo,rustc,…}.
+# Mac: rust-toolchain.toml → these binaries → docker exec quirky_villani.
+# In-container: fall through to /usr/local/cargo/bin with RUSTUP_TOOLCHAIN=nightly
+# so we do not re-enter this path toolchain.
+set -euo pipefail
+
+CONTAINER="${XPOST_TEST_DOCKER:-quirky_villani}"
+HOST_ROOT="${XPOST_HOST_ROOT:-/Users/nan/bs}"
+TOOL="$(basename "$0")"
+REAL="/usr/local/cargo/bin/${TOOL}"
+
+in_docker() {
+  [ -f /.dockerenv ] || [ -n "${XPOST_TEST_IN_DOCKER:-}" ]
+}
+
+if in_docker; then
+  if [ ! -x "$REAL" ]; then
+    echo "xpost-test docker-toolchain: missing $REAL" >&2
+    exit 127
+  fi
+  exec env RUSTUP_TOOLCHAIN=nightly "$REAL" "$@"
+fi
+
+cwd="$(pwd -P)"
+case "$cwd" in
+  "$HOST_ROOT" | "$HOST_ROOT"/*) ;;
+  *)
+    echo "xpost-test docker-toolchain: cwd $cwd is outside $HOST_ROOT" >&2
+    exit 1
+    ;;
+esac
+
+if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
+  echo "xpost-test docker-toolchain: container $CONTAINER is not running" >&2
+  exit 1
+fi
+
+tty_flags=(-i)
+if [ -t 1 ]; then
+  tty_flags=(-it)
+fi
+
+exec docker exec "${tty_flags[@]}" \
+  -e XPOST_TEST_IN_DOCKER=1 \
+  -e RUSTUP_TOOLCHAIN=nightly \
+  -w "$cwd" \
+  "$CONTAINER" \
+  "$REAL" "$@"
