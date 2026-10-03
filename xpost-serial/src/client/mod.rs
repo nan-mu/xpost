@@ -82,6 +82,22 @@ impl SerialHandler {
         }
     }
 
+    /// Like [`Self::open_memory`], but tees the session transcript to `log_path`.
+    #[cfg(all(test, feature = "dev"))]
+    pub fn open_memory_with_log(client: MemoryClient, log_path: &Path) -> io::Result<Self> {
+        Ok(Self {
+            link: AppLink::Memory(client),
+            record: SharedRecordInner::create(log_path, false)?,
+            flash: None,
+        })
+    }
+
+    /// Read the entire transcript file (empty if this handler has no log path).
+    #[cfg(all(test, feature = "dev"))]
+    pub fn log_lines(&self) -> io::Result<Vec<String>> {
+        self.record.lock().all_lines()
+    }
+
     /// Stop the flash worker (if any) and release this handler.
     pub fn shutdown(self) {
         if let Some(flash) = self.flash {

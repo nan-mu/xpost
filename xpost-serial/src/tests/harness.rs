@@ -140,3 +140,37 @@ pub fn with_session<H, F>(
     body(&client);
     client.shutdown();
 }
+
+/// Like [`with_session`], but tees the client transcript to a temp file and returns its lines.
+pub fn with_session_logged<H, F>(
+    register: impl FnOnce(TestBuilder) -> ServerHandler<ReadFn, WriteFn, H, 128>,
+    body: F,
+) -> Vec<String>
+where
+    H: RequestHandler + Send + 'static,
+    F: FnOnce(&SerialHandler),
+{
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let log_path: PathBuf = std::env::temp_dir().join(format!(
+        "xpost-serial-log-{}-{nanos}.log",
+        std::process::id()
+    ));
+
+    let pair = MemoryPair::new();
+    let client = SerialHandler::open_memory_with_log(pair.client, &log_path)
+        .expect("open_memory_with_log");
+    let handler = register(builder(pair.server));
+    let _server = spawn_server(handler);
+    thread::sleep(Duration::from_millis(20));
+    body(&client);
+    let lines = client.log_lines().expect("read session log");
+    client.shutdown();
+    let _ = std::fs::remove_file(&log_path);
+    lines
+}

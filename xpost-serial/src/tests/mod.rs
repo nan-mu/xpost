@@ -2,5 +2,6 @@
 
 mod command;
 mod harness;
+mod log;
 mod reply;
 mod session;

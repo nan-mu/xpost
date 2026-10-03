@@ -262,6 +262,16 @@ impl Record {
         Ok(out)
     }
 
+    /// All transcript lines from the log file (no time filter).
+    #[cfg(all(test, feature = "dev"))]
+    pub fn all_lines(&self) -> io::Result<Vec<String>> {
+        let Some(path) = self.path.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let file = File::open(path)?;
+        BufReader::new(file).lines().collect()
+    }
+
     pub(crate) fn ok_from_found<E>(
         &self,
         found: &Found,
