@@ -54,10 +54,6 @@ impl SharedRecordInner {
         self.notify.notified().await;
     }
 
-    pub fn path(&self) -> PathBuf {
-        self.lock().path().to_path_buf()
-    }
-
     /// Wait for a matching reply after `after` (caller races timeout / interrupt).
     pub(crate) async fn wait_reply<E>(
         &self,
@@ -116,10 +112,6 @@ pub(crate) trait WriteRecord {
     fn write_to(&self, rec: &mut Record);
 }
 
-pub(crate) trait WithRecord {
-    fn record(self, rec: &mut Record) -> Self;
-}
-
 impl WriteRecord for OkReply<'_> {
     fn write_to(&self, rec: &mut Record) {
         rec.cmd_rx(crate::client::serial::ok_label(self));
@@ -139,19 +131,6 @@ impl WriteRecord for Command<'_> {
 impl WriteRecord for FlashEvent {
     fn write_to(&self, rec: &mut Record) {
         rec.flash(self);
-    }
-}
-
-impl<T, E: Display> WithRecord for core::result::Result<T, E>
-where
-    T: WriteRecord,
-{
-    fn record(self, rec: &mut Record) -> Self {
-        match &self {
-            Ok(ok) => ok.write_to(rec),
-            Err(e) => rec.err(e),
-        }
-        self
     }
 }
 
@@ -175,10 +154,6 @@ impl Record {
             payloads: Vec::new(),
             entries: Vec::new(),
         })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     pub fn payload(&self, i: usize) -> Option<&[u8]> {
@@ -217,10 +192,6 @@ impl Record {
         let at = SystemTime::now();
         let payload = self.push_payload(&data);
         self.entries.push(Entry::Blob { at, payload });
-    }
-
-    pub fn err(&mut self, err: &impl Display) {
-        self.append_file(&format!("[err] {err}"));
     }
 
     pub fn flash(&mut self, flash: &impl Display) {
