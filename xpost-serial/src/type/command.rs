@@ -6,7 +6,7 @@
 
 use core::time::Duration;
 
-/// Host wait for unsolicited [`crate::r#type::reply::OkReply::Init`] when using
+/// Host wait for unsolicited [`crate::reply::OkReply::Init`] when using
 /// [`Command::GetInit`]. Not a UART deadline for a request line.
 pub const GET_INIT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -26,6 +26,8 @@ pub enum Command<'a> {
     GetMap {
         name: &'a str,
     },
+    /// Names borrow ASCII; key/value borrow the original wire tokens, not decoded
+    /// integers. The firmware validates them against the selected map's schema.
     UpdateMap {
         name: &'a str,
         key: &'a [u8],

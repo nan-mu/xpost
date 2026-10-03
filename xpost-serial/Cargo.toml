@@ -10,7 +10,7 @@ description = "Host serial/flash backend for xpost-agent (USB-UART + espflash)"
 [workspace]
 
 [features]
-default = ["client"]
+default = ["server"]
 # Host USB control plane (serial + flash tasks). Mutually exclusive with `server`.
 client = [
     "dep:esp-idf-part",
@@ -23,9 +23,11 @@ client = [
     "dep:xpost-elf",
 ]
 # Server / App-mode dispatch + reply generation (no host USB deps).
-server = []
+server = ["dep:winnow", "dep:embassy-executor", "dep:embassy-time"]
 
 [dependencies]
+embassy-executor = { version = "0.10", default-features = false, optional = true }
+embassy-time = { version = "0.5", default-features = false, optional = true }
 esp-idf-part = { version = "0.6", optional = true }
 espflash = { version = "4.6", default-features = false, features = ["serialport"], optional = true }
 futures = { version = "0.3", optional = true }

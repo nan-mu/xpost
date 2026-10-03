@@ -1,8 +1,8 @@
 //! Wire reply shapes: `OK …` / `ERR …`. `no_std`, no `alloc`.
 //!
 //! Host parsing lives on the client; server-side builders live on the server.
-//! [`Display`] is optional and implemented beside those sides — not required by
-//! [`ErrReply`].
+//! Wire conversion uses explicit codec interfaces; these shapes do not require
+//! `Debug` or `Display`.
 
 /// Successful App-mode reply (borrows wire bytes from the caller / record store).
 pub enum OkReply<'a> {
@@ -22,23 +22,79 @@ pub enum OkReply<'a> {
     },
     /// Unsolicited `OK init` after App-mode init finishes.
     ///
-    /// Host obtains this via [`crate::r#type::command::Command::GetInit`] as a
+    /// Host obtains this via [`crate::command::Command::GetInit`] as a
     /// transcript wait only — there is no UART request line.
     Init,
 }
 
-/// Reply-error surface: local parse vs server `ERR` implement separately.
+/// Common bound for independent reply-error types.
 ///
-/// [`fmt::Display`] is **not** required — wire/host formatting is optional and
-/// provided by client / server as needed.
+/// Server, map, perf and local parsing errors implement this trait directly.
+/// There is no enclosing error enum and no requirement to convert one error
+/// domain into another. Formatting and wire encoding are separate interfaces;
+/// implementing this marker alone does not make a local error a wire reply.
 pub trait ErrReply {}
 
-/// Successfully recognized server `ERR <cmd>` (why text is discarded).
+/// General device execution/protocol failures, independent of the command.
+///
+/// Domain failures are peers ([`MapError`] and [`PerfError`]), never payloads of
+/// this enum. See the [wire contract](super#device-error-contract). A timeout
+/// reported by the device is distinct from the host's local waiting deadline.
 pub enum ServerError {
+    /// `ERR unknown`: an empty or unrecognized request, including `get init`.
     Unknown,
+    /// `ERR timeout`: the device execution deadline expired before output began.
+    /// Does not imply rollback of work already performed.
+    Timeout,
+    /// `ERR logic`: an internal invariant or execution-state assumption failed.
+    Logic,
+    /// `ERR busy`: a conflicting operation prevents execution at this time.
+    Busy,
+    /// `ERR unsupported`: the requested facility/operation is not implemented.
+    Unsupported,
 }
 
 impl ErrReply for ServerError {}
+
+/// Map-domain failures shared by get, clear and update operations.
+///
+/// These describe what failed, without wrapping an operation or another error.
+/// General device timeouts and logic failures remain [`ServerError`] values.
+pub enum MapError {
+    /// `ERR map name-not-found`: no map exists under the requested name.
+    NameNotFound,
+    /// `ERR map key-not-found`: an operation requiring an existing key found none.
+    /// An ordinary hash upsert may insert an absent key and need not fail here.
+    KeyNotFound,
+    /// `ERR map invalid-name`: the name violates firmware naming rules.
+    InvalidName,
+    /// `ERR map invalid-key`: malformed/wrong-sized key or out-of-range index.
+    InvalidKey,
+    /// `ERR map invalid-value`: malformed, overflowing or wrong-sized value.
+    InvalidValue,
+    /// `ERR map full`: a new hash entry cannot fit in the map.
+    Full,
+    /// `ERR map unsupported`: the map kind/layout does not support the operation.
+    Unsupported,
+    /// `ERR map buffer-too-small`: bounded storage cannot hold the map snapshot.
+    BufferTooSmall,
+}
+
+impl ErrReply for MapError {}
+
+/// Performance-domain failures shared by get and clear operations.
+///
+/// General device timeouts and logic failures remain [`ServerError`] values.
+pub enum PerfError {
+    /// `ERR perf unavailable`: the required performance facility is not enabled.
+    Unavailable,
+    /// `ERR perf unsupported`: the requested perf operation/layout is unsupported.
+    Unsupported,
+    /// `ERR perf buffer-too-small`: bounded storage cannot hold the report.
+    BufferTooSmall,
+}
+
+impl ErrReply for PerfError {}
 
 pub enum MapKind {
     Array { size: u32 },

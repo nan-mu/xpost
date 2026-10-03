@@ -45,6 +45,10 @@ impl fmt::Debug for ServerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unknown => f.write_str("Unknown"),
+            Self::Timeout => f.write_str("Timeout"),
+            Self::Logic => f.write_str("Logic"),
+            Self::Busy => f.write_str("Busy"),
+            Self::Unsupported => f.write_str("Unsupported"),
         }
     }
 }
@@ -53,6 +57,10 @@ impl fmt::Display for ServerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unknown => f.write_str("ERR unknown"),
+            Self::Timeout => f.write_str("ERR timeout"),
+            Self::Logic => f.write_str("ERR logic"),
+            Self::Busy => f.write_str("ERR busy"),
+            Self::Unsupported => f.write_str("ERR unsupported"),
         }
     }
 }

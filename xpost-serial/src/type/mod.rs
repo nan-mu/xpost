@@ -28,7 +28,7 @@
 //! must never be produced by server request parsing. Host `request(GetInit)`
 //! (or equivalent) only looks for / waits until `OK init` appears in the
 //! transcript, with deadline [`command::GET_INIT_TIMEOUT`]. Success is
-//! [`OkReply::Init`](reply::OkReply::Init).
+//! [`OkReply::Init`].
 //!
 //! # [`reply::OkReply`] — success
 //!
@@ -71,17 +71,63 @@
 //! never by sending a command on the wire. Deadline:
 //! [`command::GET_INIT_TIMEOUT`].
 //!
-//! # [`reply::ServerError`] — DUT `ERR`
+//! # Device error contract
 //!
-//! Wire: `ERR <cmd-ish> <why>` (e.g. `ERR clear map not-found`,
-//! `ERR get perf no-perf`). Recognized shape collapses to
-//! [`ServerError::Unknown`](reply::ServerError::Unknown) for now (`why` discarded).
-//! Local host parse failures are a separate [`reply::ErrReply`] implementor on
-//! the client (`client::error::ParseError`), not a wire variant. App-mode
-//! `request` returns `Result<OkReply, E>` with `E: ErrReply`.
+//! Errors are flat semantic types sharing the [`reply::ErrReply`] marker:
+//! [`reply::ServerError`], [`reply::MapError`] and [`reply::PerfError`] each
+//! implement it directly. None wraps the others. There are no per-command
+//! error variants, catch-all wrapper enums, or implicit domain-to-server
+//! conversions. Request syntax errors also implement the same marker directly.
+//!
+//! Every wire error is one LF-terminated text line with no binary payload.
+//! Its tokens identify the failure's meaning/domain, not the originating command:
+//!
+//! - General errors: `ERR unknown`, `ERR timeout`, `ERR logic`, `ERR busy`,
+//!   `ERR unsupported`. `unknown` includes unrecognized/empty requests and
+//!   the host-only `get init`; firmware may instead ignore empty UART lines.
+//! - Map errors: `ERR map name-not-found`, `ERR map key-not-found`,
+//!   `ERR map invalid-name`, `ERR map invalid-key`, `ERR map invalid-value`,
+//!   `ERR map full`, `ERR map unsupported`, `ERR map buffer-too-small`.
+//! - Perf errors: `ERR perf unavailable`, `ERR perf unsupported`,
+//!   `ERR perf buffer-too-small`.
+//! - Request syntax errors: `ERR bad-arity` for missing/extra arguments and
+//!   `ERR invalid-utf8` for a map-name token that cannot be decoded as text,
+//!   `ERR line-too-long` after an oversized UART request has been discarded.
+//!
+//! For example, get/clear/update of an absent named map all use
+//! [`MapError::NameNotFound`]. A missing key is [`MapError::KeyNotFound`]; a hash
+//! upsert that permits insertion does not fail merely because its key is absent.
+//! A full hash insertion uses [`MapError::Full`], whereas insufficient snapshot
+//! storage uses [`MapError::BufferTooSmall`]. Get/clear of unavailable performance
+//! data uses [`PerfError::Unavailable`]. Any operation's device execution deadline
+//! uses [`ServerError::Timeout`]; violated execution invariants use
+//! [`ServerError::Logic`], independently of the command or resource domain.
+//!
+//! A timeout is a device execution result, not a host receive timeout. Lack of
+//! response is never itself a wire error. A local host error may implement
+//! [`reply::ErrReply`] without any wire representation. Server-side wire codecs
+//! provide encoding separately; neither `Debug` nor `Display` is required.
+//!
+//! The firmware validates names, key/value tokens and resource state, executes
+//! commands, and enforces any device deadlines. The protocol codec does not
+//! access maps, run timers, or guarantee rollback: a failed clear/update may
+//! already have changed state. Retries are the caller's policy.
+//!
+//! Validate resource availability and payload length before sending `OK get map <n>\n` or
+//! `OK get perf <n>\n`. Once that header starts, the sender must complete exactly
+//! `n` bytes; an execution or I/O failure cannot be reported by appending `ERR`
+//! inside the payload. The firmware may then stream an infallible encoder such
+//! as `xpost::ext::perf::report_perf` through the server writer without allocating
+//! a full blob. The UART owner must recover/re-synchronize a broken
+//! transport before exchanging further replies.
+//!
+//! Local host parse failures implement [`reply::ErrReply`] separately from wire
+//! errors, as do host waiting timeouts. The current client's ERR parser is still
+//! a stub and its error formatting requires adaptation to these new variants;
+//! this contract describes firmware output, not completed client support.
 
 pub mod command;
 pub mod reply;
 
 pub use command::{Command as WireCommand, GET_INIT_TIMEOUT};
-pub use reply::{ErrReply, MapEntry, MapKey, MapKind, OkReply, ServerError};
+pub use reply::{ErrReply, MapEntry, MapError, MapKey, MapKind, OkReply, PerfError, ServerError};
