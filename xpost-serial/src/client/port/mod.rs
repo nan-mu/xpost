@@ -1,34 +1,87 @@
-//! USB serial port identity + exclusive gate for App UART vs espflash download.
+//! USB serial port: identity, exclusive gate, App [`Uart`], espflash download.
 //!
-//! App I/O lives in [`crate::client::serial`] (`Uart` + `Log`). This module only
-//! resolves the device and serializes opens (idf-monitor pause-before-flash style).
+//! Sessions from [`Port::open_uart`] / [`Port::open_download`] hold the fd until
+//! drop. App `serial::request` runs under `tokio::select!`; interrupt/timeout
+//! returns early so the session drops and flash can open download.
 
 mod download;
+mod uart;
 
 pub use download::Downloader;
+pub use uart::{Command, Interrupt, Uart};
 
+use crate::client::record::SharedRecord;
+
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use std::io;
 use serialport::{SerialPortType, UsbPortInfo};
 
-use crate::client::error::{Error, Result};
 use crate::client::BAUD;
-use crate::r#type::ops::Chip;
+use crate::client::ops::Chip;
 
-/// Resolved USB serial endpoint (path + identity). No open fd.
+/// Resolved USB serial endpoint. No open fd until [`Self::open_uart`] /
+/// [`Self::open_download`].
 #[derive(Debug)]
 pub struct Port {
     name: String,
     usb: UsbPortInfo,
     baud: u32,
     chip: Chip,
-    /// Serialize App vs download opens (OS exclusive lock).
     gate: Mutex<()>,
+    interrupt: Interrupt,
+}
+
+/// App UART session: holds exclusive gate + fd until drop.
+pub struct UartSession<'a> {
+    _gate: std::sync::MutexGuard<'a, ()>,
+    uart: Uart,
+}
+
+impl Deref for UartSession<'_> {
+    type Target = Uart;
+    fn deref(&self) -> &Uart {
+        &self.uart
+    }
+}
+
+impl DerefMut for UartSession<'_> {
+    fn deref_mut(&mut self) -> &mut Uart {
+        &mut self.uart
+    }
+}
+
+/// Download-mode session: holds exclusive gate + fd until drop.
+pub struct DownloadSession<'a> {
+    _gate: std::sync::MutexGuard<'a, ()>,
+    dl: Downloader,
+}
+
+impl Deref for DownloadSession<'_> {
+    type Target = Downloader;
+    fn deref(&self) -> &Downloader {
+        &self.dl
+    }
+}
+
+impl DerefMut for DownloadSession<'_> {
+    fn deref_mut(&mut self) -> &mut Downloader {
+        &mut self.dl
+    }
+}
+
+impl DownloadSession<'_> {
+    /// Hard-reset to app, drop the download fd, then release the gate.
+    pub fn reset_to_app(self) -> io::Result<()> {
+        let Self { _gate, dl } = self;
+        dl.reset_to_app()
+    }
 }
 
 impl Port {
-    pub fn resolve(port: Option<&Path>, chip: Chip) -> Result<Self> {
+    pub fn resolve(port: Option<&Path>, chip: Chip) -> io::Result<Self> {
         let (name, usb) = resolve_port(port)?;
         Ok(Self {
             name,
@@ -36,6 +89,7 @@ impl Port {
             baud: BAUD,
             chip,
             gate: Mutex::new(()),
+            interrupt: Interrupt::new(),
         })
     }
 
@@ -51,27 +105,40 @@ impl Port {
         self.chip
     }
 
-    /// Hold the exclusive gate while `f` runs (App UART or any non-download use).
-    pub fn with_gate<R>(&self, f: impl FnOnce() -> Result<R>) -> Result<R> {
-        let _gate = self
-            .gate
-            .lock()
-            .map_err(|_| Error::Msg("port gate poisoned".into()))?;
-        f()
+    pub fn interrupt(&self) -> &Interrupt {
+        &self.interrupt
     }
 
-    /// Open download-mode flasher, run `f` (usually ends in [`Downloader::reset_to_app`]).
-    pub fn with_download<R>(&self, f: impl FnOnce(Downloader) -> Result<R>) -> Result<R> {
-        let _gate = self
+    /// Occupy App UART fd until the returned session is dropped.
+    ///
+    /// Spawns a reader that continuously appends framed UART into `record`.
+    /// Clears a stale interrupt first. Race work against [`Interrupt::wait`] /
+    /// a deadline so drop releases the gate for [`Self::open_download`].
+    pub(crate) fn open_uart(&self, record: SharedRecord) -> io::Result<UartSession<'_>> {
+        self.interrupt.clear();
+        let gate = self
             .gate
             .lock()
-            .map_err(|_| Error::Msg("port gate poisoned".into()))?;
+            .map_err(|_| std::io::Error::other("port gate poisoned"))?;
+        let uart = Uart::open(&self.name, self.baud, record)?;
+        Ok(UartSession { _gate: gate, uart })
+    }
+
+    /// Occupy download-mode fd until the returned session is dropped.
+    ///
+    /// Blocks on the gate until any App [`UartSession`] is dropped (after
+    /// interrupt/timeout abort).
+    pub(crate) fn open_download(&self) -> io::Result<DownloadSession<'_>> {
+        let gate = self
+            .gate
+            .lock()
+            .map_err(|_| std::io::Error::other("port gate poisoned"))?;
         let dl = Downloader::connect(&self.name, &self.usb, self.chip, self.baud)?;
-        f(dl)
+        Ok(DownloadSession { _gate: gate, dl })
     }
 }
 
-pub(crate) fn tempfile_path() -> Result<PathBuf> {
+pub(crate) fn tempfile_path() -> io::Result<PathBuf> {
     let mut p = std::env::temp_dir();
     p.push(format!(
         "xpost-serial-readback-{}-{}.bin",
@@ -81,7 +148,7 @@ pub(crate) fn tempfile_path() -> Result<PathBuf> {
     Ok(p)
 }
 
-pub(crate) fn resolve_port(port: Option<&Path>) -> Result<(String, UsbPortInfo)> {
+pub(crate) fn resolve_port(port: Option<&Path>) -> io::Result<(String, UsbPortInfo)> {
     let ports = serialport::available_ports().unwrap_or_default();
     if let Some(want) = port {
         let want_s = want.display().to_string();
@@ -150,9 +217,9 @@ pub(crate) fn resolve_port(port: Option<&Path>) -> Result<(String, UsbPortInfo)>
         }
     }
     match unique.len() {
-        0 => Err(Error::Msg("no USB serial ports found".into())),
+        0 => Err(std::io::Error::other("no USB serial ports found")),
         1 => Ok(unique.into_iter().next().unwrap()),
-        _ => Err(Error::Msg(format!(
+        _ => Err(std::io::Error::other(format!(
             "multiple USB serial ports; pass --port explicitly: {}",
             unique
                 .iter()

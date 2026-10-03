@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, bail};
+use std::io;
 
 pub const COUNTER_WIRE_LEN: usize = 184;
 pub const AGGREGATE_WIRE_LEN: usize = 8 * 176;
@@ -156,8 +156,9 @@ pub struct TraceSnap {
     pub events: Vec<TraceEvent>,
 }
 
-pub fn decode(payload: &[u8]) -> Result<Report> {
-    let mask = mask_for_len(payload.len()).context("unknown get-perf payload length")?;
+pub fn decode(payload: &[u8]) -> io::Result<Report> {
+    let mask = mask_for_len(payload.len())
+        .ok_or_else(|| std::io::Error::other("unknown get-perf payload length"))?;
     let mut off = 0usize;
     let mut report = Report {
         mask,
@@ -184,7 +185,10 @@ pub fn decode(payload: &[u8]) -> Result<Report> {
         off = end;
     }
     if off != payload.len() {
-        bail!("get-perf decode leftover {} bytes", payload.len() - off);
+        return Err(std::io::Error::other(format!(
+            "get-perf decode leftover {} bytes",
+            payload.len() - off
+        )));
     }
     Ok(report)
 }
@@ -199,9 +203,9 @@ fn u64_le(buf: &[u8]) -> u64 {
     u64::from_le_bytes(buf.try_into().unwrap())
 }
 
-fn decode_counters(buf: &[u8]) -> Result<BTreeMap<String, i64>> {
+fn decode_counters(buf: &[u8]) -> io::Result<BTreeMap<String, i64>> {
     if buf.len() != COUNTER_WIRE_LEN {
-        bail!("counter section len");
+        return Err(std::io::Error::other("counter section len"));
     }
     let mut out = BTreeMap::new();
     for (i, name) in COUNTER_NAMES.iter().enumerate() {
@@ -216,9 +220,9 @@ fn decode_counters(buf: &[u8]) -> Result<BTreeMap<String, i64>> {
     Ok(out)
 }
 
-fn decode_aggregates(buf: &[u8]) -> Result<Vec<AggSnap>> {
+fn decode_aggregates(buf: &[u8]) -> io::Result<Vec<AggSnap>> {
     if buf.len() != AGGREGATE_WIRE_LEN {
-        bail!("aggregate section len");
+        return Err(std::io::Error::other("aggregate section len"));
     }
     let mut out = Vec::with_capacity(8);
     for (i, name) in AGG_NAMES.iter().enumerate() {
@@ -253,9 +257,9 @@ fn decode_aggregates(buf: &[u8]) -> Result<Vec<AggSnap>> {
     Ok(out)
 }
 
-fn decode_gauges(buf: &[u8]) -> Result<BTreeMap<String, (i64, i64)>> {
+fn decode_gauges(buf: &[u8]) -> io::Result<BTreeMap<String, (i64, i64)>> {
     if buf.len() != GAUGE_WIRE_LEN {
-        bail!("gauge section len");
+        return Err(std::io::Error::other("gauge section len"));
     }
     let mut out = BTreeMap::new();
     for (i, name) in GAUGE_NAMES.iter().enumerate() {
@@ -267,9 +271,9 @@ fn decode_gauges(buf: &[u8]) -> Result<BTreeMap<String, (i64, i64)>> {
     Ok(out)
 }
 
-fn decode_trace(buf: &[u8]) -> Result<TraceSnap> {
+fn decode_trace(buf: &[u8]) -> io::Result<TraceSnap> {
     if buf.len() != TRACE_WIRE_LEN {
-        bail!("trace section len");
+        return Err(std::io::Error::other("trace section len"));
     }
     let len = u32_le(&buf[0..4]);
     let dropped = u32_le(&buf[4..8]);

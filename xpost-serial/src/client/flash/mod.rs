@@ -14,12 +14,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::FutureExt;
+use futures::executor::block_on;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::client::error::{Error, Result};
+use std::io;
+use crate::client::ops::{FlashEvent, FlashOp};
 use crate::client::port::Port;
-use crate::client::serial::{InterruptTx, Log};
-use crate::r#type::ops::{Flash, FlashOp};
+use crate::client::record::{SharedRecord, WriteRecord};
 
 /// Default partition label for the XDP flash span (`partitions.csv` Name column).
 pub const DEFAULT_XDP_PARTITION: &str = "xdp";
@@ -27,7 +28,7 @@ pub const DEFAULT_XDP_PARTITION: &str = "xdp";
 enum FlashReq {
     Op {
         op: FlashOp,
-        resp: oneshot::Sender<Result<FlashResult>>,
+        resp: oneshot::Sender<io::Result<FlashResult>>,
     },
     Shutdown,
 }
@@ -40,78 +41,36 @@ pub enum FlashResult {
     List(Vec<XdpEntry>),
 }
 
-/// Handle for flash operations (dedicated tokio task; exclusive with App UART via [`Port`] gate).
-pub struct FlashHandle {
+/// Internal flash worker handle (owned by [`crate::client::SerialHandler`]).
+pub(crate) struct FlashWorker {
     tx: mpsc::UnboundedSender<FlashReq>,
     join: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl FlashHandle {
-    pub async fn flash_fw(&self, firmware: &Path, partitions: &Path) -> Result<()> {
-        match self
-            .call(FlashOp::Fw {
-                firmware: firmware.display().to_string(),
-                partitions: partitions.display().to_string(),
-            })
-            .await?
-        {
-            FlashResult::Done => Ok(()),
-            other => Err(Error::Msg(format!("unexpected flash result: {other:?}"))),
-        }
+impl FlashWorker {
+    pub(crate) fn call(&self, op: FlashOp) -> io::Result<FlashResult> {
+        block_on(self.call_async(op))
     }
 
-    pub async fn flash_xdp(&self, name: &str, path: &Path) -> Result<InstallOutcome> {
-        match self
-            .call(FlashOp::Xdp {
-                name: name.to_string(),
-                path: path.display().to_string(),
-            })
-            .await?
-        {
-            FlashResult::Install(o) => Ok(o),
-            other => Err(Error::Msg(format!("unexpected flash result: {other:?}"))),
-        }
-    }
-
-    /// `names` empty ⇒ clear entire XDP table (`*`).
-    pub async fn clear_xdp(&self, names: &[String]) -> Result<()> {
-        match self
-            .call(FlashOp::Clear {
-                names: names.to_vec(),
-            })
-            .await?
-        {
-            FlashResult::Done => Ok(()),
-            other => Err(Error::Msg(format!("unexpected flash result: {other:?}"))),
-        }
-    }
-
-    pub async fn list_xdp(&self) -> Result<Vec<XdpEntry>> {
-        match self.call(FlashOp::List).await? {
-            FlashResult::List(v) => Ok(v),
-            other => Err(Error::Msg(format!("unexpected flash result: {other:?}"))),
-        }
-    }
-
-    async fn call(&self, op: FlashOp) -> Result<FlashResult> {
+    async fn call_async(&self, op: FlashOp) -> io::Result<FlashResult> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
             .send(FlashReq::Op { op, resp: resp_tx })
-            .map_err(|_| Error::Msg("flash task closed".into()))?;
+            .map_err(|_| std::io::Error::other("flash task closed"))?;
         resp_rx
             .await
-            .map_err(|_| Error::Msg("flash response dropped".into()))?
+            .map_err(|_| std::io::Error::other("flash response dropped"))?
     }
 
-    pub async fn shutdown(mut self) {
+    pub(crate) fn shutdown(mut self) {
         let _ = self.tx.send(FlashReq::Shutdown);
         if let Some(j) = self.join.take() {
-            let _ = j.await;
+            let _ = block_on(j);
         }
     }
 }
 
-impl Drop for FlashHandle {
+impl Drop for FlashWorker {
     fn drop(&mut self) {
         let _ = self.tx.send(FlashReq::Shutdown);
         if let Some(j) = self.join.take() {
@@ -133,7 +92,7 @@ pub struct FlashConfig {
 
 impl FlashConfig {
     /// Build config from a board `partitions.csv` (partition label `"xdp"`).
-    pub fn from_partitions_csv(partitions: impl Into<PathBuf>) -> Result<Self> {
+    pub fn from_partitions_csv(partitions: impl Into<PathBuf>) -> io::Result<Self> {
         Self::from_partitions_csv_named(partitions, DEFAULT_XDP_PARTITION)
     }
 
@@ -141,7 +100,7 @@ impl FlashConfig {
     pub fn from_partitions_csv_named(
         partitions: impl Into<PathBuf>,
         partition: impl Into<String>,
-    ) -> Result<Self> {
+    ) -> io::Result<Self> {
         let partitions = partitions.into();
         let partition = partition.into();
         let table = xdp_table_from_csv(&partitions, &partition)?;
@@ -153,7 +112,7 @@ impl FlashConfig {
     }
 
     /// Resolve [`XdpTable`] from [`Self::partitions`] / [`Self::partition`].
-    pub fn xdp_table(&self) -> Result<XdpTable> {
+    pub fn xdp_table(&self) -> io::Result<XdpTable> {
         let mut table = xdp_table_from_csv(&self.partitions, &self.partition)?;
         table.image_capacity = table.image_capacity.min(self.image_capacity);
         Ok(table)
@@ -161,15 +120,10 @@ impl FlashConfig {
 }
 
 /// Spawn flash worker on shared [`Port`] (open-per-op download).
-pub fn spawn(
-    cfg: FlashConfig,
-    port: Arc<Port>,
-    log: Arc<Log>,
-    interrupt: InterruptTx,
-) -> FlashHandle {
+pub(crate) fn spawn(cfg: FlashConfig, port: Arc<Port>, record: SharedRecord) -> FlashWorker {
     let (tx, rx) = mpsc::unbounded_channel();
-    let join = tokio::spawn(worker(cfg, port, log, interrupt, rx));
-    FlashHandle {
+    let join = tokio::spawn(worker(cfg, port, record, rx));
+    FlashWorker {
         tx,
         join: Some(join),
     }
@@ -178,8 +132,7 @@ pub fn spawn(
 async fn worker(
     cfg: FlashConfig,
     port: Arc<Port>,
-    log: Arc<Log>,
-    interrupt: InterruptTx,
+    record: SharedRecord,
     mut rx: mpsc::UnboundedReceiver<FlashReq>,
 ) {
     while let Some(req) = rx.recv().await {
@@ -188,14 +141,12 @@ async fn worker(
             FlashReq::Op { op, resp } => {
                 let cfg = cfg.clone();
                 let port = Arc::clone(&port);
-                let log = Arc::clone(&log);
-                let interrupt = interrupt.clone();
-                let result =
-                    tokio::task::spawn_blocking(move || run_op(&port, &cfg, &log, &interrupt, &op))
-                        .map(|join| {
-                            join.unwrap_or_else(|e| Err(Error::Msg(format!("flash join: {e}"))))
-                        })
-                        .await;
+                let record = Arc::clone(&record);
+                let result = tokio::task::spawn_blocking(move || run_op(&port, &cfg, &record, &op))
+                    .map(|join| {
+                        join.unwrap_or_else(|e| Err(std::io::Error::other(format!("flash join: {e}"))))
+                    })
+                    .await;
                 let _ = resp.send(result);
             }
         }
@@ -205,34 +156,51 @@ async fn worker(
 fn run_op(
     port: &Port,
     cfg: &FlashConfig,
-    log: &Log,
-    interrupt: &InterruptTx,
+    record: &SharedRecord,
     op: &FlashOp,
-) -> Result<FlashResult> {
-    // Kick App UART select (if any) so it can drop and release the gate; then
-    // take download. Do not wait for a serial ack — flash is disruptive.
-    let _ = interrupt.try_send(());
-    log.write_line(&Flash::Begin(op.clone()).to_string());
+) -> io::Result<FlashResult> {
+    // Abort any App UART `select!` so its session drops and releases the gate;
+    // then open download. Do not wait for a serial ack — flash is disruptive.
+    port.interrupt().signal();
+    {
+        let mut rec = record.lock();
+        FlashEvent::Begin(op.clone()).write_to(&mut rec);
+    }
     let result = match op {
         FlashOp::Fw {
             firmware,
             partitions,
-        } => fw::flash_fw(port, Path::new(firmware), Path::new(partitions)).map(|_| FlashResult::Done),
+        } => fw::flash_fw(port, Path::new(firmware), Path::new(partitions))
+            .map(|_| FlashResult::Done),
         FlashOp::Xdp { name, path } => {
             xdp::install(port, cfg, name, Path::new(path)).map(FlashResult::Install)
         }
         FlashOp::Clear { names } => xdp::clear(port, cfg, names).map(|_| FlashResult::Done),
         FlashOp::List => xdp::list(port, cfg).map(FlashResult::List),
     };
-    match &result {
-        Ok(_) => log.write_line(&Flash::End(op.clone()).to_string()),
-        Err(e) => log.write_line(
-            &Flash::Failed {
+    {
+        let mut rec = record.lock();
+        match &result {
+            Ok(FlashResult::List(entries)) => {
+                for e in entries {
+                    rec.flash(&format!(
+                        "FLASH list name={} offset={} len={}",
+                        e.name, e.offset, e.len
+                    ));
+                }
+                FlashEvent::End(op.clone()).write_to(&mut rec);
+            }
+            Ok(FlashResult::Install(o)) => {
+                rec.flash(&format!("FLASH install {o:?}"));
+                FlashEvent::End(op.clone()).write_to(&mut rec);
+            }
+            Ok(FlashResult::Done) => FlashEvent::End(op.clone()).write_to(&mut rec),
+            Err(e) => FlashEvent::Failed {
                 op: op.clone(),
                 msg: e.to_string(),
             }
-            .to_string(),
-        ),
+            .write_to(&mut rec),
+        }
     }
     result
 }

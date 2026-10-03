@@ -25,7 +25,6 @@ pub use r#type::{command, reply};
 
 #[cfg(feature = "client")]
 pub use client::{
-    DEFAULT_XDP_PARTITION, Chip, Client, FlashConfig, FlashHandle, FlashResult, InstallOutcome,
-    OpenOptions, Port, XdpEntry, XdpTable, xdp_name_from_bytes, xdp_name_from_file,
-    xdp_table_from_csv,
+    Chip, DEFAULT_XDP_PARTITION, FlashConfig, FlashResult, InstallOutcome, OpenOptions, Port,
+    SerialHandler, XdpEntry, XdpTable,
 };

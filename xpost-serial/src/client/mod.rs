@@ -1,25 +1,33 @@
 //! Host USB control plane: sync App UART + flash task sharing [`port::Port`].
 
-pub mod command;
 pub mod error;
 pub mod flash;
+pub mod ops;
 pub mod port;
+pub mod record;
+pub mod reply;
 pub mod serial;
+mod wire_fmt;
 
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-pub use crate::r#type::ops::{
-    Chip, Clear, Command, Disable, Enable, Flash, FlashOp, Get, Update,
-};
-pub use error::{Error, Result};
+use futures::executor::block_on;
+
+pub use crate::r#type::command::Command;
+pub use crate::r#type::reply::OkReply;
+pub use error::{Interrupted, ParseError, RequestError, RequestTimeout, Result};
 pub use flash::{
-    DEFAULT_XDP_PARTITION, FlashConfig, FlashHandle, FlashResult, InstallOutcome, XdpEntry,
-    XdpTable, xdp_name_from_bytes, xdp_name_from_file, xdp_table_from_csv,
+    DEFAULT_XDP_PARTITION, FlashConfig, FlashResult, InstallOutcome, XdpEntry, XdpTable,
 };
+pub use ops::{Chip, FlashOp};
 pub use port::Port;
-pub use serial::{Log, ReplyMsg, Report, SerialHandle, decode_perf, mask_for_len};
+pub use serial::{Report, decode_perf, mask_for_len};
+
+use flash::FlashWorker;
+use record::{SharedRecord, SharedRecordInner};
 
 // —— shared client constants (single source) ——
 
@@ -34,13 +42,6 @@ pub(crate) const RESET_TO_APP_SETTLE: Duration = Duration::from_millis(800);
 /// Reader-thread wake only — never the business request deadline.
 pub(crate) const PORT_IO_TIMEOUT: Duration = Duration::from_millis(200);
 
-/// Paired serial + flash handles sharing one [`Port`] (open-per-op).
-pub struct Client {
-    pub port: Arc<Port>,
-    pub serial: SerialHandle,
-    pub flash: FlashHandle,
-}
-
 pub struct OpenOptions<'a> {
     pub port: Option<&'a Path>,
     pub chip: Chip,
@@ -49,30 +50,50 @@ pub struct OpenOptions<'a> {
     pub flash: FlashConfig,
 }
 
-impl Client {
-    /// Resolve USB port, bind App + flash handles (no long-lived fd on the port).
-    ///
-    /// App: `serial` module (`Uart` select = business / interrupt / timeout).
-    /// Flash: signals interrupt then `Port::with_download`.
-    pub fn open(opts: OpenOptions<'_>) -> Result<Self> {
+/// Unified host control-plane handle (App UART + flash worker).
+pub struct SerialHandler {
+    port: Arc<Port>,
+    record: SharedRecord,
+    flash: FlashWorker,
+}
+
+impl SerialHandler {
+    /// Resolve USB port, bind App + flash worker (no long-lived fd on the port).
+    pub fn open(opts: OpenOptions<'_>) -> io::Result<Self> {
         let port = Arc::new(Port::resolve(opts.port, opts.chip)?);
-        let (interrupt_tx, interrupt_rx) = serial::interrupt_channel();
-        let serial = serial::open(
-            Arc::clone(&port),
-            opts.log_path,
-            opts.tee_stdout,
-            interrupt_rx,
-        )?;
-        let flash = flash::spawn(
-            opts.flash,
-            Arc::clone(&port),
-            serial.log_arc(),
-            interrupt_tx,
-        );
+        let record = SharedRecordInner::create(opts.log_path, opts.tee_stdout)?;
+        let flash = flash::spawn(opts.flash, Arc::clone(&port), Arc::clone(&record));
         Ok(Self {
             port,
-            serial,
+            record,
             flash,
         })
+    }
+
+    /// Stop the flash worker and release this handler.
+    pub fn shutdown(self) {
+        self.flash.shutdown();
+    }
+
+    /// Send one App wire [`Command`] and wait for the matching reply.
+    pub fn request<'a, E>(&'a self, cmd: &Command<'_>) -> Result<'a, E>
+    where
+        E: RequestError,
+    {
+        let found = block_on(serial::run_op::<E>(&self.port, &self.record, cmd))?;
+        self.record.materialize_ok::<E>(&found)
+    }
+
+    /// Run a download-mode [`FlashOp`] (not an App-mode wire reply).
+    pub fn flash(&self, op: FlashOp) -> io::Result<FlashResult> {
+        self.flash.call(op)
+    }
+
+    pub fn lines_in_range(&self, since: SystemTime, until: SystemTime) -> io::Result<Vec<String>> {
+        self.record.lock().lines_in_range(since, until)
+    }
+
+    pub fn port(&self) -> &Port {
+        &self.port
     }
 }
