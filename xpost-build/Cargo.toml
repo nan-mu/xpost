@@ -17,6 +17,10 @@ name = "xpost-link"
 path = "src/bin/xpost-link.rs"
 
 [[bin]]
+name = "xpost-link"
+path = "src/bin/xpost-link.rs"
+
+[[bin]]
 name = "xpost-compact-elf"
 path = "src/bin/xpost-compact-elf.rs"
 

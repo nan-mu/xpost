@@ -1038,6 +1038,7 @@ fn wifi_deinit() -> Result<(), crate::WifiError> {
 }
 
 #[cfg_attr(feature = "xdp", ram)]
+#[cfg_attr(feature = "xdp", ram)]
 unsafe extern "C" fn recv_cb_sta(
     buffer: *mut c_types::c_void,
     len: u16,
@@ -1143,23 +1144,14 @@ fn xdp_dispatch(
     }
     let frame = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), len as usize) };
     let prog = xdp::current();
-    #[cfg(feature = "xdp-observe")]
-    {
-        prog.rx_packets(frame.len());
-    }
+    xdp::observe::notify(|p| p.on_rx_enter(frame.len()));
     let (action, window) = {
-        #[cfg(feature = "xdp-observe")]
-        {
-            prog.xdp_invocations();
-        }
+        xdp::observe::notify(|p| p.on_xdp_enter());
         let _run = xdp::prof::Span::enter(xdp::prof::Site::XdpRun);
         let frame_ptr = frame.as_ptr();
         let frame_len = frame.len();
         let (xdp_act, win) = prog.run(frame);
-        #[cfg(feature = "xdp-observe")]
-        {
-            prog.xdp_action(xdp_act);
-        }
+        xdp::observe::notify(|p| p.on_xdp_leave(xdp_act));
         let action = xdp::map_xdp_action(xdp_act, frame_ptr, frame_len, win);
         (action, win)
     };
@@ -1183,22 +1175,14 @@ fn xdp_dispatch(
                     }
                 }) {
                     Ok(depth) => {
-                        #[cfg(feature = "xdp-observe")]
-                        {
-                            prog.rx_delivered(depth);
-                        }
-                        #[cfg(not(feature = "xdp-observe"))]
-                        let _ = depth;
+                        xdp::observe::notify(|p| p.on_pass(depth));
                         wake();
                         include::ESP_OK as esp_err_t
                     }
                     Err(_) => {
                         debug!("RX QUEUE FULL");
-                        #[cfg(feature = "xdp-observe")]
-                        {
-                            let depth = RX_QUEUE_SIZE.load(Ordering::Relaxed);
-                            prog.rx_queue_overflow(depth);
-                        }
+                        let depth = RX_QUEUE_SIZE.load(Ordering::Relaxed);
+                        xdp::observe::notify(|p| p.on_rx_overflow(depth));
                         include::ESP_ERR_NO_MEM as esp_err_t
                     }
                 },
@@ -1206,35 +1190,23 @@ fn xdp_dispatch(
         }
         Action::Drop => {
             xdp::free_rx_buffer(eb);
-            #[cfg(feature = "xdp-observe")]
-            {
-                prog.rx_discarded();
-            }
+            xdp::observe::notify(|p| p.on_drop());
             Some(include::ESP_OK as esp_err_t)
         }
         Action::Tx => {
             match xdp::tx::transmit(ifx, window, eb) {
                 xdp::tx::TxOutcome::Ok => {}
                 xdp::tx::TxOutcome::FailBadBuf => {
-                    #[cfg(feature = "xdp-observe")]
-                    {
-                        prog.tx_fail_bad_buf();
-                    }
+                    xdp::observe::notify(|p| p.on_tx_fail_bad_buf());
                 }
                 xdp::tx::TxOutcome::FailToken | xdp::tx::TxOutcome::FailRing => {
-                    #[cfg(feature = "xdp-observe")]
-                    {
-                        prog.tx_fail_token();
-                    }
+                    xdp::observe::notify(|p| p.on_tx_fail_token());
                 }
             }
             Some(include::ESP_OK as esp_err_t)
         }
     };
-    #[cfg(feature = "xdp-observe")]
-    {
-        prog.rx_end();
-    }
+    xdp::observe::notify(|p| p.on_rx_end());
     result
 }
 

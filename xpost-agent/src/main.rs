@@ -255,71 +255,6 @@ fn run() -> Result<()> {
 
 /// One datagram to the DUT. Returns `ack` or `no-ack`.
 pub(crate) fn probe_ack(esp: &str, port: u16, timeout: Duration) -> Result<&'static str> {
-    match probe_ack_native(esp, port, timeout) {
-        Ok(v) => Ok(v),
-        // macOS Local Network Privacy: ad-hoc Rust UDP often gets EHOSTUNREACH (65)
-        // while Apple-signed `/usr/bin/python3` / `nc` still work.
-        Err(e) if cfg!(target_os = "macos") => {
-            eprintln!("xpost-agent: native UDP probe failed ({e:#}); trying /usr/bin/python3");
-            probe_ack_via_python(esp, port, timeout)
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// Fire-and-forget N STIMs (no ACK wait). Used so drop-phase volume is not gated by 2s timeouts.
-pub(crate) fn probe_burst(esp: &str, port: u16, n: u32) -> Result<u32> {
-    match probe_burst_native(esp, port, n) {
-        Ok(v) => Ok(v),
-        Err(e) if cfg!(target_os = "macos") => {
-            eprintln!("xpost-agent: native UDP burst failed ({e:#}); trying /usr/bin/python3");
-            probe_burst_via_python(esp, port, n)
-        }
-        Err(e) => Err(e),
-    }
-}
-
-fn probe_burst_native(esp: &str, port: u16, n: u32) -> Result<u32> {
-    let sock = UdpSocket::bind("0.0.0.0:0").context("bind burst socket")?;
-    let dest = format!("{esp}:{port}");
-    let mut sent = 0u32;
-    for _ in 0..n {
-        sock.send_to(b"STIM\n", &dest)
-            .with_context(|| format!("burst send to {dest}"))?;
-        sent += 1;
-    }
-    Ok(sent)
-}
-
-fn probe_burst_via_python(esp: &str, port: u16, n: u32) -> Result<u32> {
-    let code = r#"
-import socket, sys
-esp, port, n = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sent = 0
-for _ in range(n):
-    s.sendto(b"STIM\n", (esp, port))
-    sent += 1
-print(sent)
-"#;
-    let out = std::process::Command::new("/usr/bin/python3")
-        .args(["-c", code, esp, &port.to_string(), &n.to_string()])
-        .output()
-        .context("spawn /usr/bin/python3 for UDP burst")?;
-    if !out.status.success() {
-        bail!(
-            "python burst failed: status={} stderr={}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    let msg = String::from_utf8_lossy(&out.stdout);
-    msg.trim()
-        .parse()
-        .with_context(|| format!("python burst count: {msg}"))
-}
-
-fn probe_ack_native(esp: &str, port: u16, timeout: Duration) -> Result<&'static str> {
     let sock = UdpSocket::bind("0.0.0.0:0").context("bind probe socket")?;
     sock.set_read_timeout(Some(timeout))
         .context("set probe timeout")?;
@@ -341,46 +276,5 @@ fn probe_ack_native(esp: &str, port: u16, timeout: Duration) -> Result<&'static 
             Ok("no-ack")
         }
         Err(e) => Err(e).context("recv ack"),
-    }
-}
-
-fn probe_ack_via_python(esp: &str, port: u16, timeout: Duration) -> Result<&'static str> {
-    let code = r#"
-import socket, sys
-esp, port, to = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.settimeout(to)
-try:
-    s.sendto(b"STIM\n", (esp, port))
-    data, _ = s.recvfrom(64)
-    print(data.decode(errors="replace").strip())
-except socket.timeout:
-    print("no-ack")
-"#;
-    let out = std::process::Command::new("/usr/bin/python3")
-        .args([
-            "-c",
-            code,
-            esp,
-            &port.to_string(),
-            &timeout.as_secs_f64().to_string(),
-        ])
-        .output()
-        .context("spawn /usr/bin/python3 for UDP probe")?;
-    if !out.status.success() {
-        bail!(
-            "python probe failed: status={} stderr={}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    let msg = String::from_utf8_lossy(&out.stdout);
-    let msg = msg.trim();
-    if msg.starts_with("ACK") || msg == "ack" {
-        Ok("ack")
-    } else if msg == "no-ack" {
-        Ok("no-ack")
-    } else {
-        bail!("unexpected python probe output: {msg}");
     }
 }

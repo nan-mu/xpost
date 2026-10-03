@@ -1,8 +1,9 @@
 [target.riscv32imc-unknown-none-elf]
-runner = "espflash flash --monitor --chip esp32c3"
+runner = "espflash flash --monitor --chip esp32c3 --partition-table partitions.csv"
 
 [env]
 ESP_LOG="info"
+XPOST_BOARD = { value = ".", relative = true }
 
 [build]
 rustflags = [

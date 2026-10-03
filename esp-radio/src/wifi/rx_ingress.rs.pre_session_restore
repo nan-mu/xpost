@@ -1,0 +1,122 @@
+//! Early RX ingress (native-XDP driver surface).
+//!
+//! # Features
+//!
+//! - `rx-ingress`: [`Prog`] attach, Pass/Drop, counter callbacks.
+//! - `rx-ingress-tx`: same-iface zero-copy Tx via `esp_wifi_internal_tx_by_ref`.
+//!
+//! # Attach timing
+//!
+//! Call [`attach_prog`] before [`super::new`] / Wi-Fi start. v1 does **not**
+//! support replacing the prog while Wi-Fi is active; doing so is undefined.
+//! [`detach_prog`] restores the default [`NoopProg`].
+//!
+//! With `rx-ingress` enabled, the STA/AP RX callbacks always call
+//! [`Prog::run`]. Whether AOT/XDP actually runs is up to the prog
+//! (e.g. unleased → `(Pass, frame)`).
+//!
+//! # Counter callbacks
+//!
+//! | Event | Driver |
+//! |-------|--------|
+//! | Drop path freed `eb` | [`Prog::count_drop`] once |
+//! | Tx handoff failed and `eb` freed | [`Prog::count_failed_tx`] once |
+//! | Tx handoff succeeded (`esp_wifi_internal_tx_by_ref` == OK) | no counter |
+//!
+//! # Tx failure conditions (`rx-ingress-tx`)
+//!
+//! Null `eb`, empty window, netstack callbacks not armed, ownership-token
+//! exhaustion, or non-OK `esp_wifi_internal_tx_by_ref`.
+//!
+//! Recommended typecheck: `esp32c3,wifi,unstable,rx-ingress-tx`.
+
+use core::cell::UnsafeCell;
+
+use crate::sys::{c_types, include};
+
+/// Disposition returned by [`Prog::run`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Action {
+    /// Enqueue the returned window on the normal RX path.
+    Pass,
+    /// Free the RX buffer; do not enqueue.
+    Drop,
+    /// Zero-copy same-iface transmit of the returned window.
+    #[cfg(feature = "rx-ingress-tx")]
+    Tx,
+}
+
+/// Program mounted on the Wi-Fi RX ingress path.
+///
+/// `run` must return a subslice of `frame` (including the full slice).
+/// Counter methods are invoked only by the driver after the corresponding
+/// buffer disposition; implementations own all storage details.
+pub trait Prog: Send + Sync {
+    /// Inspect/modify `frame` and return an [`Action`] plus the visible window.
+    ///
+    /// The returned slice must be a subslice of `frame` (possibly the full
+    /// frame). On [`Action::Pass`], the driver enqueues using this window's
+    /// pointer and length (shrink-only `adjust_tail` takes effect here).
+    fn run<'a>(&self, frame: &'a mut [u8]) -> (Action, &'a mut [u8]);
+
+    /// Called once after the driver frees `eb` on the Drop path.
+    fn count_drop(&self);
+
+    /// Called once after a Tx attempt fails and `eb` has been freed (or
+    /// handoff failed such that the ownership protocol will free it).
+    fn count_failed_tx(&self);
+}
+
+/// Default prog: always Pass the full frame; counters are no-ops.
+pub struct NoopProg;
+
+impl Prog for NoopProg {
+    #[inline]
+    fn run<'a>(&self, frame: &'a mut [u8]) -> (Action, &'a mut [u8]) {
+        (Action::Pass, frame)
+    }
+
+    #[inline]
+    fn count_drop(&self) {}
+
+    #[inline]
+    fn count_failed_tx(&self) {}
+}
+
+static NOOP: NoopProg = NoopProg;
+
+/// Written only via [`attach_prog`] / [`detach_prog`] before Wi-Fi start.
+struct ProgCell(UnsafeCell<&'static dyn Prog>);
+
+// SAFETY: attach/detach are boot-time only (documented); afterward the
+// reference is immutable and `Prog: Sync`.
+unsafe impl Sync for ProgCell {}
+
+static CURRENT: ProgCell = ProgCell(UnsafeCell::new(&NOOP));
+
+/// Install `prog` for STA/AP RX ingress. Call before Wi-Fi start.
+pub fn attach_prog(prog: &'static dyn Prog) {
+    // SAFETY: boot-time single writer; see module docs.
+    unsafe {
+        *CURRENT.0.get() = prog;
+    }
+}
+
+/// Restore [`NoopProg`]. Must not be called while Wi-Fi RX is active.
+pub fn detach_prog() {
+    attach_prog(&NOOP);
+}
+
+#[inline]
+pub(crate) fn current() -> &'static dyn Prog {
+    // SAFETY: after boot attach, value is stable; Prog is Sync.
+    unsafe { *CURRENT.0.get() }
+}
+
+#[inline]
+pub(crate) fn free_rx_buffer(eb: *mut c_types::c_void) {
+    if !eb.is_null() {
+        unsafe { include::esp_wifi_internal_free_rx_buffer(eb) };
+    }
+}

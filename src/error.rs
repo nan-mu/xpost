@@ -34,10 +34,6 @@ pub enum MapCheckError {
 pub enum MapUseError {
     NotFound,
     TypeMismatch,
-    InvalidArg,
-    Exists,
-    NoMem,
-    Busy,
 }
 
 // ─── Shared leaf ───────────────────────────────────────────────────────
@@ -179,10 +175,6 @@ impl_error_display! {
     MapUseError,
     Self::NotFound => "not found",
     Self::TypeMismatch => "map type/layout mismatch",
-    Self::InvalidArg => "invalid argument",
-    Self::Exists => "already exists",
-    Self::NoMem => "out of memory",
-    Self::Busy => "busy",
 }
 
 impl_error_display! {

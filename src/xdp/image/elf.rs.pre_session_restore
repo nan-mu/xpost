@@ -1,0 +1,345 @@
+//! Compact ELF V0 loader: one SRAM buffer, `flash_layout!` views, [`XdpBuilder`].
+//!
+//! Physical order: EHDR | SHT×4 | `.xpost.meta` | image | names | pad | digest.
+
+use alloc::string::String;
+
+use sha2::{Digest, Sha256};
+
+use crate::{
+    map::MapMeta,
+    xdp::{
+        XdpTableStorage,
+        image::builder::{Incomplete, XdpBuilder, map_builder_from_descriptor},
+        image::meta::CollectedMetas,
+        state::{MAX_IMAGES, MAX_REQUIRED_MAPS},
+    },
+};
+
+const WIRE_BUF: usize = 1024;
+
+xpost_macros::flash_layout! {
+    pub(crate) CompactElfFixed {
+        skip 52;              // Elf32Header
+        skip 40;              // shdr[0] NULL
+        skip 16;              // shdr[1] name..addr
+        meta_offset: le<u32>;
+        meta_size: le<u32>;
+        skip 16;
+        skip 12;              // shdr[2] name,type,flags
+        slot_address: le<u32>;
+        image_offset: le<u32>;
+        image_size: le<u32>;
+        skip 16;
+        skip 16;              // shdr[3] name..addr
+        names_offset: le<u32>;
+        skip 20;
+        xpost_version: u8;
+        machine: u8;
+        map_count: le<u16>;
+        helper_address: le<u32>;
+    }
+}
+
+xpost_macros::flash_layout! {
+    pub(crate) MapDescFixed {
+        map_type: u8;
+        len: le<u24>;
+        map_vma: le<u32>;
+        key_layout_len: le<u32>;
+        value_layout_len: le<u32>;
+    }
+}
+
+xpost_macros::flash_layout! {
+    pub(crate) ImageDigest {
+        sha256: bytes<32>;
+    }
+}
+
+#[inline(always)]
+const fn align4(x: usize) -> usize {
+    (x + 3) & !3
+}
+
+fn table_read(table: &mut dyn XdpTableStorage, abs: usize, out: &mut [u8]) -> bool {
+    let end = match abs.checked_add(out.len()) {
+        Some(v) => v,
+        None => return false,
+    };
+    if end > table.capacity() {
+        return false;
+    }
+    table.read(abs, out).is_ok()
+}
+
+fn visit_table_bytes(
+    table: &mut dyn XdpTableStorage,
+    base: usize,
+    len: usize,
+    mut visit: impl FnMut(&[u8]),
+) -> bool {
+    #[repr(C, align(4))]
+    struct Block([u8; 68]);
+
+    if len == 0 {
+        return true;
+    }
+    let end = match base.checked_add(len) {
+        Some(v) => v,
+        None => return false,
+    };
+    if ((end + 3) & !3) > table.capacity() {
+        return false;
+    }
+    let mut block = Block([0; 68]);
+    let mut current = base;
+    while current < end {
+        let n = (end - current).min(64);
+        let prefix = current & 3;
+        let physical_start = current & !3;
+        let physical_len = (prefix + n + 3) & !3;
+        if physical_start.saturating_add(physical_len) > table.capacity() {
+            return false;
+        }
+        if table
+            .read(physical_start, &mut block.0[..physical_len])
+            .is_err()
+        {
+            return false;
+        }
+        visit(&block.0[prefix..prefix + n]);
+        current += n;
+    }
+    true
+}
+
+fn take_cstring4(rest: &[u8]) -> Option<(&str, usize)> {
+    let nul = rest.iter().position(|&c| c == 0)?;
+    if nul == 0 || nul > 31 {
+        return None;
+    }
+    let encoded = (nul + 1 + 3) & !3;
+    if rest.len() < encoded {
+        return None;
+    }
+    let raw = &rest[..nul];
+    if !raw.is_ascii() || rest[nul + 1..encoded].iter().any(|&c| c != 0) {
+        return None;
+    }
+    let name = core::str::from_utf8(raw).ok()?;
+    Some((name, encoded))
+}
+
+enum ScanOutcome {
+    HardFail,
+    SoftSkip { file_len: usize },
+    Ok { file_len: usize },
+}
+
+fn parse_container(
+    table: &mut dyn XdpTableStorage,
+    at: usize,
+    b: &mut XdpBuilder,
+) -> ScanOutcome {
+    let mut buf = [0u8; WIRE_BUF];
+    if !table_read(table, at, &mut buf[..CompactElfFixed::WIRE_SIZE]) {
+        return ScanOutcome::HardFail;
+    }
+    if buf[..4] != [0x7f, b'E', b'L', b'F'] {
+        return ScanOutcome::HardFail;
+    }
+    let f = match CompactElfFixed::from_bytes(&buf) {
+        Some(v) => v,
+        None => return ScanOutcome::HardFail,
+    };
+
+    let meta_offset = f.meta_offset() as usize;
+    let meta_size = f.meta_size() as usize;
+    let slot_address = f.slot_address() as usize;
+    let image_offset = f.image_offset() as usize;
+    let image_size = f.image_size() as usize;
+    let names_offset = f.names_offset() as usize;
+    let map_count = f.map_count();
+    let helper = f.helper_address() as usize;
+    let digest_off = align4(names_offset.saturating_add(36));
+    let file_len = match digest_off.checked_add(32) {
+        Some(v) => v,
+        None => return ScanOutcome::HardFail,
+    };
+    if at.saturating_add(file_len) > table.capacity() {
+        return ScanOutcome::HardFail;
+    }
+    let soft = || ScanOutcome::SoftSkip { file_len };
+
+    let meta_abs = CompactElfFixed::WIRE_SIZE - 8;
+    if meta_offset != meta_abs || !(12..=WIRE_BUF).contains(&meta_size) || meta_size % 4 != 0 {
+        return soft();
+    }
+    if slot_address == 0
+        || (slot_address & 3) != 0
+        || image_size == 0
+        || image_offset != meta_abs + meta_size
+        || slot_address.checked_add(image_size).is_none()
+        || names_offset != image_offset + image_size
+    {
+        return soft();
+    }
+    if f.xpost_version() != 0 || f.machine() != 1 {
+        return soft();
+    }
+    if map_count as usize > MAX_REQUIRED_MAPS || helper == 0 || (helper & 3) != 0 {
+        return soft();
+    }
+
+    let tail = meta_size - 8;
+    if !table_read(table, at + CompactElfFixed::WIRE_SIZE, &mut buf[..tail]) {
+        return soft();
+    }
+    let xdp_name = {
+        let mut rest = &buf[..tail];
+        let (xdp_name, n) = match take_cstring4(rest) {
+            Some(v) => v,
+            None => return soft(),
+        };
+        rest = &rest[n..];
+
+        b.required_maps.clear();
+        b.aot_binds.clear();
+        let mut seen_names = heapless::Vec::<&str, MAX_REQUIRED_MAPS>::new();
+        let mut seen_vmas = heapless::Vec::<u32, MAX_REQUIRED_MAPS>::new();
+
+        for _ in 0..map_count {
+            let mark = rest.len();
+            let (map_name, n) = match take_cstring4(rest) {
+                Some(v) => v,
+                None => return soft(),
+            };
+            rest = &rest[n..];
+            let fixed = match MapDescFixed::from_bytes(rest) {
+                Some(v) => v,
+                None => return soft(),
+            };
+            rest = &rest[MapDescFixed::WIRE_SIZE..];
+            let key_len = fixed.key_layout_len() as usize;
+            let value_len = fixed.value_layout_len() as usize;
+            if rest.len() < key_len + value_len {
+                return soft();
+            }
+            let key_layout = if key_len == 0 {
+                None
+            } else {
+                let k = &rest[..key_len];
+                rest = &rest[key_len..];
+                Some(k)
+            };
+            let value_layout = if value_len == 0 {
+                None
+            } else {
+                let v = &rest[..value_len];
+                rest = &rest[value_len..];
+                Some(v)
+            };
+            let consumed = mark - rest.len();
+            let pad = align4(consumed) - consumed;
+            if rest.len() < pad || rest[..pad].iter().any(|&c| c != 0) {
+                return soft();
+            }
+            rest = &rest[pad..];
+
+            let map_vma = fixed.map_vma();
+            if seen_names.iter().any(|&n| n == map_name) || seen_vmas.iter().any(|&v| v == map_vma)
+            {
+                return soft();
+            }
+            let _ = seen_names.push(map_name);
+            let _ = seen_vmas.push(map_vma);
+
+            let builder = match map_builder_from_descriptor(
+                map_name,
+                fixed.map_type(),
+                fixed.len(),
+                key_layout,
+                value_layout,
+            ) {
+                Ok(v) => v,
+                Err(_) => return soft(),
+            };
+            let meta_row = match MapMeta::from_builder(builder) {
+                Ok(m) => m,
+                Err(_) => return soft(),
+            };
+            if b.required_maps.push(meta_row).is_err() {
+                return soft();
+            }
+            if b.aot_binds
+                .push((String::from(map_name), map_vma as usize))
+                .is_err()
+            {
+                return soft();
+            }
+        }
+        if !rest.is_empty() {
+            return soft();
+        }
+        String::from(xdp_name)
+    };
+
+    if !table_read(table, at + digest_off, &mut buf[..32]) {
+        return soft();
+    }
+    let digest = match ImageDigest::from_bytes(&buf) {
+        Some(d) => d,
+        None => return soft(),
+    };
+    let mut hasher = Sha256::new();
+    if !visit_table_bytes(table, at + image_offset, image_size, |chunk| {
+        hasher.update(chunk);
+    }) {
+        return soft();
+    }
+    let computed: [u8; 32] = hasher.finalize().into();
+    if computed != *digest.sha256() {
+        return soft();
+    }
+
+    b.name = Some(xdp_name);
+    b.link_addr = slot_address;
+    b.helper_address = helper;
+    b.image_abs = at.saturating_add(image_offset);
+    b.image_len = image_size;
+    b.container_abs = at;
+    b.container_len = file_len;
+    b.image_digest = computed;
+    ScanOutcome::Ok { file_len }
+}
+
+pub(crate) fn collect_metas(table: &mut dyn XdpTableStorage) -> CollectedMetas {
+    let mut out = CollectedMetas::new();
+    let mut cursor = 0usize;
+    let cap = table.capacity();
+    while cursor.saturating_add(CompactElfFixed::WIRE_SIZE) <= cap {
+        if out.len() >= MAX_IMAGES {
+            break;
+        }
+        let mut b = XdpBuilder::<Incomplete>::for_elf(out.len());
+        match parse_container(table, cursor, &mut b) {
+            ScanOutcome::HardFail => break,
+            ScanOutcome::SoftSkip { file_len } => {
+                cursor = cursor.saturating_add(file_len);
+            }
+            ScanOutcome::Ok { file_len } => match b.finish_meta() {
+                Some(meta) => {
+                    cursor = cursor.saturating_add(meta.container_len);
+                    if out.push(meta).is_err() {
+                        break;
+                    }
+                }
+                None => {
+                    cursor = cursor.saturating_add(file_len);
+                }
+            },
+        }
+    }
+    out
+}

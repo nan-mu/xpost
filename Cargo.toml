@@ -75,9 +75,11 @@ helper_length = 0x200
 xpost-macros     = { path = "xpost-macros" }
 xpost-elf        = { path = "xpost-elf" }
 xpost-type       = { path = "xpost-type" }
+xpost-elf        = { path = "xpost-elf" }
 log              = "0.4.27"
 critical-section = "1.2.0"
 heapless         = "0.9.3"
+sha2             = { version = "0.10", default-features = false }
 nom              = { version = "8.0.0", default-features = false, features = ["alloc"] }
 talc             = { version = "5.0", features = ["counters"] }
 allocator-api2   = { version = "0.4", default-features = false, features = ["alloc"] }

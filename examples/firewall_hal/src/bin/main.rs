@@ -51,9 +51,11 @@ static DROP: AtomicUsize = AtomicUsize::new(0);
 static ACK_IP: AtomicU32 = AtomicU32::new(0);
 static ACK_PORT: AtomicU32 = AtomicU32::new(0);
 
-type BlacklistMap = FnvIndexMap<u32, u8, MAX_BLACKLIST>;
+type BlacklistMap = FnvIndexMap<u32, u64, MAX_BLACKLIST>;
 static BLACKLIST: critical_section::Mutex<core::cell::RefCell<BlacklistMap>> =
     critical_section::Mutex::new(core::cell::RefCell::new(FnvIndexMap::new()));
+/// When false, stim path ignores packets (agent `xdp off` / `disable xdp`).
+static DATAPLANE: portable_atomic::AtomicBool = portable_atomic::AtomicBool::new(true);
 
 static NET_RESOURCES: StaticCell<StackResources<5>> = StaticCell::new();
 static UDP_RX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
@@ -162,10 +164,16 @@ fn ip_key_from_addr(addr: embassy_net::IpAddress) -> Option<u32> {
     Some(u32::from_be_bytes(v4.octets()))
 }
 
-fn is_blocked(key: u32) -> bool {
+fn hit_and_count(key: u32) -> bool {
     critical_section::with(|cs| {
-        let map = BLACKLIST.borrow(cs).borrow();
-        matches!(map.get(&key), Some(&v) if v != 0)
+        let mut map = BLACKLIST.borrow(cs).borrow_mut();
+        match map.get_mut(&key) {
+            Some(v) => {
+                *v = v.saturating_add(1);
+                true
+            }
+            None => false,
+        }
     })
 }
 
@@ -187,10 +195,13 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
         let Ok((_n, meta)) = socket.recv_from(&mut buf).await else {
             continue;
         };
+        if !DATAPLANE.load(Ordering::Relaxed) {
+            continue;
+        }
         let Some(key) = ip_key_from_addr(meta.endpoint.addr) else {
             continue;
         };
-        if is_blocked(key) {
+        if hit_and_count(key) {
             DROP.fetch_add(1, Ordering::Relaxed);
             continue;
         }
@@ -253,8 +264,8 @@ fn handle_map_crud<'a>(pkt: &[u8], val_buf: &'a mut [u8; 8]) -> (u32, u32, &'a [
                 let map = BLACKLIST.borrow(cs).borrow();
                 match map.get(&key).copied() {
                     Some(v) => {
-                        val_buf[0] = v;
-                        (STATUS_OK, kind, &val_buf[..1])
+                        val_buf[..8].copy_from_slice(&v.to_le_bytes());
+                        (STATUS_OK, kind, &val_buf[..8])
                     }
                     None => (STATUS_NOT_FOUND, kind, &val_buf[..0]),
                 }
@@ -265,7 +276,14 @@ fn handle_map_crud<'a>(pkt: &[u8], val_buf: &'a mut [u8; 8]) -> (u32, u32, &'a [
                 return (STATUS_BAD, kind, &val_buf[..0]);
             }
             let key = u32::from_be_bytes([op.key[0], op.key[1], op.key[2], op.key[3]]);
-            let val = if op.value.is_empty() { 1 } else { op.value[0] };
+            let val = if op.value.is_empty() {
+                0u64
+            } else {
+                let mut b = [0u8; 8];
+                let n = op.value.len().min(8);
+                b[..n].copy_from_slice(&op.value[..n]);
+                u64::from_le_bytes(b)
+            };
             critical_section::with(|cs| {
                 let mut map = BLACKLIST.borrow(cs).borrow_mut();
                 match map.insert(key, val) {
@@ -337,6 +355,16 @@ fn dispatch_serial(line: &str) {
     } else if line.eq_ignore_ascii_case("blacklist clear") {
         critical_section::with(|cs| BLACKLIST.borrow(cs).borrow_mut().clear());
         esp_println::println!("OK blacklist clear");
+    } else if line.eq_ignore_ascii_case("xdp off") || line.eq_ignore_ascii_case("disable xdp") {
+        DATAPLANE.store(false, Ordering::Relaxed);
+        esp_println::println!("OK xdp off");
+    } else if line.eq_ignore_ascii_case("xdp on") || line.eq_ignore_ascii_case("enable xdp") {
+        DATAPLANE.store(true, Ordering::Relaxed);
+        esp_println::println!("OK xdp on");
+    } else if let Some(rest) = strip_cmd(line, "map dump") {
+        print_map_dump(rest);
+    } else if line.eq_ignore_ascii_case("map dump") {
+        print_map_dump("");
     } else if line.eq_ignore_ascii_case("counters") {
         let drop = DROP.load(Ordering::Relaxed);
         let net_rx = NET_RX.load(Ordering::Relaxed);
@@ -377,6 +405,30 @@ fn print_report() {
         feature = "kind-t"
     )))]
     esp_println::println!("ERR report no-perf");
+}
+
+fn print_map_dump(rest: &str) {
+    let name = rest.trim();
+    if name.is_empty() {
+        esp_println::println!("ERR map dump <name>");
+        return;
+    }
+    if !name.eq_ignore_ascii_case(MAP_BLACKLIST) {
+        esp_println::println!("ERR map not-found");
+        return;
+    }
+    critical_section::with(|cs| {
+        let map = BLACKLIST.borrow(cs).borrow();
+        esp_println::println!(
+            "OK map {MAP_BLACKLIST} type=hash size={} cap={MAX_BLACKLIST}",
+            map.len()
+        );
+        for (k, v) in map.iter() {
+            let o = k.to_be_bytes();
+            esp_println::println!("{}.{}.{}.{} {v}", o[0], o[1], o[2], o[3]);
+        }
+        esp_println::println!("OK map end");
+    });
 }
 
 fn strip_cmd<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {

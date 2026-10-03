@@ -1,0 +1,11 @@
+[package]
+name = "xpost-elf"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Compact ELF V0 decode/encode + XPM1 mem-map blob (no_std)"
+
+[dependencies]
+xpost-macros = { path = "../xpost-macros" }
+sha2 = { version = "0.10", default-features = false }
+heapless = "0.9.3"

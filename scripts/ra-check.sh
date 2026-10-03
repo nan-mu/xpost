@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # rust-analyzer flycheck / buildScripts helper for multi-workspace xpost.
 #
-# Root workspace: only `-p xpost` (avoids --workspace/--all-targets RV32
-# false errors and keeps the host xpost-macros expander).
-# Linked firmware workspaces (e.g. examples/just_xdp): check the local
-# package so build.rs / mem_map codegen run.
+# Do NOT hardcode a triple here: host crates (xpost-serial / xpost-agent /
+# xpost-test) and MCU crates share one overrideCommand, and each directory's
+# `.cargo/config.toml` already sets the right `build.target`.
+#
+# Root workspace: only `-p xpost` (avoids --workspace RV32 false errors on
+# host-oriented path deps and keeps the xpost-macros expander).
+# Other linked workspaces: plain `cargo check` in that cwd.
 set -euo pipefail
 
-target=riscv32imc-unknown-none-elf
 msg=(--message-format=json)
 
 if grep -Eq '^name[[:space:]]*=[[:space:]]*"xpost"' Cargo.toml; then
-  exec cargo check -p xpost --target "$target" "${msg[@]}" "$@"
+  exec cargo check -p xpost "${msg[@]}" "$@"
 fi
 
-exec cargo check --target "$target" "${msg[@]}" "$@"
+exec cargo check "${msg[@]}" "$@"

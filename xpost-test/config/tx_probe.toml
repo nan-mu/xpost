@@ -1,0 +1,7 @@
+# tx_probe — XDP TX-path debug only (not a formal experiment).
+# Selected via default.toml `run = ["tx_probe"]` or `./xpost-test tx_probe`.
+# Writes tx_probe_* only; never DROPs / touches just_tx_* or just_drop_*.
+
+formal = false
+rounds = 1
+arms = ["xdp"]

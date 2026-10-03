@@ -3,7 +3,7 @@
 //! Control-plane mutation is serialized by [`MAP_RT`]; helpers resolve AOT
 //! VMAs via [`alias`] and operate under a non-nested heap lock.
 
-pub(crate) mod alias;
+mod alias;
 pub(crate) mod builder;
 pub(crate) mod heap;
 pub(crate) mod kinds;
@@ -12,7 +12,6 @@ mod state;
 
 pub use builder::{MapBuilder, MapKey, MapType, MapValue};
 pub use heap::HEAP_SIZE;
-pub use ops::{BPF_ANY, BPF_EXIST, BPF_NOEXIST};
 pub use state::MAP_RT;
 pub use xpost_macros::{MapKey, MapValue};
 
@@ -186,21 +185,12 @@ impl MapRt {
         );
         let storage = match builder.map_type {
             MapType::Hash => {
-                let kl = builder
-                    .key_layout
-                    .as_ref()
-                    .ok_or(MapCreateError::TypeMismatch)?;
-                let vl = builder
-                    .value_layout
-                    .as_ref()
-                    .ok_or(MapCreateError::TypeMismatch)?;
+                let kl = builder.key_layout.as_ref().ok_or(MapCreateError::TypeMismatch)?;
+                let vl = builder.value_layout.as_ref().ok_or(MapCreateError::TypeMismatch)?;
                 hash::alloc_hash_storage(layout_size(kl), layout_size(vl), builder.len)?
             }
             MapType::Array => {
-                let vl = builder
-                    .value_layout
-                    .as_ref()
-                    .ok_or(MapCreateError::TypeMismatch)?;
+                let vl = builder.value_layout.as_ref().ok_or(MapCreateError::TypeMismatch)?;
                 array::alloc_array_storage(layout_size(vl), builder.len)?
             }
         };
@@ -229,77 +219,6 @@ impl MapRt {
             .ok_or(MapUseError::NotFound)
     }
 
-    /// Control-plane HASH lookup: copy up to `out.len()` value bytes; returns value size.
-    pub fn hash_lookup(&self, idx: MapIdx, key: &[u8], out: &mut [u8]) -> Result<usize, MapUseError> {
-        let meta = self.meta.get(idx).ok_or(MapUseError::NotFound)?;
-        if meta.map_type != MapType::Hash {
-            return Err(MapUseError::TypeMismatch);
-        }
-        let map = unsafe { meta.storage.as_ref::<hash::BpfHashMap>() };
-        if key.len() != map.key_size {
-            return Err(MapUseError::InvalidArg);
-        }
-        let p = MapOps::lookup(map, key.as_ptr()).map_err(map_op_to_use)?;
-        let n = map.value_size.min(out.len());
-        unsafe {
-            core::ptr::copy_nonoverlapping(p, out.as_mut_ptr(), n);
-        }
-        Ok(map.value_size)
-    }
-
-    /// Control-plane HASH update (`flags`: [`BPF_ANY`] / [`BPF_NOEXIST`] / [`BPF_EXIST`]).
-    pub fn hash_update(
-        &mut self,
-        idx: MapIdx,
-        key: &[u8],
-        value: &[u8],
-        flags: u64,
-    ) -> Result<(), MapUseError> {
-        let meta = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
-        if meta.map_type != MapType::Hash {
-            return Err(MapUseError::TypeMismatch);
-        }
-        let map = unsafe { meta.storage.as_mut::<hash::BpfHashMap>() };
-        if key.len() != map.key_size || value.len() != map.value_size {
-            return Err(MapUseError::InvalidArg);
-        }
-        MapOps::update(map, key.as_ptr(), value.as_ptr(), flags).map_err(map_op_to_use)
-    }
-
-    /// Control-plane HASH delete.
-    pub fn hash_delete(&mut self, idx: MapIdx, key: &[u8]) -> Result<(), MapUseError> {
-        let meta = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
-        if meta.map_type != MapType::Hash {
-            return Err(MapUseError::TypeMismatch);
-        }
-        let map = unsafe { meta.storage.as_mut::<hash::BpfHashMap>() };
-        if key.len() != map.key_size {
-            return Err(MapUseError::InvalidArg);
-        }
-        MapOps::delete(map, key.as_ptr()).map_err(map_op_to_use)
-    }
-
-    /// Control-plane: remove all HASH entries (capacity unchanged).
-    pub fn hash_clear(&mut self, idx: MapIdx) -> Result<(), MapUseError> {
-        let meta = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
-        if meta.map_type != MapType::Hash {
-            return Err(MapUseError::TypeMismatch);
-        }
-        let map = unsafe { meta.storage.as_mut::<hash::BpfHashMap>() };
-        map.clear();
-        Ok(())
-    }
-
-    /// Control-plane: current HASH occupancy.
-    pub fn hash_len(&self, idx: MapIdx) -> Result<usize, MapUseError> {
-        let meta = self.meta.get(idx).ok_or(MapUseError::NotFound)?;
-        if meta.map_type != MapType::Hash {
-            return Err(MapUseError::TypeMismatch);
-        }
-        let map = unsafe { meta.storage.as_ref::<hash::BpfHashMap>() };
-        Ok(map.len_used())
-    }
-
     pub(crate) fn add_user(&mut self, idx: MapIdx) -> Result<(), MapUseError> {
         let res = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
         res.storage.users = res.storage.users.saturating_add(1);
@@ -310,16 +229,6 @@ impl MapRt {
         let res = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
         res.storage.users = res.storage.users.saturating_sub(1);
         Ok(())
-    }
-}
-
-fn map_op_to_use(e: ops::MapOpError) -> MapUseError {
-    match e {
-        ops::MapOpError::NotFound => MapUseError::NotFound,
-        ops::MapOpError::InvalidArg | ops::MapOpError::Unsupported => MapUseError::InvalidArg,
-        ops::MapOpError::Exists => MapUseError::Exists,
-        ops::MapOpError::NoMem => MapUseError::NoMem,
-        ops::MapOpError::Busy => MapUseError::Busy,
     }
 }
 

@@ -277,11 +277,8 @@ pub fn write_write_bin_addrs(path: &Path, layout: &Layout) -> Result<()> {
     .unwrap();
     match &layout.cold_table {
         None => {
-            writeln!(
-                out,
-                "# [cold_table] absent in intent layout.toml — no write-bin targets."
-            )
-            .unwrap();
+            writeln!(out, "# [cold_table] absent in intent layout.toml — no write-bin targets.")
+                .unwrap();
         }
         Some(c) => {
             writeln!(out, "cold_table_flash_base = {:#x}", c.base).unwrap();
@@ -294,7 +291,12 @@ pub fn write_write_bin_addrs(path: &Path, layout: &Layout) -> Result<()> {
                 "# Packed Compact ELF (variable-length) starts at cold_table_flash_base."
             )
             .unwrap();
-            writeln!(out, "#   espflash write-bin {:#x} <xdp.elf>", c.base).unwrap();
+            writeln!(
+                out,
+                "#   espflash write-bin {:#x} <xdp.elf>",
+                c.base
+            )
+            .unwrap();
             writeln!(out).unwrap();
             for i in 0..c.image_count() {
                 if let Some(abs) = c.image_abs(i) {

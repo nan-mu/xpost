@@ -1,0 +1,16 @@
+[arena]
+iram_base = 0x40380000
+arena_end = 0x40382000
+
+[helper]
+length = 0x200
+
+[slots]
+a = { length = 0xE00, mount = "rx" }
+b = { length = 0x1000, mount = "call" }
+
+[cold_table]
+base = 0x310000
+length = 0x10000
+image_capacity = 0x2000
+partition = "xdp"

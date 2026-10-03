@@ -46,15 +46,6 @@ async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
             )
             .await
         }
-        "firewall" => {
-            bench::run_firewall(
-                cfg,
-                bench::FirewallOpts {
-                    formal: cfg.firewall.formal,
-                },
-            )
-            .await
-        }
         "just_tx" => {
             let mut harness = open_harness(cfg).await?;
             bench::run_just_tx(

@@ -1,0 +1,12 @@
+schema_version = 1
+
+[wifi]
+ssid = "your_wifi_ssid"
+password = "your_wifi_password"
+
+[probe]
+ip = "192.168.110.142"
+reply_port = 18080
+
+[dut]
+ctrl_port = 8081

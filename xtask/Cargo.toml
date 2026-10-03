@@ -16,3 +16,5 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 xpost-build = { path = "../xpost-build" }
+xpost-build = { path = "../xpost-build" }
+xpost-build = { path = "../xpost-build" }

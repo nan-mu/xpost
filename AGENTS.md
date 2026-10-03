@@ -32,12 +32,13 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
   (shared USB). Dispatch: `cargo xtask agent …`.
   Map read: DUT `map dump <name>` (multi-line → `OK map end`); HTTP
   `GET /v1/map/{name}` / MCP `map_dump`. Do not use legacy `rxcnt <key>`.
-- **`xpost-serial`**: library only — **API** for `Session` / `install_xdp` /
-  `program` / `request` / `request_report` / `Sink` (see that crate’s rustdoc).
-  Cold install is **by XDP name**; do not pass raw cold addresses on the normal
-  path. Perf metrics live in `xpost::ext::perf`; DUT serial read face is
-  `report` (binary, length → feature mask) + `perf clear` (agent:
-  `/v1/perf_clear`). Formal decodes the report and writes exam-scoped tables
+- **`xpost-serial`**: library only — wire [`type`](xpost-serial/src/type/) plus
+  feature `client` (`Client` = serial + flash threads, unified `Command` incl.
+  `Flash`) or mutually exclusive `server` (DUT `dispatch` / reply builders).
+  App UART: `ping` / `enable|disable xdp` / `clear|get|update map` /
+  `clear|get perf` (blob). Cold install **by XDP name** via flash thread.
+  Perf metrics live in `xpost::ext::perf`; host decode is
+  `client::serial::decode_perf`. Formal decodes the report and writes exam-scoped tables
   (`sql/formal.sql`: `exam` + `just_*_config/data` + `xdp_*`/`hal_*` +
   `trace_event`) — no `report_raw`. Open-run never DROP/TRUNCATE; explicit
   wipe is `run = ["formal-clear"]` in `config/default.toml` then rebuild
@@ -52,76 +53,93 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 - **`--port`**: optional. Omit → unique USB serial; zero or many → require
   `--port`.
 
+### Experiment module rustdoc (`xpost-test/test/src/bench/`)
+
+Structure per formal experiment: **目的 → 伪代码 → 发包/dataplane 一段 → 数据处理**
+（`config` / `data` 两个无序列表）。记号约定以后收到上级模块，勿在各实验重复长段。
+
+Writing the dataplane paragraph:
+
+- State facts only; do not introduce or define jargon (`stim`, …). Prefer plain
+  verbs（发往、读出、+1、DROP）.
+- Only mention settings that matter to the measurement. Skip what the
+  pseudocode already covers (e.g. pps grid) and incidental fields（目的 IP —
+  「发往 DUT」已含）.
+- Prefer dense prose over bullet inventories of headers/ports/payloads.
+  Fold constants into the sentence（「DUT 的 `STIM_PORT`」「载荷为 1 字节」）.
+- Keep one consistent pair of terms for address roles（源 / 目的，或 src / dst）；
+  do not mix styles in the same paragraph.
+
 ## Commands
 
-Mac（USB 接 ESP；cwd = `xpost/`）：只需常驻 agent。收到 `FlashProfile` 时按 `profiles.toml` 的 `build` 编译再烧录。
-
-HTTP：`/health`、`/v1/*`（harness）、`/mcp`（Cursor Streamable HTTP MCP）。
-
 ```bash
+cargo xtask just_drop build --release
+
+# Install / overwrite just_drop XDP ELF in the cold table (default just_drop.elf)
+cargo xtask agent program --elf examples/just_drop/just_drop.elf
+# or omit --elf (same default)
+
+# List cold-table entries
+cargo xtask agent list
+
+# Erase all XDP ELF containers in the cold table
+cargo xtask agent clear
+
+cargo xtask agent request PING
+cargo xtask agent request counters
+cargo xtask agent probe <esp-ipv4>
+
+# Long-running RPC for xpost-test / fwctl (default device session)
 cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
 ```
 
-Cursor MCP 示例 URL：`http://127.0.0.1:9240/mcp`。
-Wi-Fi 凭据仍在 `examples/just_xdp/.env`、`examples/just_drop_hal/.env` 与 `examples/just_tx_hal/.env`（`WIFI_SSID` / `WIFI_PASS`）。
+`probe` sends one UDP datagram to port 8080 and prints `ack` or `no-ack`.
+Drop XDP should yield `no-ack` and a rising `drop` counter. `counters` is one
+`OK counters …` line (`drop`, `failed_tx`, `net_rx`, and the runtime error
+counters). `ack-dest <ipv4> <port>` points the firmware ACK at a fixed listener;
+otherwise the ACK returns to the stimulus source.
 
-TR3000（编译期嵌入 `xpost-test/config/`：`default.toml` + `just_tx.toml` + `just_drop.toml` + `firewall.toml`）：
+On TR3000, `./probe just-drop` runs the ACK functional path (50 stims, or 10 with
+`--smoke`) then a UDP×4 link-rate blast (`--no-perf` skips perf;
+`--window-secs` overrides 40s / smoke 10s). Use `--no-pg` to skip Postgres.
 
-**用户说「测试 / 跑一下 / 验证」时：默认正式跑。** 永远无参 `./xpost-test`；改
-实验改 `config/*.toml` 后重编。Mac 侧首选 fish helper（build → scp → ssh 无参跑）：
+Wi-Fi STA needs `WIFI_SSID` and `WIFI_PASS` (or `WIFI_PASSWORD` in
+`examples/just_drop/.env`, loaded by that crate's `build.rs`). Without them the
+UDP path stays down and serial `counters` still works.
+
+## Control: `just_drop_hal`
+
+crates.io-only esp-hal / embassy-net / smoltcp firmware — **no** path deps into
+the xpost tree, **no** local `esp-radio` fork, **no** cold XDP / `agent program`.
 
 ```bash
-fish -c 'source ~/.config/fish/functions/xpost-test.fish; and xpost-test'
+cargo xtask just_drop_hal build --release
+cargo xtask agent request "drop off"   # Pass: ACK + net_rx↑
+cargo xtask agent request "drop on"    # Drop: no-ack + drop/rxcnt[17]↑
+cargo xtask agent probe <esp-ipv4>
+cargo xtask agent request counters
+cargo xtask agent request "rxcnt 17"
 ```
 
-**输出**：stdout/stderr 直接看终端；不要 `> /tmp/…`、`tee`、`tail` 截断日志文件。长跑用
-`block_until_ms: 0` 后台跑，再读终端输出。
+Drop is application-layer on UDP:8080 (packet already entered smoltcp), not
+Wi-Fi ingress. Serial surface matches `just_drop` (`ping` / `counters` /
+`rxcnt` / `ack-dest`); XDP error fields in `OK counters` are always 0,
+`map_lock=no-rt`. Wi-Fi creds: `examples/just_drop_hal/.env` (same keys).
 
-**正式性能测试永远只跑无参二进制**——不要环境变量、不要子命令、不要任何 CLI flags。
-改实验：改 TOML → 重编 → scp → 无参 `./xpost-test`（或上面的 fish helper）。
+### PPS A/B (`benchmark/`)
 
-手工等价步骤（一般不必；优先 fish helper）：
+Pixi + Jupyter；数据经 `utils.db` 现查 Postgres（`benchmark/.env`）：
 
 ```bash
-cd xpost-test && cargo build -p test --release
-scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
-# on TR3000:
-./xpost-test
+cd benchmark && pixi install && pixi run ensure-schema && pixi run lab
+# notebook: just_drop_pps.ipynb（内含复现流程）
+# TR3000 采集：
+./probe just-drop-pps --path hal|xdp --out /tmp/….csv
+# 入库（显式 CSV + summary，写入 experiment_*）：
+pixi run ingest-pps -- /tmp/….csv /tmp/…_summary.json
 ```
 
-- `config/default.toml`：`run = [...]`（`just_tx` / `just_drop` / `firewall` / `dev` /
-  `formal-clear`）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`
-- `config/just_tx.toml` / `just_drop.toml`：`formal`、`arms`（`xdp`/`hal`）；流水线
-  固定再跑 `xdp_t`（`window_s=30`；全网格；无 OP 早停）
-- `config/firewall.toml`：hash blacklist `sizes` / `traffic` hit|miss；profiles
-  `firewall-cag` / `firewall-hal-cag` / `firewall-t`
-- XDP 固件工程：`examples/just_xdp`、`examples/firewall`；profiles `just-*-cag` /
-  `just-*-t` / `just-*-hal-cag` / `firewall-*`（agent `profiles.toml`）
-- 调试火焰图 Trace（**火焰轨**）：`run = ["dev"]`（硬编码：XDP × `just-tx-t` × 100 pps × 2s × 1
-  轮；**无 DB**；report → `/tmp/xpost-dev-flame.report`；Mac scp 到
-  `target/dev-flame.report` 后 `pixi run python -m utils.export_flame_svg`）
-- Agent HTTP：`/health`、`/v1/*`（含 `/v1/perf_clear`、`/v1/serial_window`、`/v1/map/{name}`）、`/mcp`
-- 实验步骤与全流程：`xpost-test` 的 `overview` / `config` rustdoc；串口 API：`xpost-serial`
-- 正式 `just_tx` 扫速网格：`400…4000` pps（步长 400）
-- 正式 `just_drop`：同网格；`map dump counter`（IPv4 src 末字节分桶）→ `just_drop_data`
-- Schema：`xpost-test/sql/formal.sql` + `just_drop.sql` / `just_tx.sql` / `firewall.sql`；显式清空：
-  `run = ["formal-clear"]` 后重编再跑
-
-只跑正式 just_tx：`run = ["just_tx"]`。firewall：`run = ["firewall"]`。一次跑全部 formal A/B：`run = ["just_drop", "just_tx"]`。
-
-可选手工 XDP 冷表操作：`cargo xtask agent program|list|clear|request|probe …`。
-
-### Formal 采集与 `benchmark/` 分析立场
-
-采集：TR3000 `./xpost-test` → `formal.*`（DDL：`xpost-test/sql/formal.sql`）。`benchmark/`
-**不负责**烧录 / 刺激 / USB；也不再维护「一实验一 notebook」的 Evaluation 路径。
-
-- **实验**（`just_tx` / `just_drop` / 后续）只是取数窗口；Analysis / Evaluation 应按
-  **指标与 xpost 功能问题**横切（例如 `hal_agg`/`xdp_agg` 同名段在 Pass vs Drop vs TX
-  下是否同事），常跨多个 exam 对比。见 `benchmark/README.md`。
-- 近期：先跑完全部 formal 实验；数据仅作轻量健全性检查。深度作图与章节写作延后，
-  且应对齐 Methodology 的功能分节，而非实验名。
-- `benchmark/backup/` 冻结归档，勿改删。
+See [`benchmark/README.md`](benchmark/README.md).
 
 ## Scope
 
@@ -139,25 +157,20 @@ aliases from meta `aot_binds` (`set_map_aliases`). There is no userspace
 Control-plane errors are `crate::error` (small enums per public entrypoint).
 BPF helper errno is `map::ops::MapOpError` (not nested into control-plane enums).
 
-### Perf (`ext::perf` / ingress program)
+### Trace (`ext::trace` / ingress program)
 
 The crate mounts a private `xdp::ingress::XdpProg` implementing `xpost_type::XdpProg`
 (re-exported as `esp_radio::wifi::XdpProg` under the `xdp` feature). Apps do **not**
-see `XDP_PROG`; they read via `ext::perf::counter()` / `aggregate()` / `gauge()` /
-`trace()` (four public exits). `report` / `clear_perf` are shared plumbing.
-EspRadioTrace wiring lives in `ext/perf/trace/` beside the ring store.
+see `XDP_PROG`; they read via `ext::trace::counter()` / `timestamp()`.
 
 - `esp-radio` — `xpost::esp_radio::new` → `wifi::new(device, config, &ingress::XDP_PROG)`
-- `perf-counter` — Counter storage + `EspRadioTrace` on the mounted prog
-- `perf-aggregate` — latency aggregates + stretch histogram (high pps)
-- `perf-gauge` — current/peak gauges
-- `perf-trace` — categorized event rings (sole timeline for flames)
+- `trace-counter` — `ext::trace::counter::Counter` + `Observe` on the mounted prog
+- `trace-timestamp` — helper enter/leave ring on the same prog
 
 Traits live in the `xpost-type` crate so esp-radio (xdp feature) and xpost share
-one declaration (`EspRadioTrace: XdpProg`). esp-radio owns RX / `XdpAction`→`Action`
-mapping / EspRadioTrace call-sites; `XdpProg::run` only invokes the leased XDP image.
+one declaration (`Observe: XdpProg`). esp-radio owns RX / `XdpAction`→`Action`
+mapping / Observe call-sites; `XdpProg::run` only invokes the leased XDP image.
 App fields like `net_rx` stay in the firmware crate.
 
 Optional / incomplete: `ext::ringbuf` behind Cargo feature `ringbuf` (currently
 `compile_error!`).
-

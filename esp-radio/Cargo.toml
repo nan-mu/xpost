@@ -31,7 +31,7 @@ check-configs = [
     { features = ["esp-hal/unstable", "esp-hal/rt", "unstable", "defmt", "wifi", "wifi-eap", "esp-now", "sniffer", "ble", "coex"], if = 'chip_has("wifi_driver_supported") && chip_has("bt_driver_supported")' },
     { features = ["esp-hal/unstable", "esp-hal/rt", "wifi-eap", "unstable"], if = 'chip_has("wifi_driver_supported")' },
     # Native-XDP ingress (local fork): Pass/Drop/Tx
-    { features = ["esp-hal/unstable", "esp-hal/rt", "unstable", "wifi", "xdp"], if = 'chip_has("wifi_driver_supported")' },
+    { features = ["esp-hal/unstable", "esp-hal/rt", "unstable", "wifi", "rx-ingress"], if = 'chip_has("wifi_driver_supported")' },
 ]
 clippy-configs = [
     { features = ["esp-hal/rt"] },
@@ -269,15 +269,12 @@ esp-now = ["wifi", "__has_unstable_feature_enabled"]
 ## ⚠️ This feature is considered unstable.
 sniffer = ["wifi", "__has_unstable_feature_enabled"]
 
-## Native-XDP early RX ingress: pass [`wifi::XdpProg`] to `wifi::new(..., prog)`.
-## Maps [`wifi::XdpAction`] to Pass / Drop / same-iface Tx.
+## Native-XDP early RX ingress: attach a [`wifi::Prog`] before Wi-Fi start;
+## Pass / Drop / same-iface zero-copy Tx + counter callbacks.
+## Default is a no-op Pass prog.
 ##
-## Recommended esp32c3 check: `esp32c3,wifi,unstable,xdp`.
-xdp = ["wifi", "dep:xpost-type"]
-
-## Compile [`wifi::xdp::EspRadioTrace`] call-sites on the XDP / TX path.
-## Requires `xdp`. Storage and semantics are owned by the `XdpProg` implementor.
-xdp-observe = ["xdp"]
+## Recommended esp32c3 check: `esp32c3,wifi,unstable,rx-ingress`.
+rx-ingress = ["wifi"]
 #DOC_ENDIF
 
 #DOC_IF has("bt_driver_supported")
@@ -355,7 +352,7 @@ defmt = [
 ## Never enable this feature in a library crate using esp-radio.
 ##
 ## Local fork note: also enables `esp-hal/unstable` so
-## `cargo check -p esp-radio --features esp32c3,wifi,unstable,xdp`
+## `cargo check -p esp-radio --features esp32c3,wifi,unstable,rx-ingress`
 ## typechecks without a separate binary crate.
 unstable = [
   "esp-hal/requires-unstable",

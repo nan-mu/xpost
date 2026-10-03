@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
 # Path-toolchain shims under .cargo/docker-toolchain/bin/{cargo,rustc,…}.
 # Mac: rust-toolchain.toml → these binaries → docker exec quirky_villani.
-# In-container: fall through to /usr/local/cargo/bin with RUSTUP_TOOLCHAIN=nightly
-# so we do not re-enter this path toolchain.
+# In-container: fall through to nightly toolchain bins (no rustup / path recurse).
+#
+# Host tree may be reached via symlink (/Users/nan/bs → /Volumes/SSD/bs).
+# pwd -P is physical; we map back to logical HOST_ROOT for docker -w.
+#
+# OrbStack virtiofs on /Volumes is unreliable for cargo (config load / metadata
+# hang, EINTR on reads). Stage under /Users/nan/.cache (internal disk, mounted
+# into quirky_villani) then mirror target/ back into the project.
 set -euo pipefail
 
 CONTAINER="${XPOST_TEST_DOCKER:-quirky_villani}"
-HOST_ROOT="${XPOST_HOST_ROOT:-/Users/nan/bs}"
+HOST_ROOT_LOGICAL="${XPOST_HOST_ROOT:-/Users/nan/bs}"
 TOOL="$(basename "$0")"
-REAL="/usr/local/cargo/bin/${TOOL}"
+NIGHTLY_BIN="/usr/local/rustup/toolchains/nightly-aarch64-unknown-linux-gnu/bin"
+REAL="${NIGHTLY_BIN}/${TOOL}"
+# Must be under /Users (OrbStack-native) on internal disk — not /Volumes via bs symlink.
+STAGE_ROOT="${XPOST_TEST_DOCKER_STAGE:-/Users/nan/.cache/xpost-test-docker}"
 
 in_docker() {
   [ -f /.dockerenv ] || [ -n "${XPOST_TEST_IN_DOCKER:-}" ]
@@ -19,14 +28,22 @@ if in_docker; then
     echo "xpost-test docker-toolchain: missing $REAL" >&2
     exit 127
   fi
-  exec env RUSTUP_TOOLCHAIN=nightly "$REAL" "$@"
+  exec env -u RUSTUP_HOME RUSTUP_TOOLCHAIN=nightly "$REAL" "$@"
 fi
 
+if [ ! -d "$HOST_ROOT_LOGICAL" ]; then
+  echo "xpost-test docker-toolchain: HOST_ROOT $HOST_ROOT_LOGICAL missing" >&2
+  exit 1
+fi
+HOST_ROOT_REAL="$(cd "$HOST_ROOT_LOGICAL" && pwd -P)"
 cwd="$(pwd -P)"
+
 case "$cwd" in
-  "$HOST_ROOT" | "$HOST_ROOT"/*) ;;
+  "$HOST_ROOT_REAL" | "$HOST_ROOT_REAL"/*)
+    workdir="${HOST_ROOT_LOGICAL}${cwd#"$HOST_ROOT_REAL"}"
+    ;;
   *)
-    echo "xpost-test docker-toolchain: cwd $cwd is outside $HOST_ROOT" >&2
+    echo "xpost-test docker-toolchain: cwd $cwd is outside $HOST_ROOT_LOGICAL (→ $HOST_ROOT_REAL)" >&2
     exit 1
     ;;
 esac
@@ -36,14 +53,75 @@ if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q t
   exit 1
 fi
 
-tty_flags=(-i)
-if [ -t 1 ]; then
-  tty_flags=(-it)
+# Only stage+mirror for the xpost-test workspace (path toolchain lives there).
+case "$workdir" in
+  */xpost/xpost-test | */xpost/xpost-test/*) ;;
+  *)
+    echo "xpost-test docker-toolchain: expected cwd under xpost-test, got $workdir" >&2
+    exit 1
+    ;;
+esac
+
+PROJECT_ROOT="${HOST_ROOT_LOGICAL}/xpost/xpost-test"
+REL="${workdir#"$PROJECT_ROOT"}"
+REL="${REL#/}"
+STAGE_PROJECT="$STAGE_ROOT"
+STAGE_WD="$STAGE_PROJECT"
+if [ -n "$REL" ]; then
+  STAGE_WD="$STAGE_PROJECT/$REL"
 fi
 
-exec docker exec "${tty_flags[@]}" \
-  -e XPOST_TEST_IN_DOCKER=1 \
-  -e RUSTUP_TOOLCHAIN=nightly \
-  -w "$cwd" \
-  "$CONTAINER" \
-  "$REAL" "$@"
+mkdir -p "$STAGE_PROJECT"
+# Refresh staged sources (keep staged target/ for incremental builds).
+rsync -a --delete \
+  --exclude target \
+  --exclude .cargo/docker-toolchain \
+  --exclude rust-toolchain.toml \
+  "$PROJECT_ROOT"/ "$STAGE_PROJECT"/
+
+# Drop path-toolchain file if rsync brought a copy; use nightly bin directly.
+rm -f "$STAGE_PROJECT/rust-toolchain.toml"
+mkdir -p "$STAGE_PROJECT/.cargo"
+# Local-disk config (avoid virtiofs .cargo/config.toml hang on /Volumes).
+cat >"$STAGE_PROJECT/.cargo/config.toml" <<'EOF'
+[build]
+target-dir = "target"
+target = "aarch64-unknown-linux-musl"
+
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"
+EOF
+
+cmd=(docker exec)
+if [ -t 0 ] && [ -t 1 ]; then
+  cmd+=(-it)
+elif [ -t 0 ]; then
+  cmd+=(-i)
+fi
+# Nightly bins first so rustc/cargo are not rustup proxies; keep cargo bin for bpf-linker.
+DOCKER_PATH="${NIGHTLY_BIN}:/usr/lib/llvm-18/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+cmd+=(
+  -e XPOST_TEST_IN_DOCKER=1
+  -e "PATH=${DOCKER_PATH}"
+  -w "$STAGE_WD"
+  "$CONTAINER"
+  env
+  -u
+  RUSTUP_HOME
+  -u
+  RUSTUP_TOOLCHAIN
+  "$REAL"
+)
+
+set +e
+"${cmd[@]}" "$@"
+status=$?
+set -e
+
+# Mirror build outputs back for scp / local consumers.
+if [ -d "$STAGE_PROJECT/target" ]; then
+  mkdir -p "$PROJECT_ROOT/target"
+  rsync -a "$STAGE_PROJECT/target"/ "$PROJECT_ROOT/target"/
+fi
+
+exit "$status"

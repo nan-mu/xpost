@@ -105,4 +105,41 @@ impl XdpTableStorage for EspFlashXdpTable {
             .read(self.abs(offset)?, out)
             .map_err(|_| FlashError::Storage)
     }
+
+    fn erase(&mut self, offset: usize, len: usize) -> Result<(), FlashError> {
+        use embedded_storage::nor_flash::NorFlash;
+        if offset.saturating_add(len) > self.partition_len as usize {
+            return Err(FlashError::Storage);
+        }
+        let start = self.abs(offset)?;
+        let end = start.saturating_add(len as u32);
+        self.flash.erase(start, end).map_err(|_| FlashError::Storage)
+    }
+
+    fn write(&mut self, offset: usize, bytes: &[u8]) -> Result<(), FlashError> {
+        use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
+        if offset.saturating_add(bytes.len()) > self.partition_len as usize {
+            return Err(FlashError::Storage);
+        }
+        if (bytes.as_ptr() as usize) % 4 != 0 || bytes.len() % 4 != 0 {
+            return Err(FlashError::Storage);
+        }
+        let abs = self.abs(offset)?;
+        self.flash
+            .write(abs, bytes)
+            .map_err(|_| FlashError::Storage)?;
+        let mut verify = [0u8; 64];
+        let mut done = 0usize;
+        while done < bytes.len() {
+            let n = (bytes.len() - done).min(verify.len());
+            self.flash
+                .read(abs + done as u32, &mut verify[..n])
+                .map_err(|_| FlashError::Storage)?;
+            if verify[..n] != bytes[done..done + n] {
+                return Err(FlashError::Storage);
+            }
+            done += n;
+        }
+        Ok(())
+    }
 }

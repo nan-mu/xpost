@@ -87,9 +87,7 @@ static FAST_ARRAYS: [FastArray; MAX_MAP_ALIASES] = [const {
 pub(crate) fn set_fast_arrays(rt: &MapRt, binds: &[(usize, MapIdx)]) {
     let mut i = 0;
     for &(addr, id) in binds {
-        let Some(meta) = rt.meta.get(id) else {
-            continue;
-        };
+        let Some(meta) = rt.meta.get(id) else { continue };
         if addr == 0 || meta.storage.kind != Some(MapType::Array) || meta.storage.ptr.is_null() {
             continue;
         }

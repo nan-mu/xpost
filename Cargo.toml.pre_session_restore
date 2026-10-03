@@ -1,0 +1,104 @@
+[workspace]
+resolver = "2"
+# MCU packages only under the default RV32 target. Host tools live under
+# `exclude` so they are not typechecked as riscv32 (thousands of false RA
+# errors from std crates). Invoke via `--manifest-path` / the `xtask` alias.
+members = [".", "esp-radio", "xpost-macros", "xpost-elf"]
+default-members = ["."]
+exclude = ["xpost-build", "xtask", "agent", "xpost-serial", "examples"]
+
+[package]
+edition      = "2024"
+name         = "xpost"
+rust-version = "1.88"
+version      = "0.1.1"
+description  = "XDP datapath on MCU (express post): AOT invoke, maps, helpers, RX ingest"
+license      = "MIT OR Apache-2.0"
+publish      = false
+links        = "xpost"
+exclude      = ["examples/*", "xtask", "xpost-build", "target"]
+
+[lib]
+test = false
+bench = false
+
+[features]
+default = []
+# Boot path B: bpf.toml codegen (`boot_maps` / `boot_xdps`).
+# Firmware-first (path A) is implicit when this is off — no named feature.
+from-bpf-toml = []
+# Incomplete — do not enable (compile_error!).
+# Pulls optional ringbuf / async-ringbuf crates; source kept for later work.
+ringbuf = ["dep:ringbuf", "dep:async-ringbuf"]
+
+# Path A defaults for `xpost-build::firmware_codegen` when the firmware crate
+# omits `[package.metadata.xpost]`. Firmware may override map/slots/target;
+# cold flash span always comes from the board `partitions.csv`.
+[package.metadata.xpost]
+schema_version = 1
+
+[package.metadata.xpost.map]
+heap_size = 65536
+
+[[package.metadata.xpost.slots.entries]]
+name = "a"
+length = 0xE00
+mount = "rx"
+primary = true
+
+[[package.metadata.xpost.slots.entries]]
+name = "b"
+length = 0x1000
+mount = "call"
+primary = false
+
+[package.metadata.xpost.xdp_table]
+partition = "xdp"
+image_capacity = 0x1000
+
+[package.metadata.xpost.target]
+arch = "riscv32"
+abi = "ilp32"
+iram_base = 0x40380000
+arena_end = 0x40380200
+helper_length = 0x200
+
+
+[dependencies]
+xpost-macros     = { path = "xpost-macros" }
+xpost-elf        = { path = "xpost-elf" }
+log              = "0.4.27"
+anyhow           = { version = "1.0.104", default-features = false }
+critical-section = "1.2.0"
+heapless         = "0.9.3"
+nom              = { version = "8.0.0", default-features = false, features = ["alloc"] }
+talc             = { version = "5.0", features = ["counters"] }
+allocator-api2   = { version = "0.4", default-features = false, features = ["alloc"] }
+allocator-api2-v02 = { version = "0.2", package = "allocator-api2", default-features = false, features = ["alloc"] }
+hashbrown        = { version = "0.17", default-features = false, features = ["allocator-api2", "default-hasher"] }
+portable-atomic  = { version = "1", default-features = false }
+ringbuf          = { version = "0.5.1", default-features = false, optional = true, features = ["alloc", "portable-atomic"] }
+async-ringbuf    = { version = "0.3.8", default-features = false, optional = true, features = ["alloc", "portable-atomic"] }
+embassy-time     = { version = "0.5.0", default-features = false, features = ["log"] }
+embassy-sync     = { version = "0.8.0", default-features = false, features = ["log"] }
+embedded-storage = { version = "0.3.1" }
+esp-storage      = { version = "0.9.0", default-features = false, features = ["esp32c3"] }
+esp-hal = { version = "~1.1.0", default-features = false, features = [
+  "esp32c3",
+  "unstable",
+] }
+esp-radio = { version = "0.18.0", path = "esp-radio", default-features = false, features = [
+  "esp32c3",
+  "unstable",
+  "wifi",
+  "xdp",
+] }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug         = 2
+lto           = "fat"
+opt-level     = "s"

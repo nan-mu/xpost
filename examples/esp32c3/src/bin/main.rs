@@ -41,6 +41,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    let flash = peripherals.FLASH;
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
 
@@ -50,6 +51,22 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     info!("Embassy initialized!");
+
+    let _linked = esp32c3::slot_link_addrs();
+    let slots = unsafe { esp32c3::mem_map::firmware_xdp_slots() };
+    let cold = xpost::xdp::ColdRegion::new(
+        esp32c3::mem_map::COLD_TABLE_FLASH_BASE,
+        esp32c3::mem_map::COLD_TABLE_FLASH_LEN,
+        esp32c3::mem_map::COLD_TABLE_IMAGE_CAPACITY,
+    );
+    match xpost::xdp::XdpRt::init(flash, &slots, cold).await {
+        Ok(rt) => info!(
+            "xdp images={} write-bin {:#x} <xdp.elf>",
+            rt.image_count(),
+            esp32c3::mem_map::COLD_TABLE_FLASH_BASE
+        ),
+        Err(e) => error!("xdp init failed: {e}"),
+    }
 
     let (mut _wifi_controller, _interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, Default::default())

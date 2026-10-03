@@ -1,7 +1,54 @@
-//! Formal `firewall` — hash-map blacklist size × hit/miss PPS grid.
+//! 测量 DUT 上 **hash map 查表与命中计数** 的耗时（命中 DROP+计数 vs 未命中 PASS；相对 HAL 对照）。
 //!
-//! Arms: `xdp_cag` + `hal`, then `xdp_t` Trace. Rules seeded via MapCrudOp
-//! (UDP `:8081`) before each size; dataplane is lookup-only.
+//! ```text
+//! firewall:
+//!   for fw in {hal, xdp_cag}:
+//!     agent flash fw
+//!     for n in {50, 100, 200}:
+//!       for τ in {hit, miss}:
+//!         for rate in {400, 800, …, 4000}:
+//!           agent insert map(blacklist) n
+//!           agent clear perf
+//!           agent enable xdp
+//!           sent τ rate 30s
+//!           agent disable xdp
+//!           agent get map(blacklist)
+//!           agent get perf
+//!           upload to db
+//!           agent clear map(blacklist)
+//!
+//!   agent flash xdp_t
+//!   agent insert map(blacklist) 8
+//!   agent clear perf
+//!   sent 1
+//!   agent get perf
+//!   upload to db
+//! ```
+//!
+//! 主机向 DUT 的 `STIM_PORT` 发 UDP，载荷为 1 字节。源 IP 按 `τ` 选取：`hit` 为
+//! 通过 xpost-agent 提前写入 `blacklist` 的 n 个地址，`miss` 为未写入的地址。
+//! XDP 用源 IP 查 `blacklist`：命中则 `XDP_DROP` 并给 `blacklist` 对应元素加一，
+//! 未命中则 `XDP_PASS`；HAL 对照在应用侧查表后丢弃或回 ACK。
+//!
+//! **数据处理**
+//!
+//! 每格写入 `firewall_config` + `firewall_data`（DDL：`sql/firewall.sql`）。
+//! Perf（`agent get perf`）另落共享 / HAL CAG 表，不在此列。
+//!
+//! `firewall_config`：
+//! - `exam_id` — 本轮 `exam` 行
+//! - `firmware` — 当前 `fw`（`hal` / `xdp_cag` / `xdp_t`）
+//! - `blacklist_size` — 本轮灌入的黑名单条目数 `n`
+//! - `traffic` — `hit` 或 `miss`
+//! - `target_pps` — 网格 `rate`
+//! - `window_s` — 刺激时长
+//! - `started_at` / `stopped_at` — 该格刺激墙钟起止
+//! - `sent` — 主机实际发出的包数
+//!
+//! `firewall_data`（每个 blacklist 键一行）：
+//! - `config_id` — 所属 `firewall_config`
+//! - `key_ip` — 黑名单键（IPv4）
+//! - `value` — `agent get map(blacklist)` 读到的计数（命中路径上该键被 +1 的次数）
 
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant, SystemTime};
@@ -11,7 +58,7 @@ use test_common::map_crud_op::{self, MapCrudOp};
 
 use crate::agent::AgentClient;
 use crate::bench::formal::{self, Firmware};
-use crate::bench::just_drop_pps::PpsPath;
+use crate::bench::just_drop::PpsPath;
 use crate::bench::pg_dsn::PgOpts;
 use crate::bench::status::{self, BudgetEta, READY_BUDGET, RoundUi};
 use crate::config::FileConfig;
@@ -150,28 +197,35 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
             }
             let miss = miss_ip(esp, &rules, &avoid);
 
-            ui.check_start(&format!("seed blacklist n={size}"));
-            seed_blacklist(&mut harness, host_ip, &rules).await?;
-            ui.check_ok(&format!("{} entries", rules.len()));
-
-            // Functional probe (one packet each).
-            probe_rule(&mut harness, rules[0], true).await?;
-            probe_rule(&mut harness, miss, false).await?;
-
             for traffic in &traffic_modes {
                 let hit = traffic == "hit";
                 let src = if hit { rules[0] } else { miss };
                 for &pps in grid {
+                    // Re-seed each cell: prior cell ends with `blacklist clear`.
+                    ui.check_start(&format!("insert blacklist n={size}"));
+                    seed_blacklist(&mut harness, host_ip, &rules).await?;
+                    ui.check_ok(&format!("{} entries", rules.len()));
+
                     agent.perf_clear().await.context("perf_clear")?;
+                    agent
+                        .request("enable xdp")
+                        .await
+                        .context("enable xdp")?;
                     let started_at = SystemTime::now();
                     let sent =
                         paced_fixed_src(cfg, &ui, &eta, path, window, pps, src).await?;
                     tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
                     let stopped_at = SystemTime::now();
+                    agent
+                        .request("disable xdp")
+                        .await
+                        .context("disable xdp")?;
+                    let map_rows = dump_blacklist(&agent).await.context("get map blacklist")?;
 
                     ui.permanent(&format!(
-                        "    {} size={size} {traffic} @{pps:.0}: sent={sent} src={src}",
-                        fw.as_db()
+                        "    {} size={size} {traffic} @{pps:.0}: sent={sent} src={src} map={}",
+                        fw.as_db(),
+                        map_rows.len()
                     ));
 
                     if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
@@ -189,6 +243,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                             sent as i64,
                         )
                         .await?;
+                        formal::insert_firewall_data(client, cfg_id, &map_rows).await?;
                         let msg = agent.request("report").await.context("report")?;
                         let decoded = formal::decode_report_msg(&msg)?;
                         formal::write_perf(
@@ -202,13 +257,11 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                         .await?;
                         ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
                     }
+                    let _ = agent.request("blacklist clear").await;
                     eta.consume_fixed(window);
                     ui.set_eta(&eta.fmt());
                 }
             }
-
-            // Clear rules before next size (serial bulk clear).
-            let _ = agent.request("blacklist clear").await;
         }
     }
 
@@ -220,19 +273,15 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
         let rules = blacklist_ips(esp, 8, &[esp, host_ip]);
         seed_blacklist(&mut harness, host_ip, &rules).await?;
         agent.perf_clear().await.context("perf_clear")?;
+        agent
+            .request("enable xdp")
+            .await
+            .context("enable xdp")?;
         let started_at = SystemTime::now();
-        let sent = paced_fixed_src(
-            cfg,
-            &ui,
-            &eta,
-            PpsPath::Xdp,
-            Duration::from_millis(50),
-            20.0,
-            rules[0],
-        )
-        .await?;
+        let sent = send_one(cfg, rules[0]).await?;
         tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
         let stopped_at = SystemTime::now();
+        let _ = agent.request("disable xdp").await;
         if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
             ui.check_start("写入 trace");
             let cfg_id = formal::insert_firewall_config(
@@ -245,7 +294,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 0.0,
                 started_at,
                 stopped_at,
-                sent.max(1) as i64,
+                sent as i64,
             )
             .await?;
             let msg = agent.request("report").await.context("report")?;
@@ -352,7 +401,7 @@ async fn flash_ready(
 }
 
 async fn seed_blacklist(harness: &mut Harness, ctrl_src: Ipv4Addr, rules: &[Ipv4Addr]) -> Result<()> {
-    // Clear first (best-effort via MapCrud DELETE of known keys is slow; serial clear is done by caller).
+    let zero = [0u8; 8];
     for ip in rules {
         let key = ip_key(*ip);
         let ack = harness
@@ -363,7 +412,7 @@ async fn seed_blacklist(harness: &mut Harness, ctrl_src: Ipv4Addr, rules: &[Ipv4
                     MAP_NAME,
                     map_crud_op::MAP_TYPE_HASH,
                     &key,
-                    &[1],
+                    &zero,
                     0,
                 ),
             )
@@ -376,23 +425,33 @@ async fn seed_blacklist(harness: &mut Harness, ctrl_src: Ipv4Addr, rules: &[Ipv4
     Ok(())
 }
 
-async fn probe_rule(harness: &mut Harness, src: Ipv4Addr, expect_drop: bool) -> Result<()> {
-    harness.reset_state().await;
-    let seq = harness.alloc_seq();
-    harness.send_stimulus(src, None, seq).await?;
-    let _ = harness.wait_t0(seq, None).await?;
-    let echo = harness
-        .wait_echo(seq, Some(Duration::from_millis(800)))
-        .await
-        .unwrap_or(None);
-    let got_echo = echo.is_some();
-    if expect_drop && got_echo {
-        bail!("probe {src}: expected drop (no ACK) but got echo");
+async fn dump_blacklist(agent: &AgentClient) -> Result<Vec<(Ipv4Addr, i64)>> {
+    let dump = agent.map_dump(MAP_NAME).await.context("map dump blacklist")?;
+    if dump.lines().any(|l| l.starts_with("ERR ")) {
+        bail!("map dump error: {dump}");
     }
-    if !expect_drop && !got_echo {
-        bail!("probe {src}: expected pass (ACK) but got none");
+    let mut out = Vec::new();
+    for line in dump.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("OK ") {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(ip_s) = parts.next() else {
+            continue;
+        };
+        let Some(val_s) = parts.next() else {
+            continue;
+        };
+        let ip: Ipv4Addr = ip_s
+            .parse()
+            .with_context(|| format!("blacklist dump ip {ip_s:?}"))?;
+        let value: i64 = val_s
+            .parse()
+            .with_context(|| format!("blacklist dump value {val_s:?}"))?;
+        out.push((ip, value));
     }
-    Ok(())
+    Ok(out)
 }
 
 async fn paced_fixed_src(
@@ -457,4 +516,48 @@ async fn paced_fixed_src(
     }
     ui.live_clear();
     Ok(sent)
+}
+
+/// Trace arm: one fixed-src UDP to DUT echo port (hit path).
+async fn send_one(cfg: &FileConfig, src: Ipv4Addr) -> Result<u64> {
+    let esp = cfg.target.esp_ip;
+    let esp_mac = cfg.esp_mac_bytes()?;
+    let src_mac = match cfg.src_mac_override()? {
+        Some(m) => m,
+        None => iface_mac(&cfg.probe.iface)?,
+    };
+    let raw = RawTx::open(
+        &cfg.probe.iface,
+        src_mac,
+        esp_mac,
+        esp,
+        STIM_PORT,
+        cfg.target.stim_sport,
+    )
+    .context("RawTx::open")?;
+    raw.send_udp(src, esp, STIM_PORT, b"D")
+        .context("send_one")?;
+    Ok(1)
+}
+
+/// Trace arm: one fixed-src UDP to DUT echo port (hit path).
+async fn send_one(cfg: &FileConfig, src: Ipv4Addr) -> Result<u64> {
+    let esp = cfg.target.esp_ip;
+    let esp_mac = cfg.esp_mac_bytes()?;
+    let src_mac = match cfg.src_mac_override()? {
+        Some(m) => m,
+        None => iface_mac(&cfg.probe.iface)?,
+    };
+    let raw = RawTx::open(
+        &cfg.probe.iface,
+        src_mac,
+        esp_mac,
+        esp,
+        STIM_PORT,
+        cfg.target.stim_sport,
+    )
+    .context("RawTx::open")?;
+    raw.send_udp(src, esp, STIM_PORT, b"D")
+        .context("send_one")?;
+    Ok(1)
 }

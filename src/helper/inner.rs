@@ -1,10 +1,8 @@
 //! Consolidated BPF helper implementations (this version's dispatched set).
 //!
-//! Deleted: redirect_map, tail_call, adjust_head, load/store_bytes,
-//! dynptr, xpost_evt_wake. Deferred BPF ringbuf helpers live in
-//! Deferred BPF ringbuf helpers live in `ext/ringbuf/` (not dispatched).
-//!
-//! `xdp_adjust_tail` is supported **shrink-only** (positive delta rejected).
+//! Deleted: redirect, redirect_map, tail_call, adjust_head/tail, load/store_bytes,
+//! dynptr, xpost_wdt_feed, xpost_evt_wake. Deferred BPF ringbuf helpers live in
+//! `map/ringbuf/` (not dispatched).
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
@@ -263,42 +261,5 @@ pub(super) mod printk {
             Ok(()) => 0,
             Err(()) => usize::MAX,
         }
-    }
-}
-
-pub(super) mod xdp_adjust_tail {
-    //! `bpf_xdp_adjust_tail` — **shrink only** (negative / zero delta).
-    //!
-    //! Positive delta (grow into headroom) is rejected. Frame storage is the
-    //! in-place RX buffer; there is no scratch grow path.
-
-    use crate::xdp::ingress::ctx::XdpMd;
-
-    const EINVAL: usize = (-22isize) as usize;
-
-    pub(crate) fn inner(ctx: usize, delta: usize) -> usize {
-        if ctx == 0 {
-            return EINVAL;
-        }
-        let delta = delta as i32;
-        if delta > 0 {
-            return EINVAL;
-        }
-        if delta == 0 {
-            return 0;
-        }
-        let md = unsafe { &mut *(ctx as *mut XdpMd) };
-        let data = md.data as usize;
-        let end = md.data_end as usize;
-        if end < data {
-            return EINVAL;
-        }
-        let shrink = (-delta) as usize;
-        let len = end - data;
-        if shrink > len {
-            return EINVAL;
-        }
-        md.data_end = (end - shrink) as *mut u8;
-        0
     }
 }

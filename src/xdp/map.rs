@@ -88,7 +88,7 @@ impl XdpRt {
     ) -> Result<(), XdpLeaseError> {
         let map_id = maps.find(name).map_err(|e| match e {
             MapUseError::NotFound => XdpLeaseError::MissingMap,
-            other => XdpLeaseError::Map(other),
+            MapUseError::TypeMismatch => XdpLeaseError::Map(e),
         })?;
         if !self.map_lease.refs.contains(&map_id) {
             maps.add_user(map_id)?;

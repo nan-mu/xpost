@@ -6,7 +6,10 @@ pub use traits::{MapKey, MapValue};
 
 use alloc::{string::String, vec::Vec};
 
-use crate::{error::MapCreateError, map::builder::traits::layout_vec};
+use crate::{
+    error::MapCreateError,
+    map::builder::traits::layout_vec,
+};
 
 /// BPF map kind stored in [`super::MapMeta`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
