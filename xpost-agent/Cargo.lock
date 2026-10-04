@@ -2234,14 +2234,13 @@ dependencies = [
 name = "xpost-serial"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "esp-idf-part",
  "espflash",
  "futures",
  "log",
  "serialport",
- "thiserror",
  "tokio",
+ "winnow 1.0.4",
  "xpost-elf",
 ]
 

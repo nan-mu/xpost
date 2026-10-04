@@ -2,13 +2,19 @@
 //!
 //! UART/blob bytes live in stable [`Box`] slabs (append-only). File tee is a copy.
 //! [`wait_reply`] returns a fully parsed [`OkReply`] (no ReplyGuard).
+//!
+//! # Rotating log directory
+//!
+//! Production open uses a **directory**: active file `serial.log`, rotated to
+//! `serial.log.1` … `serial.log.{KEEP}` when the active file exceeds
+//! [`ROTATE_MAX_BYTES`].
 
 mod find;
 
 pub(crate) use find::Found;
 
 use std::fmt::Display;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -20,6 +26,13 @@ use crate::client::ops::FlashEvent;
 use crate::r#type::command::Command;
 use crate::r#type::reply::OkReply;
 
+/// Active / rotated transcript basename under the log directory.
+pub const SERIAL_LOG_NAME: &str = "serial.log";
+/// Rotate when the active file reaches this size.
+pub const ROTATE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+/// Keep this many rotated siblings (`serial.log.1` …).
+pub const ROTATE_KEEP: u32 = 5;
+
 /// Shared transcript (internal to [`crate::client::SerialHandler`]).
 pub(crate) type SharedRecord = Arc<SharedRecordInner>;
 
@@ -29,9 +42,19 @@ pub(crate) struct SharedRecordInner {
 }
 
 impl SharedRecordInner {
-    pub fn create(path: impl AsRef<Path>, tee_stdout: bool) -> io::Result<SharedRecord> {
+    /// Rotating transcript under `log_dir` (`serial.log` + `.N`).
+    pub fn create_rotating(log_dir: impl AsRef<Path>, tee_stdout: bool) -> io::Result<SharedRecord> {
         Ok(Arc::new(Self {
-            inner: Mutex::new(Record::create(path, tee_stdout)?),
+            inner: Mutex::new(Record::create_rotating(log_dir, tee_stdout)?),
+            notify: Notify::new(),
+        }))
+    }
+
+    /// Single-file transcript (tests / memory harness). No rotation.
+    #[cfg(all(test, feature = "dev"))]
+    pub fn create_file(path: impl AsRef<Path>, tee_stdout: bool) -> io::Result<SharedRecord> {
+        Ok(Arc::new(Self {
+            inner: Mutex::new(Record::create_file(path, tee_stdout)?),
             notify: Notify::new(),
         }))
     }
@@ -110,7 +133,11 @@ impl Entry {
 #[derive(Debug)]
 pub(crate) struct Record {
     file: Option<File>,
+    /// Active log file path (`…/serial.log` or a single test file).
     path: Option<PathBuf>,
+    /// When set, size-based rotation under this directory.
+    rotate_dir: Option<PathBuf>,
+    bytes_written: u64,
     tee_stdout: bool,
     /// Append-only; each `Box` is immovable on the heap.
     payloads: Vec<Box<[u8]>>,
@@ -121,16 +148,9 @@ pub(crate) trait WriteRecord {
     fn write_to(&self, rec: &mut Record);
 }
 
-impl WriteRecord for OkReply<'_> {
-    fn write_to(&self, rec: &mut Record) {
-        rec.cmd_rx(crate::client::serial::ok_label(self));
-    }
-}
-
 impl WriteRecord for Command<'_> {
     fn write_to(&self, rec: &mut Record) {
         match self {
-            // Host-only marker in the transcript — never a UART verb.
             Command::GetInit => rec.cmd_tx(&"get init (host wait)"),
             other => rec.cmd_tx(other),
         }
@@ -144,12 +164,31 @@ impl WriteRecord for FlashEvent {
 }
 
 impl Record {
-    pub fn create(path: impl AsRef<Path>, tee_stdout: bool) -> io::Result<Self> {
+    /// Rotating `serial.log` under `log_dir`.
+    pub fn create_rotating(log_dir: impl AsRef<Path>, tee_stdout: bool) -> io::Result<Self> {
+        let dir = log_dir.as_ref().to_path_buf();
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(SERIAL_LOG_NAME);
+        let (file, bytes_written) = open_append(&path)?;
+        Ok(Self {
+            file: Some(file),
+            path: Some(path),
+            rotate_dir: Some(dir),
+            bytes_written,
+            tee_stdout,
+            payloads: Vec::new(),
+            entries: Vec::new(),
+        })
+    }
+
+    /// Single file (truncate on create). Used by memory-with-log tests.
+    #[cfg(all(test, feature = "dev"))]
+    pub fn create_file(path: impl AsRef<Path>, tee_stdout: bool) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)?;
         }
         let file = OpenOptions::new()
             .create(true)
@@ -159,6 +198,8 @@ impl Record {
         Ok(Self {
             file: Some(file),
             path: Some(path),
+            rotate_dir: None,
+            bytes_written: 0,
             tee_stdout,
             payloads: Vec::new(),
             entries: Vec::new(),
@@ -171,6 +212,8 @@ impl Record {
         Self {
             file: None,
             path: None,
+            rotate_dir: None,
+            bytes_written: 0,
             tee_stdout: false,
             payloads: Vec::new(),
             entries: Vec::new(),
@@ -232,9 +275,17 @@ impl Record {
     fn append_file_at(&mut self, at: SystemTime, line: &str) {
         let ts = rfc3339_millis(at);
         let full = format!("{ts} {line}");
+        let line_bytes = (full.len() + 1) as u64; // + `\n`
+        if self.rotate_dir.is_some()
+            && self.bytes_written > 0
+            && self.bytes_written + line_bytes > ROTATE_MAX_BYTES
+        {
+            let _ = self.rotate();
+        }
         if let Some(file) = self.file.as_mut() {
             let _ = writeln!(file, "{full}");
             let _ = file.flush();
+            self.bytes_written = self.bytes_written.saturating_add(line_bytes);
         }
         if self.tee_stdout {
             let mut out = io::stdout().lock();
@@ -243,33 +294,82 @@ impl Record {
         }
     }
 
-    pub fn lines_in_range(&self, since: SystemTime, until: SystemTime) -> io::Result<Vec<String>> {
-        let Some(path) = self.path.as_ref() else {
-            return Ok(Vec::new());
+    fn rotate(&mut self) -> io::Result<()> {
+        let Some(dir) = self.rotate_dir.clone() else {
+            return Ok(());
         };
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
+        // Drop current handle before rename.
+        self.file = None;
+        let active = dir.join(SERIAL_LOG_NAME);
+        // serial.log.(KEEP-1) → drop; …; serial.log.1 ← serial.log
+        let oldest = dir.join(format!("{SERIAL_LOG_NAME}.{ROTATE_KEEP}"));
+        let _ = fs::remove_file(&oldest);
+        for n in (1..ROTATE_KEEP).rev() {
+            let from = dir.join(format!("{SERIAL_LOG_NAME}.{n}"));
+            let to = dir.join(format!("{SERIAL_LOG_NAME}.{}", n + 1));
+            if from.is_file() {
+                let _ = fs::rename(&from, &to);
+            }
+        }
+        if active.is_file() {
+            let _ = fs::rename(&active, dir.join(format!("{SERIAL_LOG_NAME}.1")));
+        }
+        let (file, bytes_written) = open_append(&active)?;
+        self.file = Some(file);
+        self.path = Some(active);
+        self.bytes_written = bytes_written;
+        Ok(())
+    }
+
+    pub fn lines_in_range(&self, since: SystemTime, until: SystemTime) -> io::Result<Vec<String>> {
         let mut out = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
-            let Some(ts) = parse_leading_rfc3339_millis(&line) else {
+        for path in self.log_files_oldest_first() {
+            if !path.is_file() {
                 continue;
-            };
-            if ts >= since && ts <= until {
-                out.push(line);
+            }
+            let file = File::open(&path)?;
+            for line in BufReader::new(file).lines() {
+                let line = line?;
+                let Some(ts) = parse_leading_rfc3339_millis(&line) else {
+                    continue;
+                };
+                if ts >= since && ts <= until {
+                    out.push(line);
+                }
             }
         }
         Ok(out)
     }
 
-    /// All transcript lines from the log file (no time filter).
+    fn log_files_oldest_first(&self) -> Vec<PathBuf> {
+        if let Some(dir) = &self.rotate_dir {
+            let mut paths: Vec<PathBuf> = (1..=ROTATE_KEEP)
+                .rev()
+                .map(|n| dir.join(format!("{SERIAL_LOG_NAME}.{n}")))
+                .collect();
+            paths.push(dir.join(SERIAL_LOG_NAME));
+            paths
+        } else if let Some(path) = &self.path {
+            vec![path.clone()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// All transcript lines from the log file(s) (no time filter).
     #[cfg(all(test, feature = "dev"))]
     pub fn all_lines(&self) -> io::Result<Vec<String>> {
-        let Some(path) = self.path.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let file = File::open(path)?;
-        BufReader::new(file).lines().collect()
+        let mut out = Vec::new();
+        for path in self.log_files_oldest_first() {
+            if !path.is_file() {
+                continue;
+            }
+            let file = File::open(&path)?;
+            for line in BufReader::new(file).lines() {
+                out.push(line?);
+            }
+        }
+        Ok(out)
     }
 
     pub(crate) fn ok_from_found<E>(
@@ -310,6 +410,15 @@ impl Record {
         self.payload(*payload)
             .ok_or_else(|| ParseError::BadShape("missing-payload").into())
     }
+}
+
+fn open_append(path: &Path) -> io::Result<(File, u64)> {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let len = file.metadata()?.len();
+    Ok((file, len))
 }
 
 fn rfc3339_millis(ts: SystemTime) -> String {

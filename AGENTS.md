@@ -18,7 +18,7 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 - Root crate `xpost`: board-agnostic runtime (maps, helpers, IRAM slots, RX ingest).
 - `examples/<app>/`: self-contained MCU projects.
 - Host (workspace `exclude`, own Cargo workspace / triple): `xpost-serial`
-  (library), `xpost-agent` (CLI), `xpost-build`, `xtask`, `xpost-test`
+  (library), `xpost-agent` (daemon), `xpost-build`, `xtask`, `xpost-test`
   (experiment harness; same git tree, separate `Cargo.toml`).
 
 ## Host serial / agent / test
@@ -50,17 +50,17 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
   `/tmp/xpost-dev-flame.report` → Mac `target/dev-flame.report`. High-pps
   formal uses Counter/Aggregate/Gauge (no Trace flood). HAL app-category
   ring slots are reserved empty.
-- **`--port`**: optional. Omit → unique USB serial; zero or many → require
-  `--port`.
 
 ## Commands
 
-Mac（USB 接 ESP；cwd = `xpost/`）：只需常驻 agent。收到 `FlashProfile` 时按 `profiles.toml` 的 `build` 编译再烧录。
+Mac（USB 接 ESP；cwd = `xpost/`）：只需常驻 agent。收到 `flash/fw` 时按 `profiles.toml` 的 `build` 编译再烧录。
 
 HTTP：`/health`、`/v1/*`（harness）、`/mcp`（Cursor Streamable HTTP MCP）。
 
 ```bash
-cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
+cargo xtask agent -- --bind 0.0.0.0:9240
+# or:
+cargo run --release --manifest-path xpost-agent/Cargo.toml -- --bind 0.0.0.0:9240
 ```
 
 Cursor MCP 示例 URL：`http://127.0.0.1:9240/mcp`。

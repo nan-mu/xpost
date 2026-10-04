@@ -43,10 +43,13 @@ pub(crate) const RESET_TO_APP_SETTLE: Duration = Duration::from_millis(800);
 /// Reader-thread wake only — never the business request deadline.
 pub(crate) const PORT_IO_TIMEOUT: Duration = Duration::from_millis(200);
 
+/// Host open options. Transcript goes under [`Self::log_dir`] as rotating
+/// `serial.log` / `serial.log.N` (see [`crate::client::record`]).
 pub struct OpenOptions<'a> {
     pub port: Option<&'a Path>,
     pub chip: Chip,
-    pub log_path: &'a Path,
+    /// Directory for rotating serial transcript files.
+    pub log_dir: &'a Path,
     pub tee_stdout: bool,
     pub flash: FlashConfig,
 }
@@ -62,7 +65,7 @@ impl SerialHandler {
     /// Resolve USB port, bind App + flash worker (no long-lived fd on the port).
     pub fn open(opts: OpenOptions<'_>) -> io::Result<Self> {
         let port = Arc::new(Port::resolve(opts.port, opts.chip)?);
-        let record = SharedRecordInner::create(opts.log_path, opts.tee_stdout)?;
+        let record = SharedRecordInner::create_rotating(opts.log_dir, opts.tee_stdout)?;
         let flash = flash::spawn(opts.flash, Arc::clone(&port), Arc::clone(&record));
         Ok(Self {
             link: AppLink::Usb(port),
@@ -82,12 +85,13 @@ impl SerialHandler {
         }
     }
 
-    /// Like [`Self::open_memory`], but tees the session transcript to `log_path`.
+    /// Like [`Self::open_memory`], but tees the session transcript to a single file
+    /// (no rotation — test harness only).
     #[cfg(all(test, feature = "dev"))]
     pub fn open_memory_with_log(client: MemoryClient, log_path: &Path) -> io::Result<Self> {
         Ok(Self {
             link: AppLink::Memory(client),
-            record: SharedRecordInner::create(log_path, false)?,
+            record: SharedRecordInner::create_file(log_path, false)?,
             flash: None,
         })
     }
