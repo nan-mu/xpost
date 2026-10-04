@@ -1,7 +1,0 @@
-{
-  "mcpServers": {
-    "xpost-agent": {
-      "url": "http://127.0.0.1:9240/mcp"
-    }
-  }
-}
