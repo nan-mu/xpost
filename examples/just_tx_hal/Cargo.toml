@@ -13,20 +13,6 @@ path = "./src/bin/main.rs"
 [package.metadata.espflash]
 partition_table = "partitions.csv"
 
-# Slot + cold table so xpost links; HAL never leases a TX image (inactive → Pass).
-[package.metadata.xpost]
-schema_version = 1
-
-[[package.metadata.xpost.slots.entries]]
-name = "a"
-length = 0xE00
-mount = "rx"
-primary = true
-
-[package.metadata.xpost.xdp_table]
-partition = "xdp"
-image_capacity = 0x1000
-
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
 
@@ -53,7 +39,6 @@ embedded-io-async = "0.7.0"
 esp-alloc = "0.10.0"
 esp-println = { version = "0.17.0", features = ["esp32c3", "log-04"] }
 embassy-executor = { version = "0.10.0", features = ["log"] }
-embassy-futures = "0.1.2"
 embassy-time = { version = "0.5.0", features = ["log"] }
 esp-radio = { version = "0.18.0", path = "../../esp-radio", features = [
   "esp-alloc",
@@ -61,21 +46,15 @@ esp-radio = { version = "0.18.0", path = "../../esp-radio", features = [
   "log-04",
   "unstable",
   "wifi",
-  "xdp",
 ] }
-xpost = { path = "../..", features = ["esp-radio"] }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
 critical-section = "1.2.0"
 portable-atomic = { version = "1", default-features = false }
 static_cell      = "2.1.1"
 
 [features]
-# Formal firmware tags: xdp_cag → perf-cag; xdp_t → perf-t.
-perf-cag = ["xpost/perf-counter", "xpost/perf-aggregate", "xpost/perf-gauge"]
-perf-t = ["xpost/perf-counter", "xpost/perf-trace"]
-
-[build-dependencies]
-xpost-build = { path = "../../xpost-build" }
+# Formal HAL CAG arm: local zero CAG report (no xpost).
+perf-cag = []
 
 [profile.dev]
 opt-level = "s"

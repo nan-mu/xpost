@@ -92,8 +92,8 @@ The App commands are:
 - `clear perf` and `get perf`
 
 A successful `get map` or `get perf` response contains an `OK get ... <n>` header and `n` blob bytes.
-The map blob is an ASCII snapshot from `xpost::map::dump`.
-The perf blob uses the `ext::perf` layout.
+The map blob is an ASCII snapshot (XDP via `xpost::map::dump`; HAL via local firmware encoders).
+The perf blob uses the CAG/trace wire layout decoded by `xpost-serial` client / `xpost-test` (`ext::perf` on XDP; local zero CAG on HAL).
 Cold installation selects an image by its XDP name.
 
 ## Test procedure
@@ -146,10 +146,11 @@ The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` setti
 - All formal experiments: `run = ["just_drop", "just_tx", "firewall"]`.
 
 The experiment files contain `formal` and `arms` settings.
-The current configuration uses `arms = ["xdp"]`, with no HAL comparison.
+The current configuration uses `arms = ["xdp"]` by default.
+Set `arms` to include `"hal"` to flash HAL profiles and write `*_hal_*` tables.
 The CAG stage runs each grid point for 30 seconds.
 The pipeline then runs an `xdp_t` stage with one packet.
-The Trace stage stores `target_pps=1` and `window_s=0`.
+The Trace stage stores `target_pps=1` and `window_s=0` and is always XDP-only.
 
 The formal `just_tx` and `just_drop` grids run from 400 to 4000 pps in steps of 400.
 The `just_drop` experiment reads `get map counter` into `just_drop_data`.
@@ -160,8 +161,13 @@ The firewall Trace stage uses eight blacklist entries and sends one matching pac
 
 The XDP firmware projects are `examples/just_xdp` and `examples/firewall`.
 Their board features are `perf-cag` and `perf-t`, with no default feature.
-The `profiles.toml` registry contains no HAL profiles.
-Its `[[fw]]` names are `just-tx-cag`, `just-tx-t`, `just-drop-cag`, `just-drop-t`, `firewall-cag`, and `firewall-t`.
+The HAL firmware projects are `examples/just_drop_hal`, `examples/just_tx_hal`, and `examples/firewall_hal`.
+HAL boards must not depend on the `xpost` or `xpost-build` crates.
+They may depend only on `xpost-serial` (`server`) for `SerialHandler` / `serial_task!`.
+HAL Wi-Fi uses bare `esp_radio::wifi::new` (no XDP feature).
+Map dump/parse and the CAG (1624-byte) perf report live in the HAL firmware callbacks.
+The `profiles.toml` `[[fw]]` names are `just-tx-cag`, `just-tx-t`, `just-drop-cag`, `just-drop-t`, `firewall-cag`, `firewall-t`, `just-tx-hal`, `just-drop-hal`, and `firewall-hal`.
+HAL profiles use `xdp = []`.
 Its `[[xdp]]` names are `just_tx`, `just_drop`, and `firewall`.
 
 For debug Trace collection, set `run = ["dev"]`.

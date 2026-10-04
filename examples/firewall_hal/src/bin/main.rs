@@ -19,18 +19,19 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
-use heapless::FnvIndexMap;
-use log::{error, info};
-use static_cell::StaticCell;
-use xpost::app_ctrl;
-use xpost::xdp::Slot;
-#[allow(unused_imports)] // PerfError only when neither perf-cag nor perf-t
-use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
-use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
-
 use firewall_hal::map_crud::{
     self, MapCrudAck, STATUS_BAD, STATUS_CONFLICT, STATUS_NOT_FOUND, STATUS_OK,
 };
+use firewall_hal::wire;
+use heapless::FnvIndexMap;
+use log::{error, info};
+use static_cell::StaticCell;
+#[allow(unused_imports)] // PerfError only when perf-cag is off
+use xpost_serial::reply::{MapError, OkReply, PerfError};
+use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
+
+#[cfg(feature = "perf-cag")]
+use firewall_hal::cag;
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -47,10 +48,6 @@ const CTRL_PORT: u16 = 8081;
 const REPLY_PORT: u16 = 18080;
 const MAP_BLACKLIST: &str = "blacklist";
 const MAX_BLACKLIST: usize = 256;
-
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".xdp.hotload_0")]
-static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
 static DROP: AtomicUsize = AtomicUsize::new(0);
@@ -89,8 +86,6 @@ async fn main(spawner: Spawner) -> ! {
 
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
 
-    let _slot = core::ptr::addr_of!(xdp_slot);
-
     spawner.spawn(control_serial(usb_rx).unwrap());
     esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
 
@@ -98,10 +93,8 @@ async fn main(spawner: Spawner) -> ! {
         .with_dynamic_tx_buf_num(128)
         .with_dynamic_rx_buf_num(1024)
         .with_ampdu_tx_enable(false);
-    let (mut controller, interfaces) = xpost::esp_radio::new(peripherals.WIFI, wifi_cfg)
+    let (mut controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, wifi_cfg)
         .expect("Failed to initialize Wi-Fi controller");
-
-    spawner.spawn(xdp_tx_task().unwrap());
 
     match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
         (Some(ssid), Some(pass)) if !ssid.is_empty() => {
@@ -126,20 +119,6 @@ async fn main(spawner: Spawner) -> ! {
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
-    }
-}
-
-#[embassy_executor::task]
-async fn xdp_tx_task() {
-    use embassy_futures::select::select;
-    use esp_radio::wifi::{XDP_TX_KICK, XdpTxPoll, xdp_tx_poll};
-    loop {
-        match xdp_tx_poll() {
-            XdpTxPoll::Idle => XDP_TX_KICK.wait().await,
-            XdpTxPoll::Blocked => {
-                select(XDP_TX_KICK.wait(), Timer::after(Duration::from_micros(500))).await;
-            }
-        }
     }
 }
 
@@ -298,7 +277,6 @@ fn handle_map_crud<'a>(pkt: &[u8], val_buf: &'a mut [u8; 8]) -> (u32, u32, &'a [
     }
 }
 
-
 serial_task! {
     fn control_serial(
         rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
@@ -316,8 +294,8 @@ serial_task! {
             [0u8; 128],
         )
         .on_ping(|reply: ReplyWriter<'_>| reply.ok(OkReply::Ping))
-        .on_enable_xdp(|reply: ReplyWriter<'_>| reply.error(&ServerError::Unsupported))
-        .on_disable_xdp(|reply: ReplyWriter<'_>| reply.error(&ServerError::Unsupported))
+        .on_enable_xdp(|reply: ReplyWriter<'_>| reply.ok(OkReply::EnableXdp))
+        .on_disable_xdp(|reply: ReplyWriter<'_>| reply.ok(OkReply::DisableXdp))
         .on_clear_map(|name: &str, reply: ReplyWriter<'_>| {
             if name != MAP_BLACKLIST {
                 reply.error(&MapError::NameNotFound);
@@ -335,17 +313,17 @@ serial_task! {
                 let map = BLACKLIST.borrow(cs).borrow();
                 let size = map.len() as u32;
                 let cap = MAX_BLACKLIST as u32;
-                let mut len = app_ctrl::hash_header_len(size, cap);
+                let mut len = wire::hash_header_len(size, cap);
                 for (k, v) in map.iter() {
-                    len += app_ctrl::hash_entry_len(&k.to_be_bytes(), &[*v]);
+                    len += wire::hash_entry_len(&k.to_be_bytes(), &[*v]);
                 }
                 reply.get_map(len, |write| {
                     let mut emit = |chunk: &[u8]| {
                         let _ = write(chunk);
                     };
-                    app_ctrl::write_hash_header(size, cap, &mut emit);
+                    wire::write_hash_header(size, cap, &mut emit);
                     for (k, v) in map.iter() {
-                        app_ctrl::write_hash_entry(&k.to_be_bytes(), &[*v], &mut emit);
+                        wire::write_hash_entry(&k.to_be_bytes(), &[*v], &mut emit);
                     }
                 });
             });
@@ -356,11 +334,11 @@ serial_task! {
                     reply.error(&MapError::NameNotFound);
                     return;
                 }
-                let Some(ip) = app_ctrl::parse_ipv4_token(key) else {
+                let Some(ip) = wire::parse_ipv4_token(key) else {
                     reply.error(&MapError::InvalidKey);
                     return;
                 };
-                let Some(val) = app_ctrl::parse_u64_token(value) else {
+                let Some(val) = wire::parse_u64_token(value) else {
                     reply.error(&MapError::InvalidValue);
                     return;
                 };
@@ -380,25 +358,25 @@ serial_task! {
             },
         )
         .on_clear_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(any(feature = "perf-cag", feature = "perf-t"))]
+            #[cfg(feature = "perf-cag")]
             {
-                xpost::ext::perf::clear_perf();
+                cag::clear_perf();
                 reply.ok(OkReply::ClearPerf);
             }
-            #[cfg(not(any(feature = "perf-cag", feature = "perf-t")))]
+            #[cfg(not(feature = "perf-cag"))]
             {
                 reply.error(&PerfError::Unavailable);
             }
         })
         .on_get_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(any(feature = "perf-cag", feature = "perf-t"))]
+            #[cfg(feature = "perf-cag")]
             {
-                let n = xpost::ext::perf::report_payload_len();
+                let n = cag::report_payload_len();
                 reply.get_perf(n, |write| {
-                    xpost::ext::perf::report_perf(write);
+                    cag::report_perf(write);
                 });
             }
-            #[cfg(not(any(feature = "perf-cag", feature = "perf-t")))]
+            #[cfg(not(feature = "perf-cag"))]
             {
                 reply.error(&PerfError::Unavailable);
             }
@@ -406,7 +384,6 @@ serial_task! {
         .build()
     }
 }
-
 
 fn ack_endpoint(src: embassy_net::IpAddress, src_port: u16) -> (embassy_net::IpAddress, u16) {
     let ip = ACK_IP.load(Ordering::Relaxed);

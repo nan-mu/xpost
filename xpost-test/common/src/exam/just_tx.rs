@@ -109,7 +109,7 @@ fn profile_for(fw: Firmware) -> &'static str {
     match fw {
         Firmware::XdpCag => "just-tx-cag",
         Firmware::XdpT => "just-tx-t",
-        Firmware::Hal => "just-tx-hal-cag",
+        Firmware::Hal => "just-tx-hal",
     }
 }
 

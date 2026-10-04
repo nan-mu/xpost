@@ -19,13 +19,15 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
+use just_tx_hal::wire;
 use log::{error, info};
 use static_cell::StaticCell;
-use xpost::app_ctrl;
-use xpost::xdp::Slot;
-#[allow(unused_imports)] // PerfError only when neither perf-cag nor perf-t
+#[allow(unused_imports)] // PerfError only when perf-cag is off
 use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
+
+#[cfg(feature = "perf-cag")]
+use just_tx_hal::cag;
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -41,12 +43,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 const STIM_PORT: u16 = 8080;
 /// IPPROTO_UDP — matches just_tx `rxcnt` ARRAY key.
 const IPPROTO_UDP: u32 = 17;
-
-/// IRAM slot required by xpost-build link layout; HAL never leases a cold image
-/// (inactive Prog → Pass). Symbol name matches xpost-build `SLOT_SYMBOL`.
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".xdp.hotload_0")]
-static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
 /// Packets that reached the UDP socket (always, before echo).
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
@@ -87,27 +83,20 @@ async fn main(spawner: Spawner) -> ! {
 
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
 
-    // Keep the IRAM slot symbol live for the linker; never lease.
-    let _slot = core::ptr::addr_of!(xdp_slot);
-
     spawner.spawn(control_serial(usb_rx).unwrap());
     esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
 
-    // Path esp-radio + xpost: inactive Prog → Pass; app echoes at UDP.
     // AMPDU TX off: its BA session stalls TX ~1.07 s under ping-pong load.
-    // Embassy frame queues (HAL-only; XDP_TX bypasses them): defaults 5/3 drop under burst.
+    // Embassy frame queues (HAL-only): defaults 5/3 drop under burst.
     let wifi_cfg = esp_radio::wifi::ControllerConfig::default()
         .with_dynamic_tx_buf_num(128)
         .with_dynamic_rx_buf_num(1024)
         .with_ampdu_tx_enable(false)
         .with_rx_queue_size(32)
         .with_tx_queue_size(16);
-    let (mut controller, interfaces) = xpost::esp_radio::new(peripherals.WIFI, wifi_cfg)
+    let (mut controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, wifi_cfg)
         .expect("Failed to initialize Wi-Fi controller");
-    info!("wifi+xdp Pass (no lease) echo_site=app tx_dyn=128 rx_dyn=1024 rx_q=32 tx_q=16");
-
-    // Drain path for any accidental XDP_TX; Pass-only should stay Idle.
-    spawner.spawn(xdp_tx_task().unwrap());
+    info!("wifi echo_site=app tx_dyn=128 rx_dyn=1024 rx_q=32 tx_q=16");
 
     match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
         (Some(ssid), Some(pass)) if !ssid.is_empty() => {
@@ -133,20 +122,6 @@ async fn main(spawner: Spawner) -> ! {
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
-    }
-}
-
-#[embassy_executor::task]
-async fn xdp_tx_task() {
-    use embassy_futures::select::select;
-    use esp_radio::wifi::{XDP_TX_KICK, XdpTxPoll, xdp_tx_poll};
-    loop {
-        match xdp_tx_poll() {
-            XdpTxPoll::Idle => XDP_TX_KICK.wait().await,
-            XdpTxPoll::Blocked => {
-                select(XDP_TX_KICK.wait(), Timer::after(Duration::from_micros(500))).await;
-            }
-        }
     }
 }
 
@@ -199,9 +174,6 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
         NET_RX.fetch_add(1, Ordering::Relaxed);
         RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
         let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
-        // Await TX fully: short with_timeout was silently dropping every echo
-        // (Wi-Fi TX often ≫ 50 ms), so TC never saw bounce and RTT stayed empty.
-        // No App* Trace stamps — HAL/XDP flames are not role-comparable under async.
         let send_ok = socket.send_to(&buf[..n], dest).await.is_ok();
         if !send_ok {
             error!("echo send failed bytes={n}");
@@ -245,11 +217,11 @@ serial_task! {
                 reply.error(&MapError::NameNotFound);
                 return;
             }
-            let len = app_ctrl::array_blob_len(RXCNT_SIZE, |i| {
+            let len = wire::array_blob_len(RXCNT_SIZE, |i| {
                 RXCNT[i as usize].load(Ordering::Relaxed)
             });
             reply.get_map(len, |write| {
-                app_ctrl::write_array_blob(
+                wire::write_array_blob(
                     RXCNT_SIZE,
                     |i| RXCNT[i as usize].load(Ordering::Relaxed),
                     &mut |chunk| {
@@ -264,7 +236,7 @@ serial_task! {
                     reply.error(&MapError::NameNotFound);
                     return;
                 }
-                let Some(slot) = app_ctrl::parse_u32_token(key) else {
+                let Some(slot) = wire::parse_u32_token(key) else {
                     reply.error(&MapError::InvalidKey);
                     return;
                 };
@@ -272,7 +244,7 @@ serial_task! {
                     reply.error(&MapError::InvalidKey);
                     return;
                 }
-                let Some(val) = app_ctrl::parse_u64_token(value) else {
+                let Some(val) = wire::parse_u64_token(value) else {
                     reply.error(&MapError::InvalidValue);
                     return;
                 };
@@ -281,25 +253,25 @@ serial_task! {
             },
         )
         .on_clear_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(any(feature = "perf-cag", feature = "perf-t"))]
+            #[cfg(feature = "perf-cag")]
             {
-                xpost::ext::perf::clear_perf();
+                cag::clear_perf();
                 reply.ok(OkReply::ClearPerf);
             }
-            #[cfg(not(any(feature = "perf-cag", feature = "perf-t")))]
+            #[cfg(not(feature = "perf-cag"))]
             {
                 reply.error(&PerfError::Unavailable);
             }
         })
         .on_get_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(any(feature = "perf-cag", feature = "perf-t"))]
+            #[cfg(feature = "perf-cag")]
             {
-                let n = xpost::ext::perf::report_payload_len();
+                let n = cag::report_payload_len();
                 reply.get_perf(n, |write| {
-                    xpost::ext::perf::report_perf(write);
+                    cag::report_perf(write);
                 });
             }
-            #[cfg(not(any(feature = "perf-cag", feature = "perf-t")))]
+            #[cfg(not(feature = "perf-cag"))]
             {
                 reply.error(&PerfError::Unavailable);
             }

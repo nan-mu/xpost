@@ -1,9 +1,8 @@
-use xpost_build::firmware_codegen;
-
 fn main() {
     load_dotenv();
     linker_be_nice();
-    firmware_codegen().unwrap();
+    // make sure linkall.x is the last linker script
+    println!("cargo:rustc-link-arg=-Tlinkall.x");
 }
 
 /// Read `.env` next to Cargo.toml into compile-time `option_env!` keys.

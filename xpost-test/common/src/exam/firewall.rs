@@ -95,7 +95,7 @@ fn profile_for(fw: Firmware) -> &'static str {
     match fw {
         Firmware::XdpCag => "firewall-cag",
         Firmware::XdpT => "firewall-t",
-        Firmware::Hal => "firewall-hal-cag",
+        Firmware::Hal => "firewall-hal",
     }
 }
 
