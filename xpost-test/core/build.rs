@@ -9,12 +9,15 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rerun-if-changed=../config/just_drop.toml");
     println!("cargo:rerun-if-changed=../config/firewall.toml");
 
-    // ABI-only builds (ebpf → core with default-features=false) must not recurse into aya-build.
+    // ABI-only builds (ebpf → xpost_test with default-features=false) must not recurse.
     if env::var_os("CARGO_FEATURE_HOST").is_none() {
         return Ok(());
     }
-
+    // Nested aya-build puts target-dir under …/out/ebpf/… — never recurse.
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    if out_dir.components().any(|c| c.as_os_str() == "ebpf") {
+        return Ok(());
+    }
 
     let cargo_metadata::Metadata { packages, .. } = cargo_metadata::MetadataCommand::new()
         .no_deps()

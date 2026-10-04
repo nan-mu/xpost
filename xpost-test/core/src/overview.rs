@@ -61,7 +61,7 @@
 //! # Build / deploy
 //!
 //! ```bash
-//! cd xpost-test && cargo build -p core --release
+//! cd xpost-test && cargo build -p xpost_test --release
 //! scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 //! ```
 //!

@@ -9,7 +9,7 @@ use aya::{
     programs::{SchedClassifier, TcAttachType, tc},
 };
 use log::{debug, info, warn};
-use core::{
+use xpost_test::{
     FilterConfig, KIND_BOUNCE_INGRESS, KIND_ECHO_INGRESS, KIND_STIM_EGRESS, MAGIC_COLLECT_RST,
     MAGIC_DUMP, MAGIC_STIM, StampEvent,
 };
@@ -273,7 +273,7 @@ impl Harness {
         {
             return true;
         }
-        buf.len() == 1 && buf[0] == core::ECHO_BYTE
+        buf.len() == 1 && buf[0] == xpost_test::ECHO_BYTE
     }
 
     pub fn alloc_seq(&mut self) -> u64 {
@@ -480,7 +480,7 @@ impl Harness {
     pub fn raw(&self) -> Arc<RawTx> {
         self.raw.clone()
     }
-
+}
 
 impl Drop for Harness {
     fn drop(&mut self) {

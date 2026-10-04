@@ -156,7 +156,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
     ));
 
     let pg_opts = PgOpts { formal };
-    let mut pg = Some(formal::connect_and_ensure(pg_opts).await?);
+    let mut pg = Some(db::connect_and_ensure(pg_opts).await?);
 
     let cells = arms.len() * sizes.len() * traffic_modes.len() * grid.len();
     let mut eta = BudgetEta::new();
@@ -167,7 +167,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
     let ui = RoundUi::new();
     let exam_id = if let Some(client) = pg.as_mut() {
         ui.check_start("INSERT exam");
-        let id = formal::insert_exam(client, Some("firewall")).await?;
+        let id = db::insert_exam(client, Some("firewall")).await?;
         ui.check_ok(&format!("exam={id}"));
         Some(id)
     } else {
@@ -216,7 +216,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
 
                     if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
                         ui.check_start(&format!("写入 size={size} {traffic} @{pps:.0}"));
-                        let cfg_id = formal::insert_firewall_config(
+                        let cfg_id = db::insert_firewall_config(
                             client,
                             exam_id,
                             *fw,
@@ -229,15 +229,15 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                             sent as i64,
                         )
                         .await?;
-                        formal::insert_firewall_data(client, cfg_id, &map_rows).await?;
+                        db::insert_firewall_data(client, cfg_id, &map_rows).await?;
                         let msg = agent.get_perf().await.context("get/perf")?;
-                        let decoded = formal::decode_report_msg(&msg)?;
-                        formal::write_perf(
+                        let decoded = db::decode_report_msg(&msg)?;
+                        db::write_perf(
                             client,
                             exam_id,
                             cfg_id,
                             *fw,
-                            formal::PerfExperiment::Firewall,
+                            db::PerfExperiment::Firewall,
                             &decoded,
                         )
                         .await?;
@@ -267,7 +267,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
         let _ = agent.disable_xdp().await;
         if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
             ui.check_start("写入 trace");
-            let cfg_id = formal::insert_firewall_config(
+            let cfg_id = db::insert_firewall_config(
                 client,
                 exam_id,
                 fw,
@@ -281,13 +281,13 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
             )
             .await?;
             let msg = agent.get_perf().await.context("get/perf")?;
-            let decoded = formal::decode_report_msg(&msg)?;
-            formal::write_perf(
+            let decoded = db::decode_report_msg(&msg)?;
+            db::write_perf(
                 client,
                 exam_id,
                 cfg_id,
                 fw,
-                formal::PerfExperiment::Firewall,
+                db::PerfExperiment::Firewall,
                 &decoded,
             )
             .await?;
@@ -297,7 +297,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
     }
 
     if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
-        formal::stop_exam(client, exam_id).await?;
+        db::stop_exam(client, exam_id).await?;
     }
     RoundUi::banner(&format!(
         "firewall done arms={} sizes={} traffic={} grid={}",

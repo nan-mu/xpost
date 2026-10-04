@@ -2,11 +2,11 @@
 
 mod harness;
 mod raw_tx;
-mod status;
+pub mod status;
 
 pub use harness::Harness;
 pub use raw_tx::{RawTx, iface_ipv4, iface_mac};
-pub use status::{self, BudgetEta, READY_BUDGET, RoundUi};
+pub use status::{BudgetEta, READY_BUDGET, RoundUi};
 
 use anyhow::{Context, Result};
 use log::info;

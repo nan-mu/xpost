@@ -172,7 +172,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     ));
 
     let pg_opts = PgOpts { formal };
-    let mut pg = Some(formal::connect_and_ensure(pg_opts).await?);
+    let mut pg = Some(db::connect_and_ensure(pg_opts).await?);
 
     let spoof = crate::pipeline::iface_ipv4(&cfg.probe.iface)
         .unwrap_or_else(|_| gen_lan_ip(cfg.target.esp_ip, &[cfg.target.esp_ip]));
@@ -191,7 +191,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     let ui = RoundUi::new();
     let exam_id = if let Some(client) = pg.as_mut() {
         ui.check_start("INSERT exam");
-        let id = formal::insert_exam(client, Some("just_tx")).await?;
+        let id = db::insert_exam(client, Some("just_tx")).await?;
         ui.check_ok(&format!("exam={id}"));
         Some(id)
     } else {
@@ -226,7 +226,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                     })
                     .collect();
                 let ok = samples.len() as i64;
-                let cfg_id = formal::insert_just_tx_config(
+                let cfg_id = db::insert_just_tx_config(
                     client,
                     exam_id,
                     *fw,
@@ -238,15 +238,15 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                     ok,
                 )
                 .await?;
-                formal::insert_just_tx_data(client, cfg_id, &samples).await?;
+                db::insert_just_tx_data(client, cfg_id, &samples).await?;
                 let msg = agent.get_perf().await.context("get/perf")?;
-                let decoded = formal::decode_report_msg(&msg)?;
-                formal::write_perf(
+                let decoded = db::decode_report_msg(&msg)?;
+                db::write_perf(
                     client,
                     exam_id,
                     cfg_id,
                     *fw,
-                    formal::PerfExperiment::JustTx,
+                    db::PerfExperiment::JustTx,
                     &decoded,
                 )
                 .await?;
@@ -296,7 +296,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
             ui.check_start("写入 trace");
             let ok = i64::from(got_rx);
-            let cfg_id = formal::insert_just_tx_config(
+            let cfg_id = db::insert_just_tx_config(
                 client,
                 exam_id,
                 fw,
@@ -309,17 +309,17 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
             )
             .await?;
             if let (true, Some(t_rx)) = (got_rx, t_rx) {
-                formal::insert_just_tx_data(client, cfg_id, &[TxSample { t_tx, t_rx }])
+                db::insert_just_tx_data(client, cfg_id, &[TxSample { t_tx, t_rx }])
                     .await?;
             }
             let msg = agent.get_perf().await.context("get/perf")?;
-            let decoded = formal::decode_report_msg(&msg)?;
-            formal::write_perf(
+            let decoded = db::decode_report_msg(&msg)?;
+            db::write_perf(
                 client,
                 exam_id,
                 cfg_id,
                 fw,
-                formal::PerfExperiment::JustTx,
+                db::PerfExperiment::JustTx,
                 &decoded,
             )
             .await?;
@@ -330,7 +330,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     }
 
     if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
-        formal::stop_exam(client, exam_id).await?;
+        db::stop_exam(client, exam_id).await?;
     }
 
     RoundUi::banner(&format!("{name} done arms={} grid={}", arms.len(), grid.len()));

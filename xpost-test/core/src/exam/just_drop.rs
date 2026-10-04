@@ -168,7 +168,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
     ));
 
     let pg_opts = PgOpts { formal };
-    let mut pg = Some(formal::connect_and_ensure(pg_opts).await?);
+    let mut pg = Some(db::connect_and_ensure(pg_opts).await?);
 
     let mut eta = BudgetEta::new();
     eta.add_flashes(arms.len() + 1);
@@ -181,7 +181,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
     let ui = RoundUi::new();
     let exam_id = if let Some(client) = pg.as_mut() {
         ui.check_start("INSERT exam");
-        let id = formal::insert_exam(client, Some("just_drop")).await?;
+        let id = db::insert_exam(client, Some("just_drop")).await?;
         ui.check_ok(&format!("exam={id}"));
         Some(id)
     } else {
@@ -224,7 +224,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
 
             if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
                 ui.check_start(&format!("写入 @{pps:.0}"));
-                let cfg_id = formal::insert_just_drop_config(
+                let cfg_id = db::insert_just_drop_config(
                     client,
                     exam_id,
                     *fw,
@@ -241,15 +241,15 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
                     .enumerate()
                     .map(|(slot, &v)| (slot as i32, v))
                     .collect();
-                formal::insert_just_drop_data(client, cfg_id, &rows).await?;
+                db::insert_just_drop_data(client, cfg_id, &rows).await?;
                 let msg = agent.get_perf().await.context("get/perf")?;
-                let decoded = formal::decode_report_msg(&msg)?;
-                formal::write_perf(
+                let decoded = db::decode_report_msg(&msg)?;
+                db::write_perf(
                     client,
                     exam_id,
                     cfg_id,
                     *fw,
-                    formal::PerfExperiment::JustDrop,
+                    db::PerfExperiment::JustDrop,
                     &decoded,
                 )
                 .await?;
@@ -272,7 +272,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         let stopped_at = SystemTime::now();
         if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
             ui.check_start("写入 trace");
-            let cfg_id = formal::insert_just_drop_config(
+            let cfg_id = db::insert_just_drop_config(
                 client,
                 exam_id,
                 fw,
@@ -285,13 +285,13 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
             )
             .await?;
             let msg = agent.get_perf().await.context("get/perf")?;
-            let decoded = formal::decode_report_msg(&msg)?;
-            formal::write_perf(
+            let decoded = db::decode_report_msg(&msg)?;
+            db::write_perf(
                 client,
                 exam_id,
                 cfg_id,
                 fw,
-                formal::PerfExperiment::JustDrop,
+                db::PerfExperiment::JustDrop,
                 &decoded,
             )
             .await?;
@@ -301,7 +301,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
     }
 
     if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
-        formal::stop_exam(client, exam_id).await?;
+        db::stop_exam(client, exam_id).await?;
     }
     RoundUi::banner(&format!(
         "just_drop done arms={} grid={}",

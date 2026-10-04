@@ -26,4 +26,4 @@ RUN mkdir -p core/src ebpf/src \
 
 RUN cargo fetch
 
-CMD ["cargo", "build", "-p", "core", "--release", "--target", "aarch64-unknown-linux-musl"]
+CMD ["cargo", "build", "-p", "xpost_test", "--release", "--target", "aarch64-unknown-linux-musl"]
