@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use xpost_serial::client::{Command, Interrupted, ParseError, RequestTimeout};
+use xpost_serial::client::{Interrupted, ParseError, RequestTimeout};
 use xpost_serial::reply::{ErrReply, MapError, PerfError, ServerError, SyntaxError};
 use xpost_serial::{Chip, FlashConfig, OpenOptions, SerialHandler};
 
@@ -149,10 +149,6 @@ pub fn open(log_dir: &Path) -> Result<SharedState> {
         flash,
     })
     .context("open SerialHandler")?;
-
-    handler
-        .request::<AgentError>(&Command::GetInit)
-        .map_err(|e| anyhow::anyhow!("GetInit: {e}"))?;
 
     eprint_line(&format!(
         "[{}] xpost-agent profiles fw={} xdp={} empty={} from {}",

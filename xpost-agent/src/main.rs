@@ -16,8 +16,8 @@
 //! ```
 //! Same port: `/health` + `/v1/*` + Streamable HTTP `/mcp`. No auth/TLS.
 //! Long ops ~1200s. USB under `spawn_blocking` + `Mutex` on
-//! [`xpost_serial::SerialHandler`]. After open: one
-//! [`GetInit`](xpost_serial::command::Command::GetInit) before App routes.
+//! [`xpost_serial::SerialHandler`]. Startup only opens the shared USB session;
+//! App/flash work runs on request.
 //! Agent is **USB-only**; stim/probe is **not** an agent API (`xpost-test` sends).
 //!
 //! **Delete** legacy HTTP (no aliases): `flash_profile`, `program`, `clear`,
@@ -112,7 +112,6 @@
 //! | `get/map/{name}` | `Command::GetMap { name }` |
 //! | `update/map/{name}` | `Command::UpdateMap { name, key, value }` |
 //! | `clear/perf` / `get/perf` | `Command::ClearPerf` / `GetPerf` |
-//! | (startup) | `Command::GetInit` (host-only) |
 //! | `run` | parse line → `Command` (debug only) |
 //!
 //! Flat ERR domains (`ServerError` / `MapError` / `PerfError` / `SyntaxError`)
