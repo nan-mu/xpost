@@ -6,20 +6,28 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+//! Native HAL twin of `exec_bench`: same host pipeline (map / enable exec /
+//! `OK finish` / perf), no XDP lease. Workload bytes are opaque at the serial
+//! boundary; [`exec_bench_common::run_hal`] interprets the buffer.
+
+use core::cell::RefCell;
 use core::convert::Infallible;
 use core::ptr::addr_of_mut;
 
+use critical_section::Mutex;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
+use heapless::FnvIndexMap;
 use log::error;
-use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
-use xpost_serial::server::reply::{write_error, write_ok};
-use xpost_serial::r#type::command::Command;
+use xpost::app_ctrl;
+use xpost::xdp::Slot;
+use xpost_serial::reply::{MapError, OkReply, ServerError};
+use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
-use exec_bench_common::{self as bench, BUF_CAP, OPCODES};
+use exec_bench_common::{self as bench, BUF_CAP};
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -31,7 +39,22 @@ extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-static mut BENCH_BUF: [u8; BUF_CAP] = [0u8; BUF_CAP];
+const MAP_NAME: &str = "workload";
+const VALUE_LEN: usize = 32;
+const KEY_IN: u8 = 0;
+const KEY_OUT: u8 = 1;
+const MAP_CAP: u32 = 2;
+
+/// Slot metadata so `xpost` links; HAL never leases a cold image.
+#[used]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".xdp.hotload_0")]
+static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
+
+static WORKLOAD: Mutex<RefCell<FnvIndexMap<u8, [u8; VALUE_LEN], 2>>> =
+    Mutex::new(RefCell::new(FnvIndexMap::new()));
+
+static mut RUN_BUF: [u8; BUF_CAP] = [0u8; BUF_CAP];
 
 #[allow(
     clippy::large_stack_frames,
@@ -51,6 +74,8 @@ async fn main(spawner: Spawner) -> ! {
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
+    let _ = &xdp_slot;
+
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
     spawner.spawn(control_serial(usb_rx).unwrap());
 
@@ -59,198 +84,149 @@ async fn main(spawner: Spawner) -> ! {
     }
 }
 
-/// Same App settle (`OK init`) + experiment-local `bench …` as the eBPF arm.
-#[embassy_executor::task]
-async fn control_serial(
-    mut rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
-) {
-    let mut write = |bytes: &[u8]| -> Result<(), Infallible> {
-        esp_println::Printer::write_bytes(bytes);
-        Ok(())
-    };
-    let _ = write_ok(&OkReply::Init, &mut write);
-
-    let mut line = [0u8; 128];
-    let mut used = 0usize;
-    let mut overflow = false;
-    loop {
-        let mut idle = true;
-        for _ in 0..64 {
-            let Ok(byte) = rx.read_byte() else {
-                break;
-            };
-            idle = false;
-            if byte == b'\n' || byte == b'\r' {
-                if overflow {
-                    let _ = write(b"ERR line-too-long\n");
-                    used = 0;
-                    overflow = false;
-                } else if used != 0 {
-                    dispatch_line(&line[..used], &mut write);
-                    used = 0;
-                }
-            } else if !overflow {
-                if let Some(slot) = line.get_mut(used) {
-                    *slot = byte;
-                    used += 1;
-                } else {
-                    overflow = true;
-                }
+serial_task! {
+    fn control_serial(
+        rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+    ) {
+        let mut rx = rx;
+        SerialHandler::builder(
+            move || match rx.read_byte() {
+                Ok(b) => Some(b),
+                Err(_) => None,
+            },
+            |bytes| {
+                esp_println::Printer::write_bytes(bytes);
+                Ok::<(), Infallible>(())
+            },
+            [0u8; 128],
+        )
+        .on_ping(|reply: ReplyWriter<'_>| reply.ok(OkReply::Ping))
+        .on_enable_xdp(|reply: ReplyWriter<'_>| reply.error(&ServerError::Unsupported))
+        .on_disable_xdp(|reply: ReplyWriter<'_>| reply.error(&ServerError::Unsupported))
+        .on_enable_exec(|reply: ReplyWriter<'_>| match run_exec() {
+            Ok(()) => reply.ok(OkReply::EnableExec),
+            Err(e) => reply.error(&e),
+        })
+        .on_disable_exec(|reply: ReplyWriter<'_>| {
+            // No lease to release; keep verb symmetry with the eBPF arm.
+            reply.ok(OkReply::DisableExec);
+        })
+        .on_clear_map(|name: &str, reply: ReplyWriter<'_>| {
+            if name != MAP_NAME {
+                reply.error(&MapError::NameNotFound);
+                return;
             }
-        }
-        Timer::after(Duration::from_millis(if idle { 10 } else { 1 })).await;
+            critical_section::with(|cs| WORKLOAD.borrow(cs).borrow_mut().clear());
+            reply.ok(OkReply::ClearMap);
+        })
+        .on_get_map(|name: &str, reply: ReplyWriter<'_>| {
+            if name != MAP_NAME {
+                reply.error(&MapError::NameNotFound);
+                return;
+            }
+            critical_section::with(|cs| {
+                let map = WORKLOAD.borrow(cs).borrow();
+                let size = map.len() as u32;
+                let mut len = app_ctrl::hash_header_len(size, MAP_CAP);
+                for (k, v) in map.iter() {
+                    len += app_ctrl::hash_entry_len(&[*k], v);
+                }
+                reply.get_map(len, |write| {
+                    let mut emit = |chunk: &[u8]| {
+                        let _ = write(chunk);
+                    };
+                    app_ctrl::write_hash_header(size, MAP_CAP, &mut emit);
+                    for (k, v) in map.iter() {
+                        app_ctrl::write_hash_entry(&[*k], v, &mut emit);
+                    }
+                });
+            });
+        })
+        .on_update_map(
+            |name: &str, key: &[u8], value: &[u8], reply: ReplyWriter<'_>| {
+                match update_bytes(name, key, value) {
+                    Ok(()) => reply.ok(OkReply::UpdateMap),
+                    Err(e) => reply.error(&e),
+                }
+            },
+        )
+        .on_clear_perf(|reply: ReplyWriter<'_>| {
+            xpost::ext::perf::clear_perf();
+            reply.ok(OkReply::ClearPerf);
+        })
+        .on_get_perf(|reply: ReplyWriter<'_>| {
+            let n = xpost::ext::perf::report_payload_len();
+            reply.get_perf(n, |write| {
+                xpost::ext::perf::report_perf(write);
+            });
+        })
+        .build()
     }
 }
 
-fn dispatch_line(line: &[u8], write: &mut impl FnMut(&[u8]) -> Result<(), Infallible>) {
-    if looks_like_bench(line) {
-        handle_bench(line, write);
-        return;
-    }
-    match Command::try_from(line) {
-        Ok(Command::Ping) => {
-            let _ = write_ok(&OkReply::Ping, write);
-        }
-        Ok(Command::EnableXdp | Command::DisableXdp) => {
-            // Native HAL arm has no XDP lease; keep verbs for agent settle symmetry.
-            let _ = write_error(&ServerError::Unsupported, write);
-        }
-        Ok(Command::ClearMap { .. } | Command::GetMap { .. } | Command::UpdateMap { .. }) => {
-            let _ = write_error(&MapError::NameNotFound, write);
-        }
-        Ok(Command::ClearPerf | Command::GetPerf) => {
-            let _ = write_error(&PerfError::Unavailable, write);
-        }
-        Ok(Command::GetInit) => {
-            let _ = write_error(&ServerError::Unknown, write);
-        }
-        Err(e) => {
-            let _ = write_error(&e, write);
-        }
+fn key_u8(key: &[u8]) -> Option<u8> {
+    match key {
+        b"0" => Some(0),
+        b"1" => Some(1),
+        [0] | [1] => Some(key[0]),
+        _ => None,
     }
 }
 
-fn looks_like_bench(line: &[u8]) -> bool {
-    let Ok(s) = core::str::from_utf8(line) else {
-        return false;
-    };
-    let s = s.trim();
-    s.eq_ignore_ascii_case("bench list") || {
-        let lower = s.as_bytes();
-        lower.len() >= 6
-            && lower[..5].eq_ignore_ascii_case(b"bench")
-            && lower[5] == b' '
+fn update_bytes(name: &str, key: &[u8], value: &[u8]) -> Result<(), MapError> {
+    if name != MAP_NAME {
+        return Err(MapError::NameNotFound);
+    }
+    let slot = key_u8(key).ok_or(MapError::InvalidKey)?;
+    let mut val = [0u8; VALUE_LEN];
+    let n = value.len().min(VALUE_LEN);
+    val[..n].copy_from_slice(&value[..n]);
+    let ok = critical_section::with(|cs| {
+        WORKLOAD.borrow(cs).borrow_mut().insert(slot, val).is_ok()
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(MapError::Full)
     }
 }
 
-fn handle_bench(line: &[u8], write: &mut impl FnMut(&[u8]) -> Result<(), Infallible>) {
-    let Ok(text) = core::str::from_utf8(line) else {
-        let _ = write(b"ERR unknown\n");
-        return;
-    };
-    let text = text.trim();
-    if text.eq_ignore_ascii_case("bench list") {
-        for (name, op) in OPCODES {
-            write_list_entry(write, *name, *op);
+/// Same pipeline step as eBPF `enable exec`: map[0] → compute → map[1], then
+/// raw UART `OK finish` (twin of eBPF `bpf_printk`; not a serial reply).
+fn run_exec() -> Result<(), MapError> {
+    let mut in_val = [0u8; VALUE_LEN];
+    let found = critical_section::with(|cs| {
+        let map = WORKLOAD.borrow(cs).borrow();
+        match map.get(&KEY_IN) {
+            Some(v) => {
+                in_val.copy_from_slice(v);
+                true
+            }
+            None => false,
         }
-        let _ = write(b"OK bench list end\n");
-        return;
+    });
+    if !found {
+        return Err(MapError::KeyNotFound);
     }
-    if let Some(rest) = text.strip_prefix("bench run ") {
-        let mut parts = rest.split_whitespace();
-        let (Some(op_name), Some(iters_s)) = (parts.next(), parts.next()) else {
-            let _ = write(b"ERR bench run <op> <iters>\n");
-            return;
-        };
-        let Some(op) = bench::parse_opcode(op_name) else {
-            let _ = write(b"ERR unknown opcode\n");
-            return;
-        };
-        let Ok(iters) = iters_s.parse::<u32>() else {
-            let _ = write(b"ERR bad iters\n");
-            return;
-        };
-        if iters == 0 {
-            let _ = write(b"ERR iters must be > 0\n");
-            return;
-        }
-        let buf: &mut [u8; BUF_CAP] = unsafe { &mut *addr_of_mut!(BENCH_BUF) };
-        let (cycles, us, ok) = bench::time_loop(buf, op, iters, bench::run_hal);
-        let name = bench::opcode_name(op).unwrap_or("?");
-        write_bench_result(write, name, iters, cycles, us, ok);
-        return;
-    }
-    if let Some(rest) = text.strip_prefix("bench verify ") {
-        let Some(op) = bench::parse_opcode(rest.trim()) else {
-            let _ = write(b"ERR unknown opcode\n");
-            return;
-        };
-        let buf: &mut [u8; BUF_CAP] = unsafe { &mut *addr_of_mut!(BENCH_BUF) };
-        let ok = bench::prepare(buf, op).is_ok()
-            && bench::run_hal(buf).is_ok()
-            && bench::verify(buf);
-        let name = bench::opcode_name(op).unwrap_or("?");
-        let _ = write(b"OK bench verify ");
-        let _ = write(name.as_bytes());
-        let _ = write(if ok { b" ok=1\n" } else { b" ok=0\n" });
-        return;
-    }
-    let _ = write(b"ERR unknown cmd\n");
-}
 
-fn write_list_entry(write: &mut impl FnMut(&[u8]) -> Result<(), Infallible>, name: &str, op: u32) {
-    let _ = write(b"OK bench list ");
-    let _ = write(name.as_bytes());
-    let _ = write(b" ");
-    let mut buf = [0u8; 20];
-    let _ = write(u32_dec(op, &mut buf));
-    let _ = write(b"\n");
-}
+    let buf: &mut [u8; BUF_CAP] = unsafe { &mut *addr_of_mut!(RUN_BUF) };
+    buf.fill(0);
+    buf[..VALUE_LEN].copy_from_slice(&in_val);
 
-fn write_bench_result(
-    write: &mut impl FnMut(&[u8]) -> Result<(), Infallible>,
-    name: &str,
-    iters: u32,
-    cycles: u64,
-    us: u64,
-    ok: bool,
-) {
-    let _ = write(b"OK bench op=");
-    let _ = write(name.as_bytes());
-    let _ = write(b" iters=");
-    let mut b = [0u8; 20];
-    let _ = write(u32_dec(iters, &mut b));
-    let _ = write(b" cycles=");
-    let _ = write(u64_dec(cycles, &mut b));
-    let _ = write(b" us=");
-    let _ = write(u64_dec(us, &mut b));
-    let _ = write(if ok { b" ok=1\n" } else { b" ok=0\n" });
-}
+    if bench::run_hal(buf).is_err() {
+        return Err(MapError::InvalidValue);
+    }
 
-fn u32_dec(mut n: u32, buf: &mut [u8; 20]) -> &[u8] {
-    if n == 0 {
-        buf[0] = b'0';
-        return &buf[..1];
+    let mut out = [0u8; VALUE_LEN];
+    out.copy_from_slice(&buf[..VALUE_LEN]);
+    let ok = critical_section::with(|cs| {
+        WORKLOAD.borrow(cs).borrow_mut().insert(KEY_OUT, out).is_ok()
+    });
+    if !ok {
+        return Err(MapError::Full);
     }
-    let mut i = buf.len();
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    &buf[i..]
-}
 
-fn u64_dec(mut n: u64, buf: &mut [u8; 20]) -> &[u8] {
-    if n == 0 {
-        buf[0] = b'0';
-        return &buf[..1];
-    }
-    let mut i = buf.len();
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    &buf[i..]
+    // Unsolicited transcript marker for host `GetFinish` (not OkReply::Finish).
+    esp_println::Printer::write_bytes(b"OK finish\n");
+    Ok(())
 }

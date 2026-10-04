@@ -6,6 +6,11 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+//! Opaque carrier for function-call XDP: lease an image, bridge map bytes into
+//! [`xpost::ext::exec_call::invoke`], and expose `SerialHandler` map/perf/exec
+//! verbs. This App does **not** interpret workload opcodes or buffer layouts —
+//! those live in the XDP image and in host / xpost-test parsing.
+
 use core::convert::Infallible;
 use core::ptr::addr_of_mut;
 
@@ -21,8 +26,6 @@ use xpost::xdp::{ReportItem, Slot, XdpRt};
 use xpost_serial::reply::{MapError, OkReply, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
-use exec_bench_common::BUF_CAP;
-
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
     error!("{}", panic_info);
@@ -34,10 +37,10 @@ extern crate alloc;
 esp_bootloader_esp_idf::esp_app_desc!();
 
 /// Compact ELF V0 map value size for `workload` (see `ebpf/bpf.toml`).
-const WORKLOAD_VALUE_LEN: usize = 32;
+const VALUE_LEN: usize = 32;
 const MAP_NAME: &str = "workload";
-const KEY_INPUT: u8 = 0;
-const KEY_OUTPUT: u8 = 1;
+const KEY_IN: u8 = 0;
+const KEY_OUT: u8 = 1;
 
 #[unsafe(link_section = ".bss")]
 static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
@@ -46,7 +49,7 @@ static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 #[unsafe(link_section = ".xdp.hotload_0")]
 static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
-static mut BENCH_BUF: [u8; BUF_CAP] = [0u8; BUF_CAP];
+static mut INVOKE_BUF: [u8; VALUE_LEN] = [0u8; VALUE_LEN];
 
 #[allow(
     clippy::large_stack_frames,
@@ -97,13 +100,13 @@ async fn main(spawner: Spawner) -> ! {
     if n_images > 0 {
         match rt.switch(0, 0, Some(&maps)) {
             Ok(()) => match rt.lease(Some(&mut maps)) {
-                Ok(()) => info!("xdp leased exec_bench"),
+                Ok(()) => info!("xdp leased"),
                 Err(e) => error!("xdp lease failed: {e:?}"),
             },
             Err(e) => error!("xdp switch failed: {e:?}"),
         }
     } else {
-        error!("xdp cold empty — flash a workload xdp into the xdp partition");
+        error!("xdp cold empty — flash an xdp image into the xdp partition");
     }
     drop(rt);
     drop(maps);
@@ -166,7 +169,7 @@ serial_task! {
         })
         .on_update_map(
             |name: &str, key: &[u8], value: &[u8], reply: ReplyWriter<'_>| {
-                match update_workload_or_default(name, key, value) {
+                match update_bytes(name, key, value) {
                     Ok(()) => reply.ok(OkReply::UpdateMap),
                     Err(e) => reply_map_err(reply, e),
                 }
@@ -206,56 +209,58 @@ fn reply_xdp_err(reply: ReplyWriter<'_>, e: AppXdpError) {
     }
 }
 
-fn parse_key01(key: &[u8]) -> Option<u8> {
+fn key_u8(key: &[u8]) -> Option<u8> {
     match key {
-        b"0" => Some(KEY_INPUT),
-        b"1" => Some(KEY_OUTPUT),
-        [b] if *b == KEY_INPUT || *b == KEY_OUTPUT => Some(*b),
+        b"0" => Some(0),
+        b"1" => Some(1),
+        [0] | [1] => Some(key[0]),
         _ => None,
     }
 }
 
-/// `workload` accepts raw value tokens (padded/truncated to 32 bytes) with key
-/// `0`/`1`. Other maps fall back to [`app_ctrl::update_map`].
-fn update_workload_or_default(name: &str, key: &[u8], value: &[u8]) -> Result<(), AppMapError> {
+/// Opaque HASH update: wire `key`/`value` tokens are raw bytes (padded/truncated
+/// to the map value size). Other maps fall back to [`app_ctrl::update_map`].
+fn update_bytes(name: &str, key: &[u8], value: &[u8]) -> Result<(), AppMapError> {
     if name != MAP_NAME {
         return app_ctrl::update_map(name, key, value);
     }
-    let slot = parse_key01(key).ok_or(AppMapError::InvalidKey)?;
+    let slot = key_u8(key).ok_or(AppMapError::InvalidKey)?;
     let (mut maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
     let vs = maps.hash_value_size(idx)?;
-    if vs != WORKLOAD_VALUE_LEN {
+    if vs != VALUE_LEN {
         return Err(AppMapError::Unsupported);
     }
-    let mut val = [0u8; WORKLOAD_VALUE_LEN];
-    let n = value.len().min(WORKLOAD_VALUE_LEN);
+    let mut val = [0u8; VALUE_LEN];
+    let n = value.len().min(VALUE_LEN);
     val[..n].copy_from_slice(&value[..n]);
     maps.hash_update(idx, &[slot], &val, BPF_ANY)
         .map_err(AppMapError::from)
 }
 
+/// Carrier path: lease → copy map[0] bytes → invoke → copy bytes to map[1].
+/// No opcode / layout interpretation. `OK finish` comes from the XDP image
+/// (`bpf_printk`), not from this App.
 fn run_exec() -> Result<(), AppMapError> {
-    // Ensure the compute image is leased before invoke.
     app_ctrl::enable_xdp().map_err(|e| match e {
         AppXdpError::Busy => AppMapError::Busy,
         AppXdpError::NoRt => AppMapError::NoRt,
         AppXdpError::Logic => AppMapError::Logic,
     })?;
 
-    let buf: &mut [u8; BUF_CAP] = unsafe { &mut *addr_of_mut!(BENCH_BUF) };
+    let buf: &mut [u8; VALUE_LEN] = unsafe { &mut *addr_of_mut!(INVOKE_BUF) };
     buf.fill(0);
 
     {
         let (maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
-        let mut tmp = [0u8; WORKLOAD_VALUE_LEN];
         let n = maps
-            .hash_lookup(idx, &[KEY_INPUT], &mut tmp)
+            .hash_lookup(idx, &[KEY_IN], buf)
             .map_err(|e| match e {
                 xpost::map::MapUseError::NotFound => AppMapError::InvalidKey,
                 other => AppMapError::from(other),
             })?;
-        let copy = n.min(BUF_CAP).min(WORKLOAD_VALUE_LEN);
-        buf[..copy].copy_from_slice(&tmp[..copy]);
+        if n > VALUE_LEN {
+            return Err(AppMapError::Logic);
+        }
     }
 
     let (act, _) = xpost::ext::exec_call::invoke(buf);
@@ -265,9 +270,7 @@ fn run_exec() -> Result<(), AppMapError> {
 
     {
         let (mut maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
-        let mut out = [0u8; WORKLOAD_VALUE_LEN];
-        out.copy_from_slice(&buf[..WORKLOAD_VALUE_LEN]);
-        maps.hash_update(idx, &[KEY_OUTPUT], &out, BPF_ANY)
+        maps.hash_update(idx, &[KEY_OUT], buf, BPF_ANY)
             .map_err(AppMapError::from)?;
     }
     Ok(())

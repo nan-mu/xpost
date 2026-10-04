@@ -32,8 +32,8 @@ pub enum Command<'a> {
     GetMap {
         name: &'a str,
     },
-    /// Names borrow ASCII; key/value borrow the original wire tokens, not decoded
-    /// integers. The firmware validates them against the selected map's schema.
+    /// Names borrow ASCII; `key` / `value` are opaque wire byte tokens (not
+    /// decoded by this crate). Firmware validates them against the map.
     UpdateMap {
         name: &'a str,
         key: &'a [u8],
@@ -45,7 +45,8 @@ pub enum Command<'a> {
     /// must not be sent on UART; server must not parse a request into this.
     GetInit,
     /// Wait for unsolicited `OK finish` in the host record (e.g. eBPF
-    /// `bpf_printk`). **Not a wire verb** — must not be sent on UART; server
-    /// must not parse a request into this or emit `OK finish` itself.
+    /// `bpf_printk` or HAL App raw UART). **Not a wire verb** — must not be
+    /// sent on UART; server must not parse a request into this or emit
+    /// `OK finish` via the reply path.
     GetFinish,
 }

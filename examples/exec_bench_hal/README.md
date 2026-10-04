@@ -1,10 +1,12 @@
 # exec_bench_hal (native HAL arm)
 
-Native reference twins for `exec_bench` (same buffer layout, opcodes).
-No XDP lease; times `exec_bench_common::run_hal` with `mcycle`.
+Same host pipeline as `exec_bench` (map / enable exec / `OK finish` / perf),
+without an XDP lease. `enable exec` runs `exec_bench_common::run_hal` on the
+opaque map input bytes and writes a raw UART `OK finish` line (twin of eBPF
+`bpf_printk`).
 
-App settle: unsolicited `OK init`. Host draft for this arm is not written yet
-(see `examples/exec_bench/HOST_DESIGN.md` for the xdp/exec arm).
+See [`../exec_bench/HOST_DESIGN.md`](../exec_bench/HOST_DESIGN.md) for the full
+pipeline and where opcode/layout parsing belongs (xpost-test, not serial).
 
 ```bash
 cd examples/exec_bench_hal && cargo build --release

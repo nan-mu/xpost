@@ -7,8 +7,9 @@
  *   [8..]   payload / scratch (map value capped at 32 bytes in Compact ELF)
  *
  * Host pipeline: update map workload input → enable exec → invoke this image →
- * bpf_printk "OK finish" on the UART transcript (GetFinish). Map I/O is bridged
- * by the App (SerialHandler); this program computes on the invoke buffer.
+ * bpf_printk "OK finish" on the UART transcript (GetFinish). The App is an
+ * opaque byte carrier (map[0] → invoke → map[1]); opcode layout is owned by
+ * this image and by host / xpost-test parse — not by App/serial types.
  *
  * Rebuild: ./examples/exec_bench/ebpf/build.sh
  */

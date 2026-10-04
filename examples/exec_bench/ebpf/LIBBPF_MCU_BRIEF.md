@@ -52,13 +52,13 @@ struct {
 5. `bpf_printk("OK finish")`（或等价：格式串恰好产生 transcript 行 `OK finish`）
 6. `return XDP_PASS`
 
-说明：App 侧目前也会把 input 拷进 `ctx` 缓冲再 `invoke`，并把 `ctx` 前 32 字节写回 output。**以 map 为权威 I/O**；若同时改 `ctx` 缓冲可以，但 **output 必须以 map key=1 为准**。
+说明：App 是 **不透明载体**——只把 map key=0 的字节拷进 `ctx` 再 `invoke`，并把返回缓冲写回 key=1；**不解析 opcode**。布局与期望输出的解析在主机 / 日后 xpost-test（见 [`HOST_DESIGN.md`](../HOST_DESIGN.md)）。**以 map 为权威 I/O**；若同时改 `ctx` 可以，但 **output 必须以 map key=1 为准**。
 
 ---
 
 ## 3. 缓冲 / value 布局（LE）
 
-与 HAL 孪生 [`exec_bench_common`](../../exec_bench_common/src/lib.rs) 一致；**整块 32 字节**：
+与 HAL 孪生 [`exec_bench_common`](../../exec_bench_common/src/lib.rs) 及主机解析草案一致；**整块 32 字节**：
 
 ```text
 offset  size  field
@@ -151,7 +151,9 @@ for workload in {incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort}:
 
 ## 8. 非目标（本文件不要求）
 
-- HAL 对照程序（Rust `exec_bench_hal`）
+- 在 App / `xpost-serial` 里增加 opcode 结构化类型（解析属主机 / xpost-test）
 - Wi-Fi / 以太网包解析
 - 扩展 serial / agent 协议
 - 拆成 8 个独立 `.c`（可选后续）
+
+HAL 对照（同流水线、无 XDP）见 [`examples/exec_bench_hal`](../../exec_bench_hal)。

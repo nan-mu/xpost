@@ -53,7 +53,6 @@ xpost = { path = "../..", features = [
 ] }
 xpost-type = { path = "../../xpost-type" }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
-exec_bench_common = { path = "../exec_bench_common" }
 
 [build-dependencies]
 xpost-build = { path = "../../xpost-build" }

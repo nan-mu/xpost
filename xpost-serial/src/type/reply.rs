@@ -27,11 +27,12 @@ pub enum OkReply<'a> {
     /// Host obtains this via [`crate::command::Command::GetInit`] as a
     /// transcript wait only — there is no UART request line.
     Init,
-    /// Unsolicited `OK finish` (e.g. from eBPF `bpf_printk` on UART).
+    /// Unsolicited `OK finish` (e.g. eBPF `bpf_printk` or HAL App raw UART).
     ///
     /// Host obtains this via [`crate::command::Command::GetFinish`] as a
     /// transcript wait only — there is no UART request line. The serial
-    /// **server must not** emit this reply.
+    /// **reply path must not** emit this variant; the marker is a raw
+    /// transcript line from the compute path.
     Finish,
 }
 

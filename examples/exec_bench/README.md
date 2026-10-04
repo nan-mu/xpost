@@ -1,12 +1,14 @@
 # exec_bench (eBPF arm)
 
-Function-call eBPF compute via `xpost::ext::exec_call` and App `enable exec`.
+Opaque App carrier for function-call XDP via `xpost::ext::exec_call`.
 
 - Cold image: `exec_bench.elf` (rebuild with `ebpf/build.sh`)
-- Map `workload`: input/output keys; value 32-byte blob
-- App: `SerialHandler` — `enable/disable exec`, map/perf (cagt), `OK init`
+- Map `workload`: keys `0`/`1`, value = opaque 32-byte blob
+- App: `SerialHandler` — exec / map / perf (cagt); does **not** interpret opcodes
 - Completion: eBPF `bpf_printk` → UART `OK finish` (host `GetFinish`)
-- Host draft: [`HOST_DESIGN.md`](HOST_DESIGN.md), [`exec_bench.rs`](exec_bench.rs), [`exec_bench.sql`](exec_bench.sql)
+- Host draft (pipelines + **xpost-test parse**): [`HOST_DESIGN.md`](HOST_DESIGN.md),
+  [`exec_bench.rs`](exec_bench.rs), [`exec_bench.sql`](exec_bench.sql)
+- HAL twin (same pipeline, no XDP): [`../exec_bench_hal`](../exec_bench_hal)
 
 ```bash
 cd examples/exec_bench && cargo build --release

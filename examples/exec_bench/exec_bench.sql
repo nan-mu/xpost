@@ -1,11 +1,11 @@
--- exec_bench — function-call eBPF via exec ingress (map input/output; cagt).
+-- exec_bench — function-call compute via exec ingress (map input/output; cagt).
 -- Draft parked under examples/exec_bench/; not loaded by formal::ensure yet.
 -- Needs exam (from formal.sql) when wired into xpost-test.
 
 CREATE TABLE IF NOT EXISTS exec_bench_config (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     exam_id UUID NOT NULL REFERENCES exam (id) ON DELETE CASCADE,
-    firmware TEXT NOT NULL CHECK (firmware = 'ebpf'),
+    firmware TEXT NOT NULL CHECK (firmware IN ('ebpf', 'hal')),
     workload TEXT NOT NULL,
     input BYTEA NOT NULL,
     started_at TIMESTAMPTZ NOT NULL,

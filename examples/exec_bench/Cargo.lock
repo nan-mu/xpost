@@ -1052,19 +1052,11 @@ dependencies = [
  "esp-hal",
  "esp-println",
  "esp-rtos",
- "exec_bench_common",
  "log",
  "xpost",
  "xpost-build",
  "xpost-serial",
  "xpost-type",
-]
-
-[[package]]
-name = "exec_bench_common"
-version = "0.1.0"
-dependencies = [
- "esp-hal",
 ]
 
 [[package]]
