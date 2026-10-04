@@ -70,13 +70,9 @@ portable-atomic = { version = "1", default-features = false }
 static_cell      = "2.1.1"
 
 [features]
-default = ["kind-c"]
-# Formal HAL images use kind-a,kind-g (C+A+G); kind-t is manual/smoke only.
-kind-c = ["xpost/perf-counter"]
-kind-a = ["kind-c", "xpost/perf-aggregate"]
-kind-g = ["kind-c", "xpost/perf-gauge"]
-kind-t = ["kind-c", "xpost/perf-trace"]
-kind-all = ["kind-a", "kind-g", "kind-t"]
+# Formal firmware tags: xdp_cag → perf-cag; xdp_t → perf-t.
+perf-cag = ["xpost/perf-counter", "xpost/perf-aggregate", "xpost/perf-gauge"]
+perf-t = ["xpost/perf-counter", "xpost/perf-trace"]
 
 [build-dependencies]
 xpost-build = { path = "../../xpost-build" }

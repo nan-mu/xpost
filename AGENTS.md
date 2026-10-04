@@ -54,7 +54,9 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 
 ## Commands
 
-Mac（USB 接 ESP；cwd = `xpost/`）：只需常驻 agent。收到 `flash/fw` 时按 `profiles.toml` 的 `build` 编译再烧录。
+Mac（USB 接 ESP；cwd = `xpost/`）：只需常驻 agent。收到 `flash/fw` 时按
+`profiles.toml` 的 `build`（cwd = `examples/<app>`，`cargo build --release
+--features …`）编译再烧录；勿用 `cargo xtask <example>`。
 
 HTTP：`/health`、`/v1/*`（harness）、`/mcp`（Cursor Streamable HTTP MCP）。
 
@@ -96,8 +98,9 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 - `config/just_tx.toml` / `just_drop.toml` / `firewall.toml`：`formal`、`arms = ["xdp"]`
   （本次只跑 XDP）；流水线固定再跑 `xdp_t`（`window_s=30`；全网格）
 - `config/firewall.toml`：另含 hash blacklist `sizes` / `traffic` hit|miss
-- XDP 固件工程：`examples/just_xdp`、`examples/firewall`；`profiles.toml` 的
-  `[[fw]]`/`[[xdp]]`：`just-*-cag|t`、`firewall-cag|t`（无 HAL）
+- XDP 固件工程：`examples/just_xdp`、`examples/firewall`；板级 feature
+  `perf-cag` / `perf-t`（无 default）；`profiles.toml` 的 `[[fw]]`/`[[xdp]]`：
+  `just-*-cag|t`、`firewall-cag|t`（无 HAL）
 - 调试火焰图 Trace（**火焰轨**）：`run = ["dev"]`（硬编码：XDP × `just-tx-t` × 100 pps × 2s × 1
   轮；**无 DB**；report → `/tmp/xpost-dev-flame.report`；Mac scp 到
   `target/dev-flame.report` 后 `pixi run python -m utils.export_flame_svg`）

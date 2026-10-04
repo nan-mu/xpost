@@ -14,7 +14,7 @@ target = "riscv32imc-unknown-none-elf"
 rustflags = ["--cfg", "portable_atomic_unsafe_assume_single_core"]
 
 [alias]
-# Root dispatcher: cargo xtask firmware doctor | cargo xtask agent | …
+# Root dispatcher: cargo xtask sync | cargo xtask agent
 # Host binary — must not inherit workspace RV32 `build.target`.
 xtask = "run --manifest-path xtask/Cargo.toml --target aarch64-apple-darwin --"
 # Flash the firmware example (from workspace root)

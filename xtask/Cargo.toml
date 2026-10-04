@@ -3,7 +3,7 @@ name = "xtask"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "xpost workspace dispatcher: cargo xtask <example> <cmd>"
+description = "xpost workspace: cargo xtask sync | cargo xtask agent"
 
 # Independent host workspace (parent defaults to RV32).
 [workspace]

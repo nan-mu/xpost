@@ -23,7 +23,7 @@ use log::{error, info};
 use static_cell::StaticCell;
 use xpost::app_ctrl;
 use xpost::xdp::Slot;
-#[allow(unused_imports)] // PerfError only when no kind-* feature
+#[allow(unused_imports)] // PerfError only when neither perf-cag nor perf-t
 use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
@@ -291,45 +291,25 @@ serial_task! {
             },
         )
         .on_clear_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(any(
-                feature = "kind-c",
-                feature = "kind-a",
-                feature = "kind-g",
-                feature = "kind-t"
-            ))]
+            #[cfg(any(feature = "perf-cag", feature = "perf-t"))]
             {
                 xpost::ext::perf::clear_perf();
                 reply.ok(OkReply::ClearPerf);
             }
-            #[cfg(not(any(
-                feature = "kind-c",
-                feature = "kind-a",
-                feature = "kind-g",
-                feature = "kind-t"
-            )))]
+            #[cfg(not(any(feature = "perf-cag", feature = "perf-t")))]
             {
                 reply.error(&PerfError::Unavailable);
             }
         })
         .on_get_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(any(
-                feature = "kind-c",
-                feature = "kind-a",
-                feature = "kind-g",
-                feature = "kind-t"
-            ))]
+            #[cfg(any(feature = "perf-cag", feature = "perf-t"))]
             {
                 let n = xpost::ext::perf::report_payload_len();
                 reply.get_perf(n, |write| {
                     xpost::ext::perf::report_perf(write);
                 });
             }
-            #[cfg(not(any(
-                feature = "kind-c",
-                feature = "kind-a",
-                feature = "kind-g",
-                feature = "kind-t"
-            )))]
+            #[cfg(not(any(feature = "perf-cag", feature = "perf-t")))]
             {
                 reply.error(&PerfError::Unavailable);
             }

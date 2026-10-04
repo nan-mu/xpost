@@ -47,10 +47,17 @@
 //! Optional `perf-aggregate` / `perf-gauge` / `perf-trace`. Control-plane APIs
 //! return `Result`.
 //!
-//! # Commands (host, repo root)
+//! # Commands
+//!
+//! Firmware (cwd = `examples/<app>`):
 //!
 //! ```bash
-//! cargo xtask just_xdp build --release
+//! cargo build --release --features perf-cag
+//! ```
+//!
+//! Host agent / cold install (repo root):
+//!
+//! ```bash
 //! cargo xtask agent program --elf examples/just_xdp/just_drop.elf
 //! ```
 //!

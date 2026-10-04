@@ -1,9 +1,12 @@
 # xpost-agent profile registry (paths relative to XPOST_ROOT / repo root).
 #
 # Formal firmware tags (DB `firmware` enum — not Cargo feature names):
-#   xdp_cag → perf-counter+aggregate+gauge via kind-a,kind-g
-#   xdp_t   → perf-trace via kind-t
-# Do not invent kind-cag. HAL profiles intentionally omitted (XDP-only formal).
+#   xdp_cag → perf-cag (counter+aggregate+gauge)
+#   xdp_t   → perf-t   (counter+trace)
+# HAL profiles intentionally omitted (XDP-only formal).
+#
+# Firmware build: cwd = examples/<project>, `cargo build --release --features …`
+# (no cargo xtask).
 
 # ---------------------------------------------------------------------------
 # just_tx (examples/just_xdp + cold just_tx.elf)
@@ -14,7 +17,7 @@ name = "just-tx-cag"
 target = "esp32c3"
 partition_table = "examples/just_xdp/partitions.csv"
 artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
-build = { cwd = ".", command = ["cargo", "xtask", "just_xdp", "build", "--release", "--no-default-features", "--features", "kind-a,kind-g"] }
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
 xdp = ["just_tx"]
 
 [[fw]]
@@ -22,7 +25,7 @@ name = "just-tx-t"
 target = "esp32c3"
 partition_table = "examples/just_xdp/partitions.csv"
 artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
-build = { cwd = ".", command = ["cargo", "xtask", "just_xdp", "build", "--release", "--no-default-features", "--features", "kind-t"] }
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-t"] }
 xdp = ["just_tx"]
 
 # ---------------------------------------------------------------------------
@@ -34,7 +37,7 @@ name = "just-drop-cag"
 target = "esp32c3"
 partition_table = "examples/just_xdp/partitions.csv"
 artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
-build = { cwd = ".", command = ["cargo", "xtask", "just_xdp", "build", "--release", "--no-default-features", "--features", "kind-a,kind-g"] }
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
 xdp = ["just_drop"]
 
 [[fw]]
@@ -42,7 +45,7 @@ name = "just-drop-t"
 target = "esp32c3"
 partition_table = "examples/just_xdp/partitions.csv"
 artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
-build = { cwd = ".", command = ["cargo", "xtask", "just_xdp", "build", "--release", "--no-default-features", "--features", "kind-t"] }
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-t"] }
 xdp = ["just_drop"]
 
 # ---------------------------------------------------------------------------
@@ -54,7 +57,7 @@ name = "firewall-cag"
 target = "esp32c3"
 partition_table = "examples/firewall/partitions.csv"
 artifact = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
-build = { cwd = ".", command = ["cargo", "xtask", "firewall", "build", "--release", "--no-default-features", "--features", "kind-a,kind-g"] }
+build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
 xdp = ["firewall"]
 
 [[fw]]
@@ -62,7 +65,7 @@ name = "firewall-t"
 target = "esp32c3"
 partition_table = "examples/firewall/partitions.csv"
 artifact = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
-build = { cwd = ".", command = ["cargo", "xtask", "firewall", "build", "--release", "--no-default-features", "--features", "kind-t"] }
+build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-t"] }
 xdp = ["firewall"]
 
 # ---------------------------------------------------------------------------
