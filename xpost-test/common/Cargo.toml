@@ -1,7 +1,5 @@
 [package]
-# Must not be named `core` — aya-build uses `-Z build-std=core` and a package
-# named `core` nests OUT_DIR until "File name too long".
-name = "xpost_test"
+name = "common"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -59,7 +57,7 @@ uuid = { version = "1", optional = true, features = ["v4"] }
 anyhow = { workspace = true }
 aya-build = { workspace = true }
 cargo_metadata = { workspace = true }
-# No path dep on `ebpf` — that would cycle (ebpf → core lib).
+# No path dep on `ebpf` — that would cycle (ebpf → common lib).
 
 [[bin]]
 name = "xpost-test"

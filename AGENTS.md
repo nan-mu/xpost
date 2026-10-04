@@ -25,10 +25,10 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 
 - **`xpost-test/`**: **owns the full test workflow** (formal `just_drop` /
   `just_tx`, `firewall`, `dev`, `formal-clear` via `config/default.toml` `run`).
-  Workspace: package `xpost_test` in `core/` (ABI lib + binary) and `ebpf`
-  (aya TC). Host modules: `agent` / `db` / `pipeline` / `exam`. Sole entry:
-  bare `./xpost-test`. See rustdoc `overview` + `config`. Calls agent HTTP;
-  does not hold the USB session while the agent is running.
+  Workspace: package `common` in `common/` (ABI lib + binary `xpost-test`) and
+  `ebpf` (aya TC). Host modules: `agent` / `db` / `pipeline` / `exam`. Sole
+  entry: bare `./xpost-test`. See rustdoc `overview` + `config`. Calls agent
+  HTTP; does not hold the USB session while the agent is running.
 - **`xpost-agent/`**: CLI + `--listen` HTTP `/v1/*` and MCP `/mcp` on one port
   (shared USB). Dispatch: `cargo xtask agent …`. Frozen HTTP/MCP contract is
   rustdoc on `xpost-agent/src/main.rs` (App verbs via `xpost_serial::Command` /
@@ -85,7 +85,7 @@ fish -c 'source ~/.config/fish/functions/xpost-test.fish; and xpost-test'
 手工等价步骤（一般不必；优先 fish helper）：
 
 ```bash
-cd xpost-test && cargo build -p xpost_test --release
+cd xpost-test && cargo build -p common --release
 scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 # on TR3000:
 ./xpost-test

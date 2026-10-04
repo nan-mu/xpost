@@ -12,7 +12,7 @@ use libc::{
 };
 use log::debug;
 use rand::Rng;
-use xpost_test::{MAGIC_STIM, PAYLOAD_HDR_LEN};
+use common::{MAGIC_STIM, PAYLOAD_HDR_LEN};
 
 pub const WIRE_FRAME_BYTES: usize = 64;
 

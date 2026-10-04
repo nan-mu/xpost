@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["core", "ebpf"]
-default-members = ["core"]
+members = ["common", "ebpf"]
+default-members = ["common"]
 
 [workspace.package]
 license = "MIT OR Apache-2.0"

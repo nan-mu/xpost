@@ -9,7 +9,7 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rerun-if-changed=../config/just_drop.toml");
     println!("cargo:rerun-if-changed=../config/firewall.toml");
 
-    // ABI-only builds (ebpf → xpost_test with default-features=false) must not recurse.
+    // ABI-only builds (ebpf → common with default-features=false) must not recurse.
     if env::var_os("CARGO_FEATURE_HOST").is_none() {
         return Ok(());
     }

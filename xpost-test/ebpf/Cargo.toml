@@ -7,7 +7,7 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-abi = { package = "xpost_test", path = "../core", default-features = false }
+abi = { package = "common", path = "../common", default-features = false }
 aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }
 

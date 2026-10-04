@@ -9,7 +9,7 @@ use aya::{
     programs::{SchedClassifier, TcAttachType, tc},
 };
 use log::{debug, info, warn};
-use xpost_test::{
+use common::{
     FilterConfig, KIND_BOUNCE_INGRESS, KIND_ECHO_INGRESS, KIND_STIM_EGRESS, MAGIC_COLLECT_RST,
     MAGIC_DUMP, MAGIC_STIM, StampEvent,
 };
@@ -273,7 +273,7 @@ impl Harness {
         {
             return true;
         }
-        buf.len() == 1 && buf[0] == xpost_test::ECHO_BYTE
+        buf.len() == 1 && buf[0] == common::ECHO_BYTE
     }
 
     pub fn alloc_seq(&mut self) -> u64 {
