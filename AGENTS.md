@@ -1,169 +1,250 @@
 # xpost
 
-Rust MCU XDP runtime (crate `xpost`) plus board examples and host tooling.
-Phase 1: ESP32-C3 / RV32IMC.
+The `xpost` crate provides an XDP runtime for Rust MCU applications.
+This repository also contains board examples and host tools.
+The Phase 1 target is ESP32-C3 with RV32IMC.
 
-## Artifact names (do not confuse)
+## Artifact names
 
-| Name | What it is | Typical path |
-|------|------------|--------------|
-| **Firmware ELF** | Board app (`XdpRt`, Wi-Fi, …) | `examples/<app>/…/release/<app>` |
-| **XDP ELF** (`xdp.elf`) | Cold-region XDP container (`.xpost.meta` + `.xpost.image`) | `../build/<stem>/<stem>.elf` |
-| **`esp32c3.elf`** | libbpf-mcu AOT debug ELF (not for cold install) | `../build/<stem>/esp32c3.elf` |
+Use these names in documents and logs:
 
-Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF”).
+- **Firmware ELF**: The board application, including `XdpRt` and Wi-Fi.
+  Typical path: `examples/<app>/.../release/<app>`.
+- **XDP ELF** (`xdp.elf`): The cold-region XDP container with `.xpost.meta` and `.xpost.image` sections.
+  Typical path: `../build/<stem>/<stem>.elf`.
+- **`esp32c3.elf`**: The libbpf-mcu AOT debug ELF.
+  Typical path: `../build/<stem>/esp32c3.elf`.
+  Do not use this file for cold installation.
 
-## Layout
+Use **XDP ELF** or **`xdp.elf`** instead of "Compact ELF" in documents and logs.
 
-- Root crate `xpost`: board-agnostic runtime (maps, helpers, IRAM slots, RX ingest).
-- `examples/<app>/`: self-contained MCU projects.
-- Host (workspace `exclude`, own Cargo workspace / triple): `xpost-serial`
-  (library), `xpost-agent` (daemon), `xpost-build`, `xpost-test`
-  (experiment harness; same git tree, separate `Cargo.toml`).
+## Repository layout
 
-## Host serial / agent / test
+- The root crate provides the shared runtime: maps, helpers, IRAM slots, and RX input processing.
+- Each `examples/<app>/` directory contains a separate MCU project.
+- `xpost-serial` provides the serial protocol library.
+- `xpost-agent` provides the host daemon.
+- `xpost-build` provides build tools.
+- `xpost-test` controls the complete test procedure.
 
-- **`xpost-test/`**: **owns the full test workflow** (formal `just_drop` /
-  `just_tx`, `firewall`, `dev`, `formal-clear` via `config/default.toml` `run`).
-  Workspace: package `common` in `common/` (ABI lib + binary `xpost-test`) and
-  `ebpf` (aya TC). Host modules: `agent` / `db` / `pipeline` / `exam`. Sole
-  entry: bare `./xpost-test`. See rustdoc `overview` + `config`. Calls agent
-  HTTP; does not hold the USB session while the agent is running.
-- **`xpost-agent/`**: CLI + `--listen` HTTP `/v1/*` and MCP `/mcp` on one port
-  (shared USB). Run from that directory (`cargo run --release -- …`). Frozen
-  HTTP/MCP contract is rustdoc on `xpost-agent/src/main.rs` (App verbs via
-  `xpost_serial::Command` / `OkReply`). After open: host-only `GetInit` waits
-  for DUT `OK init`.
-- **`xpost-serial`**: library only — shared `r#type` wire + opt-in `client`
-  (host) / `server` (firmware `SerialHandler` + `serial_task!`). Examples use
-  `default-features = false, features = ["server"]`. App verbs: `ping`,
-  `enable`/`disable xdp`, `clear`/`get`/`update map`, `clear`/`get perf`.
-  `get map` / `get perf` success is `OK get … <n>` + `n` blob bytes (map blob
-  = ASCII snapshot from `xpost::map::dump`; perf blob = `ext::perf` layout).
-  Cold install is **by XDP name**. Formal decodes perf reports into exam-scoped
-  tables (`sql/formal.sql`: `exam` + `just_*_config/data` + `xdp_*`/`hal_*` +
-  `trace_event`) — no `report_raw`. Open-run never DROP/TRUNCATE; explicit
-  wipe is `run = ["formal-clear"]` in `config/default.toml` then rebuild
-  (`TRUNCATE exam CASCADE`). Trace is the
-  **sole timeline**: categorized rings of timestamped events (nest =
-  paired Begin/End on the same ring). Flame export is **XDP-only** split
-  path charts (`export_flame_svg`: `just_tx-xdp-*-path-rx|path-tx.flame.*`;
-  x = ``t_us`` within episode). Prefer short `dev` capture →
-  `/tmp/xpost-dev-flame.report` → Mac `target/dev-flame.report`. High-pps
-  formal uses Counter/Aggregate/Gauge (no Trace flood). HAL app-category
-  ring slots are reserved empty.
+The root workspace excludes the four host packages.
+These packages have separate Cargo workspaces and target settings.
+The `xpost-test` workspace contains `common` and `ebpf`.
+The `common` package provides the ABI library and the `xpost-test` binary.
+The `ebpf` package uses aya TC.
+The host modules are `agent`, `db`, `pipeline`, and `exam`.
 
-## Commands
+## Agent access
 
-Mac（USB 接 ESP）：常驻 `xpost-agent`。收到 `flash/fw` 时按 `profiles.toml`
-的 `build`（cwd = `examples/<app>`，`cargo build --release --features …`）
-编译再烧录。
+The `xpost-agent` daemon controls the shared USB connection.
+It serves HTTP `/health` and `/v1/*`, and Streamable HTTP MCP `/mcp`, on one port.
+After it opens the connection, the host-only `GetInit` command waits for the DUT message `OK init`.
 
-HTTP：`/health`、`/v1/*`（harness）、`/mcp`（Cursor Streamable HTTP MCP）。
+**AI agents must use MCP for direct operations on `xpost-agent`.**
+
+1. Read the available MCP tool list, tool descriptions, and input schemas before a call.
+2. Use the specified input format.
+3. Check the returned result.
+
+If MCP is unavailable, stop the affected Agent operations.
+Report the reason.
+Do not use HTTP or direct serial calls as an alternative.
+Do not start the daemon automatically to inspect its API.
+Apply these rules to cold-table operations too.
+These rules cover direct AI operations.
+The `xpost-test` program continues to use HTTP internally.
+It does not hold the USB connection while the Agent runs.
+
+The Mac connected to the ESP through USB hosts the daemon.
+The startup command is:
 
 ```bash
 cd xpost-agent && cargo run --release -- --bind 0.0.0.0:9240
 ```
 
-Cursor MCP 示例 URL：`http://127.0.0.1:9240/mcp`。
-Wi-Fi 凭据仍在 `examples/just_xdp/.env`、`examples/just_drop_hal/.env` 与 `examples/just_tx_hal/.env`（`WIFI_SSID` / `WIFI_PASS`）。
+Example Cursor MCP URL: `http://127.0.0.1:9240/mcp`.
 
-TR3000（编译期嵌入 `xpost-test/config/`：`default.toml` + `just_tx.toml` + `just_drop.toml` + `firewall.toml`）：
+For `flash/fw`, the Agent uses the `build` entry in `profiles.toml` before it writes the firmware.
+The build runs in `examples/<app>` with `cargo build --release --features ...`.
 
-**用户说「测试 / 跑一下 / 验证」时：默认正式跑。** 永远无参 `./xpost-test`；改
-实验改 `config/*.toml` 后重编。Mac 侧首选 fish helper（build → scp → ssh 无参跑）：
+Each firmware project reads `WIFI_SSID` and `WIFI_PASS` from its own `.env` file:
+
+- `examples/just_xdp/`
+- `examples/firewall/`
+- `examples/just_drop_hal/`
+- `examples/just_tx_hal/`
+- `examples/firewall_hal/`
+
+## Serial protocol
+
+The `xpost-serial` crate is a library only.
+Its shared `r#type` module defines the wire protocol.
+Host tools enable the `client` feature.
+Firmware enables the `server` feature, which provides `SerialHandler` and `serial_task!`.
+Examples use `default-features = false, features = ["server"]`.
+
+The App wire types are `xpost_serial::command::Command` and `xpost_serial::reply::OkReply`.
+The App commands are:
+
+- `ping`
+- `enable xdp` and `disable xdp`
+- `clear map`, `get map`, and `update map`
+- `clear perf` and `get perf`
+
+A successful `get map` or `get perf` response contains an `OK get ... <n>` header and `n` blob bytes.
+The map blob is an ASCII snapshot from `xpost::map::dump`.
+The perf blob uses the `ext::perf` layout.
+Cold installation selects an image by its XDP name.
+
+## Test procedure
+
+**Use a formal run by default when the user asks to test, run, or verify the system.**
+On TR3000, always run the binary as `./xpost-test`.
+Do not add environment variables, subcommands, or CLI flags to a formal run.
+
+The build embeds these files from `xpost-test/config/`:
+
+- `default.toml`
+- `just_tx.toml`
+- `just_drop.toml`
+- `firewall.toml`
+
+To change an experiment, edit these TOML files.
+Rebuild the binary.
+Upload it before the next run.
+
+Use the repository fish script from the repository root:
 
 ```bash
-fish -c 'source ~/.config/fish/functions/xpost-test.fish; and xpost-test'
+./xpost-test/scripts/xpost-test.fish
 ```
 
-**输出**：stdout/stderr 直接看终端；不要 `> /tmp/…`、`tee`、`tail` 截断日志文件。长跑用
-`block_until_ms: 0` 后台跑，再读终端输出。
-
-**正式性能测试永远只跑无参二进制**——不要环境变量、不要子命令、不要任何 CLI flags。
-改实验：改 TOML → 重编 → scp → 无参 `./xpost-test`（或上面的 fish helper）。
-
-手工等价步骤（一般不必；优先 fish helper）：
+The script builds the binary, uploads it to TR3000, and runs it without arguments through SSH.
+Use these manual steps only when necessary:
 
 ```bash
 cd xpost-test && cargo build --release
 scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
-# on TR3000:
+# On TR3000:
 ./xpost-test
 ```
 
-- `config/default.toml`：`run = [...]`（`just_tx` / `just_drop` / `firewall` / `dev` /
-  `formal-clear`）、`[postgres]`、`[agent]`、`[dut]`、`[probe]`
-- `config/just_tx.toml` / `just_drop.toml` / `firewall.toml`：`formal`、`arms = ["xdp"]`
-  （本次只跑 XDP）；流水线固定再跑 `xdp_t`（`window_s=30`；全网格）
-- `config/firewall.toml`：另含 hash blacklist `sizes` / `traffic` hit|miss
-- XDP 固件工程：`examples/just_xdp`、`examples/firewall`；板级 feature
-  `perf-cag` / `perf-t`（无 default）；`profiles.toml` 的 `[[fw]]`/`[[xdp]]`：
-  `just-*-cag|t`、`firewall-cag|t`（无 HAL）
-- 调试火焰图 Trace（**火焰轨**）：`run = ["dev"]`（硬编码：XDP × `just-tx-t` × 100 pps × 2s × 1
-  轮；**无 DB**；report → `/tmp/xpost-dev-flame.report`；Mac scp 到
-  `target/dev-flame.report` 后 `pixi run python -m utils.export_flame_svg`）
-- Agent HTTP：`/health`、`/v1/*`（冻结合约见 `xpost-agent` rustdoc；含
-  `/v1/get/map/{name}`、`/v1/clear/perf`、`/v1/get/perf` 等）、`/mcp`
-- 实验步骤与全流程：`xpost-test` 的 `overview` / `config` rustdoc；串口 API：`xpost-serial`
-- 正式 `just_tx` 扫速网格：`400…4000` pps（步长 400）
-- 正式 `just_drop`：同网格；`get map counter`（IPv4 src 末字节分桶）→ `just_drop_data`
-- Schema：`xpost-test/sql/formal.sql` + `just_drop.sql` / `just_tx.sql` / `firewall.sql`；显式清空：
-  `run = ["formal-clear"]` 后重编再跑
+Read stdout and stderr directly from the terminal.
+Do not redirect test output to `/tmp` files.
+Do not use `tee` or `tail` to process test logs.
+For long runs, use the execution tool's session support to keep the process active.
+Continue to read its terminal output.
 
-只跑正式 just_tx：`run = ["just_tx"]`。firewall：`run = ["firewall"]`。一次跑全部 formal A/B：`run = ["just_drop", "just_tx"]`。
+### Experiment settings
 
-可选手工冷表操作：agent 起来后走 HTTP `/v1/flash/*`、`/v1/clear/xdp`、
-`/v1/get/xdp`（或同名 MCP tools）。
+The `run` list in `config/default.toml` selects the experiments and their order.
+The supported entries are `just_tx`, `just_drop`, `firewall`, `dev`, and `formal-clear`.
+The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` settings.
 
-### Formal 采集与 `benchmark/` 分析立场
+- Only `just_tx`: `run = ["just_tx"]`.
+- Only `firewall`: `run = ["firewall"]`.
+- All formal experiments: `run = ["just_drop", "just_tx", "firewall"]`.
 
-采集：TR3000 `./xpost-test` → `formal.*`（DDL：`xpost-test/sql/formal.sql`）。`benchmark/`
-**不负责**烧录 / 刺激 / USB；也不再维护「一实验一 notebook」的 Evaluation 路径。
+The experiment files contain `formal` and `arms` settings.
+The current configuration uses `arms = ["xdp"]`, with no HAL comparison.
+The CAG stage runs each grid point for 30 seconds.
+The pipeline then runs an `xdp_t` stage with one packet.
+The Trace stage stores `target_pps=1` and `window_s=0`.
 
-- **实验**（`just_tx` / `just_drop` / 后续）只是取数窗口；Analysis / Evaluation 应按
-  **指标与 xpost 功能问题**横切（例如 `hal_agg`/`xdp_agg` 同名段在 Pass vs Drop vs TX
-  下是否同事），常跨多个 exam 对比。见 `benchmark/README.md`。
-- 近期：先跑完全部 formal 实验；数据仅作轻量健全性检查。深度作图与章节写作延后，
-  且应对齐 Methodology 的功能分节，而非实验名。
-- `benchmark/backup/` 冻结归档，勿改删。
+The formal `just_tx` and `just_drop` grids run from 400 to 4000 pps in steps of 400.
+The `just_drop` experiment reads `get map counter` into `just_drop_data`.
+The counter uses the last byte of the IPv4 source address as its bucket index.
 
-## Scope
+The `firewall.toml` file also sets the blacklist `sizes` and the `traffic` modes, `hit` and `miss`.
+The firewall Trace stage uses eight blacklist entries and sends one matching packet.
 
-Bare-metal only (no ESP-IDF). Static loading of XDP ELF image bytes into slots;
-no on-device ELF parse of the firmware image. Preserve ABI / linker layout with
-`libbpf-mcu` XPM1 and board `partitions.csv`.
+The XDP firmware projects are `examples/just_xdp` and `examples/firewall`.
+Their board features are `perf-cag` and `perf-t`, with no default feature.
+The `profiles.toml` registry contains no HAL profiles.
+Its `[[fw]]` names are `just-tx-cag`, `just-tx-t`, `just-drop-cag`, `just-drop-t`, `firewall-cag`, and `firewall-t`.
+Its `[[xdp]]` names are `just_tx`, `just_drop`, and `firewall`.
 
-### Maps / boot
+For debug Trace collection, set `run = ["dev"]`.
+This mode uses `just-tx-t` at 100 pps for two seconds, for one round.
+It writes no database records.
+It writes the report to `/tmp/xpost-dev-flame.report`.
 
-Firmware-first: `MapRt::init` claims the talc heap, then `XdpRt::init` scans cold
-XDP ELF and `MapRt::create`s each image's `required_maps`. Lease installs VMR→RMA
-aliases from meta `aot_binds` (`set_map_aliases`). There is no userspace
-`register_map_name` path — map names live in `MapRt` meta and XDP ELF descriptors.
+See the `xpost-test` rustdoc modules `overview` and `config` for the complete procedure.
+See `xpost-serial` for the serial API.
 
-Control-plane errors are `crate::error` (small enums per public entrypoint).
-BPF helper errno is `map::ops::MapOpError` (not nested into control-plane enums).
+### Database rules
 
-### Perf (`ext::perf` / ingress program)
+Formal collection decodes perf reports into tables associated with an exam.
+The tables include `exam`, experiment configuration and data tables, `xdp_*` and HAL perf tables, and `trace_event`.
+The collector does not store `report_raw`.
+The schema files in `xpost-test/sql/` are `formal.sql`, `just_drop.sql`, `just_tx.sql`, and `firewall.sql`.
 
-The crate mounts a private `xdp::ingress::XdpProg` implementing `xpost_type::XdpProg`
-(re-exported as `esp_radio::wifi::XdpProg` under the `xdp` feature). Apps do **not**
-see `XDP_PROG`; they read via `ext::perf::counter()` / `aggregate()` / `gauge()` /
-`trace()` (four public exits). `report_perf` / `clear_perf` are shared plumbing
-(App serial: `get perf` / `clear perf`).
-EspRadioTrace wiring lives in `ext/perf/trace/` beside the ring store.
+Starting a run must not execute `DROP` or `TRUNCATE`.
+For an explicit database clear, set `run = ["formal-clear"]`.
+Rebuild the binary.
+Upload it to TR3000.
+Run it without arguments.
+This operation executes `TRUNCATE exam CASCADE`.
 
-- `esp-radio` — `xpost::esp_radio::new` → `wifi::new(device, config, &ingress::XDP_PROG)`
-- `perf-counter` — Counter storage + `EspRadioTrace` on the mounted prog
-- `perf-aggregate` — latency aggregates + stretch histogram (high pps)
-- `perf-gauge` — current/peak gauges
-- `perf-trace` — categorized event rings (sole timeline for flames)
+## Runtime constraints
 
-Traits live in the `xpost-type` crate so esp-radio (xdp feature) and xpost share
-one declaration (`EspRadioTrace: XdpProg`). esp-radio owns RX / `XdpAction`→`Action`
-mapping / EspRadioTrace call-sites; `XdpProg::run` only invokes the leased XDP image.
-App fields like `net_rx` stay in the firmware crate.
+Use bare-metal firmware only, without ESP-IDF.
+Use static loading to place XDP ELF image bytes into slots.
+Do not parse the firmware ELF on the device.
+Preserve the ABI and linker layout defined by libbpf-mcu XPM1 and the board's `partitions.csv`.
 
-Optional / incomplete: `ext::ringbuf` behind Cargo feature `ringbuf` (currently
-`compile_error!`).
+### Maps and boot
 
+The firmware starts the runtimes in this order:
+
+1. `MapRt::init` claims the talc heap.
+2. `XdpRt::init` scans the cold XDP ELF images.
+3. `MapRt::create` creates the maps listed in each image's `required_maps`.
+
+When it leases an image, the runtime installs VMR-to-RMA aliases from `aot_binds` through `set_map_aliases`.
+Map names reside in `MapRt` metadata and XDP ELF descriptors.
+There is no userspace `register_map_name` path.
+
+Control-plane errors use the small enums in `crate::error` for each public entry point.
+BPF helper errno values use `map::ops::MapOpError`.
+Keep these helper errors separate from control-plane enums.
+
+### Performance and ingress
+
+The crate mounts a private `xdp::ingress::XdpProg` that implements the `xpost_type::XdpProg` trait.
+With the `xdp` feature, esp-radio also exports this trait as `esp_radio::wifi::XdpProg`.
+Applications cannot access `XDP_PROG`.
+They read performance data through four public accessors:
+
+- `ext::perf::counter()`
+- `ext::perf::aggregate()`
+- `ext::perf::gauge()`
+- `ext::perf::trace()`
+
+The shared `report_perf` and `clear_perf` functions support the App commands `get perf` and `clear perf`.
+The `EspRadioTrace` integration resides in `ext/perf/trace/`, beside the ring storage.
+
+- `esp-radio`: `xpost::esp_radio::new` calls `wifi::new(device, config, &ingress::XDP_PROG)`.
+- `perf-counter`: Counter storage and `EspRadioTrace` hooks on the mounted program.
+- `perf-aggregate`: Latency aggregates and a stretch histogram for high packet rates.
+- `perf-gauge`: Current and peak values.
+- `perf-trace`: Event rings grouped by category.
+
+Trace provides the only timeline.
+Each event has a timestamp.
+Nested intervals use paired Begin and End events on the same ring.
+The HAL application-category ring slots remain reserved and empty.
+Formal runs at high packet rates use Counter, Aggregate, and Gauge data instead of continuous Trace collection.
+
+The `xpost-type` crate defines the shared traits for xpost and esp-radio: `EspRadioTrace: XdpProg`.
+The esp-radio crate controls RX, maps `XdpAction` to `Action`, and calls the `EspRadioTrace` hooks.
+The `XdpProg::run` method only calls the leased XDP image.
+Application fields such as `net_rx` remain in the firmware crate.
+
+The optional `ext::ringbuf` module is incomplete.
+Enabling the Cargo feature `ringbuf` triggers `compile_error!`.
+
+## Archive protection
+
+The `benchmark/backup/` directory contains frozen archives.
+Do not change or delete these files without an explicit user request.
