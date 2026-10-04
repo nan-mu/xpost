@@ -48,12 +48,13 @@ esp-radio = { version = "0.18.0", path = "../../esp-radio", features = [
   "wifi",
 ] }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
+hal_cag = { path = "../hal_cag" }
 critical-section = "1.2.0"
 portable-atomic = { version = "1", default-features = false }
 static_cell      = "2.1.1"
 
 [features]
-# Formal HAL CAG arm: local zero CAG report (no xpost).
+# Formal HAL CAG arm: local dataplane CAG report (no xpost).
 perf-cag = []
 
 [profile.dev]

@@ -1016,6 +1016,7 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
+ "hal_cag",
  "heapless 0.8.0",
  "log",
  "portable-atomic",
@@ -1096,6 +1097,15 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
+]
+
+[[package]]
+name = "hal_cag"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "esp-hal",
+ "portable-atomic",
 ]
 
 [[package]]

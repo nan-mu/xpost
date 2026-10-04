@@ -20,7 +20,7 @@ use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use just_tx_hal::wire;
-use log::{error, info};
+use log::error;
 use static_cell::StaticCell;
 #[allow(unused_imports)] // PerfError only when perf-cag is off
 use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
@@ -79,12 +79,7 @@ async fn main(spawner: Spawner) -> ! {
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
-    info!("Embassy initialized!");
-
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
-
-    spawner.spawn(control_serial(usb_rx).unwrap());
-    esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
 
     // AMPDU TX off: its BA session stalls TX ~1.07 s under ping-pong load.
     // Embassy frame queues (HAL-only): defaults 5/3 drop under burst.
@@ -96,7 +91,6 @@ async fn main(spawner: Spawner) -> ! {
         .with_tx_queue_size(16);
     let (mut controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, wifi_cfg)
         .expect("Failed to initialize Wi-Fi controller");
-    info!("wifi echo_site=app tx_dyn=128 rx_dyn=1024 rx_q=32 tx_q=16");
 
     match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
         (Some(ssid), Some(pass)) if !ssid.is_empty() => {
@@ -111,12 +105,11 @@ async fn main(spawner: Spawner) -> ! {
             let net_config = embassy_net::Config::dhcpv4(Default::default());
             let (stack, runner) = embassy_net::new(interfaces.station, net_config, resources, seed);
             spawner.spawn(net_task(runner).unwrap());
-            spawner.spawn(udp_task(stack).unwrap());
+            spawner.spawn(udp_task(stack, usb_rx, spawner).unwrap());
             spawner.spawn(wifi_task(controller).unwrap());
-            info!("sta ssid={ssid} stim_port={STIM_PORT}");
         }
         _ => {
-            info!("WIFI_SSID/WIFI_PASS unset; UDP echo disabled, serial counters still live");
+            spawner.spawn(control_serial(usb_rx).unwrap());
         }
     }
 
@@ -129,14 +122,13 @@ async fn main(spawner: Spawner) -> ! {
 async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
     loop {
         match controller.connect_async().await {
-            Ok(_) => info!("wifi connected"),
+            Ok(_) => {}
             Err(e) => {
                 error!("wifi connect: {e:?}");
                 Timer::after(Duration::from_secs(2)).await;
             }
         }
         let _ = controller.wait_for_disconnect_async().await;
-        info!("wifi disconnected");
         Timer::after(Duration::from_secs(2)).await;
     }
 }
@@ -151,12 +143,12 @@ async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::Inte
     clippy::large_stack_frames,
     reason = "embassy UdpSocket future and larger TX/RX scratch buffers"
 )]
-async fn udp_task(stack: embassy_net::Stack<'static>) {
+async fn udp_task(
+    stack: embassy_net::Stack<'static>,
+    usb_rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+    spawner: Spawner,
+) {
     stack.wait_config_up().await;
-    if let Some(v4) = stack.config_v4() {
-        info!("dhcp {}", v4.address);
-        esp_println::println!("xpost ready ipv4={} port={STIM_PORT}", v4.address);
-    }
 
     let rx_meta = UDP_RX_META.init([PacketMetadata::EMPTY; 16]);
     let tx_meta = UDP_TX_META.init([PacketMetadata::EMPTY; 16]);
@@ -164,17 +156,54 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
     let tx_buf = UDP_TX_BUF.init([0; 4096]);
     let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
     socket.bind(STIM_PORT).expect("bind stim");
-    info!("udp echo listening {STIM_PORT}");
+    // `OK init` after DHCP + bind: GetInit means dataplane is live.
+    spawner.spawn(control_serial(usb_rx).unwrap());
 
     let mut buf = [0u8; 256];
     loop {
         let Ok((n, meta)) = socket.recv_from(&mut buf).await else {
             continue;
         };
+        #[cfg(feature = "perf-cag")]
+        let t0 = cag::now_ticks();
+        #[cfg(feature = "perf-cag")]
+        {
+            cag::bump_rx_packets();
+            cag::set_rx_queue_depth(1);
+        }
         NET_RX.fetch_add(1, Ordering::Relaxed);
         RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "perf-cag")]
+        {
+            let t1 = cag::now_ticks();
+            cag::record_dispatch(t1.saturating_sub(t0));
+            // Echo path has no map/policy; keep a 1-tick execution sample.
+            cag::record_execution(1);
+        }
         let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
+        #[cfg(feature = "perf-cag")]
+        {
+            cag::bump_rx_delivered();
+            cag::bump_tx_submitted();
+            cag::set_tx_inflight(1);
+        }
+        #[cfg(feature = "perf-cag")]
+        let t_tx = cag::now_ticks();
         let send_ok = socket.send_to(&buf[..n], dest).await.is_ok();
+        #[cfg(feature = "perf-cag")]
+        {
+            let now = cag::now_ticks();
+            cag::record_post_action(now.saturating_sub(t_tx));
+            cag::record_tx_submission(now.saturating_sub(t_tx));
+            if send_ok {
+                cag::bump_tx_completed();
+            } else {
+                cag::bump_tx_failed();
+            }
+            cag::set_tx_inflight(0);
+            cag::set_rx_queue_depth(0);
+            cag::record_rx_processing(now.saturating_sub(t0));
+        }
         if !send_ok {
             error!("echo send failed bytes={n}");
         }

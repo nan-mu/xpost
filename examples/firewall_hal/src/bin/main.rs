@@ -10,7 +10,7 @@
 use core::convert::Infallible;
 
 use alloc::string::ToString;
-use portable_atomic::{AtomicU32, AtomicUsize, Ordering};
+use portable_atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_net::StackResources;
@@ -24,7 +24,7 @@ use firewall_hal::map_crud::{
 };
 use firewall_hal::wire;
 use heapless::FnvIndexMap;
-use log::{error, info};
+use log::error;
 use static_cell::StaticCell;
 #[allow(unused_imports)] // PerfError only when perf-cag is off
 use xpost_serial::reply::{MapError, OkReply, PerfError};
@@ -51,6 +51,8 @@ const MAX_BLACKLIST: usize = 256;
 
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
 static DROP: AtomicUsize = AtomicUsize::new(0);
+/// Set after MapCrud UDP bind so `OK init` waits for both dataplane sockets.
+static CTRL_BOUND: AtomicBool = AtomicBool::new(false);
 static ACK_IP: AtomicU32 = AtomicU32::new(0);
 static ACK_PORT: AtomicU32 = AtomicU32::new(0);
 
@@ -86,9 +88,6 @@ async fn main(spawner: Spawner) -> ! {
 
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
 
-    spawner.spawn(control_serial(usb_rx).unwrap());
-    esp_println::println!("xpost ready ipv4=? port={STIM_PORT}");
-
     let wifi_cfg = esp_radio::wifi::ControllerConfig::default()
         .with_dynamic_tx_buf_num(128)
         .with_dynamic_rx_buf_num(1024)
@@ -109,12 +108,13 @@ async fn main(spawner: Spawner) -> ! {
             let net_config = embassy_net::Config::dhcpv4(Default::default());
             let (stack, runner) = embassy_net::new(interfaces.station, net_config, resources, seed);
             spawner.spawn(net_task(runner).unwrap());
-            spawner.spawn(udp_task(stack).unwrap());
+            spawner.spawn(udp_task(stack, usb_rx, spawner).unwrap());
             spawner.spawn(ctrl_task(stack).unwrap());
             spawner.spawn(wifi_task(controller).unwrap());
-            info!("sta ssid={ssid} stim={STIM_PORT} ctrl={CTRL_PORT}");
         }
-        _ => info!("WIFI unset"),
+        _ => {
+            spawner.spawn(control_serial(usb_rx).unwrap());
+        }
     }
 
     loop {
@@ -126,7 +126,7 @@ async fn main(spawner: Spawner) -> ! {
 async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
     loop {
         match controller.connect_async().await {
-            Ok(_) => info!("wifi connected"),
+            Ok(_) => {}
             Err(e) => {
                 error!("wifi connect: {e:?}");
                 Timer::after(Duration::from_secs(2)).await;
@@ -156,32 +156,90 @@ fn is_blocked(key: u32) -> bool {
 
 #[embassy_executor::task]
 #[allow(clippy::large_stack_frames, reason = "UDP socket")]
-async fn udp_task(stack: embassy_net::Stack<'static>) {
+async fn udp_task(
+    stack: embassy_net::Stack<'static>,
+    usb_rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+    spawner: Spawner,
+) {
     stack.wait_config_up().await;
-    if let Some(v4) = stack.config_v4() {
-        esp_println::println!("xpost ready ipv4={} port={STIM_PORT}", v4.address);
-    }
     let rx_meta = UDP_RX_META.init([PacketMetadata::EMPTY; 4]);
     let tx_meta = UDP_TX_META.init([PacketMetadata::EMPTY; 4]);
     let rx_buf = UDP_RX_BUF.init([0; 1536]);
     let tx_buf = UDP_TX_BUF.init([0; 1536]);
     let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
     socket.bind(STIM_PORT).expect("bind stim");
+    while !CTRL_BOUND.load(Ordering::Acquire) {
+        Timer::after(Duration::from_millis(10)).await;
+    }
+    // `OK init` after DHCP + stim/ctrl bind: GetInit means dataplane is live.
+    spawner.spawn(control_serial(usb_rx).unwrap());
     let mut buf = [0u8; 256];
     loop {
-        let Ok((_n, meta)) = socket.recv_from(&mut buf).await else {
+        let Ok((n, meta)) = socket.recv_from(&mut buf).await else {
             continue;
         };
+        #[cfg(feature = "perf-cag")]
+        let t0 = cag::now_ticks();
+        #[cfg(feature = "perf-cag")]
+        {
+            cag::bump_rx_packets();
+            cag::set_rx_queue_depth(1);
+            cag::record_dispatch(0);
+        }
         let Some(key) = ip_key_from_addr(meta.endpoint.addr) else {
+            #[cfg(feature = "perf-cag")]
+            {
+                cag::bump_rx_discarded();
+                cag::set_rx_queue_depth(0);
+                cag::record_rx_processing(cag::now_ticks().saturating_sub(t0));
+            }
             continue;
         };
-        if is_blocked(key) {
+        #[cfg(feature = "perf-cag")]
+        let t_map = cag::now_ticks();
+        let blocked = is_blocked(key);
+        #[cfg(feature = "perf-cag")]
+        {
+            let now = cag::now_ticks();
+            cag::record_map_operation(now.saturating_sub(t_map));
+            cag::record_execution(now.saturating_sub(t_map));
+        }
+        if blocked {
             DROP.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "perf-cag")]
+            {
+                cag::bump_rx_discarded();
+                cag::set_rx_queue_depth(0);
+                cag::record_rx_processing(cag::now_ticks().saturating_sub(t0));
+            }
             continue;
         }
         NET_RX.fetch_add(1, Ordering::Relaxed);
         let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
-        let _ = socket.send_to(b"ACK\n", dest).await;
+        #[cfg(feature = "perf-cag")]
+        {
+            cag::bump_rx_delivered();
+            cag::bump_tx_submitted();
+            cag::set_tx_inflight(1);
+        }
+        #[cfg(feature = "perf-cag")]
+        let t_tx = cag::now_ticks();
+        // Echo stimulus payload so host eBPF can match seq.
+        let send_ok = socket.send_to(&buf[..n], dest).await.is_ok();
+        #[cfg(feature = "perf-cag")]
+        {
+            let now = cag::now_ticks();
+            cag::record_post_action(now.saturating_sub(t_tx));
+            cag::record_tx_submission(now.saturating_sub(t_tx));
+            if send_ok {
+                cag::bump_tx_completed();
+            } else {
+                cag::bump_tx_failed();
+            }
+            cag::set_tx_inflight(0);
+            cag::set_rx_queue_depth(0);
+            cag::record_rx_processing(now.saturating_sub(t0));
+        }
     }
 }
 
@@ -195,6 +253,7 @@ async fn ctrl_task(stack: embassy_net::Stack<'static>) {
     let tx_buf = CTRL_TX_BUF.init([0; 1536]);
     let mut socket = UdpSocket::new(stack, rx_meta, rx_buf, tx_meta, tx_buf);
     socket.bind(CTRL_PORT).expect("bind ctrl");
+    CTRL_BOUND.store(true, Ordering::Release);
     let mut buf = [0u8; 512];
     let mut ack_buf = [0u8; 256];
     let mut val_buf = [0u8; 8];
