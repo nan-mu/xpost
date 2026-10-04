@@ -38,7 +38,7 @@ The host modules are `agent`, `db`, `pipeline`, and `exam`.
 
 The `xpost-agent` daemon controls the shared USB connection.
 It serves HTTP `/health` and `/v1/*`, and Streamable HTTP MCP `/mcp`, on one port.
-After it opens the connection, the host-only `GetInit` command waits for the DUT message `OK init`.
+Startup opens the USB session only; App and flash operations run when a request arrives.
 
 **AI agents must use MCP for direct operations on `xpost-agent`.**
 
