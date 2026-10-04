@@ -1,7 +1,0 @@
-# just_tx / just_tx_hal experiment knobs (compile-time embed).
-# Selected via default.toml `run = ["just_tx"]` (per-packet path fixed in code).
-# See config/README.md.
-
-formal = true
-rounds = 3
-arms = ["hal", "xdp"]

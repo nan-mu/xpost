@@ -1,4 +1,4 @@
-//! Mac flash agent HTTP client (`/v1/*` on xpost-agent).
+//! Mac flash agent HTTP client — frozen `/v1/*` contract on xpost-agent.
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -26,17 +26,17 @@ impl AgentClient {
         Self { base, http }
     }
 
-    pub async fn flash_profile(&self, profile_id: &str) -> Result<()> {
+    /// `POST /v1/flash/fw` — build+flash firmware profile.
+    pub async fn flash_fw(&self, profile_id: &str) -> Result<()> {
         let body = serde_json::json!({ "profile_id": profile_id });
-        let msg = self.post_json("/v1/flash_profile", &body).await?;
-        log::info!("flash_profile: {msg}");
+        let msg = self.post_json("/v1/flash/fw", &body).await?;
+        log::info!("flash_fw: {msg}");
         Ok(())
     }
 
     /// Reserved for future executor flows (post-flash MCU reset).
     #[allow(dead_code)]
     pub async fn reboot(&self) -> Result<()> {
-        // No dedicated /v1/reboot yet; keep API for callers.
         bail!("reboot not exposed on HTTP agent yet");
     }
 
@@ -50,6 +50,12 @@ impl AgentClient {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         bail!("agent not idle within {:?}", budget);
+    }
+
+    /// `GET /v1/dut_status` — UART `ready …` / `booting`.
+    #[allow(dead_code)]
+    pub async fn dut_status(&self) -> Result<String> {
+        self.get_json("/v1/dut_status").await
     }
 
     async fn get_json(&self, path: &str) -> Result<String> {

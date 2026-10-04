@@ -6,7 +6,8 @@
 //! Binary name: **`xpost-test`**. Compile-time config only:
 //! [`config/default.toml`](../../config/default.toml) +
 //! [`just_tx.toml`](../../config/just_tx.toml) +
-//! [`just_drop.toml`](../../config/just_drop.toml). Knobs: [`config`].
+//! [`just_drop.toml`](../../config/just_drop.toml) +
+//! [`firewall.toml`](../../config/firewall.toml). Knobs: [`config`].
 //!
 //! # Sole entry
 //!
@@ -16,25 +17,26 @@
 //! Mac (USB ESP)                         TR3000                         Postgres
 //! cargo xtask agent                     ./xpost-test                   formal.*
 //!   --listen 0.0.0.0:9240                 │                              ▲
-//!   /health /v1/* /mcp                    │ FlashProfile / counters      │
-//!         ▲                               │ request / probe              │
+//!   /health /v1/* /mcp                    │ flash/fw · get/map · get/perf│
+//!         ▲                               │ enable/disable/xdp           │
 //!         └──────── HTTP [agent] ─────────┘                              │
-//!                     RAW UDP stim + TC stamps ──► DUT ──► counters ─────┘
+//!                     RAW UDP stim (test-owned) ──► DUT ──► get/perf ────┘
 //! ```
 //!
 //! 1. Mac: `cargo xtask agent --listen 0.0.0.0:9240 --no-monitor`
 //! 2. Edit `config/default.toml` `run = ["just_drop"]` and/or `["just_tx"]` /
-//!    `["dev"]` / `["formal-clear"]` (steps fixed in Rust; TOML selects experiments).
+//!    `["firewall"]` / `["dev"]` / `["formal-clear"]` (steps fixed in Rust).
 //! 3. Rebuild → scp → on TR3000: `./xpost-test`
 //!
 //! | `run` | Role | Tables |
 //! |-------|------|--------|
-//! | `just_drop` | `xdp_cag`/`hal` PPS grid + Array Map dump + `xdp_t` Trace | `exam` + `just_drop_*` + perf |
+//! | `just_drop` | `xdp_cag`/`hal` PPS grid + Array Map + `xdp_t` Trace | `exam` + `just_drop_*` + perf |
 //! | `just_tx` | `xdp_cag`/`hal` pps grid RTT + `xdp_t` Trace | `exam` + `just_tx_*` (sent/ok; success RTT) + perf |
+//! | `firewall` | hash blacklist size×hit/miss PPS + Trace | `exam` + `firewall_*` + perf |
 //! | `dev` | Flame Trace only: XDP × 100 pps × 2s × 1; report file; **no DB** | — |
 //! | `formal-clear` | `TRUNCATE exam CASCADE` | wipe |
 //!
-//! Formal DDL: `sql/formal.sql` (shared) + `just_tx.sql` / `just_drop.sql`.
+//! Formal DDL: `sql/formal.sql` (shared) + `just_tx.sql` / `just_drop.sql` / `firewall.sql`.
 //! Open-run never DROP/TRUNCATE; wipe with `run = ["formal-clear"]`.
 //!
 //! # Topology
