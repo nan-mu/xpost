@@ -8,7 +8,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use libc::{
-    AF_PACKET, ETH_P_ALL, ETH_P_IP, IFNAMSIZ, SOCK_RAW, bind as libc_bind, sockaddr_ll, socket,
+    AF_PACKET, ETH_P_ALL, ETH_P_ARP, ETH_P_IP, IFNAMSIZ, SOCK_RAW, bind as libc_bind, sockaddr_ll,
+    socket,
 };
 use log::debug;
 use common::{MAGIC_STIM, PAYLOAD_HDR_LEN};
@@ -22,6 +23,7 @@ pub struct RawTx {
     /// UDP source port on stimulus frames (`stim_sport`). Must ≠ STA echo `reply_port`
     /// so TC can tell XDP port-swap bounce (`dport=stim_sport`) from STA echo (`dport=reply`).
     sport: u16,
+    esp_ip: Ipv4Addr,
 }
 
 impl RawTx {
@@ -29,7 +31,7 @@ impl RawTx {
         iface: &str,
         src_mac: [u8; 6],
         dst_mac: [u8; 6],
-        _esp_ip: Ipv4Addr,
+        esp_ip: Ipv4Addr,
         echo_port: u16,
         sport: u16,
     ) -> Result<Self> {
@@ -62,6 +64,7 @@ impl RawTx {
             dst_mac,
             echo_port,
             sport,
+            esp_ip,
         })
     }
 
@@ -73,6 +76,9 @@ impl RawTx {
         seq: u64,
         pad: &[u8],
     ) -> Result<()> {
+        // HAL (and any L3 echo) ARPs the stimulus src. Teach the STA our MAC for `src_ip`
+        // so the echo frame returns to this iface for XDP/TC stamp — IP can still be spoofed.
+        self.send_arp_announce(src_ip)?;
         let mut payload = Vec::with_capacity(PAYLOAD_HDR_LEN + pad.len());
         payload.extend_from_slice(&MAGIC_STIM);
         payload.extend_from_slice(&seq.to_le_bytes());
@@ -121,13 +127,35 @@ impl RawTx {
         Ok(())
     }
 
+    /// ARP reply: `src_ip` lives at `src_mac`, targeted at the STA.
+    fn send_arp_announce(&self, src_ip: Ipv4Addr) -> Result<()> {
+        let mut frame = Vec::with_capacity(42);
+        frame.extend_from_slice(&[0xff; 6]);
+        frame.extend_from_slice(&self.src_mac);
+        frame.extend_from_slice(&(ETH_P_ARP as u16).to_be_bytes());
+        frame.extend_from_slice(&1u16.to_be_bytes()); // htype Ethernet
+        frame.extend_from_slice(&(ETH_P_IP as u16).to_be_bytes());
+        frame.push(6);
+        frame.push(4);
+        frame.extend_from_slice(&2u16.to_be_bytes()); // reply
+        frame.extend_from_slice(&self.src_mac);
+        frame.extend_from_slice(&src_ip.octets());
+        frame.extend_from_slice(&self.dst_mac);
+        frame.extend_from_slice(&self.esp_ip.octets());
+        self.send_l2_frame(&frame, ETH_P_ARP as u16, &[0xff; 6])
+    }
+
     pub fn send_udp_frame(&self, frame: &[u8]) -> Result<()> {
+        self.send_l2_frame(frame, ETH_P_IP as u16, &self.dst_mac)
+    }
+
+    fn send_l2_frame(&self, frame: &[u8], proto: u16, dst_mac: &[u8; 6]) -> Result<()> {
         let mut sll: sockaddr_ll = unsafe { mem::zeroed() };
         sll.sll_family = AF_PACKET as u16;
-        sll.sll_protocol = (ETH_P_IP as u16).to_be();
+        sll.sll_protocol = proto.to_be();
         sll.sll_ifindex = self.ifindex;
         sll.sll_halen = 6;
-        sll.sll_addr[..6].copy_from_slice(&self.dst_mac);
+        sll.sll_addr[..6].copy_from_slice(dst_mac);
 
         let n = unsafe {
             libc::sendto(
