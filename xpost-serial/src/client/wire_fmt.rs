@@ -10,8 +10,9 @@ use crate::{
     client::{
         error::ParseError,
         reply::{
-            parse_clear_map_reply, parse_clear_perf_reply, parse_disable_xdp_reply,
-            parse_enable_xdp_reply, parse_err_reply, parse_get_map_reply, parse_get_perf_reply,
+            parse_clear_map_reply, parse_clear_perf_reply, parse_disable_exec_reply,
+            parse_disable_xdp_reply, parse_enable_exec_reply, parse_enable_xdp_reply,
+            parse_err_reply, parse_finish_reply, parse_get_map_reply, parse_get_perf_reply,
             parse_init_reply, parse_map_err_reply, parse_perf_err_reply, parse_ping_reply,
             parse_syntax_err_reply, parse_update_map_reply,
         },
@@ -28,6 +29,8 @@ impl fmt::Display for Command<'_> {
             Self::Ping => f.write_str("ping"),
             Self::EnableXdp => f.write_str("enable xdp"),
             Self::DisableXdp => f.write_str("disable xdp"),
+            Self::EnableExec => f.write_str("enable exec"),
+            Self::DisableExec => f.write_str("disable exec"),
             Self::ClearMap { name } => {
                 f.write_str("clear map ")?;
                 f.write_str(name)
@@ -47,7 +50,7 @@ impl fmt::Display for Command<'_> {
             Self::ClearPerf => f.write_str("clear perf"),
             Self::GetPerf => f.write_str("get perf"),
             // Host-only: must never be serialized to UART.
-            Self::GetInit => Err(fmt::Error),
+            Self::GetInit | Self::GetFinish => Err(fmt::Error),
         }
     }
 }
@@ -60,12 +63,15 @@ impl<'a> TryFrom<(&'a [u8], &Command<'_>)> for OkReply<'a> {
             Command::Ping => parse_ping_reply(raw),
             Command::EnableXdp => parse_enable_xdp_reply(raw),
             Command::DisableXdp => parse_disable_xdp_reply(raw),
+            Command::EnableExec => parse_enable_exec_reply(raw),
+            Command::DisableExec => parse_disable_exec_reply(raw),
             Command::ClearMap { .. } => parse_clear_map_reply(raw),
             Command::ClearPerf => parse_clear_perf_reply(raw),
             Command::UpdateMap { .. } => parse_update_map_reply(raw),
             Command::GetPerf => parse_get_perf_reply(raw),
             Command::GetMap { .. } => parse_get_map_reply(raw),
             Command::GetInit => parse_init_reply(raw),
+            Command::GetFinish => parse_finish_reply(raw),
         }
     }
 }

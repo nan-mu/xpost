@@ -13,6 +13,8 @@ pub(crate) enum Found {
     Ping,
     EnableXdp,
     DisableXdp,
+    EnableExec,
+    DisableExec,
     ClearMap,
     ClearPerf,
     UpdateMap,
@@ -23,6 +25,7 @@ pub(crate) enum Found {
         blob_idx: usize,
     },
     Init,
+    Finish,
 }
 
 /// Wait until a matching reply appears after `after` (no internal deadline —
@@ -175,10 +178,13 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
         OkReply::Ping => Some(Found::Ping),
         OkReply::EnableXdp => Some(Found::EnableXdp),
         OkReply::DisableXdp => Some(Found::DisableXdp),
+        OkReply::EnableExec => Some(Found::EnableExec),
+        OkReply::DisableExec => Some(Found::DisableExec),
         OkReply::ClearMap => Some(Found::ClearMap),
         OkReply::ClearPerf => Some(Found::ClearPerf),
         OkReply::UpdateMap => Some(Found::UpdateMap),
         OkReply::Init => Some(Found::Init),
+        OkReply::Finish => Some(Found::Finish),
         OkReply::GetMap { .. } | OkReply::GetPerf { .. } => None,
     }
 }

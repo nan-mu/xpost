@@ -174,6 +174,7 @@ impl WriteRecord for Command<'_> {
     fn write_to(&self, rec: &mut Record) {
         match self {
             Command::GetInit => rec.cmd_tx(&"get init (host wait)"),
+            Command::GetFinish => rec.cmd_tx(&"get finish (host wait)"),
             other => rec.cmd_tx(other),
         }
     }
@@ -405,6 +406,8 @@ impl Record {
             Found::Ping => OkReply::Ping,
             Found::EnableXdp => OkReply::EnableXdp,
             Found::DisableXdp => OkReply::DisableXdp,
+            Found::EnableExec => OkReply::EnableExec,
+            Found::DisableExec => OkReply::DisableExec,
             Found::ClearMap => OkReply::ClearMap,
             Found::ClearPerf => OkReply::ClearPerf,
             Found::UpdateMap => OkReply::UpdateMap,
@@ -415,6 +418,7 @@ impl Record {
                 blob: self.blob_at(*blob_idx)?,
             },
             Found::Init => OkReply::Init,
+            Found::Finish => OkReply::Finish,
         })
     }
 

@@ -14,9 +14,12 @@ fn assert_cmd_eq(got: &Command<'_>, expect: &Command<'_>) {
         (Command::Ping, Command::Ping)
         | (Command::EnableXdp, Command::EnableXdp)
         | (Command::DisableXdp, Command::DisableXdp)
+        | (Command::EnableExec, Command::EnableExec)
+        | (Command::DisableExec, Command::DisableExec)
         | (Command::ClearPerf, Command::ClearPerf)
         | (Command::GetPerf, Command::GetPerf)
-        | (Command::GetInit, Command::GetInit) => {}
+        | (Command::GetInit, Command::GetInit)
+        | (Command::GetFinish, Command::GetFinish) => {}
         (Command::ClearMap { name: a }, Command::ClearMap { name: b })
         | (Command::GetMap { name: a }, Command::GetMap { name: b }) => {
             assert_eq!(a, b, "map name");
@@ -74,6 +77,16 @@ fn disable_xdp() {
 }
 
 #[test]
+fn enable_exec() {
+    roundtrip(Command::EnableExec);
+}
+
+#[test]
+fn disable_exec() {
+    roundtrip(Command::DisableExec);
+}
+
+#[test]
 fn clear_map() {
     roundtrip(Command::ClearMap { name: "counter" });
 }
@@ -114,5 +127,18 @@ fn get_init_is_not_wire() {
         Err(ParseCommandError::Unknown) => {}
         Err(_) => panic!("expected Unknown for `get init`"),
         Ok(_) => panic!("`get init` must not parse as a wire command"),
+    }
+}
+
+#[test]
+fn get_finish_is_not_wire() {
+    let mut s = String::new();
+    assert!(write!(s, "{}", Command::GetFinish).is_err());
+    assert!(s.is_empty());
+
+    match parse_command(b"get finish") {
+        Err(ParseCommandError::Unknown) => {}
+        Err(_) => panic!("expected Unknown for `get finish`"),
+        Ok(_) => panic!("`get finish` must not parse as a wire command"),
     }
 }

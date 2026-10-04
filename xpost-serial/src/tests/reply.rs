@@ -29,10 +29,13 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
         (OkReply::Ping, OkReply::Ping)
         | (OkReply::EnableXdp, OkReply::EnableXdp)
         | (OkReply::DisableXdp, OkReply::DisableXdp)
+        | (OkReply::EnableExec, OkReply::EnableExec)
+        | (OkReply::DisableExec, OkReply::DisableExec)
         | (OkReply::ClearMap, OkReply::ClearMap)
         | (OkReply::ClearPerf, OkReply::ClearPerf)
         | (OkReply::UpdateMap, OkReply::UpdateMap)
-        | (OkReply::Init, OkReply::Init) => {}
+        | (OkReply::Init, OkReply::Init)
+        | (OkReply::Finish, OkReply::Finish) => {}
         (OkReply::GetMap { blob: a }, OkReply::GetMap { blob: b })
         | (OkReply::GetPerf { blob: a }, OkReply::GetPerf { blob: b }) => {
             assert_eq!(a, b, "blob");
@@ -87,6 +90,16 @@ fn ok_disable_xdp() {
 }
 
 #[test]
+fn ok_enable_exec() {
+    roundtrip_ok(Command::EnableExec, OkReply::EnableExec);
+}
+
+#[test]
+fn ok_disable_exec() {
+    roundtrip_ok(Command::DisableExec, OkReply::DisableExec);
+}
+
+#[test]
 fn ok_clear_map() {
     roundtrip_ok(Command::ClearMap { name: "counter" }, OkReply::ClearMap);
 }
@@ -111,6 +124,13 @@ fn ok_update_map() {
 #[test]
 fn ok_init() {
     roundtrip_ok(Command::GetInit, OkReply::Init);
+}
+
+#[test]
+fn ok_finish() {
+    // Encode path exists for host parse of UART lines from eBPF printk;
+    // server must not emit Finish in normal App callbacks.
+    roundtrip_ok(Command::GetFinish, OkReply::Finish);
 }
 
 #[test]
