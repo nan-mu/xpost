@@ -18,7 +18,7 @@
 //! | `just_drop` | Formal XDP PPS grid + Trace | `exam` + `just_drop_*` + `xdp_*` / `trace_event` |
 //! | `just_tx` | Formal XDP pps grid RTT + Trace | `exam` + `just_tx_config`(sent/ok) / `just_tx_data` + perf |
 //! | `firewall` | Hash blacklist size×hit/miss PPS grid + Trace | `exam` + `firewall_*` + perf |
-//! | `dev` | Flame Trace: XDP × 100 pps × 2s × 1; `/tmp/xpost-dev-flame.report`; no DB | — |
+//! | `dev` | HAL smoke: just_tx/just_drop/firewall `@100pps×2s`; no XDP, no DB | — |
 //! | `formal-clear` | `TRUNCATE exam CASCADE` | wipe only |
 //!
 //! `dev` is fully hard-coded (no separate TOML); never touches Postgres.

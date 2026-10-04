@@ -2,7 +2,7 @@
 # Selected via default.toml `run = ["just_tx"]`.
 #
 # Formal pipeline (code): flash each arm over full pps grid (window_s=30),
-# then xdp_t one-packet Trace. Flame debug: `run = ["dev"]`.
+# then xdp_t one-packet Trace. HAL smoke: `run = ["dev"]` (see exam/dev.rs).
 
 formal = true
 arms = ["xdp"]
