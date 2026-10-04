@@ -8,7 +8,7 @@ use core::time::Duration;
 
 /// Host wait for unsolicited [`crate::reply::OkReply::Init`] when using
 /// [`Command::GetInit`]. Not a UART deadline for a request line.
-pub const GET_INIT_TIMEOUT: Duration = Duration::from_secs(30);
+pub const GET_INIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// App-mode command shape.
 ///
