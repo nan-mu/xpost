@@ -36,8 +36,8 @@
 //! | GET | `/health` | — | liveness |
 //! | GET | `/v1/status` | — | `idle` |
 //! | GET | `/v1/dut_status` | — | UART `ready` / `booting` (settle; uses `ping`) |
-//! | POST | `/v1/flash/fw` | `{"profile_id"}` | build+flash firmware; **does not** install `xdp.elf` |
-//! | POST | `/v1/flash/xdp` | `{"elf"}` | write XDP image into cold table |
+//! | POST | `/v1/flash/fw` | `{"name"}` | build+flash firmware, then co-flash `fw.xdp[]` |
+//! | POST | `/v1/flash/xdp` | `{"name"}` | build+write named XDP image into cold table |
 //! | POST | `/v1/clear/xdp` | `{"name": "*"\|"prog"\|["a","b"]}` | remove image(s); `*`=all; missing name → err |
 //! | GET | `/v1/get/xdp` | — | list installed XDP images |
 //! | POST | `/v1/enable/xdp` | `{}` | App `EnableXdp` |
@@ -129,6 +129,7 @@
 mod http;
 mod mcp;
 mod ops;
+mod profiles;
 mod state;
 mod util;
 

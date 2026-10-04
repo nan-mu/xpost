@@ -1,6 +1,6 @@
 //! Synchronous USB operations shared by HTTP and MCP.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command as ProcCommand;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -9,7 +9,8 @@ use anyhow::{Context, Result, bail};
 use xpost_serial::client::flash::xdp_name_from_file;
 use xpost_serial::client::{Command, FlashOp, FlashResult, OkReply};
 
-use crate::state::{AgentError, AgentState, NOISY_LOG_EVERY, ProfileEntry};
+use crate::profiles::{BuildSpec, XdpProfile, abs_under_root};
+use crate::state::{AgentError, AgentState, NOISY_LOG_EVERY};
 use crate::util::{file_size, fmt_bytes, fmt_dur, log_line, truncate};
 
 fn maybe_log_noisy(state: &Mutex<AgentState>, noisy: bool) -> bool {
@@ -97,36 +98,44 @@ pub fn dut_status(state: &Mutex<AgentState>) -> Result<String> {
     }
 }
 
-pub fn flash_fw(state: &Mutex<AgentState>, profile_id: &str, peer: &str) -> Result<String> {
+pub fn flash_fw(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
     with_log(
         peer,
         "FlashFw",
-        &format!("profile=`{profile_id}`"),
+        &format!("name=`{name}`"),
         false,
         state,
-        || flash_fw_inner(state, profile_id, peer),
+        || flash_fw_inner(state, name, peer),
     )
 }
 
-fn flash_fw_inner(state: &Mutex<AgentState>, id: &str, peer: &str) -> Result<String> {
-    let (root, entry) = {
+fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
+    let (root, fw, linked_xdps) = {
         let g = lock(state)?;
-        let entry = g
+        let fw = g
             .profiles
-            .iter()
-            .find(|p| p.id == id)
+            .fw(name)
             .cloned()
-            .with_context(|| format!("unknown profile `{id}`"))?;
-        (g.root.clone(), entry)
+            .with_context(|| format!("unknown fw `{name}`"))?;
+        let mut linked = Vec::with_capacity(fw.xdp.len());
+        for xn in &fw.xdp {
+            let x = g
+                .profiles
+                .xdp(xn)
+                .cloned()
+                .with_context(|| format!("fw `{name}` lists missing xdp `{xn}`"))?;
+            linked.push(x);
+        }
+        (g.root.clone(), fw, linked)
     };
 
-    let build_dur = run_profile_build(&root, &entry, peer)?;
+    let build_dur = run_build(&root, &fw.build, &format!("fw `{name}`"), peer)?;
 
-    let firmware = root.join(&entry.bin);
-    let partitions = root.join(&entry.partition_table);
+    let firmware = abs_under_root(&root, &fw.artifact);
+    let partitions = abs_under_root(&root, &fw.partition_table);
     if !firmware.is_file() {
         bail!(
-            "firmware not found after build: {} (profile `{id}`)",
+            "firmware not found after build: {} (fw `{name}`)",
             firmware.display()
         );
     }
@@ -137,60 +146,159 @@ fn flash_fw_inner(state: &Mutex<AgentState>, id: &str, peer: &str) -> Result<Str
     log_line(
         peer,
         &format!(
-            "[fw] profile `{id}`: {} ({})  [part] {}  (no xdp install)",
+            "[fw] `{name}`: {} ({})  [part] {}  co-flash xdp={}",
             firmware.display(),
             fmt_bytes(fw_sz),
             partitions.display(),
+            linked_xdps.len(),
         ),
     );
 
-    let g = lock(state)?;
     let t_flash = Instant::now();
-    g.handler
-        .flash(FlashOp::Fw {
-            firmware: firmware.display().to_string(),
-            partitions: partitions.display().to_string(),
-        })
-        .with_context(|| format!("flash fw profile `{id}`"))?;
-    let flash_dur = t_flash.elapsed();
-    Ok(format!(
-        "flashed profile={id} fw={} build={} flash={}",
+    {
+        let g = lock(state)?;
+        g.handler
+            .flash(FlashOp::Fw {
+                firmware: firmware.display().to_string(),
+                partitions: partitions.display().to_string(),
+            })
+            .with_context(|| format!("flash fw `{name}`"))?;
+    }
+    let mut flash_dur = t_flash.elapsed();
+
+    let mut xdp_parts = Vec::new();
+    for x in &linked_xdps {
+        let part = flash_one_xdp(state, &root, x, peer)?;
+        flash_dur += part.1;
+        xdp_parts.push(part.0);
+    }
+
+    let mut msg = format!(
+        "flashed fw={name} size={} build={} flash={}",
         fmt_bytes(fw_sz),
         fmt_dur(build_dur),
         fmt_dur(flash_dur)
-    ))
+    );
+    if !xdp_parts.is_empty() {
+        msg.push_str("; xdp=[");
+        msg.push_str(&xdp_parts.join(", "));
+        msg.push(']');
+    }
+    Ok(msg)
 }
 
-fn run_profile_build(root: &Path, entry: &ProfileEntry, peer: &str) -> Result<Duration> {
-    let Some(argv) = entry.build.as_ref() else {
-        log_line(peer, &format!("build profile `{}`: (none)", entry.id));
-        return Ok(Duration::ZERO);
-    };
-    if argv.is_empty() {
-        return Ok(Duration::ZERO);
+pub fn flash_xdp(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
+    with_log(
+        peer,
+        "FlashXdp",
+        &format!("name=`{name}`"),
+        false,
+        state,
+        || {
+            let (root, xdp) = {
+                let g = lock(state)?;
+                let xdp = g
+                    .profiles
+                    .xdp(name)
+                    .cloned()
+                    .with_context(|| format!("unknown xdp `{name}`"))?;
+                // Ensure linked fw / partition table resolve (validated on load).
+                let _ = g.profiles.partition_table_for_xdp(name)?;
+                (g.root.clone(), xdp)
+            };
+            let (summary, _) = flash_one_xdp(state, &root, &xdp, peer)?;
+            Ok(summary)
+        },
+    )
+}
+
+/// Build + flash one XDP profile. Returns (summary, flash duration).
+fn flash_one_xdp(
+    state: &Mutex<AgentState>,
+    root: &Path,
+    xdp: &XdpProfile,
+    peer: &str,
+) -> Result<(String, Duration)> {
+    let name = xdp.name.as_str();
+    let _build_dur = run_build(root, &xdp.build, &format!("xdp `{name}`"), peer)?;
+
+    let path = abs_under_root(root, &xdp.artifact);
+    if !path.is_file() {
+        bail!(
+            "xdp artifact not found after build: {} (xdp `{name}`)",
+            path.display()
+        );
     }
-    let (prog, args) = argv.split_first().unwrap();
+    let elf_name = xdp_name_from_file(&path)
+        .with_context(|| format!("parse name from {}", path.display()))?;
+    if elf_name != name {
+        bail!(
+            "xdp profile name `{name}` != ELF-derived name `{elf_name}` ({})",
+            path.display()
+        );
+    }
+    let sz = file_size(&path).unwrap_or(0);
     log_line(
         peer,
         &format!(
-            "build profile `{}`: {} {}  (cwd {})",
-            entry.id,
+            "[xdp] `{name}`: {} ({})",
+            path.display(),
+            fmt_bytes(sz)
+        ),
+    );
+
+    let t_flash = Instant::now();
+    let g = lock(state)?;
+    let outcome = g
+        .handler
+        .flash(FlashOp::Xdp {
+            name: elf_name.clone(),
+            path: path.display().to_string(),
+        })
+        .with_context(|| format!("flash xdp `{name}`"))?;
+    let flash_dur = t_flash.elapsed();
+    let summary = match outcome {
+        FlashResult::Install(xpost_serial::InstallOutcome::Overwritten { offset }) => {
+            format!(
+                "overwritten name={name} offset={offset:#x} size={}",
+                fmt_bytes(sz)
+            )
+        }
+        FlashResult::Install(xpost_serial::InstallOutcome::Created { offset }) => format!(
+            "created name={name} offset={offset:#x} size={}",
+            fmt_bytes(sz)
+        ),
+        FlashResult::Done => format!("done name={name} size={}", fmt_bytes(sz)),
+        FlashResult::List(_) => bail!("unexpected list result from flash xdp"),
+    };
+    Ok((summary, flash_dur))
+}
+
+fn run_build(root: &Path, build: &BuildSpec, label: &str, peer: &str) -> Result<Duration> {
+    let cwd = abs_under_root(root, &build.cwd);
+    let (prog, args) = build
+        .command
+        .split_first()
+        .context(format!("{label}: empty build.command"))?;
+    log_line(
+        peer,
+        &format!(
+            "build {label}: {} {}  (cwd {})",
             prog,
             args.join(" "),
-            root.display()
+            cwd.display()
         ),
     );
     let t0 = Instant::now();
     let status = ProcCommand::new(prog)
         .args(args)
-        .current_dir(root)
+        .current_dir(&cwd)
         .status()
-        .with_context(|| format!("spawn build for profile `{}`", entry.id))?;
+        .with_context(|| format!("spawn build for {label}"))?;
     let elapsed = t0.elapsed();
     if !status.success() {
         bail!(
-            "build failed for profile `{}` in {} (status={status}): {} {}",
-            entry.id,
+            "build failed for {label} in {} (status={status}): {} {}",
             fmt_dur(elapsed),
             prog,
             args.join(" ")
@@ -198,43 +306,9 @@ fn run_profile_build(root: &Path, entry: &ProfileEntry, peer: &str) -> Result<Du
     }
     log_line(
         peer,
-        &format!("build profile `{}` ok in {}", entry.id, fmt_dur(elapsed)),
+        &format!("build {label} ok in {}", fmt_dur(elapsed)),
     );
     Ok(elapsed)
-}
-
-pub fn flash_xdp(state: &Mutex<AgentState>, elf: &str, peer: &str) -> Result<String> {
-    with_log(peer, "FlashXdp", &format!("elf={elf}"), false, state, || {
-        let path = PathBuf::from(elf.trim());
-        if !path.is_file() {
-            bail!("elf not found: {}", path.display());
-        }
-        let name = xdp_name_from_file(&path)
-            .with_context(|| format!("parse name from {}", path.display()))?;
-        let sz = file_size(&path).unwrap_or(0);
-        let g = lock(state)?;
-        let outcome = g
-            .handler
-            .flash(FlashOp::Xdp {
-                name: name.clone(),
-                path: path.display().to_string(),
-            })
-            .with_context(|| format!("flash xdp `{name}`"))?;
-        match outcome {
-            FlashResult::Install(xpost_serial::InstallOutcome::Overwritten { offset }) => {
-                Ok(format!(
-                    "overwritten name={name} offset={offset:#x} size={}",
-                    fmt_bytes(sz)
-                ))
-            }
-            FlashResult::Install(xpost_serial::InstallOutcome::Created { offset }) => Ok(format!(
-                "created name={name} offset={offset:#x} size={}",
-                fmt_bytes(sz)
-            )),
-            FlashResult::Done => Ok(format!("done name={name} size={}", fmt_bytes(sz))),
-            FlashResult::List(_) => bail!("unexpected list result from flash xdp"),
-        }
-    })
 }
 
 /// `names`: after normalizing body — `"*"` → clear all; otherwise named list.

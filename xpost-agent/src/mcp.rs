@@ -11,13 +11,8 @@ use crate::ops::{self, MapKv};
 use crate::state::SharedState;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct FlashFwArgs {
-    profile_id: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct FlashXdpArgs {
-    elf: String,
+struct FlashByNameArgs {
+    name: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -86,25 +81,25 @@ impl XpostMcp {
         }
     }
 
-    #[tool(description = "Build + flash firmware profile (does not install xdp.elf)")]
+    #[tool(description = "Build + flash named firmware profile, then co-flash fw.xdp[]")]
     async fn flash_fw(
         &self,
-        Parameters(args): Parameters<FlashFwArgs>,
+        Parameters(args): Parameters<FlashByNameArgs>,
     ) -> Result<CallToolResult, McpError> {
         let shared = self.shared.clone();
-        let id = args.profile_id;
-        self.run_op(move || ops::flash_fw(shared.as_ref(), &id, "mcp"))
+        let name = args.name;
+        self.run_op(move || ops::flash_fw(shared.as_ref(), &name, "mcp"))
             .await
     }
 
-    #[tool(description = "Write an XDP ELF into the cold table")]
+    #[tool(description = "Build + write named XDP profile into the cold table")]
     async fn flash_xdp(
         &self,
-        Parameters(args): Parameters<FlashXdpArgs>,
+        Parameters(args): Parameters<FlashByNameArgs>,
     ) -> Result<CallToolResult, McpError> {
         let shared = self.shared.clone();
-        let elf = args.elf;
-        self.run_op(move || ops::flash_xdp(shared.as_ref(), &elf, "mcp"))
+        let name = args.name;
+        self.run_op(move || ops::flash_xdp(shared.as_ref(), &name, "mcp"))
             .await
     }
 

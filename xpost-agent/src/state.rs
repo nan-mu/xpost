@@ -1,46 +1,25 @@
 //! Shared USB [`SerialHandler`] + profiles for HTTP `/v1` and MCP `/mcp`.
 
 use std::fmt;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use xpost_serial::client::{Command, Interrupted, ParseError, RequestTimeout};
 use xpost_serial::reply::{ErrReply, MapError, PerfError, ServerError, SyntaxError};
 use xpost_serial::{Chip, FlashConfig, OpenOptions, SerialHandler};
 
+use crate::profiles::Profiles;
 use crate::util::{eprint_line, ts};
 
 /// Don't reprint noisy get-map / get-perf lines more often than this.
 pub const NOISY_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Default board partitions.csv used for FlashConfig XDP span (all examples share
-/// `xdp @ 0x310000`).
+/// `xdp @ 0x310000`). Used when the registry has no fw entries yet.
 const DEFAULT_PARTITIONS: &str = "examples/just_xdp/partitions.csv";
-
-#[derive(Debug, Deserialize)]
-struct ProfilesFile {
-    #[serde(default, rename = "profile")]
-    profiles: Vec<ProfileEntry>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProfileEntry {
-    pub id: String,
-    pub bin: String,
-    pub partition_table: String,
-    #[serde(default)]
-    pub xdp_elf: Option<String>,
-    #[serde(default)]
-    pub xdp_name: Option<String>,
-    /// Optional argv relative to workspace root, run before flash.
-    #[serde(default)]
-    pub build: Option<Vec<String>>,
-}
 
 /// Concrete `E` for [`SerialHandler::request`].
 pub enum AgentError {
@@ -139,7 +118,7 @@ impl std::error::Error for AgentError {}
 
 pub struct AgentState {
     pub handler: SerialHandler,
-    pub profiles: Vec<ProfileEntry>,
+    pub profiles: Profiles,
     pub root: PathBuf,
     pub last_noisy_log: Option<Instant>,
 }
@@ -148,9 +127,14 @@ pub type SharedState = Arc<Mutex<AgentState>>;
 
 pub fn open(log_dir: &Path) -> Result<SharedState> {
     let root = workspace_root();
-    let partitions = root.join(DEFAULT_PARTITIONS);
+    let profiles = load_profiles(&root)?;
+    let partitions_rel = profiles
+        .default_partition_table()
+        .unwrap_or(DEFAULT_PARTITIONS);
+    let partitions = root.join(partitions_rel);
     let flash = FlashConfig::from_partitions_csv(&partitions)
         .with_context(|| format!("FlashConfig from {}", partitions.display()))?;
+    let chip = profiles.default_chip()?.unwrap_or(Chip::Esp32c3);
 
     eprint_line(&format!(
         "[{}] xpost-agent serial log_dir {}",
@@ -159,7 +143,7 @@ pub fn open(log_dir: &Path) -> Result<SharedState> {
     ));
     let handler = SerialHandler::open(OpenOptions {
         port: None,
-        chip: Chip::Esp32c3,
+        chip,
         log_dir,
         tee_stdout: true,
         flash,
@@ -170,31 +154,14 @@ pub fn open(log_dir: &Path) -> Result<SharedState> {
         .request::<AgentError>(&Command::GetInit)
         .map_err(|e| anyhow::anyhow!("GetInit: {e}"))?;
 
-    let profiles = load_profiles(&root)?;
     eprint_line(&format!(
-        "[{}] xpost-agent profiles={} from {}",
+        "[{}] xpost-agent profiles fw={} xdp={} empty={} from {}",
         ts(),
-        profiles.len(),
+        profiles.fw_count(),
+        profiles.xdp_count(),
+        profiles.is_empty(),
         root.join("profiles.toml").display()
     ));
-    for p in &profiles {
-        let xdp = match (&p.xdp_name, &p.xdp_elf) {
-            (Some(n), Some(e)) => format!(" xdp={n} ({e})"),
-            (None, Some(e)) => format!(" xdp_elf={e}"),
-            _ => String::new(),
-        };
-        let build = p
-            .build
-            .as_ref()
-            .map(|a| format!(" build=[{}]", a.join(" ")))
-            .unwrap_or_default();
-        eprint_line(&format!(
-            "[{}]   • {} → {}{xdp}{build}",
-            ts(),
-            p.id,
-            p.bin
-        ));
-    }
     Ok(Arc::new(Mutex::new(AgentState {
         handler,
         profiles,
@@ -219,13 +186,9 @@ pub fn workspace_root() -> PathBuf {
     PathBuf::from(".")
 }
 
-fn load_profiles(root: &Path) -> Result<Vec<ProfileEntry>> {
+fn load_profiles(root: &Path) -> Result<Profiles> {
     let path = std::env::var("XPOST_PROFILES")
         .map(PathBuf::from)
         .unwrap_or_else(|_| root.join("profiles.toml"));
-    let text = fs::read_to_string(&path)
-        .with_context(|| format!("read profiles {}", path.display()))?;
-    let file: ProfilesFile = toml::from_str(&text)
-        .with_context(|| format!("parse profiles {}", path.display()))?;
-    Ok(file.profiles)
+    Profiles::load_path(&path)
 }

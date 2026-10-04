@@ -50,13 +50,8 @@ impl ApiResp {
 }
 
 #[derive(Deserialize)]
-struct FlashFwBody {
-    profile_id: String,
-}
-
-#[derive(Deserialize)]
-struct FlashXdpBody {
-    elf: String,
+struct FlashByNameBody {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -187,16 +182,22 @@ where
     }
 }
 
-async fn v1_flash_fw(State(st): State<AppState>, Json(body): Json<FlashFwBody>) -> Json<ApiResp> {
+async fn v1_flash_fw(
+    State(st): State<AppState>,
+    Json(body): Json<FlashByNameBody>,
+) -> Json<ApiResp> {
     let shared = st.shared.clone();
-    let id = body.profile_id;
-    run_blocking(move || ops::flash_fw(shared.as_ref(), &id, "http")).await
+    let name = body.name;
+    run_blocking(move || ops::flash_fw(shared.as_ref(), &name, "http")).await
 }
 
-async fn v1_flash_xdp(State(st): State<AppState>, Json(body): Json<FlashXdpBody>) -> Json<ApiResp> {
+async fn v1_flash_xdp(
+    State(st): State<AppState>,
+    Json(body): Json<FlashByNameBody>,
+) -> Json<ApiResp> {
     let shared = st.shared.clone();
-    let elf = body.elf;
-    run_blocking(move || ops::flash_xdp(shared.as_ref(), &elf, "http")).await
+    let name = body.name;
+    run_blocking(move || ops::flash_xdp(shared.as_ref(), &name, "http")).await
 }
 
 fn clear_xdp_names(name: ClearXdpName) -> Result<Vec<String>, String> {
