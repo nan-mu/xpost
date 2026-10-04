@@ -7,6 +7,7 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+use core::convert::Infallible;
 use core::ptr::addr_of_mut;
 
 use alloc::string::ToString;
@@ -21,8 +22,12 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use log::{error, info};
 use static_cell::StaticCell;
+use xpost::app_ctrl::{self, AppMapError, AppXdpError};
 use xpost::map::{BPF_ANY, HEAP_SIZE, MapRt, MapUseError};
 use xpost::xdp::{ReportItem, Slot, XdpRt};
+#[allow(unused_imports)] // PerfError only when no kind-* feature
+use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
+use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
 use firewall::map_crud::{
     self, MapCrudAck, STATUS_BAD, STATUS_CONFLICT, STATUS_NOT_FOUND, STATUS_OK,
@@ -86,12 +91,6 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
-    spawner.spawn(serial_task(usb_rx).unwrap());
-    Timer::after(Duration::from_millis(1200)).await;
-    esp_println::println!(
-        "xpost ready ipv4={} port={STIM_PORT}",
-        option_env!("STA_IP").unwrap_or("?")
-    );
 
     let map_heap: &'static mut [u8] = unsafe { &mut *addr_of_mut!(MAP_HEAP) };
     let mut maps = MapRt::init(map_heap).await.expect("MapRt::init");
@@ -131,6 +130,12 @@ async fn main(spawner: Spawner) -> ! {
     }
     drop(rt);
     drop(maps);
+
+    spawner.spawn(control_serial(usb_rx).unwrap());
+    esp_println::println!(
+        "xpost ready ipv4={} port={STIM_PORT}",
+        option_env!("STA_IP").unwrap_or("?")
+    );
 
     let wifi_cfg = esp_radio::wifi::ControllerConfig::default()
         .with_dynamic_tx_buf_num(128)
@@ -307,173 +312,120 @@ fn handle_map_crud<'a>(pkt: &[u8], val_buf: &'a mut [u8; 32]) -> (u32, u32, &'a 
     }
 }
 
-#[embassy_executor::task]
-async fn serial_task(
-    mut rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
-) {
-    let mut line = [0u8; 80];
-    let mut len = 0usize;
-    loop {
-        match rx.read_byte() {
-            Ok(b) => {
-                if b == b'\n' || b == b'\r' {
-                    if len > 0 {
-                        let text = core::str::from_utf8(&line[..len]).unwrap_or("");
-                        dispatch_serial(text);
-                        len = 0;
-                    }
-                } else if len < line.len() {
-                    line[len] = b;
-                    len += 1;
+serial_task! {
+    fn control_serial(
+        rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+    ) {
+        let mut rx = rx;
+        SerialHandler::builder(
+            move || match rx.read_byte() {
+                Ok(b) => Some(b),
+                Err(_) => None,
+            },
+            |bytes| {
+                esp_println::Printer::write_bytes(bytes);
+                Ok::<(), Infallible>(())
+            },
+            [0u8; 128],
+        )
+        .on_ping(|reply: ReplyWriter<'_>| reply.ok(OkReply::Ping))
+        .on_enable_xdp(|reply: ReplyWriter<'_>| match app_ctrl::enable_xdp() {
+            Ok(()) => reply.ok(OkReply::EnableXdp),
+            Err(e) => reply_xdp_err(reply, e),
+        })
+        .on_disable_xdp(|reply: ReplyWriter<'_>| match app_ctrl::disable_xdp() {
+            Ok(()) => reply.ok(OkReply::DisableXdp),
+            Err(e) => reply_xdp_err(reply, e),
+        })
+        .on_clear_map(|name: &str, reply: ReplyWriter<'_>| match app_ctrl::clear_map(name) {
+            Ok(()) => reply.ok(OkReply::ClearMap),
+            Err(e) => reply_map_err(reply, e),
+        })
+        .on_get_map(|name: &str, reply: ReplyWriter<'_>| match app_ctrl::lock_map(name) {
+            Ok((maps, idx)) => match maps.map_blob_len(idx) {
+                Ok(len) => reply.get_map(len, |write| {
+                    let _ = maps.write_map_blob(idx, |chunk| {
+                        let _ = write(chunk);
+                    });
+                }),
+                Err(e) => reply_map_err(reply, e.into()),
+            },
+            Err(e) => reply_map_err(reply, e),
+        })
+        .on_update_map(
+            |name: &str, key: &[u8], value: &[u8], reply: ReplyWriter<'_>| {
+                match app_ctrl::update_map(name, key, value) {
+                    Ok(()) => reply.ok(OkReply::UpdateMap),
+                    Err(e) => reply_map_err(reply, e),
                 }
+            },
+        )
+        .on_clear_perf(|reply: ReplyWriter<'_>| {
+            #[cfg(any(
+                feature = "kind-c",
+                feature = "kind-a",
+                feature = "kind-g",
+                feature = "kind-t"
+            ))]
+            {
+                xpost::ext::perf::clear_perf();
+                reply.ok(OkReply::ClearPerf);
             }
-            Err(_) => Timer::after(Duration::from_millis(10)).await,
-        }
-    }
-}
-
-fn dispatch_serial(line: &str) {
-    let line = line.trim();
-    if line.eq_ignore_ascii_case("ping") {
-        esp_println::println!("OK ping");
-    } else if line.eq_ignore_ascii_case("report") || line.eq_ignore_ascii_case("report perf") {
-        print_report();
-    } else if line.eq_ignore_ascii_case("perf clear") {
-        #[cfg(any(
-            feature = "kind-c",
-            feature = "kind-a",
-            feature = "kind-g",
-            feature = "kind-t"
-        ))]
-        xpost::ext::perf::clear_perf();
-        esp_println::println!("OK perf clear");
-    } else if line.eq_ignore_ascii_case("blacklist clear") {
-        match blacklist_clear() {
-            Ok(()) => esp_println::println!("OK blacklist clear"),
-            Err(e) => esp_println::println!("ERR blacklist clear {e}"),
-        }
-    } else if let Some(rest) = strip_cmd(line, "map dump") {
-        print_map_dump(rest);
-    } else if line.eq_ignore_ascii_case("map dump") {
-        print_map_dump("");
-    } else if let Some(rest) = strip_cmd(line, "ack-dest") {
-        match parse_ack_dest(rest) {
-            Some((ip, port)) => {
-                ACK_IP.store(ip, Ordering::Relaxed);
-                ACK_PORT.store(u32::from(port), Ordering::Relaxed);
-                esp_println::println!("OK ack-dest {rest}");
+            #[cfg(not(any(
+                feature = "kind-c",
+                feature = "kind-a",
+                feature = "kind-g",
+                feature = "kind-t"
+            )))]
+            {
+                reply.error(&PerfError::Unavailable);
             }
-            None => esp_println::println!("ERR ack-dest <ipv4> <port>"),
-        }
-    } else if line.eq_ignore_ascii_case("heap") {
-        esp_println::println!(
-            "OK heap used={} free={}",
-            esp_alloc::HEAP.used(),
-            esp_alloc::HEAP.free()
-        );
-    } else {
-        esp_println::println!("ERR unknown");
-    }
-}
-
-fn blacklist_clear() -> Result<(), &'static str> {
-    let lock = xpost::map::MAP_RT.try_get().ok_or("no-rt")?;
-    let mut maps = lock.try_lock().map_err(|_| "busy")?;
-    let idx = maps.find(MAP_BLACKLIST).map_err(|_| "not-found")?;
-    maps.hash_clear(idx).map_err(|_| "clear")?;
-    Ok(())
-}
-
-fn print_report() {
-    #[cfg(any(
-        feature = "kind-c",
-        feature = "kind-a",
-        feature = "kind-g",
-        feature = "kind-t"
-    ))]
-    {
-        let n = xpost::ext::perf::report_payload_len();
-        esp_println::println!("OK report {n}");
-        xpost::ext::perf::report_perf(|chunk| {
-            esp_println::Printer::write_bytes(chunk);
-            Ok::<(), core::convert::Infallible>(())
-        });
-    }
-    #[cfg(not(any(
-        feature = "kind-c",
-        feature = "kind-a",
-        feature = "kind-g",
-        feature = "kind-t"
-    )))]
-    esp_println::println!("ERR report no-perf");
-}
-
-fn print_map_dump(rest: &str) {
-    let name = rest.trim();
-    if name.is_empty() {
-        esp_println::println!("ERR map dump <name>");
-        return;
-    }
-    let Some(lock) = xpost::map::MAP_RT.try_get() else {
-        esp_println::println!("ERR map no-rt");
-        return;
-    };
-    let Ok(guard) = lock.try_lock() else {
-        esp_println::println!("ERR busy");
-        return;
-    };
-    let Ok(id) = guard.find(name) else {
-        esp_println::println!("ERR map not-found");
-        return;
-    };
-    let Ok(mg) = guard.get(id) else {
-        esp_println::println!("ERR map get");
-        return;
-    };
-    match mg.map_type() {
-        xpost::map::MapType::Array => {
-            let n = mg.len();
-            esp_println::println!("OK map {name} type=array size={n}");
-            for i in 0..n {
-                match mg.array_get_u64(i as u32) {
-                    Ok(v) => esp_println::println!("{i} {v}"),
-                    Err(_) => {
-                        esp_println::println!("ERR map slot={i}");
-                        return;
-                    }
-                }
+        })
+        .on_get_perf(|reply: ReplyWriter<'_>| {
+            #[cfg(any(
+                feature = "kind-c",
+                feature = "kind-a",
+                feature = "kind-g",
+                feature = "kind-t"
+            ))]
+            {
+                let n = xpost::ext::perf::report_payload_len();
+                reply.get_perf(n, |write| {
+                    xpost::ext::perf::report_perf(write);
+                });
             }
-            esp_println::println!("OK map end");
-        }
-        xpost::map::MapType::Hash => {
-            let n = guard.hash_len(id).unwrap_or(0);
-            esp_println::println!("OK map {name} type=hash size={n} cap={}", mg.len());
-            esp_println::println!("OK map end");
-        }
+            #[cfg(not(any(
+                feature = "kind-c",
+                feature = "kind-a",
+                feature = "kind-g",
+                feature = "kind-t"
+            )))]
+            {
+                reply.error(&PerfError::Unavailable);
+            }
+        })
+        .build()
     }
 }
 
-fn strip_cmd<'a>(line: &'a str, cmd: &str) -> Option<&'a str> {
-    let rest = line.get(cmd.len()..)?;
-    if !line[..cmd.len()].eq_ignore_ascii_case(cmd) {
-        return None;
-    }
-    let rest = rest.trim_start();
-    if rest.is_empty() {
-        None
-    } else {
-        Some(rest)
+fn reply_map_err(reply: ReplyWriter<'_>, e: AppMapError) {
+    match e {
+        AppMapError::Busy => reply.error(&ServerError::Busy),
+        AppMapError::NoRt | AppMapError::Logic => reply.error(&ServerError::Logic),
+        AppMapError::NameNotFound => reply.error(&MapError::NameNotFound),
+        AppMapError::InvalidName => reply.error(&MapError::InvalidName),
+        AppMapError::InvalidKey => reply.error(&MapError::InvalidKey),
+        AppMapError::InvalidValue => reply.error(&MapError::InvalidValue),
+        AppMapError::Full => reply.error(&MapError::Full),
+        AppMapError::Unsupported => reply.error(&MapError::Unsupported),
     }
 }
 
-fn parse_ack_dest(rest: &str) -> Option<(u32, u16)> {
-    let mut parts = rest.split_whitespace();
-    let ip = parse_v4(parts.next()?)?;
-    let port: u16 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() || port == 0 {
-        return None;
+fn reply_xdp_err(reply: ReplyWriter<'_>, e: AppXdpError) {
+    match e {
+        AppXdpError::Busy => reply.error(&ServerError::Busy),
+        AppXdpError::NoRt | AppXdpError::Logic => reply.error(&ServerError::Logic),
     }
-    Some((ip, port))
 }
 
 fn static_ipv4_config() -> embassy_net::Config {

@@ -58,16 +58,20 @@ fn run_linker(args: &[String]) -> Result<()> {
     };
     let meta = embed_meta_from_env()?;
     let map = embed::embed_layout(&meta.crate_manifest, &meta.board_dir, &elf)?;
-    eprintln!(
-        "xpost-link: embedded {} helper={:#x} slot={:#x}+{:#x} table={:#x}+{:#x} → {}",
-        xpost_elf::SECTION_NAME,
-        map.helper_addr,
-        map.slot_addr,
-        map.slot_len,
-        map.table_addr,
-        map.table_len,
-        elf.display()
-    );
+    // Success is silent: rustc surfaces linker stderr as `linker_messages`.
+    // Opt in with XPOST_LINK_VERBOSE=1 for local debugging.
+    if std::env::var_os("XPOST_LINK_VERBOSE").is_some() {
+        eprintln!(
+            "xpost-link: embedded {} helper={:#x} slot={:#x}+{:#x} table={:#x}+{:#x} → {}",
+            xpost_elf::SECTION_NAME,
+            map.helper_addr,
+            map.slot_addr,
+            map.slot_len,
+            map.table_addr,
+            map.table_len,
+            elf.display()
+        );
+    }
     Ok(())
 }
 

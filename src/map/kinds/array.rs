@@ -62,6 +62,11 @@ impl BpfArrayMap {
             value_size + (a - rem)
         }
     }
+
+    /// Control-plane: zero every element (capacity unchanged).
+    pub(crate) fn clear(&mut self) {
+        self.data.fill(0);
+    }
 }
 
 impl MapOps for BpfArrayMap {
