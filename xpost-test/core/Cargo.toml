@@ -1,0 +1,65 @@
+[package]
+name = "core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["host"]
+# Userspace aya::Pod on ABI types (also pulled by `host`).
+user = ["dep:aya"]
+# Host binary deps. Off when `ebpf` builds this lib as pure no_std ABI.
+host = [
+  "user",
+  "dep:aya-log",
+  "dep:anyhow",
+  "dep:env_logger",
+  "dep:libc",
+  "dep:log",
+  "dep:serde",
+  "dep:serde_json",
+  "dep:reqwest",
+  "dep:tokio",
+  "dep:toml",
+  "dep:rand",
+  "dep:tokio-postgres",
+  "dep:uuid",
+]
+
+[dependencies]
+aya = { workspace = true, optional = true }
+aya-log = { workspace = true, optional = true }
+anyhow = { workspace = true, default-features = true, optional = true }
+env_logger = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+log = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = [
+  "io-util",
+  "io-std",
+  "macros",
+  "rt",
+  "rt-multi-thread",
+  "net",
+  "signal",
+  "sync",
+  "time",
+  "process",
+] }
+toml = { workspace = true, optional = true }
+rand = { version = "0.10.2", optional = true }
+tokio-postgres = { version = "0.7", default-features = false, optional = true, features = ["runtime", "with-uuid-1", "with-serde_json-1"] }
+uuid = { version = "1", optional = true, features = ["v4"] }
+
+[build-dependencies]
+anyhow = { workspace = true }
+aya-build = { workspace = true }
+cargo_metadata = { workspace = true }
+# No path dep on `ebpf` — that would cycle (ebpf → core lib).
+
+[[bin]]
+name = "xpost-test"
+path = "src/main.rs"
+required-features = ["host"]

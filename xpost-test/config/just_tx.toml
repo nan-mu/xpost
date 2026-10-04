@@ -5,4 +5,4 @@
 # then xdp_t one-packet Trace. Flame debug: `run = ["dev"]`.
 
 formal = true
-arms = ["hal", "xdp"]
+arms = ["xdp"]

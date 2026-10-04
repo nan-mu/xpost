@@ -1,20 +1,89 @@
 # xpost-agent profile registry (paths relative to XPOST_ROOT / repo root).
 #
-# Schema (no entries yet — add [[fw]] / [[xdp]] as needed):
-#
-#   [[fw]]
-#   name = "…"
-#   target = "esp32c3"
-#   partition_table = "examples/…/partitions.csv"
-#   artifact = "examples/…/target/…/release/…"
-#   build = { cwd = "…", command = ["cargo", …] }
-#   xdp = ["xdp_name", …]          # optional; co-flashed after fw
-#
-#   [[xdp]]
-#   name = "…"
-#   fw = "fw_name"                 # must match an [[fw]].name
-#   artifact = "build/<stem>/<stem>.elf"
-#   build = { cwd = "…", command = ["pixi", "run", "build", "--firmware", "…", "-c", "…"] }
-#   # target optional; if set must match linked fw
-#
-# HTTP: POST /v1/flash/fw|xdp  {"name":"…"}
+# Formal firmware tags (DB `firmware` enum — not Cargo feature names):
+#   xdp_cag → perf-counter+aggregate+gauge via kind-a,kind-g
+#   xdp_t   → perf-trace via kind-t
+# Do not invent kind-cag. HAL profiles intentionally omitted (XDP-only formal).
+
+# ---------------------------------------------------------------------------
+# just_tx (examples/just_xdp + cold just_tx.elf)
+# ---------------------------------------------------------------------------
+
+[[fw]]
+name = "just-tx-cag"
+target = "esp32c3"
+partition_table = "examples/just_xdp/partitions.csv"
+artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = ".", command = ["cargo", "xtask", "just_xdp", "build", "--release", "--no-default-features", "--features", "kind-a,kind-g"] }
+xdp = ["just_tx"]
+
+[[fw]]
+name = "just-tx-t"
+target = "esp32c3"
+partition_table = "examples/just_xdp/partitions.csv"
+artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = ".", command = ["cargo", "xtask", "just_xdp", "build", "--release", "--no-default-features", "--features", "kind-t"] }
+xdp = ["just_tx"]
+
+# ---------------------------------------------------------------------------
+# just_drop (examples/just_xdp + cold just_drop.elf)
+# ---------------------------------------------------------------------------
+
+[[fw]]
+name = "just-drop-cag"
+target = "esp32c3"
+partition_table = "examples/just_xdp/partitions.csv"
+artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = ".", command = ["cargo", "xtask", "just_xdp", "build", "--release", "--no-default-features", "--features", "kind-a,kind-g"] }
+xdp = ["just_drop"]
+
+[[fw]]
+name = "just-drop-t"
+target = "esp32c3"
+partition_table = "examples/just_xdp/partitions.csv"
+artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = ".", command = ["cargo", "xtask", "just_xdp", "build", "--release", "--no-default-features", "--features", "kind-t"] }
+xdp = ["just_drop"]
+
+# ---------------------------------------------------------------------------
+# firewall (examples/firewall + cold firewall.elf)
+# ---------------------------------------------------------------------------
+
+[[fw]]
+name = "firewall-cag"
+target = "esp32c3"
+partition_table = "examples/firewall/partitions.csv"
+artifact = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
+build = { cwd = ".", command = ["cargo", "xtask", "firewall", "build", "--release", "--no-default-features", "--features", "kind-a,kind-g"] }
+xdp = ["firewall"]
+
+[[fw]]
+name = "firewall-t"
+target = "esp32c3"
+partition_table = "examples/firewall/partitions.csv"
+artifact = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
+build = { cwd = ".", command = ["cargo", "xtask", "firewall", "build", "--release", "--no-default-features", "--features", "kind-t"] }
+xdp = ["firewall"]
+
+# ---------------------------------------------------------------------------
+# XDP images (name must equal ELF-derived stem). Canonical fw = *-cag;
+# *-t shares the same partition_table and may co-flash the same xdp.
+# ---------------------------------------------------------------------------
+
+[[xdp]]
+name = "just_tx"
+fw = "just-tx-cag"
+artifact = "../build/just_tx/just_tx.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp", "-c", "just_tx"] }
+
+[[xdp]]
+name = "just_drop"
+fw = "just-drop-cag"
+artifact = "../build/just_drop/just_drop.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp", "-c", "just_drop"] }
+
+[[xdp]]
+name = "firewall"
+fw = "firewall-cag"
+artifact = "../build/firewall/firewall.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall", "-c", "firewall"] }

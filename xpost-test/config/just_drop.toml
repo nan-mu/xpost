@@ -8,7 +8,7 @@
 formal = true
 rounds = 1
 sample_interval_ms = 1000
-arms = ["hal", "xdp"]
+arms = ["xdp"]
 kinds = ["c"]
 fixed_pps = 800
 trace_pps = 200

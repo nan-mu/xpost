@@ -173,11 +173,18 @@ pub fn build_registry(fws: Vec<FwProfile>, xdps: Vec<XdpProfile>) -> Result<Prof
                 bail!("fw `{fname}` lists unknown xdp `{xn}`");
             }
             let x = &xdp_map[xn];
+            // Canonical owner is xdp.fw; other fws may co-flash the same xdp when
+            // they share that owner's partition_table (e.g. just-tx-cag / just-tx-t).
             if x.fw != *fname {
-                bail!(
-                    "fw `{fname}` lists xdp `{xn}`, but that xdp.fw is `{}`",
-                    x.fw
-                );
+                let Some(owner) = fw_map.get(&x.fw) else {
+                    bail!("xdp `{xn}` links missing fw `{}`", x.fw);
+                };
+                if owner.partition_table != f.partition_table {
+                    bail!(
+                        "fw `{fname}` lists xdp `{xn}`, but that xdp.fw is `{}` with different partition_table",
+                        x.fw
+                    );
+                }
             }
         }
     }
@@ -316,7 +323,7 @@ build = { cwd = ".", command = ["echo"] }
     }
 
     #[test]
-    fn reject_xdp_fw_mismatch_in_list() {
+    fn allow_shared_xdp_same_partition() {
         let toml = r#"
 [[fw]]
 name = "a"
@@ -332,15 +339,47 @@ target = "esp32c3"
 partition_table = "p.csv"
 artifact = "b.elf"
 build = { cwd = ".", command = ["echo"] }
+xdp = ["x"]
 
 [[xdp]]
 name = "x"
-fw = "b"
+fw = "a"
+artifact = "build/x/x.elf"
+build = { cwd = ".", command = ["pixi", "run", "build"] }
+"#;
+        let p = Profiles::parse(toml).unwrap();
+        assert_eq!(p.fw("a").unwrap().xdp, vec!["x"]);
+        assert_eq!(p.fw("b").unwrap().xdp, vec!["x"]);
+        assert_eq!(p.xdp("x").unwrap().fw, "a");
+    }
+
+    #[test]
+    fn reject_shared_xdp_different_partition() {
+        let toml = r#"
+[[fw]]
+name = "a"
+target = "esp32c3"
+partition_table = "p.csv"
+artifact = "a.elf"
+build = { cwd = ".", command = ["echo"] }
+xdp = ["x"]
+
+[[fw]]
+name = "b"
+target = "esp32c3"
+partition_table = "other.csv"
+artifact = "b.elf"
+build = { cwd = ".", command = ["echo"] }
+xdp = ["x"]
+
+[[xdp]]
+name = "x"
+fw = "a"
 artifact = "build/x/x.elf"
 build = { cwd = ".", command = ["pixi", "run", "build"] }
 "#;
         let err = Profiles::parse(toml).unwrap_err().to_string();
-        assert!(err.contains("lists xdp"), "{err}");
+        assert!(err.contains("different partition_table"), "{err}");
     }
 
     #[test]

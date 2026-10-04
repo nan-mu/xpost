@@ -1,4 +1,4 @@
-# Cross-build test probe for TR3000 (aarch64-unknown-linux-musl).
+# Cross-build xpost-test for TR3000 (aarch64-unknown-linux-musl).
 FROM debian:bullseye
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -11,23 +11,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN rustup target add aarch64-unknown-linux-musl
 
-WORKDIR /work/test
+WORKDIR /work/xpost-test
 
-COPY test/Cargo.toml test/Cargo.lock ./
-COPY test/test/Cargo.toml test/
-COPY test/test-common/Cargo.toml test-common/
-COPY test/test-report/Cargo.toml test-report/
-COPY test/test-ebpf/Cargo.toml test-ebpf/
-COPY test/xtask/Cargo.toml xtask/
+COPY Cargo.toml Cargo.lock ./
+COPY core/Cargo.toml core/
+COPY ebpf/Cargo.toml ebpf/
 
 # Stub members for dependency cache (sources mounted at run time).
-RUN mkdir -p test/src test-common/src test-report/src test-ebpf/src xtask/src \
-    && echo 'fn main(){}' > test/src/main.rs \
-    && echo 'pub fn lib(){}' > test-common/src/lib.rs \
-    && echo 'pub fn lib(){}' > test-report/src/lib.rs \
-    && echo 'pub fn lib(){}' > test-ebpf/src/lib.rs \
-    && echo 'fn main(){}' > xtask/src/main.rs
+RUN mkdir -p core/src ebpf/src \
+    && echo '#![cfg_attr(not(feature = "host"), no_std)] pub const X: u8 = 0;' > core/src/lib.rs \
+    && echo 'fn main(){}' > core/src/main.rs \
+    && echo '#![no_std] pub fn lib(){}' > ebpf/src/lib.rs \
+    && echo '#![no_std] #![no_main] #[panic_handler] fn panic(_: &::core::panic::PanicInfo) -> ! { loop {} }' > ebpf/src/main.rs
 
 RUN cargo fetch
 
-CMD ["cargo", "build", "-p", "test", "--release", "--target", "aarch64-unknown-linux-musl"]
+CMD ["cargo", "build", "-p", "core", "--release", "--target", "aarch64-unknown-linux-musl"]
