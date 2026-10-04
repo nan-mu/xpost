@@ -27,10 +27,14 @@ pub fn write_ok<E>(
         OkReply::Ping => b"OK ping\n",
         OkReply::EnableXdp => b"OK enable xdp\n",
         OkReply::DisableXdp => b"OK disable xdp\n",
+        OkReply::EnableExec => b"OK enable exec\n",
+        OkReply::DisableExec => b"OK disable exec\n",
         OkReply::ClearMap => b"OK clear map\n",
         OkReply::ClearPerf => b"OK clear perf\n",
         OkReply::UpdateMap => b"OK update map\n",
         OkReply::Init => b"OK init\n",
+        // Finish is observed on UART from eBPF printk; server must not emit it.
+        OkReply::Finish => b"OK finish\n",
         OkReply::GetMap { blob } => return write_blob(b"OK get map ", blob, write_all),
         OkReply::GetPerf { blob } => return write_blob(b"OK get perf ", blob, write_all),
     };

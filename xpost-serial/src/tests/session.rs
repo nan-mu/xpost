@@ -45,6 +45,32 @@ fn disable_xdp_ok() {
 }
 
 #[test]
+fn enable_exec_ok() {
+    with_session(
+        |b| b.on_enable_exec(|reply: ReplyWriter<'_>| reply.ok(OkReply::EnableExec)).build(),
+        |client| {
+            let ok = client
+                .request::<TestError>(&Command::EnableExec)
+                .expect("enable exec ok");
+            assert!(matches!(ok, OkReply::EnableExec));
+        },
+    );
+}
+
+#[test]
+fn disable_exec_ok() {
+    with_session(
+        |b| b.on_disable_exec(|reply: ReplyWriter<'_>| reply.ok(OkReply::DisableExec)).build(),
+        |client| {
+            let ok = client
+                .request::<TestError>(&Command::DisableExec)
+                .expect("disable exec ok");
+            assert!(matches!(ok, OkReply::DisableExec));
+        },
+    );
+}
+
+#[test]
 fn clear_map_ok() {
     with_session(
         |b| {
@@ -162,6 +188,52 @@ fn get_init_ok() {
             assert!(matches!(ok, OkReply::Init));
         },
     );
+}
+
+#[test]
+fn get_finish_ok_from_uart_injection() {
+    // `OK finish` is not emitted by SerialHandler::start; simulate eBPF printk
+    // by writing the line on the memory UART duplex.
+    use std::thread;
+    use std::time::Duration;
+
+    use crate::client::{MemoryPair, SerialHandler};
+    use crate::server::SerialHandler as ServerHandler;
+    use crate::tests::harness::TestError;
+
+    let pair = MemoryPair::new();
+    let inject = pair.server.clone();
+    let client = SerialHandler::open_memory(pair.client);
+    let read_end = pair.server.clone();
+    let write_end = pair.server;
+    let handler = ServerHandler::builder(
+        move || read_end.read_byte(),
+        move |bytes: &[u8]| write_end.write_all(bytes),
+        [0u8; 128],
+    )
+    .build();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_t = std::sync::Arc::clone(&stop);
+    let join = thread::spawn(move || {
+        let mut handler = handler;
+        handler.start();
+        while !stop_t.load(std::sync::atomic::Ordering::Acquire) {
+            if !handler.pump() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+    thread::sleep(Duration::from_millis(20));
+    let _ = inject.write_all(b"OK finish\n");
+    thread::sleep(Duration::from_millis(20));
+    let ok = client
+        .request::<TestError>(&Command::GetFinish)
+        .expect("get finish ok");
+    assert!(matches!(ok, OkReply::Finish));
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    client.shutdown();
+    let _ = join.join();
 }
 
 #[test]

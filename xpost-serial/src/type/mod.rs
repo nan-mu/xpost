@@ -14,21 +14,31 @@
 //! | [`Ping`](command::Command::Ping) | `ping` |
 //! | [`EnableXdp`](command::Command::EnableXdp) | `enable xdp` |
 //! | [`DisableXdp`](command::Command::DisableXdp) | `disable xdp` |
+//! | [`EnableExec`](command::Command::EnableExec) | `enable exec` |
+//! | [`DisableExec`](command::Command::DisableExec) | `disable exec` |
 //! | [`ClearMap`](command::Command::ClearMap) | `clear map <name>` |
 //! | [`GetMap`](command::Command::GetMap) | `get map <name>` |
 //! | [`UpdateMap`](command::Command::UpdateMap) | `update map <name> <key> <value>` |
 //! | [`ClearPerf`](command::Command::ClearPerf) | `clear perf` |
 //! | [`GetPerf`](command::Command::GetPerf) | `get perf` |
 //! | [`GetInit`](command::Command::GetInit) | **no wire** — host record wait only |
+//! | [`GetFinish`](command::Command::GetFinish) | **no wire** — host record wait only |
 //!
-//! `UpdateMap`: ARRAY `key` = decimal slot, `value` = `u64` token; HASH `key` =
-//! dotted IPv4 (as bytes), `value` = `u64` token.
+//! `UpdateMap`: `key` and `value` are **opaque wire byte tokens**. xpost-serial
+//! does not decode them into integers, IPs, or workload structs — firmware
+//! validates them against the selected map. (Common App conventions such as
+//! ARRAY decimal slots or HASH dotted-IPv4 keys live in firmware / host parse,
+//! not in this crate's types.)
 //!
-//! **[`GetInit`](command::Command::GetInit)** must never be written to UART and
-//! must never be produced by server request parsing. Host `request(GetInit)`
-//! (or equivalent) only looks for / waits until `OK init` appears in the
-//! transcript, with deadline [`command::GET_INIT_TIMEOUT`]. Success is
-//! [`OkReply::Init`].
+//! **[`GetInit`](command::Command::GetInit)** / **[`GetFinish`](command::Command::GetFinish)**
+//! must never be written to UART as request lines and must never be produced by
+//! server request parsing. Host `request(GetInit|GetFinish)` only looks for /
+//! waits until `OK init` / `OK finish` appear in the transcript (deadlines
+//! [`command::GET_INIT_TIMEOUT`] / [`command::GET_FINISH_TIMEOUT`]). Success is
+//! [`OkReply::Init`] / [`OkReply::Finish`]. The serial **reply path** must not
+//! emit `OK finish` via [`OkReply::Finish`](reply::OkReply::Finish); an
+//! unsolicited UART line from eBPF `bpf_printk` (or a HAL App twin writing the
+//! same raw line) is how the transcript gets that marker.
 //!
 //! # [`reply::OkReply`] — success
 //!
@@ -37,12 +47,15 @@
 //! | [`Ping`](reply::OkReply::Ping) | `OK ping` |
 //! | [`EnableXdp`](reply::OkReply::EnableXdp) | `OK enable xdp` |
 //! | [`DisableXdp`](reply::OkReply::DisableXdp) | `OK disable xdp` |
+//! | [`EnableExec`](reply::OkReply::EnableExec) | `OK enable exec` |
+//! | [`DisableExec`](reply::OkReply::DisableExec) | `OK disable exec` |
 //! | [`ClearMap`](reply::OkReply::ClearMap) | `OK clear map` |
 //! | [`ClearPerf`](reply::OkReply::ClearPerf) | `OK clear perf` |
 //! | [`UpdateMap`](reply::OkReply::UpdateMap) | `OK update map` |
 //! | [`GetMap`](reply::OkReply::GetMap) | `OK get map <n>` + `n` blob bytes |
 //! | [`GetPerf`](reply::OkReply::GetPerf) | `OK get perf <n>` + `n` blob bytes |
 //! | [`Init`](reply::OkReply::Init) | `OK init` (unsolicited; see below) |
+//! | [`Finish`](reply::OkReply::Finish) | `OK finish` (unsolicited; see below) |
 //!
 //! **`get map` / `get perf` success (length-prefixed blob)**
 //!
@@ -70,6 +83,15 @@
 //! [`Command::GetInit`](command::Command::GetInit) as a **record wait** only —
 //! never by sending a command on the wire. Deadline:
 //! [`command::GET_INIT_TIMEOUT`].
+//!
+//! **`OK finish` (unsolicited transcript line)**
+//!
+//! Completion of a function-call / `exec` run is signaled by an unsolicited
+//! `OK finish` line on the UART transcript (eBPF `bpf_printk`, or a HAL App
+//! writing the same raw bytes). The serial **reply path must not** emit this
+//! via [`OkReply::Finish`](reply::OkReply::Finish). The host observes it via
+//! [`Command::GetFinish`](command::Command::GetFinish) as a **record wait** only.
+//! Deadline: [`command::GET_FINISH_TIMEOUT`].
 //!
 //! # Device error contract
 //!
@@ -129,7 +151,7 @@
 pub mod command;
 pub mod reply;
 
-pub use command::{Command as WireCommand, GET_INIT_TIMEOUT};
+pub use command::{Command as WireCommand, GET_FINISH_TIMEOUT, GET_INIT_TIMEOUT};
 pub use reply::{
     ErrReply, MapEntry, MapError, MapKey, MapKind, OkReply, PerfError, ServerError, SyntaxError,
 };

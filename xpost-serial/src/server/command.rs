@@ -72,7 +72,7 @@ fn map_name<'a>(input: &mut &'a [u8]) -> Result<&'a str, ParseCommandError> {
 /// context is used. Missing/extra arguments to a recognized command are rejected.
 /// Map-specific key/value validation belongs to the firmware command handler.
 /// This is not a UART stream accumulator: pass only one request at a time.
-/// Never produces [`Command::GetInit`].
+/// Never produces [`Command::GetInit`] or [`Command::GetFinish`].
 pub fn parse_command(mut line: &[u8]) -> Result<Command<'_>, ParseCommandError> {
     whitespace(&mut line).map_err(|_| ParseCommandError::Empty)?;
     let verb = token(&mut line).map_err(|_| ParseCommandError::Empty)?;
@@ -87,6 +87,12 @@ pub fn parse_command(mut line: &[u8]) -> Result<Command<'_>, ParseCommandError> 
     } else if keyword(verb, b"disable") && keyword(target, b"xdp") {
         no_args(&mut line)?;
         Ok(Command::DisableXdp)
+    } else if keyword(verb, b"enable") && keyword(target, b"exec") {
+        no_args(&mut line)?;
+        Ok(Command::EnableExec)
+    } else if keyword(verb, b"disable") && keyword(target, b"exec") {
+        no_args(&mut line)?;
+        Ok(Command::DisableExec)
     } else if keyword(verb, b"clear") && keyword(target, b"perf") {
         no_args(&mut line)?;
         Ok(Command::ClearPerf)

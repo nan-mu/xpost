@@ -130,6 +130,9 @@ async fn serve_async(addr: &str, log_dir: &Path) -> Result<()> {
         .route("/get/xdp", get(v1_get_xdp))
         .route("/enable/xdp", post(v1_enable_xdp))
         .route("/disable/xdp", post(v1_disable_xdp))
+        .route("/enable/exec", post(v1_enable_exec))
+        .route("/disable/exec", post(v1_disable_exec))
+        .route("/get/finish", post(v1_get_finish))
         .route("/clear/map/{map_name}", post(v1_clear_map))
         .route("/get/map/{map_name}", get(v1_get_map))
         .route("/update/map/{map_name}", post(v1_update_map))
@@ -260,6 +263,21 @@ async fn v1_enable_xdp(State(st): State<AppState>) -> Json<ApiResp> {
 async fn v1_disable_xdp(State(st): State<AppState>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     run_blocking(move || ops::disable_xdp(shared.as_ref(), "http")).await
+}
+
+async fn v1_enable_exec(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::enable_exec(shared.as_ref(), "http")).await
+}
+
+async fn v1_disable_exec(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::disable_exec(shared.as_ref(), "http")).await
+}
+
+async fn v1_get_finish(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::get_finish(shared.as_ref(), "http")).await
 }
 
 async fn v1_clear_map(

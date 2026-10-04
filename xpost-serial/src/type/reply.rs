@@ -9,6 +9,8 @@ pub enum OkReply<'a> {
     Ping,
     EnableXdp,
     DisableXdp,
+    EnableExec,
+    DisableExec,
     ClearMap,
     ClearPerf,
     /// `OK get map <n>` + `n` blob bytes (same framing as [`Self::GetPerf`]).
@@ -25,6 +27,13 @@ pub enum OkReply<'a> {
     /// Host obtains this via [`crate::command::Command::GetInit`] as a
     /// transcript wait only — there is no UART request line.
     Init,
+    /// Unsolicited `OK finish` (e.g. eBPF `bpf_printk` or HAL App raw UART).
+    ///
+    /// Host obtains this via [`crate::command::Command::GetFinish`] as a
+    /// transcript wait only — there is no UART request line. The serial
+    /// **reply path must not** emit this variant; the marker is a raw
+    /// transcript line from the compute path.
+    Finish,
 }
 
 /// Common bound for independent reply-error types.
