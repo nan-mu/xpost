@@ -25,6 +25,9 @@ struct ApiResp {
 #[derive(Debug, Clone, Deserialize)]
 pub struct MapGetResp {
     pub ok: bool,
+    /// Present on the frozen map JSON shape (absent on `{ok,message}` envelopes).
+    #[allow(dead_code)]
+    pub name: String,
     #[serde(default)]
     pub entries: Vec<MapEntry>,
 }
@@ -160,8 +163,14 @@ impl AgentClient {
     }
 
     /// `GET /v1/dut_status` — UART `ready …` / `booting` (agent may ping internally).
+    #[allow(dead_code)]
     pub async fn dut_status(&self) -> Result<String> {
         self.get_message("/v1/dut_status").await
+    }
+
+    /// `GET /v1/get/init` — wait for unsolicited `OK init`.
+    pub async fn get_init(&self) -> Result<String> {
+        self.get_message("/v1/get/init").await
     }
 
     async fn get_message(&self, path: &str) -> Result<String> {

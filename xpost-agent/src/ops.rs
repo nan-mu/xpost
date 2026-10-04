@@ -81,6 +81,15 @@ pub fn get_status() -> String {
     "idle".into()
 }
 
+/// Host wait for unsolicited `OK init` (firmware finished App init).
+pub fn get_init(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
+    with_log(peer, "GetInit", "", false, state, || {
+        let g = lock(state)?;
+        req(&g, &Command::GetInit)?;
+        Ok("OK init".into())
+    })
+}
+
 /// Ping settle: `ready` on OK ping, else `booting`.
 pub fn dut_status(state: &Mutex<AgentState>) -> Result<String> {
     let g = lock(state)?;
@@ -392,6 +401,102 @@ pub fn get_map(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<Stri
             _ => bail!("unexpected reply for get map"),
         }
     })
+}
+
+/// Frozen HTTP map JSON (`GET /v1/get/map/{name}`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MapJson {
+    pub ok: bool,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub map_type: String,
+    pub entries: Vec<MapKvJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<u32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MapKvJson {
+    pub key: String,
+    pub value: String,
+}
+
+/// App `GetMap` → decoded map JSON (HTTP contract).
+pub fn get_map_json(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<MapJson> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("empty map name");
+    }
+    let blob = with_log(peer, "GetMap", name, true, state, || {
+        let g = lock(state)?;
+        match req(&g, &Command::GetMap { name })? {
+            OkReply::GetMap { blob } => Ok(String::from_utf8_lossy(blob).into_owned()),
+            _ => bail!("unexpected reply for get map"),
+        }
+    })?;
+    decode_map_blob(name, blob.as_bytes())
+}
+
+fn decode_map_blob(name: &str, blob: &[u8]) -> Result<MapJson> {
+    let text = std::str::from_utf8(blob).context("map blob is not UTF-8")?;
+    let mut lines = text.lines().filter(|l| !l.is_empty());
+    let header = lines.next().context("map blob missing header")?;
+    let mut parts = header.split_whitespace();
+    let kind = parts.next().context("map blob header kind")?;
+    match kind {
+        "array" => {
+            let size: u32 = parts
+                .next()
+                .context("array header size")?
+                .parse()
+                .context("array size")?;
+            let mut entries = Vec::with_capacity(size as usize);
+            for line in lines {
+                let mut kv = line.split_whitespace();
+                let key = kv.next().context("array entry key")?.to_string();
+                let value = kv.next().context("array entry value")?.to_string();
+                entries.push(MapKvJson { key, value });
+            }
+            Ok(MapJson {
+                ok: true,
+                name: name.to_string(),
+                map_type: "array".into(),
+                entries,
+                size: Some(size),
+                cap: None,
+            })
+        }
+        "hash" => {
+            let size: u32 = parts
+                .next()
+                .context("hash header size")?
+                .parse()
+                .context("hash size")?;
+            let cap: u32 = parts
+                .next()
+                .context("hash header cap")?
+                .parse()
+                .context("hash cap")?;
+            let mut entries = Vec::with_capacity(size as usize);
+            for line in lines {
+                let mut kv = line.split_whitespace();
+                let key = kv.next().context("hash entry key")?.to_string();
+                let value = kv.next().context("hash entry value")?.to_string();
+                entries.push(MapKvJson { key, value });
+            }
+            Ok(MapJson {
+                ok: true,
+                name: name.to_string(),
+                map_type: "hash".into(),
+                entries,
+                size: Some(size),
+                cap: Some(cap),
+            })
+        }
+        other => bail!("unknown map blob kind `{other}`"),
+    }
 }
 
 pub struct MapKv {

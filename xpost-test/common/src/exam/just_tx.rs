@@ -29,7 +29,7 @@
 //! 每格写入 `just_tx_config` + `just_tx_data`（DDL：`sql/just_tx.sql`）。
 //! 仅成功回包写入 `just_tx_data`；丢包率 = `sent - ok`。
 //! Perf（`agent get perf`）另落共享 / HAL CAG 表，不在此列。
-//! `dev` 火焰路径不写 Postgres。
+//! HAL 短烟测见 `exam::dev`（`run = ["dev"]`）。
 //!
 //! `just_tx_config`：
 //! - `exam_id` — 本轮 `exam` 行
@@ -66,17 +66,12 @@ const WINDOW_S: Duration = Duration::from_secs(30);
 const WARMUP: Duration = Duration::from_secs(1);
 const COOLDOWN: Duration = Duration::from_secs(3);
 const DRAIN: Duration = Duration::from_millis(1000);
-const DRAIN_MS: u64 = 200;
 const RX_READY_TRIES: usize = 40;
 const RX_READY_BURST: u32 = 64;
 
 const SWEEP_PPS: &[f64] = &[
     400.0, 800.0, 1200.0, 1600.0, 2000.0, 2400.0, 2800.0, 3200.0, 3600.0, 4000.0,
 ];
-
-const DEV_FLAME_PPS: f64 = 100.0;
-const DEV_FLAME_WINDOW: Duration = Duration::from_secs(2);
-const DEV_FLAME_REPORT_PATH: &str = "/tmp/xpost-dev-flame.report";
 
 #[derive(Clone, Debug)]
 struct ProbeSample {
@@ -109,7 +104,7 @@ fn profile_for(fw: Firmware) -> &'static str {
     match fw {
         Firmware::XdpCag => "just-tx-cag",
         Firmware::XdpT => "just-tx-t",
-        Firmware::Hal => "just-tx-hal-cag",
+        Firmware::Hal => "just-tx-hal",
     }
 }
 
@@ -121,7 +116,7 @@ fn path_for(fw: Firmware) -> PpsPath {
 }
 
 pub struct JustTxOpts {
-    /// `run = ["dev"]` flame path (no Postgres).
+    /// Legacy flag; formal just_tx ignores this (`dev` is handled in `exam::dev`).
     pub is_dev: bool,
     pub formal: bool,
 }
@@ -142,9 +137,9 @@ fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
 }
 
 pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOpts) -> Result<()> {
-    let name = if opts.is_dev { "dev" } else { "just_tx" };
-    let is_dev = opts.is_dev;
-    let formal = if is_dev { false } else { opts.formal };
+    let _ = opts.is_dev;
+    let name = "just_tx";
+    let formal = opts.formal;
     let endpoint = cfg
         .agent
         .resolved_endpoint()
@@ -154,10 +149,6 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
 
     let window = WINDOW_S;
     let grid: &[f64] = SWEEP_PPS;
-
-    if is_dev {
-        return run_dev_flame(cfg, harness, &agent, &endpoint, &esp_s).await;
-    }
 
     // Arms from just_tx.toml; xdp_t always last.
     let arms = arms_from_cfg(&cfg.just_tx.arms)?;
@@ -262,8 +253,9 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         ui.end_round();
     }
 
-    // Trace arm: one packet.
-    {
+    // Trace arm (XDP): skip when `arms` is HAL-only.
+    let want_xdp_t = arms.iter().any(|a| matches!(a, Firmware::XdpCag));
+    if want_xdp_t {
         ui.begin_round();
         ui.set_eta(&eta.fmt());
         let fw = Firmware::XdpT;
@@ -334,42 +326,6 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     RoundUi::banner(&format!("{name} done arms={} grid={}", arms.len(), grid.len()));
     Ok(())
 }
-
-async fn run_dev_flame(
-    cfg: &FileConfig,
-    _harness: &mut Harness,
-    agent: &AgentClient,
-    endpoint: &str,
-    esp_s: &str,
-) -> Result<()> {
-    RoundUi::banner(&format!(
-        "dev flame Trace XDP @{DEV_FLAME_PPS:.0}pps {}s → {DEV_FLAME_REPORT_PATH} agent={endpoint} esp={esp_s}",
-        DEV_FLAME_WINDOW.as_secs()
-    ));
-    let spoof = crate::pipeline::iface_ipv4(&cfg.probe.iface)
-        .unwrap_or_else(|_| gen_lan_ip(cfg.target.esp_ip, &[cfg.target.esp_ip]));
-    let mut eta = BudgetEta::new();
-    eta.add_flashes(1);
-    eta.add_fixed(READY_BUDGET + DEV_FLAME_WINDOW);
-    let ui = RoundUi::new();
-    ui.begin_round();
-    let profile = "just-tx-t";
-    flash_and_ready(cfg, agent, &ui, &mut eta, PpsPath::Xdp, spoof, profile).await?;
-    agent.clear_perf().await.context("clear/perf")?;
-    use crate::exam::just_drop::paced_blast;
-    let sent = paced_blast(cfg, &ui, &eta, PpsPath::Xdp, DEV_FLAME_WINDOW, DEV_FLAME_PPS).await?;
-    tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
-    let msg = agent.get_perf().await.context("get/perf")?;
-    std::fs::write(DEV_FLAME_REPORT_PATH, msg.as_bytes())
-        .with_context(|| format!("write {DEV_FLAME_REPORT_PATH}"))?;
-    ui.permanent(&format!(
-        "    flame report → {DEV_FLAME_REPORT_PATH} ({} bytes) sent={sent}",
-        msg.len()
-    ));
-    ui.end_round();
-    Ok(())
-}
-
 
 fn host_stall_thresh(pps: f64) -> Duration {
     let period = Duration::from_secs_f64(1.0 / pps.max(1.0));

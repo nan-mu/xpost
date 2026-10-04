@@ -18,7 +18,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Notify;
 
@@ -39,6 +39,8 @@ pub(crate) type SharedRecord = Arc<SharedRecordInner>;
 pub(crate) struct SharedRecordInner {
     inner: Mutex<Record>,
     notify: Notify,
+    /// Last flash `Begin` — GetInit must not match a previous image's `OK init`.
+    init_after: Mutex<Option<SystemTime>>,
 }
 
 impl SharedRecordInner {
@@ -47,6 +49,7 @@ impl SharedRecordInner {
         Ok(Arc::new(Self {
             inner: Mutex::new(Record::create_rotating(log_dir, tee_stdout)?),
             notify: Notify::new(),
+            init_after: Mutex::new(None),
         }))
     }
 
@@ -56,6 +59,7 @@ impl SharedRecordInner {
         Ok(Arc::new(Self {
             inner: Mutex::new(Record::create_file(path, tee_stdout)?),
             notify: Notify::new(),
+            init_after: Mutex::new(None),
         }))
     }
 
@@ -65,11 +69,29 @@ impl SharedRecordInner {
         Arc::new(Self {
             inner: Mutex::new(Record::memory()),
             notify: Notify::new(),
+            init_after: Mutex::new(None),
         })
     }
 
     pub fn lock(&self) -> MutexGuard<'_, Record> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Bound GetInit to UART lines after this flash started.
+    pub fn mark_init_after(&self, at: SystemTime) {
+        *self.init_after.lock().unwrap_or_else(|e| e.into_inner()) = Some(at);
+    }
+
+    /// After last flash Begin; otherwise a short lookback for already-booted DUT.
+    pub fn init_after(&self) -> SystemTime {
+        self.init_after
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|| {
+                SystemTime::now()
+                    .checked_sub(Duration::from_secs(15))
+                    .unwrap_or(UNIX_EPOCH)
+            })
     }
 
     pub fn uart(&self, line: &[u8]) {

@@ -1,4 +1,4 @@
-//! Formal / flame exams driven by compile-time `config/`.
+//! Formal / HAL-smoke exams driven by compile-time `config/`.
 
 pub mod dev;
 pub mod firewall;

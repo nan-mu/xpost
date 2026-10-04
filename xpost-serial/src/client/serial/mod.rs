@@ -8,7 +8,6 @@ pub mod perf;
 pub use perf::{Report, decode as decode_perf, mask_for_len};
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
 
 use futures::FutureExt;
 
@@ -39,11 +38,9 @@ where
         cmd.write_to(&mut rec);
     }
     // GetInit: open reader only — never serialize / write a UART verb.
-    // Floor slightly in the past so a boot `OK init` racing the open is accepted.
+    // Lower bound is last flash Begin (else 15s lookback if never flashed).
     let after = match cmd {
-        Command::GetInit => SystemTime::now()
-            .checked_sub(Duration::from_millis(500))
-            .unwrap_or(SystemTime::UNIX_EPOCH),
+        Command::GetInit => record.init_after(),
         _ => uart.write_command(cmd.to_string().as_str())?,
     };
 

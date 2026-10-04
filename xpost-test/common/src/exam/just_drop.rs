@@ -117,7 +117,7 @@ fn profile_for(fw: Firmware) -> &'static str {
     match fw {
         Firmware::XdpCag => "just-drop-cag",
         Firmware::XdpT => "just-drop-t",
-        Firmware::Hal => "just-drop-hal-cag",
+        Firmware::Hal => "just-drop-hal",
     }
 }
 
@@ -478,14 +478,3 @@ async fn send_one(cfg: &FileConfig, seed: i64) -> Result<u64> {
     Ok(1)
 }
 
-/// Shared by `just_tx` flame helper (legacy import).
-pub(crate) async fn paced_blast(
-    cfg: &FileConfig,
-    ui: &RoundUi,
-    eta: &BudgetEta,
-    path: PpsPath,
-    window: Duration,
-    target_pps: f64,
-) -> Result<u64> {
-    paced_multi_src(cfg, ui, eta, path, window, target_pps, SOURCE_SEED_DEFAULT).await
-}

@@ -6,7 +6,7 @@ use std::cell::{Cell, RefCell};
 use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::agent::AgentClient;
 
@@ -14,7 +14,7 @@ const BAR_W: usize = 12;
 const LABEL_COLS: usize = 36;
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-/// Max wait for UART `xpost ready` after flash (replaces fixed reboot sleep).
+/// Max wait for firmware `OK init` after flash (GetInit).
 pub const READY_BUDGET: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy)]
@@ -500,39 +500,25 @@ pub fn fmt_short(d: Duration) -> String {
     }
 }
 
-/// Poll agent `/v1/dut_status` until UART shows `ready` (agent may ping internally).
+/// Wait for firmware `OK init` (App init finished, including dataplane bind).
 pub async fn settle_checklist(ui: &RoundUi, agent: &AgentClient, budget: Duration) -> Result<()> {
     let label = format!("settle ≤{}s", budget.as_secs());
     ui.check_activate(&label);
     let start = Instant::now();
-    let mut last = String::from("booting");
-    loop {
-        match agent.dut_status().await {
-            Ok(msg) => {
-                last = msg.trim().to_string();
-                if last.starts_with("ready") {
-                    let left = budget.saturating_sub(start.elapsed());
-                    ui.check_ok(&format!(
-                        "{} ({} left)",
-                        truncate_note(&last, 48),
-                        fmt_short(left)
-                    ));
-                    return Ok(());
-                }
-                let left = budget.saturating_sub(start.elapsed());
-                ui.check_note(&format!("{last} · {} left", fmt_short(left)));
-            }
-            Err(e) => {
-                let left = budget.saturating_sub(start.elapsed());
-                ui.check_note(&format!("dut_status err: {e:#} · {} left", fmt_short(left)));
-            }
+    match agent.get_init().await {
+        Ok(msg) => {
+            let left = budget.saturating_sub(start.elapsed());
+            ui.check_ok(&format!(
+                "{} ({} left)",
+                truncate_note(msg.trim(), 48),
+                fmt_short(left)
+            ));
+            Ok(())
         }
-
-        if start.elapsed() >= budget {
-            ui.check_fail(&format!("timeout; last={last}"));
-            bail!("DUT not ready within {:?}; last status={last}", budget);
+        Err(e) => {
+            ui.check_fail(&format!("GetInit: {e:#}"));
+            Err(e).with_context(|| format!("DUT OK init not seen within {budget:?}"))
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
