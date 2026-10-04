@@ -3,7 +3,7 @@
 #   ./xpost-test
 # No env vars, no CLI flags. Edit `run` to choose which experiments run.
 #
-# Mac side: cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
+# Mac side: cd xpost-agent && cargo run --release -- --bind 0.0.0.0:9240
 # Agent HTTP: /health, /v1/* (harness), /mcp (Cursor MCP). endpoint = host:port (http:// inferred).
 #
 # Experiment knobs: just_tx.toml / just_drop.toml only (formal).

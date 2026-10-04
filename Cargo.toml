@@ -2,10 +2,10 @@
 resolver = "2"
 # MCU packages only under the default RV32 target. Host tools live under
 # `exclude` so they are not typechecked as riscv32 (thousands of false RA
-# errors from std crates). Invoke via `--manifest-path` / the `xtask` alias.
+# errors from std crates). Invoke via `--manifest-path` or their own cwd.
 members = [".", "esp-radio", "xpost-macros", "xpost-elf", "xpost-type"]
 default-members = ["."]
-exclude = ["xpost-build", "xtask", "xpost-agent", "xpost-serial", "xpost-test", "examples"]
+exclude = ["xpost-build", "xpost-agent", "xpost-serial", "xpost-test", "examples"]
 
 [package]
 edition      = "2024"
@@ -16,7 +16,7 @@ description  = "XDP datapath on MCU (express post): AOT invoke, maps, helpers, R
 license      = "MIT OR Apache-2.0"
 publish      = false
 links        = "xpost"
-exclude      = ["examples/*", "xtask", "xpost-build", "target"]
+exclude      = ["examples/*", "xpost-build", "target"]
 
 [lib]
 test = false

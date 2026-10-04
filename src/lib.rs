@@ -24,15 +24,14 @@
 //! xpost/                          # this repo (publishable library at root)
 //!   src/                          # xpost runtime
 //!   xpost-build/                  # board codegen (layout/partitions → Rust + IRAM linker script)
-//!   xtask/                        # root dispatcher only
+//!   xpost-agent/                  # host USB/HTTP daemon (own Cargo workspace)
 //!   examples/
-//!     just_drop/                  # firmware-first cold XDP ELF path
+//!     just_xdp/                   # firmware-first cold XDP ELF path
 //! ```
 //!
 //! - **Library**: does not ship board tomls. Integrators set board metadata /
 //!   `partitions.csv` via the firmware crate.
-//! - **Each example**: independent MCU project with its own xtask; can be copied
-//!   out of tree.
+//! - **Each example**: independent MCU project; can be copied out of tree.
 //! - **`mem.toml` is obsolete**. Codegen consumes in-memory layout from
 //!   `[package.metadata.xpost]` ∪ board files. The libbpf-mcu **contract**
 //!   `layout.toml` (§3.2) is exported under `target/layout-export/`.
@@ -55,17 +54,17 @@
 //! cargo build --release --features perf-cag
 //! ```
 //!
-//! Host agent / cold install (repo root):
+//! Host agent (cwd = `xpost-agent/`):
 //!
 //! ```bash
-//! cargo xtask agent program --elf examples/just_xdp/just_drop.elf
+//! cargo run --release -- --bind 0.0.0.0:9240
 //! ```
 //!
 //! # AOT handoff (from libbpf-mcu)
 //!
 //! Build / encode an XDP ELF (host: `xpost-compact-elf` + libbpf-mcu `bpf.toml` for
-//! map meta). Cold-install via agent. For firmware layout export:
-//! `cargo xtask sync export --board <example>`.
+//! map meta). Cold-install via agent. Layout codegen runs from example
+//! `build.rs` via `xpost-build`.
 
 #![no_std]
 

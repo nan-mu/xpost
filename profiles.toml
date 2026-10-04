@@ -5,8 +5,7 @@
 #   xdp_t   → perf-t   (counter+trace)
 # HAL profiles intentionally omitted (XDP-only formal).
 #
-# Firmware build: cwd = examples/<project>, `cargo build --release --features …`
-# (no cargo xtask).
+# Firmware build: cwd = examples/<project>, `cargo build --release --features …`.
 
 # ---------------------------------------------------------------------------
 # just_tx (examples/just_xdp + cold just_tx.elf)

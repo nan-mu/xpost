@@ -1,7 +1,7 @@
 # rust-analyzer for the xpost MCU lib + linked firmware examples.
 #
-# Root `.cargo/config.toml` defaults to RV32. Host packages (xtask/
-# xpost-build) stay workspace.exclude — do not set `files.exclude`
+# Root `.cargo/config.toml` defaults to RV32. Host packages (xpost-agent /
+# xpost-build / …) stay workspace.exclude — do not set `files.exclude`
 # here (server rejects it).
 #
 # Firmware examples are separate Cargo workspaces (own `[workspace]`).

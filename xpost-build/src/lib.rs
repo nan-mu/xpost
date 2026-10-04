@@ -77,7 +77,7 @@ pub const HEAP_SIZE: usize = 65536;
 /// Reserved for talc metadata + registry HashMap overhead inside the pool.
 pub const POOL_RESERVED: usize = 2048;
 
-/// Highest `schema_version` this xtask understands.
+/// Highest `schema_version` this xpost-build understands.
 pub const MAX_CONFIG_SCHEMA: i64 = 1;
 
 /// Userspace cfgs derived from enabled `[[tests]]`.

@@ -18,7 +18,7 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 - Root crate `xpost`: board-agnostic runtime (maps, helpers, IRAM slots, RX ingest).
 - `examples/<app>/`: self-contained MCU projects.
 - Host (workspace `exclude`, own Cargo workspace / triple): `xpost-serial`
-  (library), `xpost-agent` (daemon), `xpost-build`, `xtask`, `xpost-test`
+  (library), `xpost-agent` (daemon), `xpost-build`, `xpost-test`
   (experiment harness; same git tree, separate `Cargo.toml`).
 
 ## Host serial / agent / test
@@ -30,9 +30,10 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
   entry: bare `./xpost-test`. See rustdoc `overview` + `config`. Calls agent
   HTTP; does not hold the USB session while the agent is running.
 - **`xpost-agent/`**: CLI + `--listen` HTTP `/v1/*` and MCP `/mcp` on one port
-  (shared USB). Dispatch: `cargo xtask agent …`. Frozen HTTP/MCP contract is
-  rustdoc on `xpost-agent/src/main.rs` (App verbs via `xpost_serial::Command` /
-  `OkReply`). After open: host-only `GetInit` waits for DUT `OK init`.
+  (shared USB). Run from that directory (`cargo run --release -- …`). Frozen
+  HTTP/MCP contract is rustdoc on `xpost-agent/src/main.rs` (App verbs via
+  `xpost_serial::Command` / `OkReply`). After open: host-only `GetInit` waits
+  for DUT `OK init`.
 - **`xpost-serial`**: library only — shared `r#type` wire + opt-in `client`
   (host) / `server` (firmware `SerialHandler` + `serial_task!`). Examples use
   `default-features = false, features = ["server"]`. App verbs: `ping`,
@@ -54,16 +55,14 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 
 ## Commands
 
-Mac（USB 接 ESP；cwd = `xpost/`）：只需常驻 agent。收到 `flash/fw` 时按
-`profiles.toml` 的 `build`（cwd = `examples/<app>`，`cargo build --release
---features …`）编译再烧录；勿用 `cargo xtask <example>`。
+Mac（USB 接 ESP）：常驻 `xpost-agent`。收到 `flash/fw` 时按 `profiles.toml`
+的 `build`（cwd = `examples/<app>`，`cargo build --release --features …`）
+编译再烧录。
 
 HTTP：`/health`、`/v1/*`（harness）、`/mcp`（Cursor Streamable HTTP MCP）。
 
 ```bash
-cargo xtask agent -- --bind 0.0.0.0:9240
-# or:
-cargo run --release --manifest-path xpost-agent/Cargo.toml -- --bind 0.0.0.0:9240
+cd xpost-agent && cargo run --release -- --bind 0.0.0.0:9240
 ```
 
 Cursor MCP 示例 URL：`http://127.0.0.1:9240/mcp`。
@@ -114,7 +113,8 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 
 只跑正式 just_tx：`run = ["just_tx"]`。firewall：`run = ["firewall"]`。一次跑全部 formal A/B：`run = ["just_drop", "just_tx"]`。
 
-可选手工 XDP 冷表操作：`cargo xtask agent program|list|clear|request|probe …`。
+可选手工冷表操作：agent 起来后走 HTTP `/v1/flash/*`、`/v1/clear/xdp`、
+`/v1/get/xdp`（或同名 MCP tools）。
 
 ### Formal 采集与 `benchmark/` 分析立场
 

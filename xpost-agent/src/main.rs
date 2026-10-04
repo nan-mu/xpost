@@ -9,10 +9,10 @@
 //! [`xpost_serial::reply::OkReply`] (current crate — plan’s older multiline
 //! `get map` text is superseded by header+blob; HTTP JSON below is unchanged).
 //!
-//! Run (daemon):
+//! Run (daemon, cwd = `xpost-agent/`):
 //! ```text
-//! cargo run --release --manifest-path xpost-agent/Cargo.toml -- --bind 0.0.0.0:9240
-//! cargo xtask agent -- --bind 0.0.0.0:9240 --log-dir target/xpost-agent
+//! cargo run --release -- --bind 0.0.0.0:9240
+//! cargo run --release -- --bind 0.0.0.0:9240 --log-dir target/xpost-agent
 //! ```
 //! Same port: `/health` + `/v1/*` + Streamable HTTP `/mcp`. No auth/TLS.
 //! Long ops ~1200s. USB under `spawn_blocking` + `Mutex` on

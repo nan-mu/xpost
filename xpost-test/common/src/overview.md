@@ -15,15 +15,16 @@ Always on TR3000, **no env / no CLI flags / no subcommands**:
 
 ```text
 Mac (USB ESP)                         TR3000                         Postgres
-cargo xtask agent                     ./xpost-test                   formal.*
-  --listen 0.0.0.0:9240                 │                              ▲
-  /health /v1/* /mcp                    │ flash/fw · get/map · get/perf│
-        ▲                               │ enable/disable/xdp           │
+cd xpost-agent                        ./xpost-test                   formal.*
+cargo run --release --                  │                              ▲
+  --bind 0.0.0.0:9240                    │ flash/fw · get/map · get/perf│
+  /health /v1/* /mcp                    │ enable/disable/xdp           │
+        ▲                               │                              │
         └──────── HTTP [agent] ─────────┘                              │
                     RAW UDP stim (test-owned) ──► DUT ──► get/perf ────┘
 ```
 
-1. Mac: `cargo xtask agent --listen 0.0.0.0:9240 --no-monitor`
+1. Mac: `cd xpost-agent && cargo run --release -- --bind 0.0.0.0:9240`
 2. Edit `config/default.toml` `run = ["just_drop"]` and/or `["just_tx"]` /
    `["firewall"]` / `["dev"]` / `["formal-clear"]` (steps fixed in Rust).
 3. Rebuild → scp → on TR3000: `./xpost-test`
