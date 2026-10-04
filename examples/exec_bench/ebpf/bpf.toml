@@ -1,0 +1,6 @@
+# No maps — pure compute workloads for ext::exec_call benchmarks.
+# Used by xpost-compact-elf / examples/exec_bench/ebpf/build.sh.
+
+source = "exec_bench.c"
+
+[maps]

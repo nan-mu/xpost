@@ -1,0 +1,41 @@
+[workspace]
+
+[package]
+edition      = "2024"
+name         = "exec_bench_hal"
+rust-version = "1.88"
+version      = "0.1.0"
+
+[[bin]]
+name = "exec_bench_hal"
+path = "./src/bin/main.rs"
+
+[package.metadata.espflash]
+partition_table = "partitions.csv"
+
+[dependencies]
+esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
+esp-rtos = { version = "0.3.0", features = [
+  "embassy",
+  "esp-alloc",
+  "esp32c3",
+  "log-04",
+] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c3", "log-04"] }
+log = "0.4.27"
+esp-alloc = "0.10.0"
+esp-println = { version = "0.17.0", features = ["esp32c3", "log-04"] }
+embassy-executor = { version = "0.10.0", features = ["log"] }
+embassy-time = { version = "0.5.0", features = ["log"] }
+critical-section = "1.2.0"
+xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
+exec_bench_common = { path = "../exec_bench_common" }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug         = 2
+lto           = "fat"
+opt-level     = "s"

@@ -117,3 +117,71 @@ name = "firewall"
 fw = "firewall-cag"
 artifact = "../build/firewall/firewall.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall", "-c", "firewall"] }
+
+# ---------------------------------------------------------------------------
+# exec_bench — function-call eBPF (exec ingress; map input/output; cagt)
+# Per-workload [[xdp]] names share one cold image for now.
+# ---------------------------------------------------------------------------
+
+[[fw]]
+name = "exec-bench-ebpf"
+target = "esp32c3"
+partition_table = "examples/exec_bench/partitions.csv"
+artifact = "examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench"
+build = { cwd = "examples/exec_bench", command = ["cargo", "build", "--release"] }
+xdp = ["incr"]
+
+[[xdp]]
+name = "incr"
+fw = "exec-bench-ebpf"
+artifact = "examples/exec_bench/exec_bench.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+
+[[xdp]]
+name = "square"
+fw = "exec-bench-ebpf"
+artifact = "examples/exec_bench/exec_bench.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+
+[[xdp]]
+name = "bitswap"
+fw = "exec-bench-ebpf"
+artifact = "examples/exec_bench/exec_bench.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+
+[[xdp]]
+name = "fib"
+fw = "exec-bench-ebpf"
+artifact = "examples/exec_bench/exec_bench.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+
+[[xdp]]
+name = "buf"
+fw = "exec-bench-ebpf"
+artifact = "examples/exec_bench/exec_bench.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+
+[[xdp]]
+name = "memcpy"
+fw = "exec-bench-ebpf"
+artifact = "examples/exec_bench/exec_bench.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+
+[[xdp]]
+name = "fletcher32"
+fw = "exec-bench-ebpf"
+artifact = "examples/exec_bench/exec_bench.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+
+[[xdp]]
+name = "bsort"
+fw = "exec-bench-ebpf"
+artifact = "examples/exec_bench/exec_bench.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+
+[[fw]]
+name = "exec-bench-hal"
+target = "esp32c3"
+partition_table = "examples/exec_bench_hal/partitions.csv"
+artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal"
+build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build", "--release"] }
