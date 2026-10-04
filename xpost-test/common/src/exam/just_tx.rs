@@ -253,8 +253,9 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         ui.end_round();
     }
 
-    // Trace arm: one packet.
-    {
+    // Trace arm (XDP): skip when `arms` is HAL-only.
+    let want_xdp_t = arms.iter().any(|a| matches!(a, Firmware::XdpCag));
+    if want_xdp_t {
         ui.begin_round();
         ui.set_eta(&eta.fmt());
         let fw = Firmware::XdpT;

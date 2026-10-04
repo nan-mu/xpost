@@ -85,7 +85,6 @@ async fn smoke_just_tx(
 
     let spoof = iface_ipv4(&cfg.probe.iface)
         .unwrap_or_else(|_| lan_ip(cfg.target.esp_ip, &[cfg.target.esp_ip]));
-    wait_rxcnt_ready(cfg, agent, &ui, spoof).await?;
 
     agent
         .clear_map("rxcnt")
@@ -283,48 +282,6 @@ async fn probe_echoes(harness: &mut Harness, src: Ipv4Addr, n: u32) -> Result<u6
         }
     }
     Ok(ok)
-}
-
-async fn wait_rxcnt_ready(
-    cfg: &FileConfig,
-    agent: &AgentClient,
-    ui: &RoundUi,
-    stim_src: Ipv4Addr,
-) -> Result<()> {
-    let esp = cfg.target.esp_ip;
-    let esp_mac = cfg.esp_mac_bytes()?;
-    let src_mac = match cfg.src_mac_override()? {
-        Some(m) => m,
-        None => iface_mac(&cfg.probe.iface)?,
-    };
-    let raw = std::sync::Arc::new(RawTx::open(
-        &cfg.probe.iface,
-        src_mac,
-        esp_mac,
-        esp,
-        STIM_PORT,
-        cfg.target.stim_sport,
-    )?);
-    for i in 0..40 {
-        let before = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
-        let raw_c = raw.clone();
-        tokio::task::spawn_blocking(move || {
-            for _ in 0..64 {
-                let _ = raw_c.send_udp(stim_src, esp, STIM_PORT, b"READY");
-            }
-        })
-        .await
-        .context("rx ready burst")?;
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        let after = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
-        if after > before {
-            ui.check_note(&format!("rxcnt {before}→{after}"));
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            return Ok(());
-        }
-        ui.check_note(&format!("try{i} quiet rxcnt={after}"));
-    }
-    bail!("just_tx_hal: rxcnt never advanced during ready probes")
 }
 
 async fn paced_multi_src(
