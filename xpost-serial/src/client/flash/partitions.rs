@@ -49,3 +49,32 @@ fn load_partition_table(path: &Path) -> io::Result<PartitionTable> {
     PartitionTable::try_from_str(text)
         .map_err(|e| std::io::Error::other(format!("partition table {}: {e}", path.display())))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn xdp_row_uses_custom_type_not_data_subtype() {
+        // `data, 0x40` panics inside esp-idf-part (unknown DataType). Custom type 0x40 is required.
+        let dir = std::env::temp_dir().join(format!("xpost-part-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("partitions.csv");
+        let mut f = fs::File::create(&path).unwrap();
+        write!(
+            f,
+            "# Name, Type, SubType, Offset, Size, Flags\n\
+             nvs, data, nvs, 0x9000, 0x6000,\n\
+             phy_init, data, phy, 0xf000, 0x1000,\n\
+             factory, app, factory, 0x10000, 0x300000,\n\
+             xdp, 0x40, 0x00, 0x310000, 0x10000,\n"
+        )
+        .unwrap();
+        let table = xdp_table_from_csv(&path, "xdp").unwrap();
+        assert_eq!(table.base, 0x310000);
+        assert_eq!(table.len, 0x10000);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
