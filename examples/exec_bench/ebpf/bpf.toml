@@ -1,6 +1,29 @@
-# No maps — pure compute workloads for ext::exec_call benchmarks.
+# exec_bench — compute dispatcher + workload hash map (input/output keys).
 # Used by xpost-compact-elf / examples/exec_bench/ebpf/build.sh.
+#
+# Map value is capped at 32 bytes (Compact ELF V0 layout). App bridges larger
+# host blobs by truncating into this value; eBPF computes on the invoke buffer.
 
 source = "exec_bench.c"
 
-[maps]
+[maps.workload]
+map_type = "BPF_MAP_TYPE_HASH"
+max_entries = 2
+key_size = 1
+value_size = 32
+# Placeholder VMA: program does not relocate against this map; App uses MapRt
+# name "workload" created from Compact ELF metadata on lease.
+map_vma = 0x40381000
+key = """
+    u8 v
+"""
+value = """
+    u32 w0
+    u32 w1
+    u32 w2
+    u32 w3
+    u32 w4
+    u32 w5
+    u32 w6
+    u32 w7
+"""

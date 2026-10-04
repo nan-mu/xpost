@@ -15,14 +15,13 @@ use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use log::{error, info};
-use xpost::app_ctrl;
-use xpost::map::{HEAP_SIZE, MapRt};
+use xpost::app_ctrl::{self, AppMapError, AppXdpError};
+use xpost::map::{BPF_ANY, HEAP_SIZE, MapRt};
 use xpost::xdp::{ReportItem, Slot, XdpRt};
-use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
-use xpost_serial::server::reply::{write_error, write_ok};
-use xpost_serial::r#type::command::Command;
+use xpost_serial::reply::{MapError, OkReply, ServerError};
+use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
-use exec_bench_common::{self as bench, BUF_CAP, OPCODES};
+use exec_bench_common::BUF_CAP;
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -33,6 +32,12 @@ fn panic(panic_info: &core::panic::PanicInfo) -> ! {
 extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+/// Compact ELF V0 map value size for `workload` (see `ebpf/bpf.toml`).
+const WORKLOAD_VALUE_LEN: usize = 32;
+const MAP_NAME: &str = "workload";
+const KEY_INPUT: u8 = 0;
+const KEY_OUTPUT: u8 = 1;
 
 #[unsafe(link_section = ".bss")]
 static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
@@ -83,6 +88,12 @@ async fn main(spawner: Spawner) -> ! {
         .filter(|i| matches!(i, ReportItem::Xdp(_)))
         .count();
     info!("xdp init images={n_images}");
+    for item in &report {
+        match item {
+            ReportItem::Xdp(name) => info!("report xdp {name}"),
+            ReportItem::Map(ty, name) => info!("report map {ty:?} {name}"),
+        }
+    }
     if n_images > 0 {
         match rt.switch(0, 0, Some(&maps)) {
             Ok(()) => match rt.lease(Some(&mut maps)) {
@@ -92,7 +103,7 @@ async fn main(spawner: Spawner) -> ! {
             Err(e) => error!("xdp switch failed: {e:?}"),
         }
     } else {
-        error!("xdp cold empty — flash exec_bench.elf into the xdp partition");
+        error!("xdp cold empty — flash a workload xdp into the xdp partition");
     }
     drop(rt);
     drop(maps);
@@ -104,223 +115,160 @@ async fn main(spawner: Spawner) -> ! {
     }
 }
 
-/// App serial: frozen verbs via `Command` + experiment-local `bench …` lines.
-///
-/// `bench *` is **not** in the frozen App wire; agent `/v1/run` cannot send it.
-/// Use raw UART (monitor) or a future wire extension. See `HOST_DESIGN.md`.
-#[embassy_executor::task]
-async fn control_serial(
-    mut rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
-) {
-    let mut write = |bytes: &[u8]| -> Result<(), Infallible> {
-        esp_println::Printer::write_bytes(bytes);
-        Ok(())
-    };
-    let _ = write_ok(&OkReply::Init, &mut write);
-
-    let mut line = [0u8; 128];
-    let mut used = 0usize;
-    let mut overflow = false;
-    loop {
-        let mut idle = true;
-        for _ in 0..64 {
-            let Ok(byte) = rx.read_byte() else {
-                break;
-            };
-            idle = false;
-            if byte == b'\n' || byte == b'\r' {
-                if overflow {
-                    let _ = write(b"ERR line-too-long\n");
-                    used = 0;
-                    overflow = false;
-                } else if used != 0 {
-                    dispatch_line(&line[..used], &mut write);
-                    used = 0;
+serial_task! {
+    fn control_serial(
+        rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+    ) {
+        let mut rx = rx;
+        SerialHandler::builder(
+            move || match rx.read_byte() {
+                Ok(b) => Some(b),
+                Err(_) => None,
+            },
+            |bytes| {
+                esp_println::Printer::write_bytes(bytes);
+                Ok::<(), Infallible>(())
+            },
+            [0u8; 128],
+        )
+        .on_ping(|reply: ReplyWriter<'_>| reply.ok(OkReply::Ping))
+        .on_enable_xdp(|reply: ReplyWriter<'_>| match app_ctrl::enable_xdp() {
+            Ok(()) => reply.ok(OkReply::EnableXdp),
+            Err(e) => reply_xdp_err(reply, e),
+        })
+        .on_disable_xdp(|reply: ReplyWriter<'_>| match app_ctrl::disable_xdp() {
+            Ok(()) => reply.ok(OkReply::DisableXdp),
+            Err(e) => reply_xdp_err(reply, e),
+        })
+        .on_enable_exec(|reply: ReplyWriter<'_>| match run_exec() {
+            Ok(()) => reply.ok(OkReply::EnableExec),
+            Err(e) => reply_map_err(reply, e),
+        })
+        .on_disable_exec(|reply: ReplyWriter<'_>| match app_ctrl::disable_xdp() {
+            // Exec shares the leased image; disable releases the lease.
+            Ok(()) => reply.ok(OkReply::DisableExec),
+            Err(e) => reply_xdp_err(reply, e),
+        })
+        .on_clear_map(|name: &str, reply: ReplyWriter<'_>| match app_ctrl::clear_map(name) {
+            Ok(()) => reply.ok(OkReply::ClearMap),
+            Err(e) => reply_map_err(reply, e),
+        })
+        .on_get_map(|name: &str, reply: ReplyWriter<'_>| match app_ctrl::lock_map(name) {
+            Ok((maps, idx)) => match maps.map_blob_len(idx) {
+                Ok(len) => reply.get_map(len, |write| {
+                    let _ = maps.write_map_blob(idx, |chunk| {
+                        let _ = write(chunk);
+                    });
+                }),
+                Err(e) => reply_map_err(reply, e.into()),
+            },
+            Err(e) => reply_map_err(reply, e),
+        })
+        .on_update_map(
+            |name: &str, key: &[u8], value: &[u8], reply: ReplyWriter<'_>| {
+                match update_workload_or_default(name, key, value) {
+                    Ok(()) => reply.ok(OkReply::UpdateMap),
+                    Err(e) => reply_map_err(reply, e),
                 }
-            } else if !overflow {
-                if let Some(slot) = line.get_mut(used) {
-                    *slot = byte;
-                    used += 1;
-                } else {
-                    overflow = true;
-                }
-            }
-        }
-        Timer::after(Duration::from_millis(if idle { 10 } else { 1 })).await;
+            },
+        )
+        .on_clear_perf(|reply: ReplyWriter<'_>| {
+            xpost::ext::perf::clear_perf();
+            reply.ok(OkReply::ClearPerf);
+        })
+        .on_get_perf(|reply: ReplyWriter<'_>| {
+            let n = xpost::ext::perf::report_payload_len();
+            reply.get_perf(n, |write| {
+                xpost::ext::perf::report_perf(write);
+            });
+        })
+        .build()
     }
 }
 
-fn looks_like_bench(line: &[u8]) -> bool {
-    let Ok(s) = core::str::from_utf8(line) else {
-        return false;
-    };
-    let s = s.trim();
-    s.eq_ignore_ascii_case("bench list") || {
-        let lower = s.as_bytes();
-        lower.len() >= 6
-            && lower[..5].eq_ignore_ascii_case(b"bench")
-            && lower[5] == b' '
+fn reply_map_err(reply: ReplyWriter<'_>, e: AppMapError) {
+    match e {
+        AppMapError::Busy => reply.error(&ServerError::Busy),
+        AppMapError::NoRt | AppMapError::Logic => reply.error(&ServerError::Logic),
+        AppMapError::NameNotFound => reply.error(&MapError::NameNotFound),
+        AppMapError::InvalidName => reply.error(&MapError::InvalidName),
+        AppMapError::InvalidKey => reply.error(&MapError::InvalidKey),
+        AppMapError::InvalidValue => reply.error(&MapError::InvalidValue),
+        AppMapError::Full => reply.error(&MapError::Full),
+        AppMapError::Unsupported => reply.error(&MapError::Unsupported),
     }
 }
 
-fn dispatch_line(line: &[u8], write: &mut impl FnMut(&[u8]) -> Result<(), Infallible>) {
-    if looks_like_bench(line) {
-        handle_bench(line, write);
-        return;
-    }
-    match Command::try_from(line) {
-        Ok(Command::Ping) => {
-            let _ = write_ok(&OkReply::Ping, write);
-        }
-        Ok(Command::EnableXdp) => match app_ctrl::enable_xdp() {
-            Ok(()) => {
-                let _ = write_ok(&OkReply::EnableXdp, write);
-            }
-            Err(_) => {
-                let _ = write_error(&ServerError::Logic, write);
-            }
-        },
-        Ok(Command::DisableXdp) => match app_ctrl::disable_xdp() {
-            Ok(()) => {
-                let _ = write_ok(&OkReply::DisableXdp, write);
-            }
-            Err(_) => {
-                let _ = write_error(&ServerError::Logic, write);
-            }
-        },
-        Ok(Command::ClearMap { .. } | Command::GetMap { .. } | Command::UpdateMap { .. }) => {
-            let _ = write_error(&MapError::NameNotFound, write);
-        }
-        Ok(Command::ClearPerf | Command::GetPerf) => {
-            let _ = write_error(&PerfError::Unavailable, write);
-        }
-        Ok(Command::GetInit) => {
-            let _ = write_error(&ServerError::Unknown, write);
-        }
-        Err(e) => {
-            let _ = write_error(&e, write);
-        }
+fn reply_xdp_err(reply: ReplyWriter<'_>, e: AppXdpError) {
+    match e {
+        AppXdpError::Busy => reply.error(&ServerError::Busy),
+        AppXdpError::NoRt | AppXdpError::Logic => reply.error(&ServerError::Logic),
     }
 }
 
-fn handle_bench(line: &[u8], write: &mut impl FnMut(&[u8]) -> Result<(), Infallible>) {
-    let Ok(text) = core::str::from_utf8(line) else {
-        let _ = write(b"ERR unknown\n");
-        return;
-    };
-    let text = text.trim();
-    if text.eq_ignore_ascii_case("bench list") {
-        for (name, op) in OPCODES {
-            let _ = write_fmt(write, *name, *op);
-        }
-        let _ = write(b"OK bench list end\n");
-        return;
+fn parse_key01(key: &[u8]) -> Option<u8> {
+    match key {
+        b"0" => Some(KEY_INPUT),
+        b"1" => Some(KEY_OUTPUT),
+        [b] if *b == KEY_INPUT || *b == KEY_OUTPUT => Some(*b),
+        _ => None,
     }
-    if let Some(rest) = text.strip_prefix("bench run ") {
-        let mut parts = rest.split_whitespace();
-        let (Some(op_name), Some(iters_s)) = (parts.next(), parts.next()) else {
-            let _ = write(b"ERR bench run <op> <iters>\n");
-            return;
-        };
-        let Some(op) = bench::parse_opcode(op_name) else {
-            let _ = write(b"ERR unknown opcode\n");
-            return;
-        };
-        let Ok(iters) = iters_s.parse::<u32>() else {
-            let _ = write(b"ERR bad iters\n");
-            return;
-        };
-        if iters == 0 {
-            let _ = write(b"ERR iters must be > 0\n");
-            return;
-        }
-        let buf: &mut [u8; BUF_CAP] = unsafe { &mut *addr_of_mut!(BENCH_BUF) };
-        let (cycles, us, ok) = bench::time_loop(buf, op, iters, |b| {
-            let (act, _) = xpost::ext::exec_call::invoke(b);
-            if act == xpost_type::XdpAction::Aborted {
-                Err(bench::BenchError::Aborted)
-            } else {
-                Ok(())
-            }
-        });
-        let name = bench::opcode_name(op).unwrap_or("?");
-        write_bench_result(write, name, iters, cycles, us, ok);
-        return;
-    }
-    if let Some(rest) = text.strip_prefix("bench verify ") {
-        let Some(op) = bench::parse_opcode(rest.trim()) else {
-            let _ = write(b"ERR unknown opcode\n");
-            return;
-        };
-        let buf: &mut [u8; BUF_CAP] = unsafe { &mut *addr_of_mut!(BENCH_BUF) };
-        let ok = bench::prepare(buf, op).is_ok()
-            && {
-                let (act, _) = xpost::ext::exec_call::invoke(buf);
-                act != xpost_type::XdpAction::Aborted
-            }
-            && bench::verify(buf);
-        let name = bench::opcode_name(op).unwrap_or("?");
-        let _ = write(b"OK bench verify ");
-        let _ = write(name.as_bytes());
-        let _ = write(if ok { b" ok=1\n" } else { b" ok=0\n" });
-        return;
-    }
-    let _ = write(b"ERR unknown cmd\n");
 }
 
-fn write_fmt(write: &mut impl FnMut(&[u8]) -> Result<(), Infallible>, name: &str, op: u32) {
-    let _ = write(b"OK bench list ");
-    let _ = write(name.as_bytes());
-    let _ = write(b" ");
-    let mut buf = [0u8; 20];
-    let _ = write(u32_dec(op, &mut buf));
-    let _ = write(b"\n");
+/// `workload` accepts raw value tokens (padded/truncated to 32 bytes) with key
+/// `0`/`1`. Other maps fall back to [`app_ctrl::update_map`].
+fn update_workload_or_default(name: &str, key: &[u8], value: &[u8]) -> Result<(), AppMapError> {
+    if name != MAP_NAME {
+        return app_ctrl::update_map(name, key, value);
+    }
+    let slot = parse_key01(key).ok_or(AppMapError::InvalidKey)?;
+    let (mut maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
+    let vs = maps.hash_value_size(idx)?;
+    if vs != WORKLOAD_VALUE_LEN {
+        return Err(AppMapError::Unsupported);
+    }
+    let mut val = [0u8; WORKLOAD_VALUE_LEN];
+    let n = value.len().min(WORKLOAD_VALUE_LEN);
+    val[..n].copy_from_slice(&value[..n]);
+    maps.hash_update(idx, &[slot], &val, BPF_ANY)
+        .map_err(AppMapError::from)
 }
 
-fn write_bench_result(
-    write: &mut impl FnMut(&[u8]) -> Result<(), Infallible>,
-    name: &str,
-    iters: u32,
-    cycles: u64,
-    us: u64,
-    ok: bool,
-) {
-    let _ = write(b"OK bench op=");
-    let _ = write(name.as_bytes());
-    let _ = write(b" iters=");
-    let mut b = [0u8; 20];
-    let _ = write(u32_dec(iters, &mut b));
-    let _ = write(b" cycles=");
-    let _ = write(u64_dec(cycles, &mut b));
-    let _ = write(b" us=");
-    let _ = write(u64_dec(us, &mut b));
-    let _ = write(if ok { b" ok=1\n" } else { b" ok=0\n" });
-}
+fn run_exec() -> Result<(), AppMapError> {
+    // Ensure the compute image is leased before invoke.
+    app_ctrl::enable_xdp().map_err(|e| match e {
+        AppXdpError::Busy => AppMapError::Busy,
+        AppXdpError::NoRt => AppMapError::NoRt,
+        AppXdpError::Logic => AppMapError::Logic,
+    })?;
 
-fn u32_dec(mut n: u32, buf: &mut [u8; 20]) -> &[u8] {
-    if n == 0 {
-        buf[0] = b'0';
-        return &buf[..1];
-    }
-    let mut i = buf.len();
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    &buf[i..]
-}
+    let buf: &mut [u8; BUF_CAP] = unsafe { &mut *addr_of_mut!(BENCH_BUF) };
+    buf.fill(0);
 
-fn u64_dec(mut n: u64, buf: &mut [u8; 20]) -> &[u8] {
-    if n == 0 {
-        buf[0] = b'0';
-        return &buf[..1];
+    {
+        let (maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
+        let mut tmp = [0u8; WORKLOAD_VALUE_LEN];
+        let n = maps
+            .hash_lookup(idx, &[KEY_INPUT], &mut tmp)
+            .map_err(|e| match e {
+                xpost::map::MapUseError::NotFound => AppMapError::InvalidKey,
+                other => AppMapError::from(other),
+            })?;
+        let copy = n.min(BUF_CAP).min(WORKLOAD_VALUE_LEN);
+        buf[..copy].copy_from_slice(&tmp[..copy]);
     }
-    let mut i = buf.len();
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
+
+    let (act, _) = xpost::ext::exec_call::invoke(buf);
+    if act == xpost_type::XdpAction::Aborted {
+        return Err(AppMapError::Logic);
     }
-    &buf[i..]
+
+    {
+        let (mut maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
+        let mut out = [0u8; WORKLOAD_VALUE_LEN];
+        out.copy_from_slice(&buf[..WORKLOAD_VALUE_LEN]);
+        maps.hash_update(idx, &[KEY_OUTPUT], &out, BPF_ANY)
+            .map_err(AppMapError::from)?;
+    }
+    Ok(())
 }

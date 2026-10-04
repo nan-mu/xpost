@@ -1,11 +1,12 @@
 # exec_bench (eBPF arm)
 
-Function-call eBPF execution benchmark using `xpost::ext::exec_call`.
+Function-call eBPF compute via `xpost::ext::exec_call` and App `enable exec`.
 
 - Cold image: `exec_bench.elf` (rebuild with `ebpf/build.sh`)
-- Workloads / UART protocol: shared with HAL via `../exec_bench_common`
-- App settle: unsolicited `OK init`; `bench …` is experiment-local (raw UART)
-- Host-side design: [`HOST_DESIGN.md`](HOST_DESIGN.md)
+- Map `workload`: input/output keys; value 32-byte blob
+- App: `SerialHandler` — `enable/disable exec`, map/perf (cagt), `OK init`
+- Completion: eBPF `bpf_printk` → UART `OK finish` (host `GetFinish`)
+- Host draft: [`HOST_DESIGN.md`](HOST_DESIGN.md), [`exec_bench.rs`](exec_bench.rs), [`exec_bench.sql`](exec_bench.sql)
 
 ```bash
 # from repo root (use host triple for xtask on non-Mac):
@@ -13,4 +14,5 @@ cargo run --manifest-path xtask/Cargo.toml --target "$(rustc -vV | sed -n 's/^ho
   exec_bench build --release
 ```
 
-Flash: agent `POST /v1/flash/fw {"name":"exec-bench-ebpf"}` (co-flashes `exec_bench` xdp).
+Flash: agent `POST /v1/flash/fw {"name":"exec-bench-ebpf"}` (co-flashes default xdp `incr`).
+Per-workload: `POST /v1/flash/xdp {"name":"square"}` (etc.; shared elf for now).

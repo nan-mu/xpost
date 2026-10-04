@@ -97,6 +97,8 @@ esp-hal = { version = "~1.1.0", default-features = false, features = [
   "esp32c3",
   "unstable",
 ] }
+# Used by bpf_printk to emit raw UART lines (e.g. `OK finish` for GetFinish).
+esp-println = { version = "0.17.0", default-features = false, features = ["esp32c3"] }
 esp-radio = { version = "0.18.0", path = "esp-radio", default-features = false, features = [
   "esp32c3",
   "unstable",

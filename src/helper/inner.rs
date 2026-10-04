@@ -231,6 +231,16 @@ pub(super) mod printk {
 
         let msg = zip_format(&tokens, args);
         log::info!("XDP: {}", msg);
+        // Also emit the formatted body as a raw UART line so host transcript
+        // waits (e.g. GetFinish → `OK finish`) can observe eBPF printk without
+        // depending on log level / `XDP:` prefixes.
+        {
+            use core::fmt::Write as _;
+            let mut line: String<288> = String::new();
+            let _ = write!(line, "{msg}");
+            esp_println::Printer::write_bytes(line.as_bytes());
+            esp_println::Printer::write_bytes(b"\n");
+        }
         Ok(())
     }
 

@@ -1,94 +1,48 @@
-# exec_bench — host-side design draft (no code in this phase)
+# exec_bench — host-side design draft
 
-Firmware is implemented (`ext::exec_call`, `examples/exec_bench`, `examples/exec_bench_hal`).
-This note records evaluations and the future `xpost-test` wiring **without modifying**
-`xpost-test/**` or `xpost-agent/**` beyond `profiles.toml` fw/xdp entries.
+Firmware uses `ext::exec_call` + `SerialHandler` (`enable/disable exec`, map
+`workload`). Host draft artifacts live in this directory; **do not** wire
+`xpost-test/**` yet.
 
-Baseline: config-only `xpost-test` + frozen agent HTTP (`/v1/flash/fw|xdp`, `/v1/run`).
+## Draft artifacts
 
-## 1. `ext::perf` — evaluation
+| File | Role |
+|------|------|
+| [`exec_bench.rs`](exec_bench.rs) | just_*–style module rustdoc (pipeline + fields); no harness |
+| [`exec_bench.sql`](exec_bench.sql) | `exec_bench_config` (incl. `input BYTEA`) / `exec_bench_data` |
 
-| Need | Verdict |
-|------|---------|
-| µs aggregates (`xdp_execution`) | Too coarse for short ALU ops; brackets live on esp-radio RX |
-| CPU cycles | **Missing** (PERFST host codec only; no DUT) |
-| HAL-comparable `execution` | just_* HAL measures inactive Pass, not app compute |
-| Wi-Fi-free | `perf-*` → `esp-radio/xdp-observe` |
+## Pipeline (xdp/exec only; no HAL)
 
-**Chosen for firmware:** RV32 `mcycle` + UART text
-`OK bench op=… iters=… cycles=… us=… ok=…`. Do not build Table-1 on `xdp_agg.execution`.
-
-## 2. `xpost-agent` — evaluation / draft
-
-| Capability | Enough? |
-|------------|---------|
-| `POST /v1/flash/fw` (`exec-bench-ebpf` / `exec-bench-hal`) | Yes (`[[fw]]`) |
-| `POST /v1/flash/xdp` (`exec_bench`) | Yes (`[[xdp]]`) |
-| Settle on unsolicited `OK init` | Yes |
-| `POST /v1/run {"cmd":"ping"}` | Yes |
-| `POST /v1/run` for `bench run …` | **No** — frozen `Command` has no bench verb |
-
-**Draft:** no new HTTP routes in this phase. Agent flash + settle works.
-Bench results are driven over **raw App UART** (monitor / future wire extension).
-Optional later: extend `xpost-serial` `Command` + agent `/v1/run` with `bench run|list|verify`.
-
-## 3. `xpost-test` — schema + pipeline draft (do not implement yet)
-
-### Why not reuse just_*
-
-- just_* assume RAW UDP / TC / binary `get perf`.
-- exec_bench is Wi-Fi-free; primary metric is text `OK bench …`.
-- Extension pattern: TOML + `dispatch` + `sql/*.sql` + `bench/*.rs` only.
-
-### Future DDL (`sql/exec_bench.sql`)
-
-```sql
-CREATE TABLE exec_bench_config (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  exam_id UUID NOT NULL REFERENCES exam(id) ON DELETE CASCADE,
-  firmware TEXT NOT NULL CHECK (firmware IN ('ebpf', 'hal')),
-  workload TEXT NOT NULL,
-  iterations BIGINT NOT NULL,
-  repeats INT NOT NULL,
-  started_at TIMESTAMPTZ NOT NULL,
-  stopped_at TIMESTAMPTZ
-);
-
-CREATE TABLE exec_bench_data (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  exam_id UUID NOT NULL REFERENCES exam(id) ON DELETE CASCADE,
-  config_id UUID NOT NULL REFERENCES exec_bench_config(id) ON DELETE CASCADE,
-  rep INT NOT NULL,
-  cycles BIGINT NOT NULL,
-  us BIGINT NOT NULL,
-  ok BOOLEAN NOT NULL,
-  UNIQUE (config_id, rep)
-);
+```text
+exec_bench:
+  agent flash fw fw
+  for workload in {incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort}:
+    agent flash xdp workload
+    agent clear perf
+    agent update map workload
+    agent enable exec
+    agent get finish
+    agent disable exec
+    agent get perf
+    agent get map
+    upload to db
 ```
 
-Use independent `firmware TEXT` (`ebpf`|`hal`); do not extend the just_* `firmware` enum.
+## Contracts
 
-### Future pipeline (`bench/exec_bench.rs`)
+- Profiles: `[[fw]] exec-bench-ebpf` + per-workload `[[xdp]]` in repo
+  [`profiles.toml`](../../profiles.toml) (shared `exec_bench.elf` for now)
+- `enable/disable exec` / `GetFinish` are `xpost-serial` verbs; agent mirrors
+  them (`/v1/enable/exec`, `/v1/disable/exec`, `/v1/get/finish`)
+- **`OK finish`**: emitted by eBPF `bpf_printk` onto UART — **not** by
+  `SerialHandler` / `write_ok(Finish)`
+- Map `workload`: keys `0`=input / `1`=output; value 32-byte Compact ELF blob
+- Default perf kinds: **cagt** (counter, aggregate, gauge, trace)
+- Unsolicited `OK init` still comes from serial server start (settle)
+
+## Future xpost-test wiring (not this phase)
 
 1. `config/exec_bench.toml` + `FileConfig` + validate `"exec_bench"`
-2. `main.rs` `dispatch` branch
-3. Load `sql/exec_bench.sql` in `formal::ensure`
-4. Loop: `flash/fw` (+ xdp for ebpf) → wait `OK init` → send `bench run` (needs wire or raw UART helper) → INSERT
-5. Usage: `run = ["exec_bench"]` → rebuild → bare `./xpost-test`
-
-### Serial contract (on DUT today)
-
-Frozen App verbs: `ping`, `enable/disable xdp` (eBPF arm via `app_ctrl`; HAL → Unsupported),
-maps/perf → not found / unavailable.
-
-Experiment-local (raw UART, not `/v1/run`):
-
-```
-OK init
-bench list
-bench run <opcode> <iterations>
-→ OK bench op=<opcode> iters=<n> cycles=<u64> us=<u64> ok=1
-bench verify <opcode>
-```
-
-Opcodes: `incr` `square` `bitswap` `fib` `buf` `memcpy` `fletcher32` `bsort`.
+2. `dispatch` + load `sql/exec_bench.sql` in `formal::ensure`
+3. Loop as above via `AgentClient`
+4. `run = ["exec_bench"]` → rebuild → bare `./xpost-test`

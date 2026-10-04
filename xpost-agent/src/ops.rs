@@ -420,6 +420,31 @@ pub fn disable_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     })
 }
 
+pub fn enable_exec(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
+    with_log(peer, "EnableExec", "", false, state, || {
+        let g = lock(state)?;
+        req(&g, &Command::EnableExec)?;
+        Ok("OK enable exec".into())
+    })
+}
+
+pub fn disable_exec(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
+    with_log(peer, "DisableExec", "", false, state, || {
+        let g = lock(state)?;
+        req(&g, &Command::DisableExec)?;
+        Ok("OK disable exec".into())
+    })
+}
+
+/// Host-only wait for unsolicited `OK finish` (eBPF printk), via [`Command::GetFinish`].
+pub fn get_finish(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
+    with_log(peer, "GetFinish", "", false, state, || {
+        let g = lock(state)?;
+        req(&g, &Command::GetFinish)?;
+        Ok("OK finish".into())
+    })
+}
+
 pub fn clear_map(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
@@ -666,6 +691,14 @@ pub fn run_cmd(state: &Mutex<AgentState>, cmd: &str, peer: &str) -> Result<Strin
                 req(&g, &Command::DisableXdp)?;
                 Ok("OK disable xdp".into())
             }
+            ParsedCmd::EnableExec => {
+                req(&g, &Command::EnableExec)?;
+                Ok("OK enable exec".into())
+            }
+            ParsedCmd::DisableExec => {
+                req(&g, &Command::DisableExec)?;
+                Ok("OK disable exec".into())
+            }
             ParsedCmd::ClearMap { name } => {
                 req(&g, &Command::ClearMap { name })?;
                 Ok("OK clear map".into())
@@ -705,6 +738,8 @@ enum ParsedCmd<'a> {
     Ping,
     EnableXdp,
     DisableXdp,
+    EnableExec,
+    DisableExec,
     ClearMap { name: &'a str },
     GetMap { name: &'a str },
     UpdateMap {
@@ -740,6 +775,18 @@ fn parse_app_command(line: &str) -> Result<ParsedCmd<'_>> {
             bail!("ERR bad-arity");
         }
         return Ok(ParsedCmd::DisableXdp);
+    }
+    if eq(verb, "enable") && eq(target, "exec") {
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::EnableExec);
+    }
+    if eq(verb, "disable") && eq(target, "exec") {
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::DisableExec);
     }
     if eq(verb, "clear") && eq(target, "perf") {
         if parts.next().is_some() {

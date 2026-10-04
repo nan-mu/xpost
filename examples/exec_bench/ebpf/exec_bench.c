@@ -1,20 +1,22 @@
 /*
  * exec_bench — XDP-ABI compute dispatcher for XPOST function-call benchmarks.
  *
- * Buffer layout (HAL twin must match):
+ * Buffer layout (HAL twin / map value must match):
  *   [0..4]  opcode  (LE u32)
  *   [4..8]  param   (LE u32; meaning depends on opcode)
- *   [8..]   payload / scratch
+ *   [8..]   payload / scratch (map value capped at 32 bytes in Compact ELF)
  *
- * Rebuild (host with clang + lld + xpost-compact-elf):
- *   ./examples/exec_bench/ebpf/build.sh
+ * Host pipeline: update map workload input → enable exec → invoke this image →
+ * bpf_printk "OK finish" on the UART transcript (GetFinish). Map I/O is bridged
+ * by the App (SerialHandler); this program computes on the invoke buffer.
  *
- * Entry is the first instruction of the packed image (slot 0x40380200).
+ * Rebuild: ./examples/exec_bench/ebpf/build.sh
  */
 
 typedef unsigned char u8;
 typedef unsigned int u32;
 typedef unsigned short u16;
+typedef unsigned long ulong;
 
 #ifndef NULL
 #define NULL ((void *)0)
@@ -45,6 +47,32 @@ struct xdp_md {
 	u32 rx_queue_index;
 	u32 egress_ifindex;
 };
+
+/* Fixed IRAM helper trampoline (see mem_map HELPER_DISPATCHER_BASE). */
+#define HELPER_ADDR 0x40380000UL
+#define BPF_FUNC_TRACE_PRINTK 6UL
+
+typedef ulong (*helper_fn)(ulong, ulong, ulong, ulong, ulong, ulong);
+
+static __attribute__((always_inline)) void bpf_printk_ok_finish(void)
+{
+	/* Format must live on the stack: packed image is .text.xdp only. */
+	char fmt[10];
+	fmt[0] = 'O';
+	fmt[1] = 'K';
+	fmt[2] = ' ';
+	fmt[3] = 'f';
+	fmt[4] = 'i';
+	fmt[5] = 'n';
+	fmt[6] = 'i';
+	fmt[7] = 's';
+	fmt[8] = 'h';
+	fmt[9] = '\0';
+	/* nargs=0 in top bits of fmt_len; size = strlen without NUL. */
+	ulong fmt_len = 9UL;
+	helper_fn helper = (helper_fn)HELPER_ADDR;
+	(void)helper(BPF_FUNC_TRACE_PRINTK, (ulong)fmt, fmt_len, 0, 0, 0);
+}
 
 static __attribute__((always_inline)) u32 load_u32(const u8 *p)
 {
@@ -118,9 +146,10 @@ int xdp_exec_bench(struct xdp_md *ctx)
 	u8 *end = (u8 *)ctx->data_end;
 	u32 opcode, param, avail;
 	u8 *payload;
+	int rc = XDP_ABORTED;
 
 	if (data + 8 > end)
-		return XDP_ABORTED;
+		goto out;
 
 	opcode = load_u32(data);
 	param = load_u32(data + 4);
@@ -131,68 +160,75 @@ int xdp_exec_bench(struct xdp_md *ctx)
 	case OP_INCR: {
 		u32 x;
 		if (avail < 4)
-			return XDP_ABORTED;
+			goto out;
 		x = load_u32(payload);
 		store_u32(payload, x + 1);
-		return XDP_PASS;
+		rc = XDP_PASS;
+		break;
 	}
 	case OP_SQUARE: {
 		u32 x;
 		if (avail < 4)
-			return XDP_ABORTED;
+			goto out;
 		x = load_u32(payload);
 		store_u32(payload, x * x);
-		return XDP_PASS;
+		rc = XDP_PASS;
+		break;
 	}
 	case OP_BITSWAP: {
 		u32 x;
 		if (avail < 4)
-			return XDP_ABORTED;
+			goto out;
 		x = load_u32(payload);
 		store_u32(payload, bitswap32(x));
-		return XDP_PASS;
+		rc = XDP_PASS;
+		break;
 	}
 	case OP_FIB: {
 		if (avail < 4)
-			return XDP_ABORTED;
+			goto out;
 		if (param > 47)
 			param = 47;
 		store_u32(payload, fib_u32(param));
-		return XDP_PASS;
+		rc = XDP_PASS;
+		break;
 	}
 	case OP_BUF: {
 		u32 i, acc = 0;
 		if (param > avail)
-			return XDP_ABORTED;
+			goto out;
 		for (i = 0; i < param; i++) {
 			payload[i] = (u8)(payload[i] + (u8)i);
 			acc += payload[i];
 		}
 		if (avail >= param + 4)
 			store_u32(payload + param, acc);
-		return XDP_PASS;
+		rc = XDP_PASS;
+		break;
 	}
 	case OP_MEMCPY: {
 		u32 i;
 		if (param == 0 || param > avail / 2)
-			return XDP_ABORTED;
+			goto out;
 		for (i = 0; i < param; i++)
 			payload[param + i] = payload[i];
-		return XDP_PASS;
+		rc = XDP_PASS;
+		break;
 	}
 	case OP_FLETCHER32: {
 		u32 sum;
 		if (param == 0 || param > avail || avail < param + 4)
-			return XDP_ABORTED;
+			goto out;
 		sum = fletcher32(payload, param);
 		store_u32(payload + param, sum);
-		return XDP_PASS;
+		rc = XDP_PASS;
+		break;
 	}
 	case OP_BSORT: {
 		u32 n = param;
 		u32 i, j;
 		if (n < 2 || n > 64 || avail < n * 4)
-			return XDP_ABORTED;
+			goto out;
 		for (i = 0; i < n - 1; i++) {
 			for (j = 0; j < n - 1 - i; j++) {
 				u32 a = load_u32(payload + j * 4);
@@ -203,9 +239,15 @@ int xdp_exec_bench(struct xdp_md *ctx)
 				}
 			}
 		}
-		return XDP_PASS;
+		rc = XDP_PASS;
+		break;
 	}
 	default:
-		return XDP_ABORTED;
+		goto out;
 	}
+
+out:
+	if (rc == XDP_PASS)
+		bpf_printk_ok_finish();
+	return rc;
 }

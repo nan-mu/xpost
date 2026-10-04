@@ -43,6 +43,9 @@
 //! | GET | `/v1/get/xdp` | — | list installed XDP images |
 //! | POST | `/v1/enable/xdp` | `{}` | App `EnableXdp` |
 //! | POST | `/v1/disable/xdp` | `{}` | App `DisableXdp` |
+//! | POST | `/v1/enable/exec` | `{}` | App `EnableExec` |
+//! | POST | `/v1/disable/exec` | `{}` | App `DisableExec` |
+//! | POST | `/v1/get/finish` | `{}` | host-only wait for `OK finish` |
 //! | POST | `/v1/clear/map/{map_name}` | `{}` | App `ClearMap` |
 //! | GET | `/v1/get/map/{map_name}` | — | App `GetMap` → **map JSON** |
 //! | POST | `/v1/update/map/{map_name}` | see below | App `UpdateMap` (single or batch) |
@@ -100,8 +103,9 @@
 //! ## MCP / CLI names (frozen)
 //!
 //! `flash_fw`, `flash_xdp`, `clear_xdp`, `get_xdp`, `enable_xdp`,
-//! `disable_xdp`, `clear_map`, `get_map`, `update_map`, `clear_perf`,
-//! `get_perf`, `get_serial`, `run`, `get_status` / `dut_status`. **No probe.**
+//! `disable_xdp`, `enable_exec`, `disable_exec`, `get_finish`, `clear_map`,
+//! `get_map`, `update_map`, `clear_perf`, `get_perf`, `get_serial`, `run`,
+//! `get_status` / `dut_status`. **No probe.**
 //!
 //! ## Serial mapping (current `xpost-serial`)
 //!
@@ -109,6 +113,8 @@
 //! |------|-------------|
 //! | `flash/fw`, `flash/xdp`, `clear/xdp`, `get/xdp` | `SerialHandler` flash / cold-table API |
 //! | `enable/xdp` / `disable/xdp` | `Command::EnableXdp` / `DisableXdp` |
+//! | `enable/exec` / `disable/exec` | `Command::EnableExec` / `DisableExec` |
+//! | `get/finish` | `Command::GetFinish` (host-only; eBPF `OK finish`) |
 //! | `clear/map/{name}` | `Command::ClearMap { name }` |
 //! | `get/map/{name}` | `Command::GetMap { name }` |
 //! | `update/map/{name}` | `Command::UpdateMap { name, key, value }` |
