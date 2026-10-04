@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 publish = false
-description = "Host agent exercising xpost-serial (program / list / request)"
+description = "Long-running HTTP/MCP daemon over xpost-serial (USB)"
 
 # Independent host workspace (parent defaults to RV32).
 [workspace]

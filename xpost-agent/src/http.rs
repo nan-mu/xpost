@@ -99,18 +99,17 @@ struct SerialBody {
     until_unix_ms: u64,
 }
 
-pub fn serve_http(addr: &str, port: Option<&Path>, log: &Path) -> Result<()> {
+pub fn serve_http(addr: &str, log_dir: &Path) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("tokio runtime")?;
-    rt.block_on(serve_async(addr, port, log))
+    rt.block_on(serve_async(addr, log_dir))
 }
 
-async fn serve_async(addr: &str, port: Option<&Path>, log: &Path) -> Result<()> {
-    let port_owned = port.map(|p| p.to_path_buf());
-    let log_owned = log.to_path_buf();
-    let shared = tokio::task::spawn_blocking(move || open(port_owned.as_deref(), &log_owned))
+async fn serve_async(addr: &str, log_dir: &Path) -> Result<()> {
+    let log_owned = log_dir.to_path_buf();
+    let shared = tokio::task::spawn_blocking(move || open(&log_owned))
         .await
         .context("join open session")?
         .context("open session")?;

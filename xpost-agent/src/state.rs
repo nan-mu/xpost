@@ -9,8 +9,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use xpost_serial::client::{Command, RequestTimeout};
-use xpost_serial::client::error::{Interrupted, ParseError};
+use xpost_serial::client::{Command, Interrupted, ParseError, RequestTimeout};
 use xpost_serial::reply::{ErrReply, MapError, PerfError, ServerError, SyntaxError};
 use xpost_serial::{Chip, FlashConfig, OpenOptions, SerialHandler};
 
@@ -147,21 +146,21 @@ pub struct AgentState {
 
 pub type SharedState = Arc<Mutex<AgentState>>;
 
-pub fn open(port: Option<&Path>, log: &Path) -> Result<SharedState> {
+pub fn open(log_dir: &Path) -> Result<SharedState> {
     let root = workspace_root();
     let partitions = root.join(DEFAULT_PARTITIONS);
     let flash = FlashConfig::from_partitions_csv(&partitions)
         .with_context(|| format!("FlashConfig from {}", partitions.display()))?;
 
     eprint_line(&format!(
-        "[{}] xpost-agent serial log {}",
+        "[{}] xpost-agent serial log_dir {}",
         ts(),
-        log.display()
+        log_dir.display()
     ));
     let handler = SerialHandler::open(OpenOptions {
-        port,
+        port: None,
         chip: Chip::Esp32c3,
-        log_path: log,
+        log_dir,
         tee_stdout: true,
         flash,
     })
@@ -202,31 +201,6 @@ pub fn open(port: Option<&Path>, log: &Path) -> Result<SharedState> {
         root,
         last_noisy_log: None,
     })))
-}
-
-/// Open a one-shot handler (CLI), including GetInit settle.
-pub fn open_handler(port: Option<&Path>, log: &Path) -> Result<SerialHandler> {
-    let root = workspace_root();
-    let partitions = root.join(DEFAULT_PARTITIONS);
-    let flash = FlashConfig::from_partitions_csv(&partitions)
-        .with_context(|| format!("FlashConfig from {}", partitions.display()))?;
-    eprint_line(&format!(
-        "[{}] xpost-agent serial log {}",
-        ts(),
-        log.display()
-    ));
-    let handler = SerialHandler::open(OpenOptions {
-        port,
-        chip: Chip::Esp32c3,
-        log_path: log,
-        tee_stdout: true,
-        flash,
-    })
-    .context("open SerialHandler")?;
-    handler
-        .request::<AgentError>(&Command::GetInit)
-        .map_err(|e| anyhow::anyhow!("GetInit: {e}"))?;
-    Ok(handler)
 }
 
 pub fn workspace_root() -> PathBuf {

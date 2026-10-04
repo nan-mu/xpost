@@ -1,4 +1,4 @@
-//! CLI front-end for [`xpost_serial`]. One-shot commands or a long-running HTTP/MCP server.
+//! Long-running HTTP/MCP daemon front-end for [`xpost_serial`].
 //!
 //! # HTTP / MCP control-plane contract (frozen)
 //!
@@ -9,7 +9,11 @@
 //! [`xpost_serial::reply::OkReply`] (current crate — plan’s older multiline
 //! `get map` text is superseded by header+blob; HTTP JSON below is unchanged).
 //!
-//! Listen: `cargo xtask agent --listen 0.0.0.0:9240 --no-monitor`  
+//! Run (daemon):
+//! ```text
+//! cargo run --release --manifest-path xpost-agent/Cargo.toml -- --bind 0.0.0.0:9240
+//! cargo xtask agent -- --bind 0.0.0.0:9240 --log-dir target/xpost-agent
+//! ```
 //! Same port: `/health` + `/v1/*` + Streamable HTTP `/mcp`. No auth/TLS.
 //! Long ops ~1200s. USB under `spawn_blocking` + `Mutex` on
 //! [`xpost_serial::SerialHandler`]. After open: one
@@ -131,147 +135,25 @@ mod util;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
-use xpost_serial::client::Command;
+use anyhow::Result;
+use clap::Parser;
 
-use crate::ops::oneshot;
-use crate::state::{open_handler, workspace_root};
-
-/// Default XDP ELF for flash xdp.
-const DEFAULT_XDP_ELF: &str = "examples/just_xdp/just_drop.elf";
-/// Default serial transcript path (tee to stdout).
-const DEFAULT_LOG: &str = "target/xpost-agent/serial.log";
+/// Default rotating serial transcript directory (passed to xpost-serial).
+const DEFAULT_LOG_DIR: &str = "target/xpost-agent";
 
 #[derive(Parser, Debug)]
-#[command(name = "xpost-agent", about = "Exercise xpost-serial against an ESP32-C3")]
+#[command(
+    name = "xpost-agent",
+    about = "Long-running HTTP/MCP daemon over xpost-serial (USB)"
+)]
 struct Cli {
-    /// Serial device (e.g. /dev/cu.usbmodem21101). Omit to auto-pick a unique USB port.
-    #[arg(long, global = true)]
-    port: Option<PathBuf>,
-
-    /// Append serial transcript here (also printed to stdout).
-    #[arg(long, global = true, default_value = DEFAULT_LOG)]
-    log: PathBuf,
-
-    /// Bind HTTP server (`/health`, `/v1/*`, `/mcp`). Mutually exclusive with subcommands.
+    /// Bind address for `/health`, `/v1/*`, and `/mcp`.
     #[arg(long)]
-    listen: Option<String>,
+    bind: String,
 
-    /// Accepted for fwctl compatibility (agent owns the USB session; no extra monitor).
-    #[arg(long, default_value_t = false)]
-    no_monitor: bool,
-
-    #[command(subcommand)]
-    cmd: Option<Cmd>,
-}
-
-#[derive(Subcommand, Debug)]
-enum Cmd {
-    /// Flash firmware and/or XDP cold-table images.
-    Flash {
-        #[command(subcommand)]
-        kind: FlashCmd,
-    },
-    /// Clear XDP cold table or a named map / perf.
-    Clear {
-        #[command(subcommand)]
-        kind: ClearCmd,
-    },
-    /// Get XDP list, map blob, perf blob, or serial window.
-    Get {
-        #[command(subcommand)]
-        kind: GetCmd,
-    },
-    /// Enable App XDP.
-    Enable {
-        #[command(subcommand)]
-        kind: EnableCmd,
-    },
-    /// Disable App XDP.
-    Disable {
-        #[command(subcommand)]
-        kind: DisableCmd,
-    },
-    /// Update a map entry.
-    Update {
-        #[command(subcommand)]
-        kind: UpdateCmd,
-    },
-    /// Debug: one App command line.
-    Run {
-        /// Command text without trailing newline.
-        cmd: String,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum FlashCmd {
-    /// Build + flash firmware profile (does not install xdp.elf).
-    Fw {
-        #[arg(long)]
-        profile_id: String,
-    },
-    /// Write XDP ELF into the cold table.
-    Xdp {
-        #[arg(long, default_value = DEFAULT_XDP_ELF)]
-        elf: PathBuf,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum ClearCmd {
-    /// Clear cold-table XDP image(s). `name=*` clears all.
-    Xdp {
-        #[arg(long)]
-        name: String,
-    },
-    /// App ClearMap.
-    Map {
-        map_name: String,
-    },
-    /// App ClearPerf.
-    Perf,
-}
-
-#[derive(Subcommand, Debug)]
-enum GetCmd {
-    /// List cold-table XDP images.
-    Xdp,
-    /// App GetMap → `OK get map <n> b64=…`.
-    Map {
-        map_name: String,
-    },
-    /// App GetPerf → `OK get perf <n> b64=…`.
-    Perf,
-    /// Transcript lines in a host unix-ms window.
-    Serial {
-        #[arg(long)]
-        since_unix_ms: u64,
-        #[arg(long)]
-        until_unix_ms: u64,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum EnableCmd {
-    Xdp,
-}
-
-#[derive(Subcommand, Debug)]
-enum DisableCmd {
-    Xdp,
-}
-
-#[derive(Subcommand, Debug)]
-enum UpdateCmd {
-    Map {
-        map_name: String,
-        #[arg(long)]
-        key: String,
-        #[arg(long)]
-        value: String,
-    },
+    /// Directory for rotating `serial.log` (xpost-serial transcript).
+    #[arg(long, default_value = DEFAULT_LOG_DIR)]
+    log_dir: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -286,79 +168,5 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let _ = cli.no_monitor;
-    if let Some(addr) = cli.listen.as_deref() {
-        if cli.cmd.is_some() {
-            bail!("--listen cannot be combined with a subcommand");
-        }
-        return http::serve_http(addr, cli.port.as_deref(), &cli.log);
-    }
-    let Some(cmd) = cli.cmd else {
-        bail!("subcommand required (or pass --listen ADDR)");
-    };
-
-    let handler = open_handler(cli.port.as_deref(), &cli.log)?;
-    let result = match cmd {
-        Cmd::Flash { kind } => match kind {
-            FlashCmd::Fw { profile_id } => {
-                let root = workspace_root();
-                oneshot::flash_fw_profile(&handler, &root, &profile_id)
-            }
-            FlashCmd::Xdp { elf } => oneshot::flash_xdp(&handler, &elf),
-        },
-        Cmd::Clear { kind } => match kind {
-            ClearCmd::Xdp { name } => {
-                let name = name.trim();
-                if name.is_empty() {
-                    bail!("missing --name");
-                }
-                let names = if name == "*" {
-                    Vec::new()
-                } else {
-                    vec![name.to_string()]
-                };
-                oneshot::clear_xdp(&handler, names)
-            }
-            ClearCmd::Map { map_name } => {
-                oneshot::app(&handler, &Command::ClearMap { name: &map_name })
-            }
-            ClearCmd::Perf => oneshot::app(&handler, &Command::ClearPerf),
-        },
-        Cmd::Get { kind } => match kind {
-            GetCmd::Xdp => oneshot::get_xdp(&handler),
-            GetCmd::Map { map_name } => {
-                oneshot::app(&handler, &Command::GetMap { name: &map_name })
-            }
-            GetCmd::Perf => oneshot::app(&handler, &Command::GetPerf),
-            GetCmd::Serial {
-                since_unix_ms,
-                until_unix_ms,
-            } => oneshot::get_serial(&handler, since_unix_ms, until_unix_ms),
-        },
-        Cmd::Enable { kind: EnableCmd::Xdp } => {
-            oneshot::app(&handler, &Command::EnableXdp)
-        }
-        Cmd::Disable {
-            kind: DisableCmd::Xdp,
-        } => oneshot::app(&handler, &Command::DisableXdp),
-        Cmd::Update {
-            kind: UpdateCmd::Map {
-                map_name,
-                key,
-                value,
-            },
-        } => oneshot::app(
-            &handler,
-            &Command::UpdateMap {
-                name: &map_name,
-                key: key.as_bytes(),
-                value: value.as_bytes(),
-            },
-        ),
-        Cmd::Run { cmd } => oneshot::run_line(&handler, &cmd),
-    };
-    let msg = result?;
-    println!("{msg}");
-    handler.shutdown();
-    Ok(())
+    http::serve_http(&cli.bind, &cli.log_dir)
 }

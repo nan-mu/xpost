@@ -18,7 +18,7 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
 - Root crate `xpost`: board-agnostic runtime (maps, helpers, IRAM slots, RX ingest).
 - `examples/<app>/`: self-contained MCU projects.
 - Host (workspace `exclude`, own Cargo workspace / triple): `xpost-serial`
-  (library), `xpost-agent` (CLI), `xpost-build`, `xtask`, `xpost-test`
+  (library), `xpost-agent` (daemon), `xpost-build`, `xtask`, `xpost-test`
   (experiment harness; same git tree, separate `Cargo.toml`).
 
 ## Host serial / agent / test
@@ -28,16 +28,15 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
   binary entry: bare `./xpost-test` (no CLI flags/subcommands). See rustdoc
   modules `overview` + `config`. Calls agent HTTP; does not hold the USB
   session while the agent is running.
-- **`xpost-agent/`**: CLI + `--listen` HTTP `/v1/*` and MCP `/mcp` on one port
-  (shared USB). Dispatch: `cargo xtask agent …`.
-  Map read: DUT `map dump <name>` (multi-line → `OK map end`); HTTP
-  `GET /v1/map/{name}` / MCP `map_dump`. Do not use legacy `rxcnt <key>`.
-- **`xpost-serial`**: library only — **API** for `Session` / `install_xdp` /
-  `program` / `request` / `request_report` / `Sink` (see that crate’s rustdoc).
+- **`xpost-agent/`**: long-running HTTP `/v1/*` + MCP `/mcp` daemon (shared USB).
+  Dispatch: `cargo xtask agent -- --bind 0.0.0.0:9240` (optional `--log-dir`).
+  Serial transcript is a rotating `serial.log` under `--log-dir` (xpost-serial).
+- **`xpost-serial`**: library only — host `SerialHandler` + App `Command` /
+  `OkReply` + flash cold-table API (see that crate’s rustdoc).
   Cold install is **by XDP name**; do not pass raw cold addresses on the normal
   path. Perf metrics live in `xpost::ext::perf`; DUT serial read face is
-  `report` (binary, length → feature mask) + `perf clear` (agent:
-  `/v1/perf_clear`). Formal decodes the report and writes exam-scoped tables
+  `get perf` (binary blob) + `clear perf` (agent: `/v1/get/perf`,
+  `/v1/clear/perf`). Formal decodes the report and writes exam-scoped tables
   (`sql/formal.sql`: `exam` + `just_*_config/data` + `xdp_*`/`hal_*` +
   `trace_event`) — no `report_raw`. Open-run never DROP/TRUNCATE; explicit
   wipe is `run = ["formal-clear"]` in `config/default.toml` then rebuild
@@ -49,17 +48,17 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
   `/tmp/xpost-dev-flame.report` → Mac `target/dev-flame.report`. High-pps
   formal uses Counter/Aggregate/Gauge (no Trace flood). HAL app-category
   ring slots are reserved empty.
-- **`--port`**: optional. Omit → unique USB serial; zero or many → require
-  `--port`.
 
 ## Commands
 
-Mac（USB 接 ESP；cwd = `xpost/`）：只需常驻 agent。收到 `FlashProfile` 时按 `profiles.toml` 的 `build` 编译再烧录。
+Mac（USB 接 ESP；cwd = `xpost/`）：只需常驻 agent。收到 `flash/fw` 时按 `profiles.toml` 的 `build` 编译再烧录。
 
 HTTP：`/health`、`/v1/*`（harness）、`/mcp`（Cursor Streamable HTTP MCP）。
 
 ```bash
-cargo xtask agent --listen 0.0.0.0:9240 --no-monitor
+cargo xtask agent -- --bind 0.0.0.0:9240
+# or:
+cargo run --release --manifest-path xpost-agent/Cargo.toml -- --bind 0.0.0.0:9240
 ```
 
 Cursor MCP 示例 URL：`http://127.0.0.1:9240/mcp`。
