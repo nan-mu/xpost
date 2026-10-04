@@ -1,7 +1,5 @@
 //! Firmware / ENUM name mapping (wire → SQL).
 
-use anyhow::{Result, bail};
-
 /// DB `firmware` enum — pipeline tag, not a Cargo feature name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Firmware {
@@ -98,11 +96,3 @@ pub const HAL_COUNTER_NAMES: &[&str] = &[
     "tx_completed",
 ];
 
-pub fn parse_firmware(s: &str) -> Result<Firmware> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "xdp_cag" | "xdp-cag" | "cag" => Ok(Firmware::XdpCag),
-        "xdp_t" | "xdp-t" | "t" => Ok(Firmware::XdpT),
-        "hal" => Ok(Firmware::Hal),
-        other => bail!("firmware must be xdp_cag|xdp_t|hal, got {other}"),
-    }
-}

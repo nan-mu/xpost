@@ -11,10 +11,7 @@ use libc::{
     AF_PACKET, ETH_P_ALL, ETH_P_IP, IFNAMSIZ, SOCK_RAW, bind as libc_bind, sockaddr_ll, socket,
 };
 use log::debug;
-use rand::Rng;
 use common::{MAGIC_STIM, PAYLOAD_HDR_LEN};
-
-pub const WIRE_FRAME_BYTES: usize = 64;
 
 pub struct RawTx {
     fd: OwnedFd,
@@ -122,31 +119,6 @@ impl RawTx {
             frame.len()
         );
         Ok(())
-    }
-
-    /// 64-byte L2 UDP frame with random payload padding (drop bench interferer).
-    pub fn build_udp_frame_64(
-        &self,
-        src_ip: Ipv4Addr,
-        dst_ip: Ipv4Addr,
-        dport: u16,
-        rng: &mut impl Rng,
-    ) -> [u8; WIRE_FRAME_BYTES] {
-        const HDR: usize = 14 + 20 + 8;
-        const PAYLOAD_LEN: usize = WIRE_FRAME_BYTES - HDR;
-        let mut payload = [0u8; PAYLOAD_LEN];
-        rng.fill_bytes(&mut payload);
-        let frame = build_udp_frame(
-            &self.dst_mac,
-            &self.src_mac,
-            src_ip,
-            dst_ip,
-            self.sport,
-            dport,
-            &payload,
-        );
-        debug_assert_eq!(frame.len(), WIRE_FRAME_BYTES);
-        frame.try_into().expect("64B wire frame")
     }
 
     pub fn send_udp_frame(&self, frame: &[u8]) -> Result<()> {
@@ -319,6 +291,7 @@ mod tests {
 
     #[test]
     fn udp_frame_64_wire_len() {
+        const WIRE: usize = 64;
         let frame = build_udp_frame(
             &[0u8; 6],
             &[0u8; 6],
@@ -326,8 +299,8 @@ mod tests {
             Ipv4Addr::new(10, 0, 0, 2),
             1234,
             5678,
-            &[0u8; WIRE_FRAME_BYTES - 42],
+            &[0u8; WIRE - 42],
         );
-        assert_eq!(frame.len(), WIRE_FRAME_BYTES);
+        assert_eq!(frame.len(), WIRE);
     }
 }

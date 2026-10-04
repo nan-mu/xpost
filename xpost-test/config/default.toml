@@ -29,7 +29,6 @@ endpoint = "192.168.110.96:9240"
 
 [probe]
 iface = "br-lan"
-pair_timeout_ms = 5000
 # Optional Ethernet source MAC override (default: iface hardware address)
 # src_mac = "00:11:22:33:44:55"
 
@@ -42,4 +41,3 @@ echo_port = 8080
 reply_port = 18080
 # Stimulus UDP sport; must ≠ reply_port (bounce swaps ports; TC uses dport!=reply).
 stim_sport = 18081
-ctrl_port = 8081

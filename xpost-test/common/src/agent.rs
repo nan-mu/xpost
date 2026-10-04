@@ -21,19 +21,12 @@ struct ApiResp {
     message: String,
 }
 
-/// `GET /v1/get/map/{name}` frozen JSON body.
+/// `GET /v1/get/map/{name}` frozen JSON body (fields we read).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MapGetResp {
     pub ok: bool,
-    pub name: String,
-    #[serde(rename = "type")]
-    pub map_type: String,
     #[serde(default)]
     pub entries: Vec<MapEntry>,
-    #[serde(default)]
-    pub size: Option<u64>,
-    #[serde(default)]
-    pub cap: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,24 +51,6 @@ impl AgentClient {
         let msg = self.post_json("/v1/flash/fw", &body).await?;
         log::info!("flash_fw: {msg}");
         Ok(())
-    }
-
-    /// `POST /v1/flash/xdp` — write XDP image into cold table by profile name.
-    pub async fn flash_xdp(&self, name: &str) -> Result<String> {
-        let body = serde_json::json!({ "name": name });
-        self.post_json("/v1/flash/xdp", &body).await
-    }
-
-    /// `POST /v1/clear/xdp` — remove cold-table image(s). `name` is `"*"` / prog / list.
-    pub async fn clear_xdp(&self, name: &str) -> Result<()> {
-        let body = serde_json::json!({ "name": name });
-        let _ = self.post_json("/v1/clear/xdp", &body).await?;
-        Ok(())
-    }
-
-    /// `GET /v1/get/xdp` — list installed XDP images.
-    pub async fn get_xdp(&self) -> Result<String> {
-        self.get_message("/v1/get/xdp").await
     }
 
     /// `POST /v1/enable/xdp`.
@@ -142,13 +117,6 @@ impl AgentClient {
         bail!("map {name} missing slot {slot}");
     }
 
-    /// `POST /v1/update/map/{name}` — single entry.
-    pub async fn update_map(&self, name: &str, key: &str, value: &str) -> Result<String> {
-        let path = format!("/v1/update/map/{name}");
-        let body = serde_json::json!({ "key": key, "value": value });
-        self.post_json(&path, &body).await
-    }
-
     /// `POST /v1/update/map/{name}` — batch `entries`.
     pub async fn update_map_batch(&self, name: &str, entries: &[(String, String)]) -> Result<String> {
         let path = format!("/v1/update/map/{name}");
@@ -177,15 +145,6 @@ impl AgentClient {
     /// `GET /v1/get/perf` — message carries `b64=…` (or equivalent).
     pub async fn get_perf(&self) -> Result<String> {
         self.get_message("/v1/get/perf").await
-    }
-
-    /// `POST /v1/get/serial` — transcript time window.
-    pub async fn get_serial(&self, since_unix_ms: u64, until_unix_ms: u64) -> Result<String> {
-        let body = serde_json::json!({
-            "since_unix_ms": since_unix_ms,
-            "until_unix_ms": until_unix_ms,
-        });
-        self.post_json("/v1/get/serial", &body).await
     }
 
     pub async fn wait_idle(&self, budget: Duration) -> Result<()> {

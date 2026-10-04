@@ -58,7 +58,7 @@ use crate::agent::AgentClient;
 use crate::db::{self, Firmware};
 use crate::exam::just_drop::PpsPath;
 use crate::db::PgOpts;
-use crate::pipeline::{self, status, BudgetEta, READY_BUDGET, RoundUi};
+use crate::pipeline::{status, BudgetEta, READY_BUDGET, RoundUi};
 use crate::config::FileConfig;
 use crate::pipeline::{RawTx, iface_ipv4, iface_mac};
 

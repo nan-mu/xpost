@@ -2,13 +2,17 @@
 //!
 //! Sole entry: bare `./xpost-test` (no env, no flags). Experiments and knobs
 //! come from compile-time `config/default.toml` + `just_tx.toml` /
-//! `just_drop.toml` — see [`config`]. Workflow overview: [`overview`].
+//! `just_drop.toml` — see [`config`].
+//!
+#![doc = include_str!("overview.md")]
+
+#![deny(dead_code)]
+#![deny(unused_imports)]
 
 mod agent;
 mod config;
 mod db;
 mod exam;
-mod overview;
 mod pipeline;
 
 use anyhow::Result;
@@ -67,15 +71,7 @@ async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
         }
         "dev" => {
             let mut harness = pipeline::open_harness(cfg).await?;
-            exam::run_just_tx(
-                cfg,
-                &mut harness,
-                exam::JustTxOpts {
-                    is_dev: true,
-                    formal: false,
-                },
-            )
-            .await
+            exam::run_dev(cfg, &mut harness).await
         }
         "formal-clear" => {
             let pg_opts = db::PgOpts { formal: true };

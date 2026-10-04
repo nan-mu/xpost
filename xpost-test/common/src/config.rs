@@ -191,14 +191,8 @@ impl Default for FirewallConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProbeConfig {
     pub iface: String,
-    #[serde(default = "default_pair_timeout_ms")]
-    pub pair_timeout_ms: u64,
     #[serde(default)]
     pub src_mac: Option<String>,
-}
-
-fn default_pair_timeout_ms() -> u64 {
-    5000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -212,8 +206,6 @@ pub struct TargetConfig {
     pub reply_port: u16,
     #[serde(default = "default_stim_sport")]
     pub stim_sport: u16,
-    #[serde(default = "default_ctrl_port")]
-    pub ctrl_port: u16,
 }
 
 fn default_echo_port() -> u16 {
@@ -224,9 +216,6 @@ fn default_reply_port() -> u16 {
 }
 fn default_stim_sport() -> u16 {
     18081
-}
-fn default_ctrl_port() -> u16 {
-    8081
 }
 
 #[derive(Debug, Deserialize)]

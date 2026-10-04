@@ -48,8 +48,6 @@ pub async fn open_harness(cfg: &FileConfig) -> Result<Harness> {
         Some(cfg.target.vip_ip),
         cfg.target.echo_port,
         cfg.target.reply_port,
-        cfg.target.ctrl_port,
-        cfg.probe.pair_timeout_ms,
         raw,
     )
     .await

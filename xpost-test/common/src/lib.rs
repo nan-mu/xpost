@@ -15,27 +15,9 @@ pub const KIND_BOUNCE_INGRESS: u8 = 3;
 /// Stimulus UDP payload magic (`FWSTIM`) — used for T0 / bounce pairing.
 pub const MAGIC_STIM: [u8; 6] = *b"FWSTIM";
 
-/// Legit collect datagram: magic + `u16` LE index + 1 data byte (+ optional pad).
-pub const MAGIC_COLLECT: [u8; 6] = *b"FWCOL1";
-
-/// Dump request / reply magic. Request: magic + `u16` LE `stream_len`.
-pub const MAGIC_DUMP: [u8; 6] = *b"FWDMP1";
-
-/// Clear the MCU collect buffer before a new stream.
-pub const MAGIC_COLLECT_RST: [u8; 6] = *b"FWRST1";
-
-/// Fixed echo payload byte from ESP firmware (legacy single-byte reply).
-pub const ECHO_BYTE: u8 = 0x42;
-
 /// STA echo replies with [`MAGIC_STIM`] + `u64` LE seq (same header as stimulus).
 /// Bytes after magic before seq ends: magic(6) + seq(8).
 pub const PAYLOAD_HDR_LEN: usize = 14;
-
-/// `MAGIC_COLLECT` + index(2) + data(1).
-pub const COLLECT_HDR_LEN: usize = 9;
-
-/// MCU collect buffer capacity (and max dump payload bytes).
-pub const COLLECT_CAP: usize = 256;
 
 /// Filter endpoints written by userspace before attach.
 ///

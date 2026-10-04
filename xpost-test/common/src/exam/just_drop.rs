@@ -54,7 +54,7 @@ use anyhow::{Context, Result, bail};
 use crate::agent::AgentClient;
 use crate::db::{self, Firmware};
 use crate::db::PgOpts;
-use crate::pipeline::{self, status, BudgetEta, READY_BUDGET, RoundUi};
+use crate::pipeline::{status, BudgetEta, READY_BUDGET, RoundUi};
 use crate::config::FileConfig;
 use crate::pipeline::{RawTx, iface_mac};
 

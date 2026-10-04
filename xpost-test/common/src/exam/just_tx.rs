@@ -55,7 +55,7 @@ use crate::agent::AgentClient;
 use crate::db::{self, Firmware, TxSample};
 use crate::exam::just_drop::PpsPath;
 use crate::db::PgOpts;
-use crate::pipeline::{self, status, BudgetEta, READY_BUDGET, RoundUi};
+use crate::pipeline::{status, BudgetEta, READY_BUDGET, RoundUi};
 use crate::config::FileConfig;
 use crate::pipeline::Harness;
 
@@ -95,8 +95,6 @@ struct WindowStats {
     loss: f64,
     samples: Vec<ProbeSample>,
     device_rxcnt_delta: u64,
-    n_t0: u64,
-    counters: serde_json::Value,
     max_send_gap: Duration,
     host_stalled: bool,
 }
@@ -380,13 +378,6 @@ fn host_stall_thresh(pps: f64) -> Duration {
         .min(Duration::from_millis(40))
 }
 
-#[derive(Clone, Copy)]
-struct OpPoint {
-    target_pps: f64,
-    loss: f64,
-}
-
-
 fn log_window(ui: &RoundUi, path: PpsPath, pair_id: usize, stats: &WindowStats) {
     ui.permanent(&format!(
         "    {} pair={pair_id}: sent={} ok={} loss={:.2}% rxcntΔ={} max_gap={:.1}ms{}",
@@ -592,8 +583,6 @@ async fn probe_window(
         loss,
         samples,
         device_rxcnt_delta: after.saturating_sub(before),
-        n_t0,
-        counters: serde_json::json!({}),
         max_send_gap,
         host_stalled,
     })
