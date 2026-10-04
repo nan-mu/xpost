@@ -1,6 +1,6 @@
 # xpost-test compile-time config
 
-Embedded by `core` at build time (`include_str!`). Edit → rebuild → scp `xpost-test` to TR3000.
+Embedded by `common` at build time (`include_str!`). Edit → `cargo build --release` → scp `xpost-test` to TR3000.
 
 | File | Role |
 |------|------|

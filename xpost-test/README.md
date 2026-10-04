@@ -10,13 +10,13 @@ TR3000 host harness for formal XDP exams against Mac `xpost-agent`.
 | `ebpf` | `ebpf/` | aya TC classifier (`test_bpf`); depends on ABI only |
 
 ```bash
-# TR3000 release (docker toolchain via rust-toolchain.toml):
-cargo build -p common --release
+# TR3000 release (cwd = xpost-test/; docker toolchain via rust-toolchain.toml):
+cargo build --release
 # or:
 fish scripts/build_in_devcontainer.fish
 ```
 
-Host-only / no bpfel: `TEST_SKIP_EBPF=1 cargo build -p common`.
+Host-only / no bpfel: `TEST_SKIP_EBPF=1 cargo build --release`.
 
 ## Binary layout (`common/src`)
 

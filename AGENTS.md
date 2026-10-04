@@ -85,7 +85,7 @@ fish -c 'source ~/.config/fish/functions/xpost-test.fish; and xpost-test'
 手工等价步骤（一般不必；优先 fish helper）：
 
 ```bash
-cd xpost-test && cargo build -p common --release
+cd xpost-test && cargo build --release
 scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 # on TR3000:
 ./xpost-test
