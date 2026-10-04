@@ -1,6 +1,6 @@
 # xpost-agent profile registry (paths relative to XPOST_ROOT / repo root).
 #
-# Schema (no entries yet — add [[fw]] / [[xdp]] as needed):
+# Schema:
 #
 #   [[fw]]
 #   name = "…"
@@ -18,3 +18,28 @@
 #   # target optional; if set must match linked fw
 #
 # HTTP: POST /v1/flash/fw|xdp  {"name":"…"}
+
+# ---------------------------------------------------------------------------
+# exec_bench — function-call eBPF vs native HAL (no Wi-Fi; mcycle via UART)
+# ---------------------------------------------------------------------------
+
+[[fw]]
+name = "exec-bench-ebpf"
+target = "esp32c3"
+partition_table = "examples/exec_bench/partitions.csv"
+artifact = "examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench"
+build = { cwd = ".", command = ["cargo", "xtask", "exec_bench", "build", "--release"] }
+xdp = ["exec_bench"]
+
+[[xdp]]
+name = "exec_bench"
+fw = "exec-bench-ebpf"
+artifact = "examples/exec_bench/exec_bench.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+
+[[fw]]
+name = "exec-bench-hal"
+target = "esp32c3"
+partition_table = "examples/exec_bench_hal/partitions.csv"
+artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal"
+build = { cwd = ".", command = ["cargo", "xtask", "exec_bench_hal", "build", "--release"] }

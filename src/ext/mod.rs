@@ -7,6 +7,7 @@
 //! |--------|---------|-------|
 //! | [`ringbuf`] | `ringbuf` | incomplete → `compile_error!` |
 //! | [`perf`] | `perf-counter` / `perf-aggregate` / `perf-gauge` / `perf-trace` | EspRadioTrace backends |
+//! | [`exec_call`] | `exec-call` | function-call invoke of leased XDP image (non-network) |
 //!
 //! Boot is firmware-first. Use [`crate::map::MapBuilder`] / [`crate::xdp::XdpBuilder`] directly.
 
@@ -20,3 +21,6 @@ pub mod ringbuf;
     feature = "perf-trace"
 ))]
 pub mod perf;
+
+#[cfg(feature = "exec-call")]
+pub mod exec_call;

@@ -164,3 +164,26 @@ App fields like `net_rx` stay in the firmware crate.
 Optional / incomplete: `ext::ringbuf` behind Cargo feature `ringbuf` (currently
 `compile_error!`).
 
+### Function-call invoke (`ext::exec_call`)
+
+Additive `ext` surface (not a second `xdp/ingress` attach). Feature `exec-call`
+exports `xpost::ext::exec_call::invoke(buf)` → reuses `ingress::run` / lease /
+`jalr` IRAM. Network RX remains behind `esp-radio` only.
+
+### `exec_bench` (firmware experiment)
+
+Wi-Fi-free A/B for eBPF execution overhead vs native HAL (HAVM-style compute):
+
+| Arm | Example | Profile | Path |
+|-----|---------|---------|------|
+| eBPF | `examples/exec_bench` | `[[fw]] exec-bench-ebpf` + `[[xdp]] exec_bench` | lease + `ext::exec_call::invoke` |
+| HAL | `examples/exec_bench_hal` | `[[fw]] exec-bench-hal` | native twins in `exec_bench_common` |
+
+- Shared layout / opcodes: `examples/exec_bench_common` (must match `ebpf/exec_bench.c`)
+- Cold image rebuild: `examples/exec_bench/ebpf/build.sh` → `exec_bench.elf`
+- Primary metric: RV32 **`mcycle`** (UART text). Do **not** use `ext::perf` for Table-1
+- App serial: unsolicited `OK init` (agent settle); frozen verbs via `Command`;
+  experiment-local `bench run|list|verify` over raw UART (not in `/v1/run` yet)
+- Host design draft: [`examples/exec_bench/HOST_DESIGN.md`](examples/exec_bench/HOST_DESIGN.md)
+  (do not edit `xpost-test/**` until that draft is implemented)
+
