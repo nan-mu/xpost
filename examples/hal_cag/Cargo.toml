@@ -1,0 +1,12 @@
+[package]
+edition = "2024"
+name = "hal_cag"
+rust-version = "1.88"
+version = "0.1.0"
+publish = false
+description = "Local CAG wire report for HAL firmwares (no xpost)"
+
+[dependencies]
+critical-section = "1.2.0"
+esp-hal = { version = "~1.1.0", features = ["esp32c3", "unstable"] }
+portable-atomic = { version = "1", default-features = false }
