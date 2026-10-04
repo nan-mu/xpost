@@ -75,6 +75,8 @@ use embassy_sync::{
 pub mod esp_radio {
     pub use crate::xdp::ingress::esp_radio::new;
 }
+/// App-mode control helpers for board examples (`enable xdp`, map/perf ops).
+pub mod app_ctrl;
 /// Control-plane errors (map + XDP public entrypoints).
 pub mod error;
 /// Feature-gated optional surfaces (`ringbuf`, `ext::perf` backends).

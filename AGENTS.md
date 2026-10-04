@@ -28,16 +28,18 @@ Prefer the term **XDP ELF** / **`xdp.elf`** in docs and logs (not “Compact ELF
   binary entry: bare `./xpost-test` (no CLI flags/subcommands). See rustdoc
   modules `overview` + `config`. Calls agent HTTP; does not hold the USB
   session while the agent is running.
-- **`xpost-agent/`**: long-running HTTP `/v1/*` + MCP `/mcp` daemon (shared USB).
-  Dispatch: `cargo xtask agent -- --bind 0.0.0.0:9240` (optional `--log-dir`).
-  Serial transcript is a rotating `serial.log` under `--log-dir` (xpost-serial).
-- **`xpost-serial`**: library only — host `SerialHandler` + App `Command` /
-  `OkReply` + flash cold-table API (see that crate’s rustdoc).
-  Cold install is **by XDP name**; do not pass raw cold addresses on the normal
-  path. Perf metrics live in `xpost::ext::perf`; DUT serial read face is
-  `get perf` (binary blob) + `clear perf` (agent: `/v1/get/perf`,
-  `/v1/clear/perf`). Formal decodes the report and writes exam-scoped tables
-  (`sql/formal.sql`: `exam` + `just_*_config/data` + `xdp_*`/`hal_*` +
+- **`xpost-agent/`**: CLI + `--listen` HTTP `/v1/*` and MCP `/mcp` on one port
+  (shared USB). Dispatch: `cargo xtask agent …`. Frozen HTTP/MCP contract is
+  rustdoc on `xpost-agent/src/main.rs` (App verbs via `xpost_serial::Command` /
+  `OkReply`). After open: host-only `GetInit` waits for DUT `OK init`.
+- **`xpost-serial`**: library only — shared `r#type` wire + opt-in `client`
+  (host) / `server` (firmware `SerialHandler` + `serial_task!`). Examples use
+  `default-features = false, features = ["server"]`. App verbs: `ping`,
+  `enable`/`disable xdp`, `clear`/`get`/`update map`, `clear`/`get perf`.
+  `get map` / `get perf` success is `OK get … <n>` + `n` blob bytes (map blob
+  = ASCII snapshot from `xpost::map::dump`; perf blob = `ext::perf` layout).
+  Cold install is **by XDP name**. Formal decodes perf reports into exam-scoped
+  tables (`sql/formal.sql`: `exam` + `just_*_config/data` + `xdp_*`/`hal_*` +
   `trace_event`) — no `report_raw`. Open-run never DROP/TRUNCATE; explicit
   wipe is `run = ["formal-clear"]` in `config/default.toml` then rebuild
   (`TRUNCATE exam CASCADE`). Trace is the
@@ -99,10 +101,11 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 - 调试火焰图 Trace（**火焰轨**）：`run = ["dev"]`（硬编码：XDP × `just-tx-t` × 100 pps × 2s × 1
   轮；**无 DB**；report → `/tmp/xpost-dev-flame.report`；Mac scp 到
   `target/dev-flame.report` 后 `pixi run python -m utils.export_flame_svg`）
-- Agent HTTP：`/health`、`/v1/*`（含 `/v1/perf_clear`、`/v1/serial_window`、`/v1/map/{name}`）、`/mcp`
+- Agent HTTP：`/health`、`/v1/*`（冻结合约见 `xpost-agent` rustdoc；含
+  `/v1/get/map/{name}`、`/v1/clear/perf`、`/v1/get/perf` 等）、`/mcp`
 - 实验步骤与全流程：`xpost-test` 的 `overview` / `config` rustdoc；串口 API：`xpost-serial`
 - 正式 `just_tx` 扫速网格：`400…4000` pps（步长 400）
-- 正式 `just_drop`：同网格；`map dump counter`（IPv4 src 末字节分桶）→ `just_drop_data`
+- 正式 `just_drop`：同网格；`get map counter`（IPv4 src 末字节分桶）→ `just_drop_data`
 - Schema：`xpost-test/sql/formal.sql` + `just_drop.sql` / `just_tx.sql` / `firewall.sql`；显式清空：
   `run = ["formal-clear"]` 后重编再跑
 
@@ -143,7 +146,8 @@ BPF helper errno is `map::ops::MapOpError` (not nested into control-plane enums)
 The crate mounts a private `xdp::ingress::XdpProg` implementing `xpost_type::XdpProg`
 (re-exported as `esp_radio::wifi::XdpProg` under the `xdp` feature). Apps do **not**
 see `XDP_PROG`; they read via `ext::perf::counter()` / `aggregate()` / `gauge()` /
-`trace()` (four public exits). `report` / `clear_perf` are shared plumbing.
+`trace()` (four public exits). `report_perf` / `clear_perf` are shared plumbing
+(App serial: `get perf` / `clear perf`).
 EspRadioTrace wiring lives in `ext/perf/trace/` beside the ring store.
 
 - `esp-radio` — `xpost::esp_radio::new` → `wifi::new(device, config, &ingress::XDP_PROG)`

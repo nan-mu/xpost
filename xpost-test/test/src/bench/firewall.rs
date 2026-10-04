@@ -54,15 +54,12 @@ use std::net::Ipv4Addr;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
-use test_common::map_crud_op::{self, MapCrudOp};
-
 use crate::agent::AgentClient;
 use crate::bench::formal::{self, Firmware};
 use crate::bench::just_drop::PpsPath;
 use crate::bench::pg_dsn::PgOpts;
 use crate::bench::status::{self, BudgetEta, READY_BUDGET, RoundUi};
 use crate::config::FileConfig;
-use crate::harness::Harness;
 use crate::raw_tx::{RawTx, iface_ipv4, iface_mac};
 
 const STIM_PORT: u16 = 8080;
@@ -109,9 +106,6 @@ fn path_for(fw: Firmware) -> PpsPath {
     }
 }
 
-fn ip_key(ip: Ipv4Addr) -> [u8; 4] {
-    ip.octets()
-}
 
 /// Deterministic blacklist IPs in DUT /24, avoiding DUT / gateway / host.
 fn blacklist_ips(esp: Ipv4Addr, n: u32, avoid: &[Ipv4Addr]) -> Vec<Ipv4Addr> {
@@ -182,8 +176,6 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
 
     let esp = cfg.target.esp_ip;
     let host_ip = iface_ipv4(&cfg.probe.iface).unwrap_or(esp);
-    let mut harness = open_harness(cfg).await?;
-
     for fw in &arms {
         let profile = profile_for(*fw);
         let path = path_for(*fw);
@@ -203,24 +195,18 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 for &pps in grid {
                     // Re-seed each cell: prior cell ends with `blacklist clear`.
                     ui.check_start(&format!("insert blacklist n={size}"));
-                    seed_blacklist(&mut harness, host_ip, &rules).await?;
+                    seed_blacklist(&agent, &rules).await?;
                     ui.check_ok(&format!("{} entries", rules.len()));
 
-                    agent.perf_clear().await.context("perf_clear")?;
-                    agent
-                        .request("enable xdp")
-                        .await
-                        .context("enable xdp")?;
+                    agent.clear_perf().await.context("clear/perf")?;
+                    agent.enable_xdp().await.context("enable/xdp")?;
                     let started_at = SystemTime::now();
                     let sent =
                         paced_fixed_src(cfg, &ui, &eta, path, window, pps, src).await?;
                     tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
                     let stopped_at = SystemTime::now();
-                    agent
-                        .request("disable xdp")
-                        .await
-                        .context("disable xdp")?;
-                    let map_rows = dump_blacklist(&agent).await.context("get map blacklist")?;
+                    agent.disable_xdp().await.context("disable/xdp")?;
+                    let map_rows = dump_blacklist(&agent).await.context("get/map blacklist")?;
 
                     ui.permanent(&format!(
                         "    {} size={size} {traffic} @{pps:.0}: sent={sent} src={src} map={}",
@@ -244,7 +230,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                         )
                         .await?;
                         formal::insert_firewall_data(client, cfg_id, &map_rows).await?;
-                        let msg = agent.request("report").await.context("report")?;
+                        let msg = agent.get_perf().await.context("get/perf")?;
                         let decoded = formal::decode_report_msg(&msg)?;
                         formal::write_perf(
                             client,
@@ -257,7 +243,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                         .await?;
                         ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
                     }
-                    let _ = agent.request("blacklist clear").await;
+                    let _ = agent.clear_map(MAP_NAME).await;
                     eta.consume_fixed(window);
                     ui.set_eta(&eta.fmt());
                 }
@@ -271,17 +257,14 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
         let profile = profile_for(fw);
         flash_ready(cfg, &agent, &ui, &mut eta, profile).await?;
         let rules = blacklist_ips(esp, 8, &[esp, host_ip]);
-        seed_blacklist(&mut harness, host_ip, &rules).await?;
-        agent.perf_clear().await.context("perf_clear")?;
-        agent
-            .request("enable xdp")
-            .await
-            .context("enable xdp")?;
+        seed_blacklist(&agent, &rules).await?;
+        agent.clear_perf().await.context("clear/perf")?;
+        agent.enable_xdp().await.context("enable/xdp")?;
         let started_at = SystemTime::now();
         let sent = send_one(cfg, rules[0]).await?;
         tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
         let stopped_at = SystemTime::now();
-        let _ = agent.request("disable xdp").await;
+        let _ = agent.disable_xdp().await;
         if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
             ui.check_start("写入 trace");
             let cfg_id = formal::insert_firewall_config(
@@ -297,7 +280,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 sent as i64,
             )
             .await?;
-            let msg = agent.request("report").await.context("report")?;
+            let msg = agent.get_perf().await.context("get/perf")?;
             let decoded = formal::decode_report_msg(&msg)?;
             formal::write_perf(
                 client,
@@ -326,34 +309,6 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
     Ok(())
 }
 
-async fn open_harness(cfg: &FileConfig) -> Result<Harness> {
-    let esp_mac = cfg.esp_mac_bytes()?;
-    let src_mac = match cfg.src_mac_override()? {
-        Some(m) => m,
-        None => iface_mac(&cfg.probe.iface)?,
-    };
-    let raw = RawTx::open(
-        &cfg.probe.iface,
-        src_mac,
-        esp_mac,
-        cfg.target.esp_ip,
-        cfg.target.echo_port,
-        cfg.target.stim_sport,
-    )?;
-    Harness::start(
-        cfg.probe.iface.clone(),
-        cfg.target.esp_ip,
-        Some(cfg.target.vip_ip),
-        cfg.target.echo_port,
-        cfg.target.reply_port,
-        cfg.target.ctrl_port,
-        cfg.probe.pair_timeout_ms,
-        raw,
-    )
-    .await
-    .context("start harness")
-}
-
 async fn flash_ready(
     cfg: &FileConfig,
     agent: &AgentClient,
@@ -379,76 +334,32 @@ async fn flash_ready(
     ui.set_eta(&eta.fmt());
 
     ui.check_activate("DUT ready");
-    for i in 0..20 {
-        match agent.request("ping").await {
-            Ok(m) if m.contains("OK ping") => {
-                ui.check_ok("ping");
-                break;
-            }
-            Ok(m) => ui.check_note(&format!("ping try{i}: {m}")),
-            Err(e) => ui.check_note(&format!("ping try{i}: {e:#}")),
-        }
-        if i == 19 {
-            ui.check_fail("no ping");
-            ui.clear_temp_for_error();
-            bail!("DUT not responding to ping after flash `{profile}`");
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
+    ui.check_ok("settled");
     ui.end_round();
     let _ = cfg;
     Ok(())
 }
 
-async fn seed_blacklist(harness: &mut Harness, ctrl_src: Ipv4Addr, rules: &[Ipv4Addr]) -> Result<()> {
-    let zero = [0u8; 8];
-    for ip in rules {
-        let key = ip_key(*ip);
-        let ack = harness
-            .map_crud_op(
-                ctrl_src,
-                MapCrudOp::simple(
-                    map_crud_op::KIND_UPDATE,
-                    MAP_NAME,
-                    map_crud_op::MAP_TYPE_HASH,
-                    &key,
-                    &zero,
-                    0,
-                ),
-            )
-            .await
-            .with_context(|| format!("MapCrud UPDATE {ip}"))?;
-        if ack.status != map_crud_op::STATUS_OK {
-            bail!("MapCrud UPDATE {ip} status={} {}", ack.status, ack.reason);
-        }
-    }
+async fn seed_blacklist(agent: &AgentClient, rules: &[Ipv4Addr]) -> Result<()> {
+    agent
+        .update_map_ips(MAP_NAME, rules)
+        .await
+        .context("update/map blacklist")?;
     Ok(())
 }
 
 async fn dump_blacklist(agent: &AgentClient) -> Result<Vec<(Ipv4Addr, i64)>> {
-    let dump = agent.map_dump(MAP_NAME).await.context("map dump blacklist")?;
-    if dump.lines().any(|l| l.starts_with("ERR ")) {
-        bail!("map dump error: {dump}");
-    }
+    let map = agent.get_map(MAP_NAME).await.context("get/map blacklist")?;
     let mut out = Vec::new();
-    for line in dump.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("OK ") {
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let Some(ip_s) = parts.next() else {
-            continue;
-        };
-        let Some(val_s) = parts.next() else {
-            continue;
-        };
-        let ip: Ipv4Addr = ip_s
+    for e in &map.entries {
+        let ip: Ipv4Addr = e
+            .key
             .parse()
-            .with_context(|| format!("blacklist dump ip {ip_s:?}"))?;
-        let value: i64 = val_s
+            .with_context(|| format!("blacklist key {:?}", e.key))?;
+        let value: i64 = e
+            .value
             .parse()
-            .with_context(|| format!("blacklist dump value {val_s:?}"))?;
+            .with_context(|| format!("blacklist value {:?}", e.value))?;
         out.push((ip, value));
     }
     Ok(out)
@@ -540,24 +451,4 @@ async fn send_one(cfg: &FileConfig, src: Ipv4Addr) -> Result<u64> {
     Ok(1)
 }
 
-/// Trace arm: one fixed-src UDP to DUT echo port (hit path).
-async fn send_one(cfg: &FileConfig, src: Ipv4Addr) -> Result<u64> {
-    let esp = cfg.target.esp_ip;
-    let esp_mac = cfg.esp_mac_bytes()?;
-    let src_mac = match cfg.src_mac_override()? {
-        Some(m) => m,
-        None => iface_mac(&cfg.probe.iface)?,
-    };
-    let raw = RawTx::open(
-        &cfg.probe.iface,
-        src_mac,
-        esp_mac,
-        esp,
-        STIM_PORT,
-        cfg.target.stim_sport,
-    )
-    .context("RawTx::open")?;
-    raw.send_udp(src, esp, STIM_PORT, b"D")
-        .context("send_one")?;
-    Ok(1)
-}
+

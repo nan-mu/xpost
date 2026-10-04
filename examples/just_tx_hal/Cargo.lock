@@ -1399,6 +1399,7 @@ dependencies = [
  "static_cell",
  "xpost",
  "xpost-build",
+ "xpost-serial",
 ]
 
 [[package]]
@@ -2240,6 +2241,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "xpost-serial"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embassy-time",
+ "winnow",
 ]
 
 [[package]]

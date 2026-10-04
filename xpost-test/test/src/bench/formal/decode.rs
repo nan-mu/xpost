@@ -1,4 +1,5 @@
-//! Decode agent `OK report <n> b64=…` into counters / agg / gauge / trace.
+//! Decode agent `GET /v1/get/perf` payload (`OK get perf <n> b64=…`) into
+//! counters / agg / gauge / trace.
 
 use std::collections::BTreeMap;
 
@@ -143,13 +144,13 @@ fn mask_for_len(len: usize) -> Option<u8> {
     None
 }
 
-/// Agent `request("report")` reply: `OK report <n> b64=…`.
+/// Agent `get_perf` reply: `OK get perf <n> b64=…` (any token with `b64=`).
 pub fn parse_report_b64(msg: &str) -> Result<Vec<u8>> {
     let msg = msg.trim();
     let b64 = msg
         .split_whitespace()
         .find_map(|p| p.strip_prefix("b64="))
-        .context("report reply missing b64=")?;
+        .context("get/perf reply missing b64=")?;
     decode_b64(b64)
 }
 
@@ -195,7 +196,7 @@ fn decode_b64(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Decode agent report reply into structured metrics.
+/// Decode agent get/perf reply into structured metrics.
 pub fn decode_report_msg(msg: &str) -> Result<DecodedReport> {
     let payload = parse_report_b64(msg)?;
     decode_payload(&payload)

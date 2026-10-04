@@ -97,6 +97,10 @@ fn ensure_xpost_link_bin() -> Result<()> {
     if candidates.iter().any(|p| p.is_file()) {
         return Ok(());
     }
+    // Nested `cargo` must not inherit the example board's `.cargo/config.toml`
+    // (`unstable.build-std = ["core","alloc"]`) or the firmware build-script's
+    // encoded RUSTFLAGS — both produce host `duplicate lang item` failures.
+    // Run from `xpost-build/` and strip RV32 / build-std inheritance.
     let status = Command::new("cargo")
         .args([
             "build",
@@ -107,8 +111,14 @@ fn ensure_xpost_link_bin() -> Result<()> {
             "xpost-link",
             "--target",
             &host,
+            "--config",
+            "unstable.build-std=[]",
         ])
+        .current_dir(&xb)
         .env("CARGO_TARGET_DIR", &target_dir)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_BUILD_RUSTFLAGS")
         .status()
         .context("spawn cargo to build xpost-link")?;
     if !status.success() {
