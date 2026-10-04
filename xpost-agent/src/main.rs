@@ -35,7 +35,8 @@
 //! |--------|------|------|----------|
 //! | GET | `/health` | — | liveness |
 //! | GET | `/v1/status` | — | `idle` |
-//! | GET | `/v1/dut_status` | — | UART `ready` / `booting` (settle; uses `ping`) |
+//! | GET | `/v1/dut_status` | — | UART `ready` / `booting` (uses `ping`) |
+//! | GET | `/v1/get/init` | — | host wait for unsolicited `OK init` |
 //! | POST | `/v1/flash/fw` | `{"name"}` | build+flash firmware, then co-flash `fw.xdp[]` |
 //! | POST | `/v1/flash/xdp` | `{"name"}` | build+write named XDP image into cold table |
 //! | POST | `/v1/clear/xdp` | `{"name": "*"\|"prog"\|["a","b"]}` | remove image(s); `*`=all; missing name → err |

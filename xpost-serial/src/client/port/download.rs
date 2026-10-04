@@ -32,7 +32,8 @@ fn ext(e: impl std::fmt::Display) -> io::Error {
 
 /// Download-mode flasher. Drop releases the USB port.
 pub struct Downloader {
-    flasher: Flasher,
+    /// `None` only while reconnecting (must drop the old exclusive flock first).
+    flasher: Option<Flasher>,
     name: String,
     usb: UsbPortInfo,
     chip: Chip,
@@ -43,7 +44,7 @@ impl Downloader {
     pub(crate) fn connect(name: &str, usb: &UsbPortInfo, chip: Chip, baud: u32) -> io::Result<Self> {
         let flasher = connect_flasher(name, usb, chip, baud)?;
         Ok(Self {
-            flasher,
+            flasher: Some(flasher),
             name: name.to_string(),
             usb: usb.clone(),
             chip,
@@ -51,25 +52,39 @@ impl Downloader {
         })
     }
 
+    fn flasher(&mut self) -> io::Result<&mut Flasher> {
+        self.flasher
+            .as_mut()
+            .ok_or_else(|| io::Error::other("download flasher not connected"))
+    }
+
     pub fn reconnect(&mut self) -> io::Result<()> {
-        drop(std::mem::replace(
-            &mut self.flasher,
-            connect_flasher(&self.name, &self.usb, self.chip, self.baud)?,
-        ));
+        // Drop the live connection before opening again. `mem::replace` with a
+        // fresh `connect_flasher` would open while the old exclusive flock is
+        // still held → EBUSY on macOS USB-JTAG.
+        self.flasher = None;
+        self.flasher = Some(connect_flasher(
+            &self.name,
+            &self.usb,
+            self.chip,
+            self.baud,
+        )?);
         Ok(())
     }
 
     /// Flash app ELF bytes, then overwrite partition table at `PART_TABLE_OFFSET`.
     pub fn flash_firmware(&mut self, firmware_elf: &[u8], part_bin: &[u8]) -> io::Result<()> {
-        let chip = self.flasher.chip();
-        let xtal = chip
-            .xtal_frequency(self.flasher.connection())
-            .map_err(ext)?;
+        let (chip, xtal) = {
+            let f = self.flasher()?;
+            let chip = f.chip();
+            let xtal = chip.xtal_frequency(f.connection()).map_err(ext)?;
+            (chip, xtal)
+        };
         let flash_data = FlashData::new(FlashSettings::default(), 0, None, chip, xtal);
         let idf = IdfBootloaderFormat::new(firmware_elf, &flash_data, None, None, None, None)
             .map_err(ext)?;
         let format = ImageFormat::from(idf);
-        self.flasher
+        self.flasher()?
             .load_image_to_flash(&mut DefaultProgressCallback, format)
             .map_err(ext)?;
 
@@ -79,13 +94,13 @@ impl Downloader {
     }
 
     pub fn write_bin_verified(&mut self, addr: u32, data: &[u8]) -> io::Result<()> {
-        self.flasher
+        self.flasher()?
             .write_bin_to_flash(addr, data, &mut DefaultProgressCallback)
             .map_err(ext)?;
         self.reconnect()?;
         let tmp = tempfile_path()?;
         let len = data.len() as u32;
-        self.flasher
+        self.flasher()?
             .read_flash(addr, len, READ_BLOCK, READ_MAX_IN_FLIGHT, tmp.clone())
             .map_err(ext)?;
         let read = fs::read(&tmp).map_err(|e| std::io::Error::other(format!("readback file: {e}")))?;
@@ -109,7 +124,7 @@ impl Downloader {
 
     pub fn read_flash(&mut self, addr: u32, len: u32) -> io::Result<Vec<u8>> {
         let tmp = tempfile_path()?;
-        self.flasher
+        self.flasher()?
             .read_flash(addr, len, READ_BLOCK, READ_MAX_IN_FLIGHT, tmp.clone())
             .map_err(ext)?;
         let data = fs::read(&tmp).map_err(|e| std::io::Error::other(format!("read flash: {e}")))?;
@@ -124,15 +139,17 @@ impl Downloader {
     }
 
     pub fn erase_region(&mut self, addr: u32, len: u32) -> io::Result<()> {
-        self.flasher.erase_region(addr, len).map_err(ext)?;
+        self.flasher()?.erase_region(addr, len).map_err(ext)?;
         Ok(())
     }
 
     /// Hard-reset to app and release the port.
     pub fn reset_to_app(mut self) -> io::Result<()> {
-        let chip = self.flasher.chip();
-        let _ = self.flasher.connection().reset_after(true, chip);
-        drop(self.flasher);
+        if let Some(mut flasher) = self.flasher.take() {
+            let chip = flasher.chip();
+            let _ = flasher.connection().reset_after(true, chip);
+            drop(flasher);
+        }
         std::thread::sleep(RESET_TO_APP_SETTLE);
         Ok(())
     }

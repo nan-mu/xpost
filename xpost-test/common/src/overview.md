@@ -34,7 +34,7 @@ cargo run --release --                  │                              ▲
 | `just_drop` | `xdp_cag` PPS grid + Array Map + `xdp_t` Trace | `exam` + `just_drop_*` + perf |
 | `just_tx` | `xdp_cag` pps grid RTT + `xdp_t` Trace | `exam` + `just_tx_*` (sent/ok; success RTT) + perf |
 | `firewall` | hash blacklist size×hit/miss PPS + Trace | `exam` + `firewall_*` + perf |
-| `dev` | Flame Trace only: XDP × 100 pps × 2s × 1; report file; **no DB** | — |
+| `dev` | HAL smoke: just_tx / just_drop / firewall `@100pps×2s`; **no XDP, no DB** | — |
 | `formal-clear` | `TRUNCATE exam CASCADE` | wipe |
 
 Formal DDL: `sql/formal.sql` (shared) + `just_tx.sql` / `just_drop.sql` / `firewall.sql`.

@@ -7,14 +7,14 @@
 # Agent HTTP: /health, /v1/* (harness), /mcp (Cursor MCP). endpoint = host:port (http:// inferred).
 #
 # Experiment knobs: just_tx.toml / just_drop.toml only (formal).
-# Debug: run = ["dev"] — hardcoded in code, no knobs file.
+# Debug: run = ["dev"] — HAL smoke for just_tx/just_drop/firewall (no XDP, no DB).
 # Wipe: run = ["formal-clear"] → TRUNCATE exam CASCADE.
 
 version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
-# Flame short Trace: `dev`. Formal: just_tx / just_drop. Wipe: formal-clear.
-run = ["just_tx", "just_drop"]
+# HAL smoke: `dev`. Formal: just_tx / just_drop / firewall. Wipe: formal-clear.
+run = ["dev"]
 
 [postgres]
 host = "192.168.110.96"

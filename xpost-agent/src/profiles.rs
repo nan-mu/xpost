@@ -85,14 +85,24 @@ impl Profiles {
         self.fw.is_empty() && self.xdp.is_empty()
     }
 
-    /// First fw partition table, if any (for SerialHandler open before flash).
+    /// Partition table for SerialHandler open (needs an `xdp` row for FlashConfig).
+    /// Prefer a fw that lists cold XDP images; HAL-only boards omit that row.
     pub fn default_partition_table(&self) -> Option<&str> {
-        self.fw.values().next().map(|f| f.partition_table.as_str())
+        self.fw
+            .values()
+            .find(|f| !f.xdp.is_empty())
+            .or_else(|| self.fw.values().next())
+            .map(|f| f.partition_table.as_str())
     }
 
-    /// Chip for the first fw entry, if any.
+    /// Chip for SerialHandler open; prefer a fw that owns cold XDP.
     pub fn default_chip(&self) -> Result<Option<xpost_serial::Chip>> {
-        match self.fw.values().next() {
+        let fw = self
+            .fw
+            .values()
+            .find(|f| !f.xdp.is_empty())
+            .or_else(|| self.fw.values().next());
+        match fw {
             Some(f) => Ok(Some(chip_for_target(&f.target)?)),
             None => Ok(None),
         }

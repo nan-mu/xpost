@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use aya::{
     Ebpf,
     maps::{Array, MapData, RingBuf},
-    programs::{SchedClassifier, TcAttachType, tc},
+    programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags, tc},
 };
 use common::{
     FilterConfig, KIND_BOUNCE_INGRESS, KIND_ECHO_INGRESS, KIND_STIM_EGRESS, StampEvent,
@@ -36,9 +36,10 @@ pub struct SeqSight {
 }
 
 pub struct Harness {
-    /// Must outlive TC links and ringbuf task.
+    /// Must outlive TC/XDP links and ringbuf task.
     _ebpf: Ebpf,
-    _links: Vec<aya::programs::tc::SchedClassifierLinkId>,
+    _tc_links: Vec<aya::programs::tc::SchedClassifierLinkId>,
+    _xdp_link: Option<aya::programs::xdp::XdpLinkId>,
     raw: Arc<RawTx>,
     pending: Arc<Mutex<HashMap<u64, Pending>>>,
     esp_ip: Ipv4Addr,
@@ -96,24 +97,45 @@ impl Harness {
         }
 
         let _ = tc::qdisc_add_clsact(&iface);
-        let mut links = Vec::new();
+        let mut tc_links = Vec::new();
         {
             let egress: &mut SchedClassifier = ebpf
                 .program_mut("test_egress")
                 .context("test_egress")?
                 .try_into()?;
             egress.load()?;
-            links.push(egress.attach(&iface, TcAttachType::Egress)?);
-            info!("attached test_egress on {iface}");
+            tc_links.push(egress.attach(&iface, TcAttachType::Egress)?);
+            info!("attached test_egress (TC) on {iface}");
         }
-        {
+
+        let xdp_link = {
+            let xdp: &mut Xdp = ebpf
+                .program_mut("test_xdp")
+                .context("test_xdp")?
+                .try_into()?;
+            xdp.load()?;
+            match xdp.attach(&iface, XdpFlags::SKB_MODE).or_else(|e_skb| {
+                warn!("XDP SKB attach on {iface} failed: {e_skb}; trying default flags");
+                xdp.attach(&iface, XdpFlags::default())
+            }) {
+                Ok(id) => {
+                    info!("attached test_xdp (XDP) on {iface}");
+                    Some(id)
+                }
+                Err(e) => {
+                    warn!("XDP attach on {iface} failed: {e}");
+                    None
+                }
+            }
+        };
+        if xdp_link.is_none() {
             let ingress: &mut SchedClassifier = ebpf
                 .program_mut("test_ingress")
                 .context("test_ingress")?
                 .try_into()?;
             ingress.load()?;
-            links.push(ingress.attach(&iface, TcAttachType::Ingress)?);
-            info!("attached test_ingress on {iface}");
+            tc_links.push(ingress.attach(&iface, TcAttachType::Ingress)?);
+            info!("attached test_ingress (TC fallback) on {iface}");
         }
 
         let events = RingBuf::try_from(ebpf.take_map("EVENTS").context("EVENTS map")?)?;
@@ -129,7 +151,8 @@ impl Harness {
 
         Ok(Self {
             _ebpf: ebpf,
-            _links: links,
+            _tc_links: tc_links,
+            _xdp_link: xdp_link,
             raw,
             pending,
             esp_ip,

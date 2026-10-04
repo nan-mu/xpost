@@ -12,6 +12,7 @@ pub use xdp::{
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use futures::FutureExt;
 use futures::executor::block_on;
@@ -166,6 +167,7 @@ fn run_op(
         let mut rec = record.lock();
         FlashEvent::Begin(op.clone()).write_to(&mut rec);
     }
+    record.mark_init_after(SystemTime::now());
     let result = match op {
         FlashOp::Fw {
             firmware,

@@ -3,7 +3,7 @@
 # Formal firmware tags (DB `firmware` enum — not Cargo feature names):
 #   xdp_cag → perf-cag (counter+aggregate+gauge)
 #   xdp_t   → perf-t   (counter+trace)
-# HAL profiles intentionally omitted (XDP-only formal).
+#   hal     → examples/*_hal with local CAG report (no xpost runtime; Trace is XDP-only)
 #
 # Firmware build: cwd = examples/<project>, `cargo build --release --features …`.
 
@@ -66,6 +66,34 @@ partition_table = "examples/firewall/partitions.csv"
 artifact = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
 build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-t"] }
 xdp = ["firewall"]
+
+# ---------------------------------------------------------------------------
+# HAL CAG arms (no cold XDP; app-layer policy + local CAG wire report)
+# ---------------------------------------------------------------------------
+
+[[fw]]
+name = "just-tx-hal"
+target = "esp32c3"
+partition_table = "examples/just_tx_hal/partitions.csv"
+artifact = "examples/just_tx_hal/target/riscv32imc-unknown-none-elf/release/just_tx_hal"
+build = { cwd = "examples/just_tx_hal", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
+xdp = []
+
+[[fw]]
+name = "just-drop-hal"
+target = "esp32c3"
+partition_table = "examples/just_drop_hal/partitions.csv"
+artifact = "examples/just_drop_hal/target/riscv32imc-unknown-none-elf/release/just_drop_hal"
+build = { cwd = "examples/just_drop_hal", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
+xdp = []
+
+[[fw]]
+name = "firewall-hal"
+target = "esp32c3"
+partition_table = "examples/firewall_hal/partitions.csv"
+artifact = "examples/firewall_hal/target/riscv32imc-unknown-none-elf/release/firewall_hal"
+build = { cwd = "examples/firewall_hal", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
+xdp = []
 
 # ---------------------------------------------------------------------------
 # XDP images (name must equal ELF-derived stem). Canonical fw = *-cag;

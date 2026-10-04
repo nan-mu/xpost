@@ -123,6 +123,7 @@ async fn serve_async(addr: &str, log_dir: &Path) -> Result<()> {
     let v1 = Router::new()
         .route("/status", get(v1_status))
         .route("/dut_status", get(v1_dut_status))
+        .route("/get/init", get(v1_get_init))
         .route("/flash/fw", post(v1_flash_fw))
         .route("/flash/xdp", post(v1_flash_xdp))
         .route("/clear/xdp", post(v1_clear_xdp))
@@ -169,6 +170,11 @@ async fn v1_status() -> Json<ApiResp> {
 async fn v1_dut_status(State(st): State<AppState>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     run_blocking(move || ops::dut_status(shared.as_ref())).await
+}
+
+async fn v1_get_init(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::get_init(shared.as_ref(), "http")).await
 }
 
 async fn run_blocking<F>(f: F) -> Json<ApiResp>
@@ -267,9 +273,16 @@ async fn v1_clear_map(
 async fn v1_get_map(
     State(st): State<AppState>,
     AxumPath(map_name): AxumPath<String>,
-) -> Json<ApiResp> {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     let shared = st.shared.clone();
-    run_blocking(move || ops::get_map(shared.as_ref(), &map_name, "http")).await
+    match tokio::task::spawn_blocking(move || ops::get_map_json(shared.as_ref(), &map_name, "http"))
+        .await
+    {
+        Ok(Ok(map)) => (StatusCode::OK, Json(map)).into_response(),
+        Ok(Err(e)) => (StatusCode::OK, Json(ApiResp::err(format!("{e:#}")))).into_response(),
+        Err(e) => (StatusCode::OK, Json(ApiResp::err(format!("join: {e}")))).into_response(),
+    }
 }
 
 async fn v1_update_map(

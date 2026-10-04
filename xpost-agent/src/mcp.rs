@@ -242,6 +242,13 @@ impl XpostMcp {
         )]))
     }
 
+    #[tool(description = "Wait for unsolicited firmware OK init")]
+    async fn get_init(&self) -> Result<CallToolResult, McpError> {
+        let shared = self.shared.clone();
+        self.run_op(move || ops::get_init(shared.as_ref(), "mcp"))
+            .await
+    }
+
     #[tool(description = "DUT UART settle: ready (ping ok) or booting")]
     async fn dut_status(&self) -> Result<CallToolResult, McpError> {
         let shared = self.shared.clone();
