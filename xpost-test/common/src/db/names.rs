@@ -86,13 +86,31 @@ pub fn map_trace_kind(kind: u8) -> Option<&'static str> {
     })
 }
 
-/// HAL counter subset written into experiment `*_hal_counter` tables.
+/// HAL counters written into experiment `*_hal_counter` tables.
+/// Matches `hal_perf` / xpost wire names; unused firmware slots stay 0.
 pub const HAL_COUNTER_NAMES: &[&str] = &[
     "rx_packets",
+    "xdp_invocations",
+    "xdp_pass",
+    "xdp_drop",
+    "xdp_tx",
+    "xdp_aborted",
     "rx_delivered",
     "rx_discarded",
+    "rx_queue_overflow",
     "tx_submitted",
     "tx_failed",
     "tx_completed",
+    "runtime_errors",
+    "helper_map",
+    "bad_md",
+    "tx_block_gt10ms",
+    "tx_block_gt100ms",
+    "tx_block_max_us",
+    "tx_pend",
+    "tx_inflight",
+    "tx_inflight_cap",
+    "tx_pending_peak",
+    "tx_inflight_peak",
 ];
 

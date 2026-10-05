@@ -127,10 +127,10 @@ md(
     r"""
 ## 0. 实验义务检查
 
-**义务：** `hal` + `xdp_cag` 网格（400…4000 pps、步长 400、窗口 30 s）+ 一次 `xdp_t`。  
+**义务：** `hal` + `xdp_cag` 网格（400…1600 步长 200，其后步长 400 至 4000；窗口 30 s）+ 一次 `xdp_t`。  
 `firewall` 另扫 blacklist `{50,100,200}` × `{hit,miss}`。
 
-**选取：** 最新且网格完整、`xdp_t ≥ 1` 的 `exam_id`。
+**选取：** 最新且网格完整（≥13 点 / firewall ≥78）、`xdp_t ≥ 1` 的 `exam_id`。
 """
 )
 
@@ -155,9 +155,9 @@ def pick_exam(config_table: str, min_cag: int, min_hal: int) -> pd.Series:
     assert len(df) == 1, f"{config_table} 缺少完整 exam"
     return df.iloc[0]
 
-tx_meta = pick_exam("just_tx_config", 10, 10)
-drop_meta = pick_exam("just_drop_config", 10, 10)
-fw_meta = pick_exam("firewall_config", 60, 60)
+tx_meta = pick_exam("just_tx_config", 13, 13)
+drop_meta = pick_exam("just_drop_config", 13, 13)
+fw_meta = pick_exam("firewall_config", 78, 78)
 JUST_TX, JUST_DROP, FIREWALL = tx_meta.exam_id, drop_meta.exam_id, fw_meta.exam_id
 
 obligations = pd.DataFrame(
@@ -184,8 +184,8 @@ md(
 
 依据 `exam/just_drop.rs`：多源 UDP；ARRAY `counter[末字节]++` 后 DROP。
 
-**仪器：** XDP 有 `map_operation` / `helper_execution`。本轮 HAL `just_drop_hal` 的
-`map_operation.count = 0`（未打点）——左图只能用 HAL `execution` 作粗代理。
+**仪器：** XDP / HAL（`hal_perf`）均写满 CAG 槽位；ARRAY 路径对 `map_operation` /
+`helper_map` / `xdp_drop` 已打点。未挂钩槽位 wire 为 0。
 """
 )
 
@@ -261,7 +261,7 @@ md(
 **来源：** `just_drop_config.sent` + `Σ just_drop_data.value` + `rx_packets`；exam 见 §0。
 
 - **XDP（蓝）：** `map_sum/sent` 与 `rx/sent` 叠在 ≈1.0，自 400 到 4000 pps 几乎不掉——ARRAY++DROP 路径吃满 offered load。
-- **HAL（橙）：** 两线重合且从 ~800 pps 起近似线性下滑，4000 pps 约到 **0.6**。不是「map 算错」，而是应用路径根本收不齐包；map 只是跟着 rx 走。
+- **HAL（橙）：** 两线重合；加密网格下拐点约在 **1000–1200 pps**（仍 ≥97%），其后近似线性下滑，4000 pps ≈ **0.57**。不是「map 算错」，而是应用路径收不齐包；`helper_map`/`map_operation.count` 与 `map_sum` 一致。
 - **结论：** ARRAY helper 场景下，XDP 的优势首先是**吞吐/捕获**，其次才是单次 helper 更便宜。
 """
 )
@@ -271,6 +271,7 @@ code(
 x_map = pivot_avg(jd_xdp, "map_operation")
 x_help = pivot_avg(jd_xdp, "helper_execution")
 x_rx = pivot_avg(jd_xdp, "rx_processing")
+h_map = pivot_avg(jd_hal, "map_operation")
 h_exec = pivot_avg(jd_hal, "execution")
 h_rx = pivot_avg(jd_hal, "rx_processing")
 
@@ -279,9 +280,10 @@ with zh_style():
     ax = axes[0]
     ax.plot(x_map["target_pps"], x_map["avg_ticks"], "o-", color=COLOR["xdp"], label="XDP map_operation")
     ax.plot(x_help["target_pps"], x_help["avg_ticks"], "^-", color=COLOR["alt"], label="XDP helper_execution")
-    ax.plot(h_exec["target_pps"], h_exec["avg_ticks"], "s--", color=COLOR["hal"],
-            label="HAL execution（≠ map_op）")
-    ax.set(xlabel="目标 pps", ylabel="平均 ticks / 样本", title="接近 map 的计时括号")
+    ax.plot(h_map["target_pps"], h_map["avg_ticks"], "s-", color=COLOR["hal"], label="HAL map_operation")
+    ax.plot(h_exec["target_pps"], h_exec["avg_ticks"], "s--", color=COLOR["hal"], alpha=0.5,
+            label="HAL execution")
+    ax.set(xlabel="目标 pps", ylabel="平均 ticks / 样本", title="map_operation 同括号对照")
     ax.legend(fontsize=6)
     ax = axes[1]
     ax.plot(x_rx["target_pps"], x_rx["avg_ticks"], "o-", color=COLOR["xdp"], label="XDP rx_processing")
@@ -297,11 +299,10 @@ md(
     r"""
 ### 图 1B 读图分析
 
-**来源：** `xdp_agg` / `just_drop_hal_agg`；平均 = `total_ticks/count`。
+**来源：** `xdp_agg` / `just_drop_hal_agg`；平均 = `total_ticks/count`。HAL 已写 `map_operation`。
 
-- **左图：** XDP `map_operation` ~1.5 ticks、`helper_execution` ~5 ticks，且对 pps 平坦。HAL `execution` ~10–20 ticks——**不是同一括号**，只能作数量级对照。
-- **右图：** XDP `rx_processing` 稳在 ~22 ticks；HAL 从 ~90 降到 ~50 仍远高于 XDP。HAL 均值随 pps「下降」更像是快路径样本占比变化，不能读成「越快越好」。
-- **诚实点：** 本轮 HAL 无 `map_operation` 样本；若要严格对比 map 括号，需要给 `just_drop_hal` 补 `record_map_operation`。
+- **左图：** XDP `map_operation` 仍远低于 HAL 同名括号；HAL `execution` ≥ `map_operation`（含决策外开销）。两端均对 pps 大致平坦——**单次成本不是 HAL 掉捕获的主因**。
+- **右图：** XDP `rx_processing` 稳在数十 ticks；HAL 仍高一个数量级。均值随 pps「下降」更像幸存者/快路径占比变化，不能读成「越快越好」。
 """
 )
 
@@ -370,9 +371,10 @@ md(
 **来源：** `firewall_config` + `Σ firewall_data.value`，`blacklist_size=50`。
 
 - **XDP hit：** 全网格 `map_sum/sent = 1.0`——每个刺激包都让命中键 +1。
-- **XDP / HAL miss：** 贴 0——未命中键不被 ++，语义正确。
-- **HAL hit：** 低 pps 接近 1，随后下滑到 ~0.6（4000 pps）——应用侧查表丢弃跟不上，**计数丢失先于「查表变慢」**。
-- **结论：** HASH 命中记账上 XDP 在持续负载下明显更稳；HAL 仍适合低速率功能对照。
+- **XDP miss：** `map_sum≈0` 且 `rx≈sent`——未命中不 ++，语义正确。
+- **HAL hit：** 低 pps 接近 1，加密网格下约 **1000 pps** 起明显掉，4000 ≈ **0.49**；`helper_map`/`map_op.count`=`map_sum`。
+- **HAL miss：** `map_sum=0` 正确，但 `rx_packets` 接近 0——PASS/ACK 路径在本轮几乎收不到包（与 XDP miss 满收形成对照），**勿把 miss 的 map 比值当吞吐**。
+- **结论：** HASH 命中记账上 XDP 在持续负载下明显更稳；HAL miss 暴露的是 App 转发捕获问题，不是 HASH 误计。
 """
 )
 
@@ -826,10 +828,11 @@ md(
 
 | 特性 | XDP 优势 | 注意事项 / HAL |
 |---|---|---|
-| ARRAY helper | 高 pps 仍能 `map≈sent`；更低 rx_processing | HAL 丢捕获；无 map_operation 样本 |
-| HASH helper | hit 记账满格；map_op ~5 ticks | HAL hit 随负载掉；miss 两边都接近 0 |
-| XDP_TX | ok 平台更高；拥塞前 RTT 更低 | 过载后回程丢失；TX submission 仍贵 |
+| ARRAY helper | 高 pps 仍能 `map≈sent`；更低 `map_operation`/`rx_processing` | HAL 拐点 ~1k pps；现有同括号 `map_operation` |
+| HASH helper | hit 记账满格；map_op ~5 ticks | HAL hit 随负载掉；HAL miss `rx≈0`（捕获问题） |
+| XDP_TX | 中负载 ok 平台更高 | 两端过载后回程丢失；TX submission 仍贵 |
 
+本轮 exam：`just_tx` / `just_drop` / `firewall` 由 §0 自动选取（密网格 13 点）。  
 图文件目录：`benchmark/outputs/feature_perf/`。
 """
 )

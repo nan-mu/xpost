@@ -167,21 +167,35 @@ async fn udp_task(
         #[cfg(feature = "perf-cag")]
         {
             cag::bump_rx_packets();
+            cag::bump_xdp_invocations();
             cag::set_rx_queue_depth(1);
-            cag::record_dispatch(0);
         }
         #[cfg(feature = "perf-cag")]
-        let t_exec = cag::now_ticks();
+        let t_dispatch_end = cag::now_ticks();
+        #[cfg(feature = "perf-cag")]
+        cag::record_dispatch(t_dispatch_end.saturating_sub(t0));
+
+        #[cfg(feature = "perf-cag")]
+        let t_map = cag::now_ticks();
         if let Some(octet) = ipv4_last_octet(meta.endpoint.addr) {
             COUNTER[octet as usize].fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "perf-cag")]
+            {
+                cag::bump_helper_map();
+                cag::record_map_operation(cag::now_ticks().saturating_sub(t_map));
+            }
+        } else {
+            #[cfg(feature = "perf-cag")]
+            cag::bump_bad_md();
         }
         #[cfg(feature = "perf-cag")]
-        cag::record_execution(cag::now_ticks().saturating_sub(t_exec));
+        cag::record_execution(cag::now_ticks().saturating_sub(t_dispatch_end));
 
         if DROP_ARMED.load(Ordering::Relaxed) {
             DROP.fetch_add(1, Ordering::Relaxed);
             #[cfg(feature = "perf-cag")]
             {
+                cag::bump_xdp_drop();
                 cag::bump_rx_discarded();
                 cag::set_rx_queue_depth(0);
                 cag::record_rx_processing(cag::now_ticks().saturating_sub(t0));
@@ -194,15 +208,18 @@ async fn udp_task(
         let payload = b"ACK\n";
         #[cfg(feature = "perf-cag")]
         {
+            cag::bump_xdp_pass();
             cag::bump_rx_delivered();
             cag::bump_tx_submitted();
             cag::set_tx_inflight(1);
+            cag::note_block_start();
         }
         #[cfg(feature = "perf-cag")]
         let t_tx = cag::now_ticks();
         let send_ok = socket.send_to(payload, dest).await.is_ok();
         #[cfg(feature = "perf-cag")]
         {
+            let _ = cag::note_block_end();
             let now = cag::now_ticks();
             cag::record_post_action(now.saturating_sub(t_tx));
             cag::record_tx_submission(now.saturating_sub(t_tx));
@@ -210,6 +227,7 @@ async fn udp_task(
                 cag::bump_tx_completed();
             } else {
                 cag::bump_tx_failed();
+                cag::bump_runtime_errors();
             }
             cag::set_tx_inflight(0);
             cag::set_rx_queue_depth(0);

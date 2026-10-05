@@ -1016,7 +1016,7 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
- "hal_cag",
+ "hal_perf",
  "heapless 0.8.0",
  "log",
  "portable-atomic",
@@ -1100,7 +1100,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hal_cag"
+name = "hal_perf"
 version = "0.1.0"
 dependencies = [
  "critical-section",

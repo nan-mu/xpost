@@ -2,8 +2,9 @@
 # Selected via default.toml `run = ["just_drop"]`.
 #
 # Formal pipeline (code): Array Map vs native array — flash xdp_cag + hal over
-# JustTx PPS grid (400…4000), source_seed multi-src stim, map dump counter,
-# then xdp_t Trace. Legacy sample_interval / fixed_pps unused.
+# PPS grid (dense 400…1600 step 200, then 400-step to 4000), source_seed
+# multi-src stim, map dump counter, then xdp_t Trace.
+# Legacy sample_interval / fixed_pps / rounds unused by exam code.
 
 formal = true
 rounds = 1

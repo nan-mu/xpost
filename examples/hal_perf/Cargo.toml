@@ -1,10 +1,10 @@
 [package]
 edition = "2024"
-name = "hal_cag"
+name = "hal_perf"
 rust-version = "1.88"
 version = "0.1.0"
 publish = false
-description = "Local CAG wire report for HAL firmwares (no xpost)"
+description = "HAL CAG wire report + App serial map wire helpers (no xpost)"
 
 [dependencies]
 critical-section = "1.2.0"

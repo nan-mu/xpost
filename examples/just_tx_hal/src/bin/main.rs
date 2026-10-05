@@ -169,29 +169,36 @@ async fn udp_task(
         #[cfg(feature = "perf-cag")]
         {
             cag::bump_rx_packets();
+            cag::bump_xdp_invocations();
             cag::set_rx_queue_depth(1);
         }
         NET_RX.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "perf-cag")]
+        let t_map = cag::now_ticks();
         RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "perf-cag")]
         {
+            cag::bump_helper_map();
             let t1 = cag::now_ticks();
-            cag::record_dispatch(t1.saturating_sub(t0));
-            // Echo path has no map/policy; keep a 1-tick execution sample.
-            cag::record_execution(1);
+            cag::record_dispatch(t_map.saturating_sub(t0));
+            cag::record_map_operation(t1.saturating_sub(t_map));
+            cag::record_execution(t1.saturating_sub(t_map));
         }
         let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
         #[cfg(feature = "perf-cag")]
         {
+            cag::bump_xdp_tx();
             cag::bump_rx_delivered();
             cag::bump_tx_submitted();
             cag::set_tx_inflight(1);
+            cag::note_block_start();
         }
         #[cfg(feature = "perf-cag")]
         let t_tx = cag::now_ticks();
         let send_ok = socket.send_to(&buf[..n], dest).await.is_ok();
         #[cfg(feature = "perf-cag")]
         {
+            let _ = cag::note_block_end();
             let now = cag::now_ticks();
             cag::record_post_action(now.saturating_sub(t_tx));
             cag::record_tx_submission(now.saturating_sub(t_tx));
@@ -199,6 +206,7 @@ async fn udp_task(
                 cag::bump_tx_completed();
             } else {
                 cag::bump_tx_failed();
+                cag::bump_runtime_errors();
             }
             cag::set_tx_inflight(0);
             cag::set_rx_queue_depth(0);

@@ -48,7 +48,7 @@ esp-radio = { version = "0.18.0", path = "../../esp-radio", features = [
   "wifi",
 ] }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
-hal_cag = { path = "../hal_cag" }
+hal_perf = { path = "../hal_perf" }
 critical-section = "1.2.0"
 heapless = "0.8"
 portable-atomic = { version = "1", default-features = false }

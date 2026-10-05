@@ -67,8 +67,11 @@ const SOURCE_SEED_DEFAULT: i64 = 0x0A11_CE00;
 /// Absolute slot slack for Wi-Fi loss (WARN only).
 const SLOT_SLACK: u64 = 64;
 
+// Dense below ~1600 (HAL knee); keep 400-step above.
 const SWEEP_PPS: &[f64] = &[
-    400.0, 800.0, 1200.0, 1600.0, 2000.0, 2400.0, 2800.0, 3200.0, 3600.0, 4000.0,
+    400.0, 600.0, 800.0, 1000.0, 1200.0, 1400.0, 1600.0, 2000.0, 2400.0, 2800.0,
+    3200.0, 3600.0, 4000.0,
+
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

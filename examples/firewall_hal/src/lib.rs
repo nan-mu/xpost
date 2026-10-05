@@ -1,5 +1,6 @@
 #![no_std]
 
-pub mod cag;
 pub mod map_crud;
-pub mod wire;
+
+pub use hal_perf as cag;
+pub use hal_perf::wire;
