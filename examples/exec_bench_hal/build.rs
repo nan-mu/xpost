@@ -1,8 +1,6 @@
-use xpost_build::firmware_codegen;
-
 fn main() {
     linker_be_nice();
-    firmware_codegen().unwrap();
+    println!("cargo:rustc-link-arg=-Tlinkall.x");
 }
 
 fn linker_be_nice() {

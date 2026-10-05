@@ -7,8 +7,8 @@
 #![deny(clippy::large_stack_frames)]
 
 //! Native HAL twin of `exec_bench`: same host pipeline (map / enable exec /
-//! `OK finish` / perf), no XDP lease. Workload bytes are opaque at the serial
-//! boundary; [`exec_bench_common::run_hal`] interprets the buffer.
+//! `OK finish` / perf), no XDP lease and no `xpost` runtime. Workload bytes are
+//! opaque at the serial boundary; [`exec_bench_common::run_hal`] interprets them.
 
 use core::cell::RefCell;
 use core::convert::Infallible;
@@ -22,12 +22,12 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use heapless::FnvIndexMap;
 use log::error;
-use xpost::app_ctrl;
-use xpost::xdp::Slot;
-use xpost_serial::reply::{MapError, OkReply, ServerError};
+#[allow(unused_imports)] // PerfError only when neither perf-cag
+use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
 use exec_bench_common::{self as bench, BUF_CAP};
+use exec_bench_hal::{cag, wire};
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -44,12 +44,6 @@ const VALUE_LEN: usize = 32;
 const KEY_IN: u8 = 0;
 const KEY_OUT: u8 = 1;
 const MAP_CAP: u32 = 2;
-
-/// Slot metadata so `xpost` links; HAL never leases a cold image.
-#[used]
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".xdp.hotload_0")]
-static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
 static WORKLOAD: Mutex<RefCell<FnvIndexMap<u8, [u8; VALUE_LEN], 2>>> =
     Mutex::new(RefCell::new(FnvIndexMap::new()));
@@ -73,8 +67,6 @@ async fn main(spawner: Spawner) -> ! {
     let sw_interrupt =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
-
-    let _ = &xdp_slot;
 
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
     spawner.spawn(control_serial(usb_rx).unwrap());
@@ -127,17 +119,17 @@ serial_task! {
             critical_section::with(|cs| {
                 let map = WORKLOAD.borrow(cs).borrow();
                 let size = map.len() as u32;
-                let mut len = app_ctrl::hash_header_len(size, MAP_CAP);
+                let mut len = wire::hash_header_len(size, MAP_CAP);
                 for (k, v) in map.iter() {
-                    len += app_ctrl::hash_entry_len(&[*k], v);
+                    len += wire::hash_entry_len(&[*k], v);
                 }
                 reply.get_map(len, |write| {
                     let mut emit = |chunk: &[u8]| {
                         let _ = write(chunk);
                     };
-                    app_ctrl::write_hash_header(size, MAP_CAP, &mut emit);
+                    wire::write_hash_header(size, MAP_CAP, &mut emit);
                     for (k, v) in map.iter() {
-                        app_ctrl::write_hash_entry(&[*k], v, &mut emit);
+                        wire::write_hash_entry(&[*k], v, &mut emit);
                     }
                 });
             });
@@ -151,14 +143,28 @@ serial_task! {
             },
         )
         .on_clear_perf(|reply: ReplyWriter<'_>| {
-            xpost::ext::perf::clear_perf();
-            reply.ok(OkReply::ClearPerf);
+            #[cfg(feature = "perf-cag")]
+            {
+                cag::clear_perf();
+                reply.ok(OkReply::ClearPerf);
+            }
+            #[cfg(not(feature = "perf-cag"))]
+            {
+                reply.error(&PerfError::Unavailable);
+            }
         })
         .on_get_perf(|reply: ReplyWriter<'_>| {
-            let n = xpost::ext::perf::report_payload_len();
-            reply.get_perf(n, |write| {
-                xpost::ext::perf::report_perf(write);
-            });
+            #[cfg(feature = "perf-cag")]
+            {
+                let n = cag::report_payload_len();
+                reply.get_perf(n, |write| {
+                    cag::report_perf(write);
+                });
+            }
+            #[cfg(not(feature = "perf-cag"))]
+            {
+                reply.error(&PerfError::Unavailable);
+            }
         })
         .build()
     }

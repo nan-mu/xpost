@@ -13,27 +13,11 @@ path = "./src/bin/main.rs"
 [package.metadata.espflash]
 partition_table = "partitions.csv"
 
-# Slot + cold table so xpost links; HAL never leases a compute image.
-[package.metadata.xpost]
-schema_version = 1
-
-[[package.metadata.xpost.slots.entries]]
-name = "a"
-length = 0xE00
-mount = "rx"
-primary = true
-
-[package.metadata.xpost.xdp_table]
-partition = "xdp"
-image_capacity = 0x1000
-
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
-# `esp-radio` feature required: root `xpost` always links esp-radio.
 esp-rtos = { version = "0.3.0", features = [
   "embassy",
   "esp-alloc",
-  "esp-radio",
   "esp32c3",
   "log-04",
 ] }
@@ -45,17 +29,13 @@ embassy-executor = { version = "0.10.0", features = ["log"] }
 embassy-time = { version = "0.5.0", features = ["log"] }
 critical-section = "1.2.0"
 heapless = "0.8"
-xpost = { path = "../..", features = [
-  "perf-counter",
-  "perf-aggregate",
-  "perf-gauge",
-  "perf-trace",
-] }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
+hal_perf = { path = "../hal_perf" }
 exec_bench_common = { path = "../exec_bench_common" }
 
-[build-dependencies]
-xpost-build = { path = "../../xpost-build" }
+[features]
+# Formal HAL CAG arm: local dataplane CAG report (no xpost).
+perf-cag = []
 
 [profile.dev]
 opt-level = "s"

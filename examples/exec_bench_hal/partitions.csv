@@ -1,6 +1,6 @@
 # Name, Type, SubType, Offset, Size, Flags
-# Cold xdp partition required for xpost-build link layout; HAL leaves it empty.
+# No xpost cold-table metadata; keep layout aligned with other HAL boards.
 nvs, data, nvs, 0x9000, 0x6000,
 phy_init, data, phy, 0xf000, 0x1000,
 factory, app, factory, 0x10000, 0x300000,
-xdp, data, 0x40, 0x310000, 0x10000,
+xdp, 0x40, 0x00, 0x310000, 0x10000,

@@ -184,4 +184,4 @@ name = "exec-bench-hal"
 target = "esp32c3"
 partition_table = "examples/exec_bench_hal/partitions.csv"
 artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal"
-build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build", "--release"] }
+build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
