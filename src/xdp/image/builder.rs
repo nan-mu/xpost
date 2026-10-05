@@ -262,7 +262,8 @@ const MAX_VALUE_BYTES: usize = 256;
 /// Keep in lockstep with [`xpost_elf::MAX_ENTRIES`] (XDP ELF V0 profile).
 const MAX_ENTRIES: u32 = xpost_elf::MAX_ENTRIES;
 
-fn validate_layout(layout: &[u8], max_bytes: usize) -> Result<(), XdpInitError> {
+/// Validate Compact ELF layout descriptors (field widths in **bits**).
+fn validate_wire_layout(layout: &[u8], max_bytes: usize) -> Result<(), XdpInitError> {
     if layout.is_empty() || layout.len() > MAX_LAYOUT_DESCS {
         return Err(XdpInitError::TypeMismatch);
     }
@@ -279,6 +280,18 @@ fn validate_layout(layout: &[u8], max_bytes: usize) -> Result<(), XdpInitError> 
         return Err(XdpInitError::TypeMismatch);
     }
     Ok(())
+}
+
+/// Convert wire bit-widths into byte `FIELD_LENS` for [`crate::map::layout_size`].
+fn wire_layout_to_field_lens(layout: &[u8]) -> Result<alloc::vec::Vec<u8>, XdpInitError> {
+    let mut out = alloc::vec::Vec::with_capacity(layout.len());
+    for &bits in layout {
+        if bits % 8 != 0 {
+            return Err(XdpInitError::TypeMismatch);
+        }
+        out.push(bits / 8);
+    }
+    Ok(out)
 }
 
 /// Build a [`MapBuilder`] from a Compact ELF MapDescriptorV0 wire record.
@@ -299,12 +312,14 @@ pub(crate) fn map_builder_from_descriptor(
         BPF_MAP_TYPE_HASH => {
             let key = key_layout.ok_or(XdpInitError::TypeMismatch)?;
             let value = value_layout.ok_or(XdpInitError::TypeMismatch)?;
-            validate_layout(key, MAX_KEY_BYTES)?;
-            validate_layout(value, MAX_VALUE_BYTES)?;
+            validate_wire_layout(key, MAX_KEY_BYTES)?;
+            validate_wire_layout(value, MAX_VALUE_BYTES)?;
+            let key = wire_layout_to_field_lens(key)?;
+            let value = wire_layout_to_field_lens(value)?;
             Ok(MapBuilder::hash()
                 .with_name(name)
-                .with_key_layout(key)
-                .with_value_layout(value)
+                .with_key_layout(&key)
+                .with_value_layout(&value)
                 .with_capacity(len as usize))
         }
         BPF_MAP_TYPE_ARRAY => {
@@ -312,10 +327,11 @@ pub(crate) fn map_builder_from_descriptor(
                 return Err(XdpInitError::TypeMismatch);
             }
             let value = value_layout.ok_or(XdpInitError::TypeMismatch)?;
-            validate_layout(value, MAX_VALUE_BYTES)?;
+            validate_wire_layout(value, MAX_VALUE_BYTES)?;
+            let value = wire_layout_to_field_lens(value)?;
             Ok(MapBuilder::array()
                 .with_name(name)
-                .with_value_layout(value)
+                .with_value_layout(&value)
                 .with_capacity(len as usize))
         }
         _ => Err(XdpInitError::TypeMismatch),

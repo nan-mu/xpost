@@ -16,8 +16,10 @@ use crate::map::{
     ops::{BPF_EXIST, BPF_NOEXIST, MapOpError, MapOps},
 };
 
-const MAX_KEY_BYTES: usize = 64;
-const MAX_VAL_BYTES: usize = 256;
+// Cap for fixed KeyBlob/ValSlot storage. `try_reserve(max_entries)` pays
+// (key+val) × entries up front — keep modest so HASH max_entries=256 fits 64KiB.
+const MAX_KEY_BYTES: usize = 16;
+const MAX_VAL_BYTES: usize = 16;
 
 /// Inner hashbrown table of [`BpfHashMap`] (`KeyBlob` → `ValSlot`).
 pub(crate) type BpfHashTable = HashMap<KeyBlob, ValSlot, hashbrown::DefaultHashBuilder, TalcAlloc>;
