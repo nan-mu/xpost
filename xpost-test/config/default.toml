@@ -14,7 +14,7 @@ version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
 # HAL smoke: `dev`. Formal: just_tx / just_drop / firewall. Wipe: formal-clear.
-run = ["dev"]
+run = ["just_tx", "just_drop", "firewall"]
 
 [postgres]
 host = "192.168.110.96"

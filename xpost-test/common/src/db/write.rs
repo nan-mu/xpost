@@ -214,7 +214,7 @@ pub async fn insert_firewall_data(
             .execute(
                 r#"
                 INSERT INTO firewall_data (config_id, key_ip, value)
-                VALUES ($1, $2::inet, $3)
+                VALUES ($1, ($2::text)::inet, $3)
                 ON CONFLICT (config_id, key_ip) DO UPDATE SET value = EXCLUDED.value
                 "#,
                 &[&config_id, &key, &value],

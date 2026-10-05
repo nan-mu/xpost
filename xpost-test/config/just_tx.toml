@@ -5,4 +5,4 @@
 # then xdp_t one-packet Trace. HAL smoke: `run = ["dev"]` (see exam/dev.rs).
 
 formal = true
-arms = ["xdp"]
+arms = ["hal", "xdp"]
