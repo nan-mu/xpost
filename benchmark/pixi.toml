@@ -17,6 +17,7 @@ ipykernel = "*"
 python-dotenv = "*"
 psycopg = { version = ">=3", extras = ["binary"] }
 sqlalchemy = "*"
+nbformat = ">=5.11.1, <6"
 
 [tasks]
 # Optional: register pixi Python for ad-hoc notebooks / REPL.

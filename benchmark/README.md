@@ -22,6 +22,7 @@ This directory is **not** an experiment-centric Evaluation workspace.
 | Path | Role |
 |------|------|
 | `backup/` | Frozen archives — **do not edit or delete** |
+| `feature_perf.ipynb` | 按特性指标的中文分析笔记本：ARRAY helper / HASH helper / `XDP_TX` vs HAL |
 | `utils/db.py` | Thin Postgres helpers for ad-hoc queries |
 | `utils/trace_flame.py` + `utils/export_*.py` | Optional flame / speedscope export |
 | `pixi.toml` | Analysis Python env (when needed) |
