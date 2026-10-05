@@ -56,7 +56,7 @@ static CTRL_BOUND: AtomicBool = AtomicBool::new(false);
 static ACK_IP: AtomicU32 = AtomicU32::new(0);
 static ACK_PORT: AtomicU32 = AtomicU32::new(0);
 
-type BlacklistMap = FnvIndexMap<u32, u8, MAX_BLACKLIST>;
+type BlacklistMap = FnvIndexMap<u32, u32, MAX_BLACKLIST>;
 static BLACKLIST: critical_section::Mutex<core::cell::RefCell<BlacklistMap>> =
     critical_section::Mutex::new(core::cell::RefCell::new(FnvIndexMap::new()));
 
@@ -149,8 +149,14 @@ fn ip_key_from_addr(addr: embassy_net::IpAddress) -> Option<u32> {
 
 fn is_blocked(key: u32) -> bool {
     critical_section::with(|cs| {
-        let map = BLACKLIST.borrow(cs).borrow();
-        matches!(map.get(&key), Some(&v) if v != 0)
+        let mut map = BLACKLIST.borrow(cs).borrow_mut();
+        match map.get_mut(&key) {
+            Some(v) => {
+                *v = v.saturating_add(1);
+                true
+            }
+            None => false,
+        }
     })
 }
 
@@ -297,8 +303,8 @@ fn handle_map_crud<'a>(pkt: &[u8], val_buf: &'a mut [u8; 8]) -> (u32, u32, &'a [
                 let map = BLACKLIST.borrow(cs).borrow();
                 match map.get(&key).copied() {
                     Some(v) => {
-                        val_buf[0] = v;
-                        (STATUS_OK, kind, &val_buf[..1])
+                        val_buf[..4].copy_from_slice(&v.to_le_bytes());
+                        (STATUS_OK, kind, &val_buf[..4])
                     }
                     None => (STATUS_NOT_FOUND, kind, &val_buf[..0]),
                 }
@@ -309,7 +315,13 @@ fn handle_map_crud<'a>(pkt: &[u8], val_buf: &'a mut [u8; 8]) -> (u32, u32, &'a [
                 return (STATUS_BAD, kind, &val_buf[..0]);
             }
             let key = u32::from_be_bytes([op.key[0], op.key[1], op.key[2], op.key[3]]);
-            let val = if op.value.is_empty() { 1 } else { op.value[0] };
+            let val = if op.value.is_empty() {
+                1u32
+            } else if op.value.len() >= 4 {
+                u32::from_le_bytes([op.value[0], op.value[1], op.value[2], op.value[3]])
+            } else {
+                op.value[0] as u32
+            };
             critical_section::with(|cs| {
                 let mut map = BLACKLIST.borrow(cs).borrow_mut();
                 match map.insert(key, val) {
@@ -374,7 +386,7 @@ serial_task! {
                 let cap = MAX_BLACKLIST as u32;
                 let mut len = wire::hash_header_len(size, cap);
                 for (k, v) in map.iter() {
-                    len += wire::hash_entry_len(&k.to_be_bytes(), &[*v]);
+                    len += wire::hash_entry_len(&k.to_be_bytes(), &v.to_le_bytes());
                 }
                 reply.get_map(len, |write| {
                     let mut emit = |chunk: &[u8]| {
@@ -382,7 +394,7 @@ serial_task! {
                     };
                     wire::write_hash_header(size, cap, &mut emit);
                     for (k, v) in map.iter() {
-                        wire::write_hash_entry(&k.to_be_bytes(), &[*v], &mut emit);
+                        wire::write_hash_entry(&k.to_be_bytes(), &v.to_le_bytes(), &mut emit);
                     }
                 });
             });
@@ -401,13 +413,13 @@ serial_task! {
                     reply.error(&MapError::InvalidValue);
                     return;
                 };
-                if val > u64::from(u8::MAX) {
+                if val > u64::from(u32::MAX) {
                     reply.error(&MapError::InvalidValue);
                     return;
                 }
                 let k = u32::from_be_bytes(ip);
                 let ok = critical_section::with(|cs| {
-                    BLACKLIST.borrow(cs).borrow_mut().insert(k, val as u8).is_ok()
+                    BLACKLIST.borrow(cs).borrow_mut().insert(k, val as u32).is_ok()
                 });
                 if ok {
                     reply.ok(OkReply::UpdateMap);

@@ -1,10 +1,10 @@
-// Firewall XDP — hash-map blacklist (lookup-only dataplane).
+// Firewall XDP — hash-map blacklist (hit DROP + count).
 //
-// Compiled externally via libbpf-mcu to RISC-V AOT (`firewall.bin`), then
-// packed into Compact ELF V0 (`firewall.elf`) with xpost-compact-elf.
-// Vendored AOT matches historical fw_hash_drop semantics:
-//   IPv4 src in `blacklist` → XDP_DROP; miss / non-IPv4 / ctrl UDP:8081 → PASS.
-// Dataplane never updates the map.
+// Compiled externally via libbpf-mcu to RISC-V AOT, packed into XDP ELF V0
+// (`firewall.elf`). Semantics (xpost-test exam/firewall.rs):
+//   IPv4 src present in `blacklist` → increment value, XDP_DROP;
+//   miss / non-IPv4 / ctrl UDP:8081 → PASS.
+// Seed value may be 0; membership is key presence, not a non-zero flag.
 
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
@@ -19,7 +19,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 256);
 	__type(key, __u32);
-	__type(value, __u8);
+	__type(value, __u32);
 } blacklist SEC(".maps");
 
 SEC("xdp")
@@ -29,7 +29,7 @@ int firewall(struct xdp_md *ctx)
 	void *data = (void *)(long)ctx->data;
 	struct ethhdr *eth = data;
 	struct iphdr *ip;
-	__u8 *flag;
+	__u32 *cnt;
 
 	if ((void *)(eth + 1) > data_end)
 		return XDP_PASS;
@@ -48,9 +48,11 @@ int firewall(struct xdp_md *ctx)
 			return XDP_PASS;
 	}
 
-	flag = bpf_map_lookup_elem(&blacklist, &ip->saddr);
-	if (flag && *flag)
+	cnt = bpf_map_lookup_elem(&blacklist, &ip->saddr);
+	if (cnt) {
+		*cnt = *cnt + 1;
 		return XDP_DROP;
+	}
 	return XDP_PASS;
 }
 
