@@ -1,0 +1,11 @@
+# 固定本次展示的数据批次；换批次时显式修改，避免报告悄悄改变。
+schema = "formal"
+rates = [400, 600, 800, 1000, 1200, 1400, 1600, 2000, 2400, 2800, 3200, 3600, 4000]
+blacklist_sizes = [200]
+traffic = ["mixed"]
+window_s = 30
+
+[exams]
+just_tx = "6bafbdd7-ecc2-4f84-9eba-47209f720d47"
+just_drop = "92d0d362-bab7-4a38-862e-6239c579bd66"
+firewall = "593d90a7-b08f-43d9-b2c9-ababb91c9444"
