@@ -7,11 +7,13 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+use core::cell::RefCell;
 use core::convert::Infallible;
 use core::ptr::addr_of_mut;
 
 use alloc::string::ToString;
-use portable_atomic::{AtomicU32, AtomicUsize, Ordering};
+use heapless::Vec as HVec;
+use portable_atomic::{AtomicUsize, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
@@ -23,6 +25,7 @@ use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use log::{error, info};
 use static_cell::StaticCell;
 use xpost::app_ctrl::{self, AppMapError, AppXdpError};
+use xpost::map::dump::{array_blob_len, write_array_blob};
 use xpost::map::{BPF_ANY, HEAP_SIZE, MapRt, MapUseError};
 use xpost::xdp::{ReportItem, Slot, XdpRt};
 #[allow(unused_imports)] // PerfError only when neither perf-cag nor perf-t
@@ -48,6 +51,15 @@ const CTRL_PORT: u16 = 8081;
 /// Host harness binds MapCrudAck on this port (`dut.reply_port`).
 const REPLY_PORT: u16 = 18080;
 const MAP_BLACKLIST: &str = "blacklist";
+/// Virtual map name for legal-flow u16 tokens (`get/clear map firewall_result`).
+const MAP_FIREWALL_RESULT: &str = "firewall_result";
+const LEGAL_CAP: usize = 1024;
+
+type LegalVec = HVec<u16, LEGAL_CAP>;
+static LEGAL_TOKENS: critical_section::Mutex<RefCell<LegalVec>> =
+    critical_section::Mutex::new(RefCell::new(HVec::new()));
+static LEGAL_SNAP: critical_section::Mutex<RefCell<[u16; LEGAL_CAP]>> =
+    critical_section::Mutex::new(RefCell::new([0u16; LEGAL_CAP]));
 
 #[unsafe(link_section = ".bss")]
 static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
@@ -57,8 +69,6 @@ static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
-static ACK_IP: AtomicU32 = AtomicU32::new(0);
-static ACK_PORT: AtomicU32 = AtomicU32::new(0);
 
 static NET_RESOURCES: StaticCell<StackResources<5>> = StaticCell::new();
 static UDP_RX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
@@ -224,14 +234,44 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
     socket.bind(STIM_PORT).expect("bind stim");
     let mut buf = [0u8; 256];
     loop {
-        let Ok((n, meta)) = socket.recv_from(&mut buf).await else {
+        let Ok((n, _meta)) = socket.recv_from(&mut buf).await else {
             continue;
         };
         NET_RX.fetch_add(1, Ordering::Relaxed);
-        let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
-        let _ = socket.send_to(b"ACK\n", dest).await;
-        let _ = n;
+        // Legal (XDP PASS) flow: record LE u16 token; never ACK.
+        if n >= 2 {
+            let token = u16::from_le_bytes([buf[0], buf[1]]);
+            critical_section::with(|cs| {
+                let _ = LEGAL_TOKENS.borrow(cs).borrow_mut().push(token);
+            });
+        }
     }
+}
+
+fn clear_legal_tokens() {
+    critical_section::with(|cs| LEGAL_TOKENS.borrow(cs).borrow_mut().clear());
+}
+
+fn reply_legal_tokens(reply: ReplyWriter<'_>) {
+    let n = critical_section::with(|cs| {
+        let tokens = LEGAL_TOKENS.borrow(cs).borrow();
+        let n = tokens.len();
+        LEGAL_SNAP.borrow(cs).borrow_mut()[..n].copy_from_slice(tokens.as_slice());
+        n
+    });
+    let size = n as u32;
+    let len = critical_section::with(|cs| {
+        let snap = LEGAL_SNAP.borrow(cs).borrow();
+        array_blob_len(size, |i| u64::from(snap[i as usize]))
+    });
+    reply.get_map(len, |write| {
+        critical_section::with(|cs| {
+            let snap = LEGAL_SNAP.borrow(cs).borrow();
+            write_array_blob(size, |i| u64::from(snap[i as usize]), &mut |chunk| {
+                let _ = write(chunk);
+            });
+        });
+    });
 }
 
 #[embassy_executor::task]
@@ -337,23 +377,40 @@ serial_task! {
             Ok(()) => reply.ok(OkReply::DisableXdp),
             Err(e) => reply_xdp_err(reply, e),
         })
-        .on_clear_map(|name: &str, reply: ReplyWriter<'_>| match app_ctrl::clear_map(name) {
-            Ok(()) => reply.ok(OkReply::ClearMap),
-            Err(e) => reply_map_err(reply, e),
+        .on_clear_map(|name: &str, reply: ReplyWriter<'_>| {
+            if name == MAP_FIREWALL_RESULT {
+                clear_legal_tokens();
+                reply.ok(OkReply::ClearMap);
+                return;
+            }
+            match app_ctrl::clear_map(name) {
+                Ok(()) => reply.ok(OkReply::ClearMap),
+                Err(e) => reply_map_err(reply, e),
+            }
         })
-        .on_get_map(|name: &str, reply: ReplyWriter<'_>| match app_ctrl::lock_map(name) {
-            Ok((maps, idx)) => match maps.map_blob_len(idx) {
-                Ok(len) => reply.get_map(len, |write| {
-                    let _ = maps.write_map_blob(idx, |chunk| {
-                        let _ = write(chunk);
-                    });
-                }),
-                Err(e) => reply_map_err(reply, e.into()),
-            },
-            Err(e) => reply_map_err(reply, e),
+        .on_get_map(|name: &str, reply: ReplyWriter<'_>| {
+            if name == MAP_FIREWALL_RESULT {
+                reply_legal_tokens(reply);
+                return;
+            }
+            match app_ctrl::lock_map(name) {
+                Ok((maps, idx)) => match maps.map_blob_len(idx) {
+                    Ok(len) => reply.get_map(len, |write| {
+                        let _ = maps.write_map_blob(idx, |chunk| {
+                            let _ = write(chunk);
+                        });
+                    }),
+                    Err(e) => reply_map_err(reply, e.into()),
+                },
+                Err(e) => reply_map_err(reply, e),
+            }
         })
         .on_update_map(
             |name: &str, key: &[u8], value: &[u8], reply: ReplyWriter<'_>| {
+                if name == MAP_FIREWALL_RESULT {
+                    reply.error(&MapError::Unsupported);
+                    return;
+                }
                 match app_ctrl::update_map(name, key, value) {
                     Ok(()) => reply.ok(OkReply::UpdateMap),
                     Err(e) => reply_map_err(reply, e),
@@ -466,15 +523,4 @@ fn parse_v4(s: &str) -> Option<u32> {
         return None;
     }
     Some((out << 8) | acc)
-}
-
-fn ack_endpoint(src: embassy_net::IpAddress, src_port: u16) -> (embassy_net::IpAddress, u16) {
-    let ip = ACK_IP.load(Ordering::Relaxed);
-    let port = ACK_PORT.load(Ordering::Relaxed) as u16;
-    if ip != 0 && port != 0 {
-        let o = ip.to_be_bytes();
-        (embassy_net::IpAddress::v4(o[0], o[1], o[2], o[3]), port)
-    } else {
-        (src, src_port)
-    }
 }

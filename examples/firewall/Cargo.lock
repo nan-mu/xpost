@@ -1166,6 +1166,7 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
+ "heapless 0.8.0",
  "log",
  "portable-atomic",
  "static_cell",

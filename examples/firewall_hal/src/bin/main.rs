@@ -7,10 +7,11 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+use core::cell::RefCell;
 use core::convert::Infallible;
 
 use alloc::string::ToString;
-use portable_atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use portable_atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_net::StackResources;
@@ -23,7 +24,7 @@ use firewall_hal::map_crud::{
     self, MapCrudAck, STATUS_BAD, STATUS_CONFLICT, STATUS_NOT_FOUND, STATUS_OK,
 };
 use firewall_hal::wire;
-use heapless::FnvIndexMap;
+use heapless::{FnvIndexMap, Vec as HVec};
 use log::error;
 use static_cell::StaticCell;
 #[allow(unused_imports)] // PerfError only when perf-cag is off
@@ -47,18 +48,24 @@ const STIM_PORT: u16 = 8080;
 const CTRL_PORT: u16 = 8081;
 const REPLY_PORT: u16 = 18080;
 const MAP_BLACKLIST: &str = "blacklist";
+const MAP_FIREWALL_RESULT: &str = "firewall_result";
 const MAX_BLACKLIST: usize = 256;
+const LEGAL_CAP: usize = 1024;
 
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
 static DROP: AtomicUsize = AtomicUsize::new(0);
 /// Set after MapCrud UDP bind so `OK init` waits for both dataplane sockets.
 static CTRL_BOUND: AtomicBool = AtomicBool::new(false);
-static ACK_IP: AtomicU32 = AtomicU32::new(0);
-static ACK_PORT: AtomicU32 = AtomicU32::new(0);
 
 type BlacklistMap = FnvIndexMap<u32, u32, MAX_BLACKLIST>;
-static BLACKLIST: critical_section::Mutex<core::cell::RefCell<BlacklistMap>> =
-    critical_section::Mutex::new(core::cell::RefCell::new(FnvIndexMap::new()));
+static BLACKLIST: critical_section::Mutex<RefCell<BlacklistMap>> =
+    critical_section::Mutex::new(RefCell::new(FnvIndexMap::new()));
+
+type LegalVec = HVec<u16, LEGAL_CAP>;
+static LEGAL_TOKENS: critical_section::Mutex<RefCell<LegalVec>> =
+    critical_section::Mutex::new(RefCell::new(HVec::new()));
+static LEGAL_SNAP: critical_section::Mutex<RefCell<[u16; LEGAL_CAP]>> =
+    critical_section::Mutex::new(RefCell::new([0u16; LEGAL_CAP]));
 
 static NET_RESOURCES: StaticCell<StackResources<5>> = StaticCell::new();
 static UDP_RX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
@@ -229,36 +236,47 @@ async fn udp_task(
             continue;
         }
         NET_RX.fetch_add(1, Ordering::Relaxed);
-        let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
+        // Legal flow: store LE u16 token; never ACK.
+        if n >= 2 {
+            let token = u16::from_le_bytes([buf[0], buf[1]]);
+            critical_section::with(|cs| {
+                let _ = LEGAL_TOKENS.borrow(cs).borrow_mut().push(token);
+            });
+        }
         #[cfg(feature = "perf-cag")]
         {
             cag::bump_xdp_pass();
             cag::bump_rx_delivered();
-            cag::bump_tx_submitted();
-            cag::set_tx_inflight(1);
-            cag::note_block_start();
-        }
-        #[cfg(feature = "perf-cag")]
-        let t_tx = cag::now_ticks();
-        // Echo stimulus payload so host eBPF can match seq.
-        let send_ok = socket.send_to(&buf[..n], dest).await.is_ok();
-        #[cfg(feature = "perf-cag")]
-        {
-            let _ = cag::note_block_end();
-            let now = cag::now_ticks();
-            cag::record_post_action(now.saturating_sub(t_tx));
-            cag::record_tx_submission(now.saturating_sub(t_tx));
-            if send_ok {
-                cag::bump_tx_completed();
-            } else {
-                cag::bump_tx_failed();
-                cag::bump_runtime_errors();
-            }
-            cag::set_tx_inflight(0);
             cag::set_rx_queue_depth(0);
-            cag::record_rx_processing(now.saturating_sub(t0));
+            cag::record_rx_processing(cag::now_ticks().saturating_sub(t0));
         }
     }
+}
+
+fn clear_legal_tokens() {
+    critical_section::with(|cs| LEGAL_TOKENS.borrow(cs).borrow_mut().clear());
+}
+
+fn reply_legal_tokens(reply: ReplyWriter<'_>) {
+    let n = critical_section::with(|cs| {
+        let tokens = LEGAL_TOKENS.borrow(cs).borrow();
+        let n = tokens.len();
+        LEGAL_SNAP.borrow(cs).borrow_mut()[..n].copy_from_slice(tokens.as_slice());
+        n
+    });
+    let size = n as u32;
+    let len = critical_section::with(|cs| {
+        let snap = LEGAL_SNAP.borrow(cs).borrow();
+        wire::array_blob_len(size, |i| u64::from(snap[i as usize]))
+    });
+    reply.get_map(len, |write| {
+        critical_section::with(|cs| {
+            let snap = LEGAL_SNAP.borrow(cs).borrow();
+            wire::write_array_blob(size, |i| u64::from(snap[i as usize]), &mut |chunk| {
+                let _ = write(chunk);
+            });
+        });
+    });
 }
 
 #[embassy_executor::task]
@@ -380,6 +398,11 @@ serial_task! {
         .on_enable_xdp(|reply: ReplyWriter<'_>| reply.ok(OkReply::EnableXdp))
         .on_disable_xdp(|reply: ReplyWriter<'_>| reply.ok(OkReply::DisableXdp))
         .on_clear_map(|name: &str, reply: ReplyWriter<'_>| {
+            if name == MAP_FIREWALL_RESULT {
+                clear_legal_tokens();
+                reply.ok(OkReply::ClearMap);
+                return;
+            }
             if name != MAP_BLACKLIST {
                 reply.error(&MapError::NameNotFound);
                 return;
@@ -388,6 +411,10 @@ serial_task! {
             reply.ok(OkReply::ClearMap);
         })
         .on_get_map(|name: &str, reply: ReplyWriter<'_>| {
+            if name == MAP_FIREWALL_RESULT {
+                reply_legal_tokens(reply);
+                return;
+            }
             if name != MAP_BLACKLIST {
                 reply.error(&MapError::NameNotFound);
                 return;
@@ -413,6 +440,10 @@ serial_task! {
         })
         .on_update_map(
             |name: &str, key: &[u8], value: &[u8], reply: ReplyWriter<'_>| {
+                if name == MAP_FIREWALL_RESULT {
+                    reply.error(&MapError::Unsupported);
+                    return;
+                }
                 if name != MAP_BLACKLIST {
                     reply.error(&MapError::NameNotFound);
                     return;
@@ -465,16 +496,5 @@ serial_task! {
             }
         })
         .build()
-    }
-}
-
-fn ack_endpoint(src: embassy_net::IpAddress, src_port: u16) -> (embassy_net::IpAddress, u16) {
-    let ip = ACK_IP.load(Ordering::Relaxed);
-    let port = ACK_PORT.load(Ordering::Relaxed) as u16;
-    if ip != 0 && port != 0 {
-        let o = ip.to_be_bytes();
-        (embassy_net::IpAddress::v4(o[0], o[1], o[2], o[3]), port)
-    } else {
-        (src, src_port)
     }
 }
