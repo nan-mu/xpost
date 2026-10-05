@@ -14,6 +14,9 @@
 
 pub const HEADER: usize = 8;
 pub const BUF_CAP: usize = 512;
+/// Compact ELF / map value size (24-byte payload after header).
+pub const MAP_VALUE_LEN: usize = 32;
+pub const MAP_PAYLOAD: usize = MAP_VALUE_LEN - HEADER;
 
 pub const OP_INCR: u32 = 0;
 pub const OP_SQUARE: u32 = 1;
@@ -80,6 +83,52 @@ pub fn default_param(op: u32) -> u32 {
     }
 }
 
+/// Compact-ELF-safe `param` for a 32-byte map value (24-byte payload).
+#[inline]
+pub fn compact_param(op: u32) -> u32 {
+    match op {
+        OP_INCR | OP_SQUARE | OP_BITSWAP => 0,
+        OP_FIB => 30,
+        // buf/fletcher need n+4 bytes; memcpy needs 2n. Cap to MAP_PAYLOAD.
+        OP_BUF | OP_FLETCHER32 => 16,
+        OP_MEMCPY => 8,
+        // n u32s fit in 24 bytes → n ≤ 6.
+        OP_BSORT => 6,
+        _ => 0,
+    }
+}
+
+fn fill_payload(payload: &mut [u8], op: u32, param: u32) -> Result<(), BenchError> {
+    payload.fill(0);
+    match op {
+        OP_INCR => store_u32(payload, 0, 0),
+        OP_SQUARE => store_u32(payload, 0, 3),
+        OP_BITSWAP => store_u32(payload, 0, 0xA5A5_5A5A),
+        OP_FIB => store_u32(payload, 0, 0),
+        OP_BUF | OP_MEMCPY | OP_FLETCHER32 => {
+            let n = param as usize;
+            if n > payload.len() {
+                return Err(BenchError::BadBuffer);
+            }
+            for (i, b) in payload.iter_mut().take(n).enumerate() {
+                *b = (i.wrapping_mul(17).wrapping_add(3)) as u8;
+            }
+        }
+        OP_BSORT => {
+            let n = param as usize;
+            if n * 4 > payload.len() {
+                return Err(BenchError::BadBuffer);
+            }
+            for i in 0..n {
+                let v = (n as u32 - 1 - i as u32).wrapping_mul(0x9E37_79B9);
+                store_u32(payload, i * 4, v);
+            }
+        }
+        _ => return Err(BenchError::BadOpcode),
+    }
+    Ok(())
+}
+
 /// Fill header + deterministic payload for one timed iteration.
 pub fn prepare(buf: &mut [u8], op: u32) -> Result<(), BenchError> {
     if buf.len() < BUF_CAP {
@@ -91,27 +140,23 @@ pub fn prepare(buf: &mut [u8], op: u32) -> Result<(), BenchError> {
     let param = default_param(op);
     store_u32(buf, 0, op);
     store_u32(buf, 4, param);
-    let payload = &mut buf[HEADER..];
-    payload.fill(0);
-    match op {
-        OP_INCR => store_u32(payload, 0, 0),
-        OP_SQUARE => store_u32(payload, 0, 3),
-        OP_BITSWAP => store_u32(payload, 0, 0xA5A5_5A5A),
-        OP_FIB => store_u32(payload, 0, 0),
-        OP_BUF | OP_MEMCPY | OP_FLETCHER32 => {
-            let n = param as usize;
-            for (i, b) in payload.iter_mut().take(n).enumerate() {
-                *b = (i.wrapping_mul(17).wrapping_add(3)) as u8;
-            }
-        }
-        OP_BSORT => {
-            let n = param as usize;
-            for i in 0..n {
-                let v = (n as u32 - 1 - i as u32).wrapping_mul(0x9E37_79B9);
-                store_u32(payload, i * 4, v);
-            }
-        }
-        _ => return Err(BenchError::BadOpcode),
+    fill_payload(&mut buf[HEADER..], op, param)
+}
+
+/// Fill a Compact-ELF 32-byte map value (host / map I/O).
+pub fn prepare_map32(buf: &mut [u8], op: u32) -> Result<(), BenchError> {
+    if buf.len() < MAP_VALUE_LEN {
+        return Err(BenchError::BadBuffer);
+    }
+    if opcode_name(op).is_none() {
+        return Err(BenchError::BadOpcode);
+    }
+    let param = compact_param(op);
+    store_u32(buf, 0, op);
+    store_u32(buf, 4, param);
+    fill_payload(&mut buf[HEADER..MAP_VALUE_LEN], op, param)?;
+    if buf.len() > MAP_VALUE_LEN {
+        buf[MAP_VALUE_LEN..].fill(0);
     }
     Ok(())
 }
@@ -294,7 +339,44 @@ pub fn verify(buf: &[u8]) -> bool {
     buf[..end] == expect[..end]
 }
 
+/// Verify a Compact-ELF 32-byte map value against prepare_map32 + run_hal.
+pub fn verify_map32(buf: &[u8]) -> bool {
+    if buf.len() < MAP_VALUE_LEN {
+        return false;
+    }
+    let op = load_u32(buf, 0);
+    let mut expect = [0u8; MAP_VALUE_LEN];
+    if prepare_map32(&mut expect, op).is_err() {
+        return false;
+    }
+    if run_hal(&mut expect).is_err() {
+        return false;
+    }
+    let param = compact_param(op) as usize;
+    let end = match op {
+        OP_INCR | OP_SQUARE | OP_BITSWAP | OP_FIB => HEADER + 4,
+        OP_BUF => HEADER + param + 4,
+        OP_MEMCPY => HEADER + param * 2,
+        OP_FLETCHER32 => HEADER + param + 4,
+        OP_BSORT => HEADER + param * 4,
+        _ => return false,
+    };
+    if end > MAP_VALUE_LEN {
+        return false;
+    }
+    buf[..end] == expect[..end]
+}
+
+/// Expected output bytes for `op` after one `prepare_map32` + `run_hal`.
+pub fn expected_map32(op: u32) -> Result<[u8; MAP_VALUE_LEN], BenchError> {
+    let mut buf = [0u8; MAP_VALUE_LEN];
+    prepare_map32(&mut buf, op)?;
+    run_hal(&mut buf)?;
+    Ok(buf)
+}
+
 /// Read RV32 `mcycle` (ESP32-C3).
+#[cfg(feature = "mcu")]
 #[inline]
 pub fn read_mcycle() -> u64 {
     let mut hi: u32;
@@ -316,6 +398,7 @@ pub fn read_mcycle() -> u64 {
 }
 
 /// Wall-clock microseconds since epoch (same clock as `ext::perf` ticks).
+#[cfg(feature = "mcu")]
 #[inline]
 pub fn now_us() -> u64 {
     esp_hal::time::Instant::now()
@@ -324,6 +407,7 @@ pub fn now_us() -> u64 {
 }
 
 /// Time `iters` prepare+run steps; returns `(cycles, us, ok)`.
+#[cfg(feature = "mcu")]
 pub fn time_loop<F>(buf: &mut [u8], op: u32, iters: u32, mut run_once: F) -> (u64, u64, bool)
 where
     F: FnMut(&mut [u8]) -> Result<(), BenchError>,

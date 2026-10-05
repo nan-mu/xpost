@@ -1,10 +1,12 @@
-# exec_bench — host-side design draft
+# exec_bench — host-side design
 
 Firmware is an **opaque carrier**: `SerialHandler` + map/perf/exec verbs.
 Workload opcodes and buffer layouts are **not** App/serial types — they are
 interpreted by the XDP image (or HAL `run_hal`) and by **xpost-test parsing**
-of map bytes. Host draft artifacts live here; **do not** wire `xpost-test/**`
-yet.
+of map bytes.
+
+Wired into `xpost-test` as `run = ["exec_bench"]` (`exam/exec_bench.rs`,
+`config/exec_bench.toml`, `sql/exec_bench.sql`).
 
 ## Draft artifacts
 

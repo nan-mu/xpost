@@ -322,13 +322,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
-name = "const-oid"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
-
-[[package]]
-name = "core"
+name = "common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -337,6 +331,7 @@ dependencies = [
  "aya-log",
  "cargo_metadata 0.19.2",
  "env_logger",
+ "exec_bench_common",
  "libc",
  "log",
  "rand",
@@ -348,6 +343,12 @@ dependencies = [
  "toml",
  "uuid",
 ]
+
+[[package]]
+name = "const-oid"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "core-error"
@@ -423,7 +424,7 @@ version = "0.1.0"
 dependencies = [
  "aya-ebpf",
  "aya-log-ebpf",
- "core",
+ "common",
  "which",
 ]
 
@@ -468,6 +469,10 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "exec_bench_common"
+version = "0.1.0"
 
 [[package]]
 name = "fallible-iterator"

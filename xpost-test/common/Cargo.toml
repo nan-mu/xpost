@@ -24,6 +24,7 @@ host = [
   "dep:rand",
   "dep:tokio-postgres",
   "dep:uuid",
+  "dep:exec_bench_common",
 ]
 
 [dependencies]
@@ -52,6 +53,7 @@ toml = { workspace = true, optional = true }
 rand = { version = "0.10.2", optional = true }
 tokio-postgres = { version = "0.7", default-features = false, optional = true, features = ["runtime", "with-uuid-1", "with-serde_json-1"] }
 uuid = { version = "1", optional = true, features = ["v4"] }
+exec_bench_common = { path = "../../examples/exec_bench_common", default-features = false, features = ["host"], optional = true }
 
 [build-dependencies]
 anyhow = { workspace = true }

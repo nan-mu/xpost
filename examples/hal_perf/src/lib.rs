@@ -734,7 +734,7 @@ pub mod wire {
     pub fn hash_entry_len(key: &[u8], value: &[u8]) -> usize {
         let mut scratch = [0u8; 64];
         let key_tok = format_hash_key(key, &mut scratch);
-        key_tok.len() + 1 + dec_len(value_as_u64(value)) + 1
+        key_tok.len() + 1 + format_hash_value_len(value) + 1
     }
 
     /// Write one HASH entry line.
@@ -743,8 +743,35 @@ pub mod wire {
         let key_tok = format_hash_key(key, &mut scratch);
         write(key_tok);
         write(b" ");
-        write_dec(value_as_u64(value), write);
+        write_hash_value(value, write);
         write(b"\n");
+    }
+
+    fn format_hash_value_len(value: &[u8]) -> usize {
+        if value.len() > 8 {
+            value.len() * 2
+        } else {
+            dec_len(value_as_u64(value))
+        }
+    }
+
+    fn write_hash_value(value: &[u8], write: &mut impl FnMut(&[u8])) {
+        if value.len() > 8 {
+            const HEX: &[u8] = b"0123456789abcdef";
+            let mut chunk = [0u8; 16];
+            let mut i = 0usize;
+            while i < value.len() {
+                let n = (value.len() - i).min(8);
+                for (j, b) in value[i..i + n].iter().enumerate() {
+                    chunk[j * 2] = HEX[(b >> 4) as usize];
+                    chunk[j * 2 + 1] = HEX[(b & 0xf) as usize];
+                }
+                write(&chunk[..n * 2]);
+                i += n;
+            }
+        } else {
+            write_dec(value_as_u64(value), write);
+        }
     }
 
     /// Parse a decimal `u32` wire token.

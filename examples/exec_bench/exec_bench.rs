@@ -73,7 +73,7 @@
 //! - `ok` — 本格是否成功（含 host 对 output 字节的校验）
 //! - `output` — `get map` 读到的 **output** 键字节
 //!
-//! Draft only: parked under `examples/exec_bench/`; **not** wired into
-//! `xpost-test`. See [`HOST_DESIGN.md`](HOST_DESIGN.md).
+//! Draft only: parked under `examples/exec_bench/`. Harness lives in
+//! `xpost-test` (`exam/exec_bench.rs`). See [`HOST_DESIGN.md`](HOST_DESIGN.md).
 
 // Implementation deferred — no harness code in this tree.

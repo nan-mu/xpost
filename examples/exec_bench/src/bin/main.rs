@@ -218,8 +218,33 @@ fn key_u8(key: &[u8]) -> Option<u8> {
     }
 }
 
-/// Opaque HASH update: wire `key`/`value` tokens are raw bytes (padded/truncated
-/// to the map value size). Other maps fall back to [`app_ctrl::update_map`].
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decode `VALUE_LEN*2` hex digits into 32 raw bytes; otherwise pad/truncate copy.
+fn decode_value_token(value: &[u8]) -> Option<[u8; VALUE_LEN]> {
+    let mut val = [0u8; VALUE_LEN];
+    if value.len() == VALUE_LEN * 2 {
+        for i in 0..VALUE_LEN {
+            let hi = hex_nibble(value[i * 2])?;
+            let lo = hex_nibble(value[i * 2 + 1])?;
+            val[i] = (hi << 4) | lo;
+        }
+        return Some(val);
+    }
+    let n = value.len().min(VALUE_LEN);
+    val[..n].copy_from_slice(&value[..n]);
+    Some(val)
+}
+
+/// Opaque HASH update: wire `key`/`value` tokens are raw bytes (or hex for 32B).
+/// Other maps fall back to [`app_ctrl::update_map`].
 fn update_bytes(name: &str, key: &[u8], value: &[u8]) -> Result<(), AppMapError> {
     if name != MAP_NAME {
         return app_ctrl::update_map(name, key, value);
@@ -230,9 +255,7 @@ fn update_bytes(name: &str, key: &[u8], value: &[u8]) -> Result<(), AppMapError>
     if vs != VALUE_LEN {
         return Err(AppMapError::Unsupported);
     }
-    let mut val = [0u8; VALUE_LEN];
-    let n = value.len().min(VALUE_LEN);
-    val[..n].copy_from_slice(&value[..n]);
+    let val = decode_value_token(value).ok_or(AppMapError::InvalidValue)?;
     maps.hash_update(idx, &[slot], &val, BPF_ANY)
         .map_err(AppMapError::from)
 }

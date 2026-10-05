@@ -26,7 +26,7 @@ use log::error;
 use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
-use exec_bench_common::{self as bench, BUF_CAP};
+use exec_bench_common::{self as bench};
 use exec_bench_hal::{cag, wire};
 
 #[panic_handler]
@@ -48,7 +48,7 @@ const MAP_CAP: u32 = 2;
 static WORKLOAD: Mutex<RefCell<FnvIndexMap<u8, [u8; VALUE_LEN], 2>>> =
     Mutex::new(RefCell::new(FnvIndexMap::new()));
 
-static mut RUN_BUF: [u8; BUF_CAP] = [0u8; BUF_CAP];
+static mut RUN_BUF: [u8; VALUE_LEN] = [0u8; VALUE_LEN];
 
 #[allow(
     clippy::large_stack_frames,
@@ -179,14 +179,36 @@ fn key_u8(key: &[u8]) -> Option<u8> {
     }
 }
 
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_value_token(value: &[u8]) -> Option<[u8; VALUE_LEN]> {
+    let mut val = [0u8; VALUE_LEN];
+    if value.len() == VALUE_LEN * 2 {
+        for i in 0..VALUE_LEN {
+            let hi = hex_nibble(value[i * 2])?;
+            let lo = hex_nibble(value[i * 2 + 1])?;
+            val[i] = (hi << 4) | lo;
+        }
+        return Some(val);
+    }
+    let n = value.len().min(VALUE_LEN);
+    val[..n].copy_from_slice(&value[..n]);
+    Some(val)
+}
+
 fn update_bytes(name: &str, key: &[u8], value: &[u8]) -> Result<(), MapError> {
     if name != MAP_NAME {
         return Err(MapError::NameNotFound);
     }
     let slot = key_u8(key).ok_or(MapError::InvalidKey)?;
-    let mut val = [0u8; VALUE_LEN];
-    let n = value.len().min(VALUE_LEN);
-    val[..n].copy_from_slice(&value[..n]);
+    let val = decode_value_token(value).ok_or(MapError::InvalidValue)?;
     let ok = critical_section::with(|cs| {
         WORKLOAD.borrow(cs).borrow_mut().insert(slot, val).is_ok()
     });
@@ -215,16 +237,14 @@ fn run_exec() -> Result<(), MapError> {
         return Err(MapError::KeyNotFound);
     }
 
-    let buf: &mut [u8; BUF_CAP] = unsafe { &mut *addr_of_mut!(RUN_BUF) };
-    buf.fill(0);
-    buf[..VALUE_LEN].copy_from_slice(&in_val);
+    let buf: &mut [u8; VALUE_LEN] = unsafe { &mut *addr_of_mut!(RUN_BUF) };
+    buf.copy_from_slice(&in_val);
 
     if bench::run_hal(buf).is_err() {
         return Err(MapError::InvalidValue);
     }
 
-    let mut out = [0u8; VALUE_LEN];
-    out.copy_from_slice(&buf[..VALUE_LEN]);
+    let out = *buf;
     let ok = critical_section::with(|cs| {
         WORKLOAD.borrow(cs).borrow_mut().insert(KEY_OUT, out).is_ok()
     });

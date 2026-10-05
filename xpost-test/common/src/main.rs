@@ -69,6 +69,15 @@ async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
             )
             .await
         }
+        "exec_bench" => {
+            exam::run_exec_bench(
+                cfg,
+                exam::ExecBenchOpts {
+                    formal: cfg.exec_bench.formal,
+                },
+            )
+            .await
+        }
         "dev" => {
             let mut harness = pipeline::open_harness(cfg).await?;
             exam::run_dev(cfg, &mut harness).await

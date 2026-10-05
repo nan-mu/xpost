@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 edition = "2024"
 name = "exec_bench_common"
@@ -5,5 +7,12 @@ version = "0.1.0"
 publish = false
 description = "Shared exec_bench workload layout + native HAL twins (no_std)"
 
+[features]
+default = ["mcu"]
+# MCU HAL timing helpers (`now_us` / `read_mcycle` / `time_loop`).
+mcu = ["dep:esp-hal"]
+# Host / xpost-test: layout + prepare/verify only (no esp-hal).
+host = []
+
 [dependencies]
-esp-hal = { version = "~1.1.0", default-features = false, features = ["esp32c3", "unstable"] }
+esp-hal = { version = "~1.1.0", default-features = false, features = ["esp32c3", "unstable"], optional = true }

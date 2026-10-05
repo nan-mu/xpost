@@ -1,5 +1,6 @@
 //! Compile-time TOML for the `xpost-test` binary:
-//! `config/default.toml` + `just_tx.toml` + `just_drop.toml` + `firewall.toml`.
+//! `config/default.toml` + `just_tx.toml` + `just_drop.toml` + `firewall.toml`
+//! + `exec_bench.toml`.
 //!
 //! Files are embedded at compile time; after editing, rebuild and scp to TR3000.
 //! The only runtime entry is bare:
@@ -18,19 +19,21 @@
 //! | `just_drop` | Formal XDP PPS grid + Trace | `exam` + `just_drop_*` + `xdp_*` / `trace_event` |
 //! | `just_tx` | Formal XDP pps grid RTT + Trace | `exam` + `just_tx_config`(sent/ok) / `just_tx_data` + perf |
 //! | `firewall` | Hash blacklist size×hit/miss PPS grid + Trace | `exam` + `firewall_*` + perf |
+//! | `exec_bench` | Exec ingress function-call A/B (eBPF + HAL) | `exam` + `exec_bench_*` + perf |
 //! | `dev` | HAL smoke: just_tx/just_drop/firewall `@100pps×2s`; no XDP, no DB | — |
 //! | `formal-clear` | `TRUNCATE exam CASCADE` | wipe only |
 //!
 //! `dev` is fully hard-coded (no separate TOML); never touches Postgres.
 //!
 //! Formal DDL: `sql/formal.sql` + `just_tx.sql` / `just_drop.sql` / `firewall.sql`
-//! (open-run never DROP/TRUNCATE). Wipe: `run = ["formal-clear"]`.
+//! / `exec_bench.sql` (open-run never DROP/TRUNCATE). Wipe: `run = ["formal-clear"]`.
 //!
 //! ```toml
 //! run = ["dev"]
 //! # run = ["just_tx"]
 //! # run = ["just_drop", "just_tx"]
 //! # run = ["firewall"]
+//! # run = ["exec_bench"]
 //! # run = ["formal-clear"]
 //! ```
 
@@ -43,6 +46,7 @@ const EMBEDDED_DEFAULT: &str = include_str!("../../config/default.toml");
 const EMBEDDED_JUST_TX: &str = include_str!("../../config/just_tx.toml");
 const EMBEDDED_JUST_DROP: &str = include_str!("../../config/just_drop.toml");
 const EMBEDDED_FIREWALL: &str = include_str!("../../config/firewall.toml");
+const EMBEDDED_EXEC_BENCH: &str = include_str!("../../config/exec_bench.toml");
 
 static POSTGRES: OnceLock<PostgresConfig> = OnceLock::new();
 
@@ -77,6 +81,8 @@ pub struct FileConfig {
     pub just_tx: BenchPpsConfig,
     #[serde(default)]
     pub firewall: FirewallConfig,
+    #[serde(default)]
+    pub exec_bench: ExecBenchConfig,
 }
 
 fn default_version() -> String {
@@ -188,6 +194,28 @@ impl Default for FirewallConfig {
     }
 }
 
+/// Knobs for exec_bench formal (`exec_bench.toml`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecBenchConfig {
+    #[serde(default = "default_true")]
+    pub formal: bool,
+    #[serde(default = "default_exec_arms")]
+    pub arms: Vec<String>,
+}
+
+fn default_exec_arms() -> Vec<String> {
+    vec!["ebpf".into(), "hal".into()]
+}
+
+impl Default for ExecBenchConfig {
+    fn default() -> Self {
+        Self {
+            formal: true,
+            arms: default_exec_arms(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProbeConfig {
     pub iface: String,
@@ -250,6 +278,12 @@ struct FirewallFile {
     bench: FirewallConfig,
 }
 
+#[derive(Debug, Deserialize)]
+struct ExecBenchFile {
+    #[serde(flatten)]
+    bench: ExecBenchConfig,
+}
+
 impl FileConfig {
     pub fn embedded() -> Result<Self> {
         let def: DefaultFile =
@@ -260,6 +294,8 @@ impl FileConfig {
             toml::from_str(EMBEDDED_JUST_DROP).context("parse config/just_drop.toml")?;
         let firewall: FirewallFile =
             toml::from_str(EMBEDDED_FIREWALL).context("parse config/firewall.toml")?;
+        let exec_bench: ExecBenchFile =
+            toml::from_str(EMBEDDED_EXEC_BENCH).context("parse config/exec_bench.toml")?;
         let cfg = Self {
             version: def.version,
             run: def.run,
@@ -270,6 +306,7 @@ impl FileConfig {
             just_drop: just_drop.bench,
             just_tx: just_tx.bench,
             firewall: firewall.bench,
+            exec_bench: exec_bench.bench,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -281,9 +318,9 @@ impl FileConfig {
         }
         for name in &self.run {
             match name.as_str() {
-                "just_tx" | "just_drop" | "firewall" | "dev" | "formal-clear" => {}
+                "just_tx" | "just_drop" | "firewall" | "exec_bench" | "dev" | "formal-clear" => {}
                 other => bail!(
-                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / firewall / dev / formal-clear"
+                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / firewall / exec_bench / dev / formal-clear"
                 ),
             }
         }
