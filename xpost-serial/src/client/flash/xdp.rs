@@ -157,6 +157,12 @@ pub(crate) fn install(
         InstallOutcome::Created { offset } => (offset, new_len),
     };
     let abs = xdp.base.saturating_add(rel);
+    if !abs.is_multiple_of(FLASH_SECTOR) {
+        return Err(std::io::Error::other(format!(
+            "xdp install `{name}` at {abs:#x} is not {FLASH_SECTOR:#x}-aligned \
+             (clear the cold table before appending a different name)"
+        )));
+    }
     dl.reconnect()?;
     let erase_len = {
         let need = old_len.max(new_len);

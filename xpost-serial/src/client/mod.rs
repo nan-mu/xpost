@@ -39,7 +39,11 @@ pub(crate) const DEFAULT_IMAGE_CAPACITY: usize = 0x1000;
 pub(crate) const FLASH_SECTOR: u32 = 0x1000;
 pub(crate) const READ_BLOCK: u32 = 0x1000;
 pub(crate) const READ_MAX_IN_FLIGHT: u32 = 64;
-pub(crate) const RESET_TO_APP_SETTLE: Duration = Duration::from_millis(800);
+/// Brief pause after hard-reset before releasing the download fd.
+pub(crate) const RESET_TO_APP_SETTLE: Duration = Duration::from_millis(50);
+/// Keep App UART open after flash so a fast unsolicited `OK init` is recorded
+/// (XDP firmware emits it before Wi-Fi; HAL waits for DHCP+bind).
+pub(crate) const POST_FLASH_INIT_CAPTURE: Duration = Duration::from_secs(3);
 /// Reader-thread wake only — never the business request deadline.
 pub(crate) const PORT_IO_TIMEOUT: Duration = Duration::from_millis(200);
 

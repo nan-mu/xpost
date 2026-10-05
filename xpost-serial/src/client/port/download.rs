@@ -161,11 +161,16 @@ fn connect_flasher(name: &str, usb: &UsbPortInfo, chip: Chip, baud: u32) -> io::
         .flow_control(serialport::FlowControl::None)
         .open_native()
         .map_err(ext)?;
+    // ESP32-C3 USB-JTAG-Serial needs UsbReset; DefaultReset is flaky after long
+    // App sessions and breaks the subsequent XDP table write with a bootloader error.
+    let before = match chip {
+        Chip::Esp32c3 => ResetBeforeOperation::UsbReset,
+    };
     let connection = Connection::new(
         serial,
         usb.clone(),
         ResetAfterOperation::HardReset,
-        ResetBeforeOperation::DefaultReset,
+        before,
         baud,
     );
     let flasher = Flasher::connect(

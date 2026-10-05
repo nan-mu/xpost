@@ -19,6 +19,7 @@ use futures::executor::block_on;
 use tokio::sync::{mpsc, oneshot};
 
 use std::io;
+use crate::client::POST_FLASH_INIT_CAPTURE;
 use crate::client::ops::{FlashEvent, FlashOp};
 use crate::client::port::Port;
 use crate::client::record::{SharedRecord, WriteRecord};
@@ -180,6 +181,21 @@ fn run_op(
         FlashOp::Clear { names } => xdp::clear(port, cfg, names).map(|_| FlashResult::Done),
         FlashOp::List => xdp::list(port, cfg).map(FlashResult::List),
     };
+    // Download held the USB fd through reset; a fast App `OK init` would be lost
+    // unless we reopen UART before GetInit. Re-mark so only this boot counts.
+    if result.is_ok()
+        && matches!(
+            op,
+            FlashOp::Fw { .. } | FlashOp::Xdp { .. } | FlashOp::Clear { .. }
+        )
+    {
+        record.mark_init_after(SystemTime::now());
+        port.interrupt().clear();
+        if let Ok(session) = port.open_uart(Arc::clone(record)) {
+            std::thread::sleep(POST_FLASH_INIT_CAPTURE);
+            drop(session);
+        }
+    }
     {
         let mut rec = record.lock();
         match &result {

@@ -175,6 +175,22 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
     }
     let mut flash_dur = t_flash.elapsed();
 
+    // Profiles carry one cold image per fw. Stale names (e.g. just_tx → just_drop)
+    // would append mid-sector and espflash erase_region rejects unaligned addresses.
+    if !linked_xdps.is_empty() {
+        log_line(peer, "clear xdp table before co-flash");
+        let t_clear = Instant::now();
+        {
+            let g = lock(state)?;
+            g.handler
+                .flash(FlashOp::Clear {
+                    names: Vec::new(),
+                })
+                .context("clear xdp before co-flash")?;
+        }
+        flash_dur += t_clear.elapsed();
+    }
+
     let mut xdp_parts = Vec::new();
     for x in &linked_xdps {
         let part = flash_one_xdp(state, &root, x, peer)?;
@@ -257,14 +273,44 @@ fn flash_one_xdp(
     );
 
     let t_flash = Instant::now();
-    let g = lock(state)?;
-    let outcome = g
-        .handler
-        .flash(FlashOp::Xdp {
-            name: elf_name.clone(),
-            path: path.display().to_string(),
-        })
-        .with_context(|| format!("flash xdp `{name}`"))?;
+    // Transient espflash bootloader errors after HAL↔XDP fw switches; retry once.
+    let outcome = {
+        const ATTEMPTS: usize = 2;
+        let mut last = None;
+        for attempt in 1..=ATTEMPTS {
+            let g = lock(state)?;
+            match g.handler.flash(FlashOp::Xdp {
+                name: elf_name.clone(),
+                path: path.display().to_string(),
+            }) {
+                Ok(o) => {
+                    last = Some(Ok(o));
+                    break;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let retryable = msg.contains("bootloader returned an error");
+                    if retryable && attempt < ATTEMPTS {
+                        log_line(
+                            peer,
+                            &format!(
+                                "[xdp] `{name}` bootloader error on attempt {attempt}/{ATTEMPTS}; retry"
+                            ),
+                        );
+                        drop(g);
+                        std::thread::sleep(Duration::from_millis(800));
+                        last = Some(Err(e));
+                        continue;
+                    }
+                    last = Some(Err(e));
+                    break;
+                }
+            }
+        }
+        last
+            .unwrap_or_else(|| Err(std::io::Error::other("flash xdp: no attempts")))
+            .with_context(|| format!("flash xdp `{name}`"))?
+    };
     let flash_dur = t_flash.elapsed();
     let summary = match outcome {
         FlashResult::Install(xpost_serial::InstallOutcome::Overwritten { offset }) => {
