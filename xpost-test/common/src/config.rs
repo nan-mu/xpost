@@ -149,10 +149,10 @@ pub struct FirewallConfig {
     pub formal: bool,
     #[serde(default = "default_pps_arms")]
     pub arms: Vec<String>,
-    #[serde(default = "default_fw_sizes")]
-    pub sizes: Vec<u32>,
-    #[serde(default = "default_fw_traffic")]
-    pub traffic: Vec<String>,
+    #[serde(default = "default_fw_blacklist_size")]
+    pub blacklist_size: u32,
+    #[serde(default = "default_fw_legal_packets")]
+    pub legal_packets: u32,
 }
 
 fn default_true() -> bool {
@@ -161,11 +161,11 @@ fn default_true() -> bool {
 fn default_pps_arms() -> Vec<String> {
     vec!["hal".into(), "xdp".into()]
 }
-fn default_fw_sizes() -> Vec<u32> {
-    vec![50, 100, 200]
+fn default_fw_blacklist_size() -> u32 {
+    200
 }
-fn default_fw_traffic() -> Vec<String> {
-    vec!["hit".into(), "miss".into()]
+fn default_fw_legal_packets() -> u32 {
+    1024
 }
 
 impl Default for BenchPpsConfig {
@@ -182,8 +182,8 @@ impl Default for FirewallConfig {
         Self {
             formal: true,
             arms: default_pps_arms(),
-            sizes: default_fw_sizes(),
-            traffic: default_fw_traffic(),
+            blacklist_size: default_fw_blacklist_size(),
+            legal_packets: default_fw_legal_packets(),
         }
     }
 }
@@ -287,19 +287,13 @@ impl FileConfig {
                 ),
             }
         }
-        for t in &self.firewall.traffic {
-            match t.as_str() {
-                "hit" | "miss" => {}
-                other => bail!("firewall.toml traffic entry must be hit|miss, got {other:?}"),
-            }
+        let n = self.firewall.blacklist_size;
+        if n == 0 || n > 256 {
+            bail!("firewall.toml blacklist_size {n} out of 1..=256");
         }
-        if self.firewall.sizes.is_empty() {
-            bail!("firewall.toml `sizes` must be non-empty");
-        }
-        for &n in &self.firewall.sizes {
-            if n == 0 || n > 256 {
-                bail!("firewall.toml size {n} out of 1..=256 (Compact ELF V0 max_entries)");
-            }
+        let legal = self.firewall.legal_packets;
+        if legal == 0 || legal > 1024 {
+            bail!("firewall.toml legal_packets {legal} out of 1..=1024");
         }
         Ok(())
     }

@@ -3,6 +3,7 @@
 //! Flashes each `*-hal` profile, exercises map / enable / short stim, and
 //! asserts dataplane outcomes. No XDP arms, no Postgres, perf ignored.
 
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
@@ -206,6 +207,7 @@ async fn smoke_firewall(
     agent: &AgentClient,
     eta: &mut BudgetEta,
 ) -> Result<()> {
+    let _ = harness;
     let ui = RoundUi::new();
     flash_settle(agent, &ui, eta, "firewall-hal").await?;
 
@@ -222,6 +224,7 @@ async fn smoke_firewall(
         .clear_map("blacklist")
         .await
         .context("firewall_hal clear/map")?;
+    let _ = agent.clear_map("firewall_result").await;
     // Value must be non-zero: HAL `is_blocked` and XDP `*flag` both require it.
     agent
         .update_map_batch("blacklist", &[(hit.to_string(), "1".into())])
@@ -238,50 +241,76 @@ async fn smoke_firewall(
         .await
         .context("firewall_hal enable/xdp")?;
 
-    let hit_ok = probe_echoes(harness, hit, 32).await?;
-    let miss_ok = probe_echoes(harness, miss, 32).await?;
+    let esp_mac = cfg.esp_mac_bytes()?;
+    let src_mac = match cfg.src_mac_override()? {
+        Some(m) => m,
+        None => iface_mac(&cfg.probe.iface)?,
+    };
+    let raw = RawTx::open(
+        &cfg.probe.iface,
+        src_mac,
+        esp_mac,
+        esp,
+        STIM_PORT,
+        cfg.target.stim_sport,
+    )
+    .context("firewall_hal RawTx")?;
+
+    for _ in 0..32 {
+        let _ = raw.send_udp(hit, esp, STIM_PORT, b"D");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let mut tokens = Vec::with_capacity(32);
+    for i in 0u16..32 {
+        let tok = 1000 + i;
+        tokens.push(tok);
+        let _ = raw.send_udp(miss, esp, STIM_PORT, &tok.to_le_bytes());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(DRAIN).await;
 
     agent
         .disable_xdp()
         .await
         .context("firewall_hal disable/xdp")?;
+
+    let map_rows = agent.get_map("blacklist").await.context("firewall_hal get/map after")?;
+    let hit_count: i64 = map_rows
+        .entries
+        .iter()
+        .find(|e| e.key == hit.to_string())
+        .and_then(|e| e.value.parse().ok())
+        .unwrap_or(0);
+    let result = agent
+        .get_map("firewall_result")
+        .await
+        .context("firewall_hal get/map firewall_result")?;
+    let mut matched = 0usize;
+    let expect: HashSet<u16> = tokens.iter().copied().collect();
+    for e in &result.entries {
+        if let Ok(v) = e.value.parse::<u16>() {
+            if expect.contains(&v) {
+                matched += 1;
+            }
+        }
+    }
     let _ = agent.clear_map("blacklist").await;
+    let _ = agent.clear_map("firewall_result").await;
 
     ui.permanent(&format!(
-        "    firewall_hal: hit={hit} echo={hit_ok}/32 miss={miss} echo={miss_ok}/32"
+        "    firewall_hal: hit={hit} count={hit_count} miss={miss} matched={matched}/32"
     ));
-    if hit_ok > 2 {
+    if hit_count < 8 {
         ui.clear_temp_for_error();
-        bail!("firewall_hal: expected hit src dropped, got {hit_ok} echoes");
+        bail!("firewall_hal: expected hit src counted, got {hit_count}");
     }
-    if miss_ok < 8 {
+    if matched < 8 {
         ui.clear_temp_for_error();
-        bail!("firewall_hal: expected miss src echoed, got {miss_ok}/32");
+        bail!("firewall_hal: expected miss tokens stored, got {matched}/32");
     }
     ui.end_round();
     eta.consume_fixed(SMOKE_WINDOW + DRAIN);
     Ok(())
-}
-
-async fn probe_echoes(harness: &mut Harness, src: Ipv4Addr, n: u32) -> Result<u64> {
-    harness.reset_state().await;
-    let mut seqs = Vec::with_capacity(n as usize);
-    for _ in 0..n {
-        let seq = harness.alloc_seq();
-        if harness.send_stimulus(src, None, seq).await.is_ok() {
-            seqs.push(seq);
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    tokio::time::sleep(DRAIN).await;
-    let mut ok = 0u64;
-    for seq in &seqs {
-        let sight = harness.take_seq(*seq).await;
-        if sight.t_bounce_ns.or(sight.t_echo_ns).is_some() {
-            ok += 1;
-        }
-    }
-    Ok(ok)
 }
 
 async fn paced_multi_src(

@@ -176,14 +176,17 @@ pub async fn insert_firewall_config(
     started_at: SystemTime,
     stopped_at: SystemTime,
     sent: i64,
+    legal_sent: Option<i64>,
+    matched: Option<i64>,
+    loss: Option<f64>,
 ) -> Result<ConfigId> {
     let row = client
         .query_one(
             r#"
             INSERT INTO firewall_config (
                 exam_id, firmware, blacklist_size, traffic, target_pps, window_s,
-                started_at, stopped_at, sent
-            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9)
+                started_at, stopped_at, sent, legal_sent, matched, loss
+            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING id
             "#,
             &[
@@ -196,6 +199,9 @@ pub async fn insert_firewall_config(
                 &started_at,
                 &stopped_at,
                 &sent,
+                &legal_sent,
+                &matched,
+                &loss,
             ],
         )
         .await

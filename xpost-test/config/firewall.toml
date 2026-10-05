@@ -1,12 +1,11 @@
 # firewall / firewall_hal formal knobs (compile-time embed).
 # Selected via default.toml `run = ["firewall"]`.
 #
-# Hash-map blacklist: flash each arm, agent update/map seed sizes, hit/miss
-# traffic over pps grid (dense 400…1600 step 200, then 400-step to 4000),
-# then xdp_t Trace.
-# Compact ELF V0 max_entries=256 → sizes capped accordingly.
+# Hash-map blacklist fixed at 200. Each CAG cell mixes illegal traffic at the
+# pps grid for 30s with exactly `legal_packets` unique LE u16 tokens on a miss
+# source IP. Legal delivery is read via virtual map `firewall_result`.
 
 formal = true
 arms = ["hal", "xdp"]
-sizes = [50, 100, 200]
-traffic = ["hit", "miss"]
+blacklist_size = 200
+legal_packets = 1024

@@ -6,15 +6,27 @@ CREATE TABLE IF NOT EXISTS firewall_config (
     exam_id UUID NOT NULL REFERENCES exam (id) ON DELETE CASCADE,
     firmware firmware NOT NULL,
     blacklist_size INT NOT NULL CHECK (blacklist_size >= 0),
-    traffic TEXT NOT NULL CHECK (traffic IN ('hit', 'miss')),
+    traffic TEXT NOT NULL CHECK (traffic IN ('hit', 'miss', 'mixed')),
     target_pps DOUBLE PRECISION NOT NULL,
     window_s DOUBLE PRECISION NOT NULL,
     started_at TIMESTAMPTZ NOT NULL,
     stopped_at TIMESTAMPTZ NOT NULL,
-    sent BIGINT NOT NULL CHECK (sent >= 0)
+    sent BIGINT NOT NULL CHECK (sent >= 0),
+    legal_sent BIGINT CHECK (legal_sent IS NULL OR legal_sent >= 0),
+    matched BIGINT CHECK (matched IS NULL OR matched >= 0),
+    loss DOUBLE PRECISION
 );
 
 CREATE INDEX IF NOT EXISTS firewall_config_exam ON firewall_config (exam_id);
+
+-- Existing DBs created before legal-flow columns / mixed traffic.
+ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS legal_sent BIGINT;
+ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS matched BIGINT;
+ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS loss DOUBLE PRECISION;
+ALTER TABLE firewall_config DROP CONSTRAINT IF EXISTS firewall_config_traffic_check;
+ALTER TABLE firewall_config
+    ADD CONSTRAINT firewall_config_traffic_check
+    CHECK (traffic IN ('hit', 'miss', 'mixed'));
 
 -- Per-key blacklist counts after a cell (`agent get map(blacklist)`).
 CREATE TABLE IF NOT EXISTS firewall_data (
