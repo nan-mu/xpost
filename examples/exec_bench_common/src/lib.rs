@@ -1,7 +1,8 @@
 //! Shared buffer layout and native HAL compute for `exec_bench_hal`.
 //!
-//! Used by the HAL App (`run_hal`) and by **host / xpost-test parsing** of map
-//! value bytes. The eBPF App carrier does **not** depend on this crate.
+//! Used by the HAL App (`run_hal`). Host / xpost-test speaks the agent map
+//! protocol with wire fixtures and does **not** depend on this crate.
+//! The eBPF App carrier does **not** depend on this crate either.
 //!
 //! Layout (must match `examples/exec_bench/ebpf/exec_bench.c`):
 //! ```text

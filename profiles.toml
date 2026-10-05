@@ -134,50 +134,50 @@ xdp = ["incr"]
 [[xdp]]
 name = "incr"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/exec_bench.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+artifact = "examples/exec_bench/incr.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "incr"] }
 
 [[xdp]]
 name = "square"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/exec_bench.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+artifact = "examples/exec_bench/square.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "square"] }
 
 [[xdp]]
 name = "bitswap"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/exec_bench.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+artifact = "examples/exec_bench/bitswap.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "bitswap"] }
 
 [[xdp]]
 name = "fib"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/exec_bench.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+artifact = "examples/exec_bench/fib.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "fib"] }
 
 [[xdp]]
 name = "buf"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/exec_bench.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+artifact = "examples/exec_bench/buf.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "buf"] }
 
 [[xdp]]
 name = "memcpy"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/exec_bench.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+artifact = "examples/exec_bench/memcpy.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "memcpy"] }
 
 [[xdp]]
 name = "fletcher32"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/exec_bench.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+artifact = "examples/exec_bench/fletcher32.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "fletcher32"] }
 
 [[xdp]]
 name = "bsort"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/exec_bench.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh"] }
+artifact = "examples/exec_bench/bsort.elf"
+build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "bsort"] }
 
 [[fw]]
 name = "exec-bench-hal"

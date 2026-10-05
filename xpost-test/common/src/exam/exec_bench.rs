@@ -1,9 +1,13 @@
 //! Function-call compute via `exec` ingress (Wi-Fi-free; default cagt).
 //!
+//! Host speaks only the agent map protocol (`update map` / `get map` hex blobs).
+//! Workload semantics live in firmware (XDP map or HAL heapless twin), not here.
+//!
 //! ```text
 //! exec_bench (ebpf):
 //!   agent flash fw exec-bench-ebpf
 //!   for workload in {incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort}:
+//!     agent clear xdp *
 //!     agent flash xdp workload
 //!     agent clear perf
 //!     agent update map workload
@@ -26,13 +30,13 @@
 //!     agent get map
 //!     upload to db
 //! ```
+//!
+//! Cold `clear` before each `flash xdp` keeps the new container at offset 0
+//! (append after a different name is not flash-sector aligned).
 
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
-use exec_bench_common::{
-    MAP_VALUE_LEN, OPCODES, expected_map32, parse_opcode, prepare_map32, verify_map32,
-};
 
 use crate::agent::AgentClient;
 use crate::config::FileConfig;
@@ -46,6 +50,59 @@ const KEY_IN: &str = "0";
 const KEY_OUT_DUMP: &str = "01";
 const FW_EBPF: &str = "exec-bench-ebpf";
 const FW_HAL: &str = "exec-bench-hal";
+const MAP_VALUE_LEN: usize = 32;
+
+/// Wire fixtures for `update map` / `get map` (64 hex chars = 32 bytes).
+/// Names match cold XDP image stems under the eBPF profile.
+const WORKLOADS: &[Workload] = &[
+    Workload {
+        name: "incr",
+        input_hex: "0000000000000000000000000000000000000000000000000000000000000000",
+        expect_hex: "0000000000000000010000000000000000000000000000000000000000000000",
+    },
+    Workload {
+        name: "square",
+        input_hex: "0100000000000000030000000000000000000000000000000000000000000000",
+        expect_hex: "0100000000000000090000000000000000000000000000000000000000000000",
+    },
+    Workload {
+        name: "bitswap",
+        input_hex: "02000000000000005a5aa5a50000000000000000000000000000000000000000",
+        expect_hex: "0200000000000000a5a55a5a0000000000000000000000000000000000000000",
+    },
+    Workload {
+        name: "fib",
+        input_hex: "030000001e000000000000000000000000000000000000000000000000000000",
+        expect_hex: "030000001e00000028b20c000000000000000000000000000000000000000000",
+    },
+    Workload {
+        name: "buf",
+        input_hex: "0400000010000000031425364758697a8b9cadbecfe0f1020000000000000000",
+        expect_hex: "0400000010000000031527394b5d6f8193a5b7c9dbedff11a007000000000000",
+    },
+    Workload {
+        name: "memcpy",
+        input_hex: "0500000008000000031425364758697a00000000000000000000000000000000",
+        expect_hex: "0500000008000000031425364758697a031425364758697a0000000000000000",
+    },
+    Workload {
+        name: "fletcher32",
+        input_hex: "0600000010000000031425364758697a8b9cadbecfe0f1020000000000000000",
+        expect_hex: "0600000010000000031425364758697a8b9cadbecfe0f102d35ba10300000000",
+    },
+    Workload {
+        name: "bsort",
+        input_hex: "07000000060000009d601517e4e6dd782b6da6da72f36e3cb979379e00000000",
+        expect_hex: "0700000006000000000000009d60151772f36e3ce4e6dd78b979379e2b6da6da",
+    },
+];
+
+#[derive(Clone, Copy)]
+struct Workload {
+    name: &'static str,
+    input_hex: &'static str,
+    expect_hex: &'static str,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arm {
@@ -100,16 +157,6 @@ fn arms_from_cfg(arms: &[String]) -> Result<Vec<Arm>> {
     Ok(out)
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0xf) as usize] as char);
-    }
-    out
-}
-
 fn hex_decode(s: &str) -> Result<Vec<u8>> {
     let s = s.trim();
     if s.len() % 2 != 0 {
@@ -137,11 +184,12 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
-/// Host 32-byte workload blob for `op` (Compact-ELF params).
-pub fn build_input(op: u32) -> Result<[u8; MAP_VALUE_LEN]> {
-    let mut buf = [0u8; MAP_VALUE_LEN];
-    prepare_map32(&mut buf, op).map_err(|e| anyhow::anyhow!("prepare_map32: {e:?}"))?;
-    Ok(buf)
+fn map_value_bytes(hex: &str) -> Result<Vec<u8>> {
+    let bytes = hex_decode(hex)?;
+    if bytes.len() != MAP_VALUE_LEN {
+        bail!("map value must be {MAP_VALUE_LEN} bytes, got {}", bytes.len());
+    }
+    Ok(bytes)
 }
 
 pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()> {
@@ -152,7 +200,7 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
     let agent = AgentClient::new(endpoint.clone());
     let formal = opts.formal;
     let arms = arms_from_cfg(&cfg.exec_bench.arms)?;
-    let workloads: Vec<&str> = OPCODES.iter().map(|(n, _)| *n).collect();
+    let workloads = WORKLOADS;
 
     RoundUi::banner(&format!(
         "exec_bench arms={:?} workloads={} formal={formal} agent={endpoint}",
@@ -187,20 +235,29 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
     for arm in &arms {
         flash_fw(cfg, &agent, &ui, &mut eta, arm.fw_profile()).await?;
 
-        for &wl in &workloads {
-            let op = parse_opcode(wl).context("opcode")?;
+        for wl in workloads {
             if *arm == Arm::Ebpf {
-                ui.check_start(&format!("flash xdp `{wl}`"));
-                agent.flash_xdp(wl).await.with_context(|| format!("flash xdp {wl}"))?;
-                ui.check_ok(wl);
+                // Clear first so the new name is Created at offset 0 (sector-aligned).
+                agent
+                    .clear_xdp("*")
+                    .await
+                    .context("clear/xdp before flash_xdp")?;
+                agent
+                    .flash_xdp(wl.name)
+                    .await
+                    .with_context(|| format!("flash/xdp {}", wl.name))?;
+                agent
+                    .get_init()
+                    .await
+                    .with_context(|| format!("OK init after flash/xdp {}", wl.name))?;
             }
 
-            let input = build_input(op)?;
-            let input_hex = hex_encode(&input);
+            let input = map_value_bytes(wl.input_hex)?;
+            let expect = map_value_bytes(wl.expect_hex)?;
 
             agent.clear_perf().await.context("clear/perf")?;
             agent
-                .update_map_batch(MAP_NAME, &[(KEY_IN.to_string(), input_hex.clone())])
+                .update_map_batch(MAP_NAME, &[(KEY_IN.to_string(), wl.input_hex.to_string())])
                 .await
                 .context("update/map workload")?;
 
@@ -225,28 +282,27 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
                     }
                     match read_output(&agent).await {
                         Ok(bytes) => {
-                            ok = verify_map32(&bytes)
-                                || expected_map32(op)
-                                    .map(|exp| bytes.as_slice() == exp.as_slice())
-                                    .unwrap_or(false);
+                            ok = bytes.as_slice() == expect.as_slice();
                             output = Some(bytes);
                         }
                         Err(e) => {
-                            eprintln!("    WARN: {arm:?}/{wl} get map: {e:#}");
+                            eprintln!("    WARN: {arm:?}/{} get map: {e:#}", wl.name);
                         }
                     }
                 }
                 _ => {
                     eprintln!(
-                        "    WARN: {:?}/{wl} enable/finish failed: enable={enable:?} finish={finish:?}",
-                        arm.as_db()
+                        "    WARN: {:?}/{} enable/finish failed: enable={enable:?} finish={finish:?}",
+                        arm.as_db(),
+                        wl.name
                     );
                 }
             }
 
             ui.permanent(&format!(
-                "    {}/{wl}: ok={ok} wall_ms={} out_len={}",
+                "    {}/{}: ok={ok} wall_ms={} out_len={}",
                 arm.as_db(),
+                wl.name,
                 wall.as_millis(),
                 output.as_ref().map(|b| b.len()).unwrap_or(0),
             ));
@@ -255,19 +311,19 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
                 bail!(
                     "exec_bench {}/{} failed (enable={:?} finish={:?})",
                     arm.as_db(),
-                    wl,
+                    wl.name,
                     enable.as_ref().map(|_| "ok").map_err(|e| format!("{e:#}")),
                     finish.as_ref().map(|m| m.as_str()).map_err(|e| format!("{e:#}")),
                 );
             }
 
             if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
-                ui.check_start(&format!("写入 {}/{wl}", arm.as_db()));
+                ui.check_start(&format!("写入 {}/{}", arm.as_db(), wl.name));
                 let cfg_id = db::insert_exec_bench_config(
                     client,
                     exam_id,
                     arm.as_db(),
-                    wl,
+                    wl.name,
                     &input,
                     started_at,
                     stopped_at,
@@ -276,7 +332,7 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
                 db::insert_exec_bench_data(client, cfg_id, 1, ok, output.as_deref()).await?;
                 let msg = agent.get_perf().await.context("get/perf")?;
                 if msg.is_empty() {
-                    bail!("{}/{wl}: get/perf empty after ok cell", arm.as_db());
+                    bail!("{}/{}: get/perf empty after ok cell", arm.as_db(), wl.name);
                 }
                 let decoded = db::decode_report_msg(&msg)?;
                 db::write_perf(
@@ -355,29 +411,38 @@ async fn flash_fw(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exec_bench_common::{OP_BSORT, OP_INCR, run_hal};
 
-    #[test]
-    fn map32_incr_verifies() {
-        let mut buf = build_input(OP_INCR).unwrap();
-        run_hal(&mut buf).unwrap();
-        assert!(verify_map32(&buf));
-        assert_eq!(buf[8..12], 1u32.to_le_bytes());
+    fn hex_encode(bytes: &[u8]) -> String {
+        const HEX: &[u8] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for &b in bytes {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0xf) as usize] as char);
+        }
+        out
     }
 
     #[test]
-    fn map32_bsort_verifies() {
-        let mut buf = build_input(OP_BSORT).unwrap();
-        run_hal(&mut buf).unwrap();
-        assert!(verify_map32(&buf));
+    fn fixtures_are_32_byte_hex() {
+        for wl in WORKLOADS {
+            let input = map_value_bytes(wl.input_hex).unwrap();
+            let expect = map_value_bytes(wl.expect_hex).unwrap();
+            assert_eq!(input.len(), MAP_VALUE_LEN, "{}", wl.name);
+            assert_eq!(expect.len(), MAP_VALUE_LEN, "{}", wl.name);
+            assert_ne!(
+                wl.input_hex, wl.expect_hex,
+                "{} input must differ from expect",
+                wl.name
+            );
+        }
     }
 
     #[test]
-    fn hex_roundtrip_32() {
-        let buf = build_input(OP_INCR).unwrap();
+    fn hex_roundtrip_incr() {
+        let wl = &WORKLOADS[0];
+        let buf = map_value_bytes(wl.input_hex).unwrap();
         let h = hex_encode(&buf);
-        assert_eq!(h.len(), 64);
-        let back = hex_decode(&h).unwrap();
-        assert_eq!(back, buf);
+        assert_eq!(h, wl.input_hex);
+        assert_eq!(hex_decode(&h).unwrap(), buf);
     }
 }

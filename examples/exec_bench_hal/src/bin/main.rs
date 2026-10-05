@@ -69,6 +69,9 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
+    // Host re-marks GetInit and reopens UART after espflash reset (~3s capture).
+    // Emit `OK init` inside that window; immediate spawn races and is lost.
+    Timer::after(Duration::from_millis(800)).await;
     spawner.spawn(control_serial(usb_rx).unwrap());
 
     loop {

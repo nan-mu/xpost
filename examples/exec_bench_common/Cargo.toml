@@ -11,7 +11,7 @@ description = "Shared exec_bench workload layout + native HAL twins (no_std)"
 default = ["mcu"]
 # MCU HAL timing helpers (`now_us` / `read_mcycle` / `time_loop`).
 mcu = ["dep:esp-hal"]
-# Host / xpost-test: layout + prepare/verify only (no esp-hal).
+# Layout + prepare/verify without esp-hal (HAL unit tests / host tools).
 host = []
 
 [dependencies]

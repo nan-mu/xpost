@@ -64,6 +64,14 @@ impl AgentClient {
         Ok(())
     }
 
+    /// `POST /v1/clear/xdp` — `name` `"*"` clears the whole cold table.
+    pub async fn clear_xdp(&self, name: &str) -> Result<()> {
+        let body = serde_json::json!({ "name": name });
+        let msg = self.post_json("/v1/clear/xdp", &body).await?;
+        log::info!("clear_xdp: {msg}");
+        Ok(())
+    }
+
     /// `POST /v1/enable/exec`.
     pub async fn enable_exec(&self) -> Result<String> {
         self.post_json("/v1/enable/exec", &serde_json::json!({})).await
