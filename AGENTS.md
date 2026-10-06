@@ -260,12 +260,14 @@ The host aborts on enable, finish, or output-check failure before inserting that
 Performance collection occurs after condition insertion. A later failure can leave partial data in an unfinished exam.
 The collector currently ignores the result of `disable exec`.
 
-The `ebpf` database label identifies the image-loading path. It does not prove use of the eBPF compiler pipeline.
-Current exec firmware does not record workload execution duration around `invoke` or `run_hal`.
-The `execution` aggregate can therefore have zero samples despite successful output checks.
-Helper timing can include the `OK finish` print operation.
+The `ebpf` database label identifies the image-loading path.
+eBPF-arm firmware compiles Counter, Aggregate, Gauge, and Trace into the report.
+`exec_call::invoke` records `xdp_invocations` / `xdp_action` (Trace `xdp_begin` / `xdp_end` and the `execution` aggregate).
+HAL `enable exec` records the same counter names plus `execution` ticks through `hal_perf`. HAL has no Trace ring.
+The exam writes eBPF Trace into `trace_event` (`firmware` tag `xdp_t`) and HAL CAG into `exec_bench_hal_*`.
+It aborts a cell if eBPF Trace lacks `xdp_begin` or HAL `xdp_invocations` is 0.
+Helper timing can include the `OK finish` print.
 Do not report helper timing or the host command interval as computation latency.
-Do not infer performance from the unused `time_loop` helper or the older drafts in `examples/exec_bench/`.
 
 ### HAL smoke test
 

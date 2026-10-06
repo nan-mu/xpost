@@ -1,4 +1,9 @@
-//! 测量 DUT 上 **无 Wi-Fi 的 `exec` 入口** 执行函数计算的耗时（相对 HAL 对照）。
+//! 测量 DUT 上 **无 Wi-Fi 的 `exec` 入口** 做一次函数计算（相对 HAL 对照）。
+//!
+//! eBPF 臂加载 `libbpf-mcu/tests/xdp/<name>.c` 打出的 XDP ELF。HAL 臂在
+//! `exec_bench_hal::run_hal` 上跑同一 32 字节布局。每格结束后读 `get perf`：
+//! eBPF 报告含 Counter/Aggregate/Gauge/Trace（`xdp_begin`/`xdp_end` 各应至少
+//! 一次）；HAL 报告是 CAG，`xdp_invocations` 应 ≥ 1。缺少这些则本格 `bail`。
 //!
 //! ```text
 //! exec_bench:
@@ -8,6 +13,7 @@
 //!       if ebpf:
 //!         agent clear xdp *
 //!         agent flash xdp workload
+//!         agent get init
 //!       agent clear perf
 //!       agent update map(workload) key 0
 //!       agent enable exec
@@ -19,23 +25,23 @@
 //! ```
 //!
 //! 主机只走 agent map 协议（`update map` / `get map` 的 32 字节 hex），不解释
-//! opcode。语义在 XDP 镜像或 HAL heapless 孪生里。固件约定值布局为 `[0..4]` LE
-//! opcode、`[4..8]` LE param、`[8..]` payload。eBPF 臂把 map[0] 拷进 `exec`
-//! invoke，再把结果写回 map[1]；镜像用 `bpf_printk` 打出 `OK finish`。HAL 臂对
-//! 同一 32 字节做 `run_hal`，再在 UART 上打出同样的 `OK finish`。本模块用固定
-//! hex fixture 比对 map[1]。eBPF 每个 workload 先 `clear xdp *` 再 `flash xdp`，
-//! 使新容器落在 offset 0（换名追加不对齐 flash sector）。
+//! opcode。固件约定值布局为 `[0..4]` LE opcode、`[4..8]` LE param、`[8..]` payload。
+//! eBPF 臂把 map[0] 拷进 `exec_call::invoke`，再把结果写回 map[1]；镜像用
+//! `bpf_printk` 打出 `OK finish`。HAL 臂对同一 32 字节做 `run_hal`，再在 UART
+//! 上打出同样的 `OK finish`。本模块用固定 hex fixture 比对 map[1]。eBPF 每个
+//! workload 先 `clear xdp *` 再 `flash xdp`，使新容器落在 offset 0。
 //!
 //! **数据处理**
 //!
 //! 每格写入 `exec_bench_config` + `exec_bench_data`（DDL：`sql/exec_bench.sql`）。
-//! Perf（`agent get perf`）另落共享 / HAL CAG 表，不在此列。
+//! eBPF 的 `get perf` 写入共享 `xdp_*` 表，并把 Trace 写入 `trace_event`
+//!（collector 标签 `xdp_t`）。HAL 的 CAG 写入 `exec_bench_hal_*`。HAL 没有 Trace。
 //! 格失败则 `bail`，该格不入库。
 //!
 //! `exec_bench_config`：
 //! - `exam_id` — 本轮 `exam` 行
-//! - `firmware` — 当前臂（`ebpf` / `hal`）
-//! - `workload` — Compact ELF / opcode 名（`incr` … `bsort`）
+//! - `firmware` — 当前臂（`ebpf` / `hal`，实验列名，不是 SQL `firmware` 枚举）
+//! - `workload` — XDP stem / opcode 名（`incr` … `bsort`）
 //! - `input` — 写入 map[0] 的 32 字节
 //! - `started_at` / `stopped_at` — 该格 `enable exec` 到 `disable exec` 的墙钟
 //!
@@ -146,7 +152,7 @@ impl Arm {
 
     pub fn as_firmware(self) -> Firmware {
         match self {
-            Self::Ebpf => Firmware::XdpCag,
+            Self::Ebpf => Firmware::XdpT,
             Self::Hal => Firmware::Hal,
         }
     }
@@ -346,6 +352,27 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
                     bail!("{}/{}: get/perf empty after ok cell", arm.as_db(), wl.name);
                 }
                 let decoded = db::decode_report_msg(&msg)?;
+                match arm {
+                    Arm::Ebpf => {
+                        if decoded.mask & db::MASK_T == 0 {
+                            bail!("{}/{}: get/perf missing Trace section (mask={:#x})", arm.as_db(), wl.name, decoded.mask);
+                        }
+                        let n_begin = decoded
+                            .trace
+                            .as_ref()
+                            .map(|t| t.events.iter().filter(|e| e.kind == 2).count())
+                            .unwrap_or(0);
+                        if n_begin == 0 {
+                            bail!("{}/{}: Trace has no xdp_begin", arm.as_db(), wl.name);
+                        }
+                    }
+                    Arm::Hal => {
+                        let inv = decoded.counters.get("xdp_invocations").copied().unwrap_or(0);
+                        if inv < 1 {
+                            bail!("{}/{}: HAL CAG xdp_invocations={inv}", arm.as_db(), wl.name);
+                        }
+                    }
+                }
                 db::write_perf(
                     client,
                     exam_id,

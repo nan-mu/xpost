@@ -2,7 +2,7 @@
 # Selected via default.toml `run = ["exec_bench"]`.
 #
 # Arms: ebpf (exec-bench-ebpf + per-workload xdp flash) and/or hal (exec-bench-hal).
-# Workloads default to all Compact-ELF opcodes when omitted in code.
+# Workloads are the eight libbpf-mcu tests/xdp stems (incr … bsort).
 
 formal = true
 arms = ["ebpf", "hal"]

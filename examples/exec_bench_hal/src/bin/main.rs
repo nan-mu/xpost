@@ -242,9 +242,20 @@ fn run_exec() -> Result<(), MapError> {
     let buf: &mut [u8; VALUE_LEN] = unsafe { &mut *addr_of_mut!(RUN_BUF) };
     buf.copy_from_slice(&in_val);
 
-    if run_hal(buf).is_err() {
+    #[cfg(feature = "perf-cag")]
+    cag::bump_xdp_invocations();
+    #[cfg(feature = "perf-cag")]
+    let t0 = cag::now_ticks();
+    let ran = run_hal(buf);
+    #[cfg(feature = "perf-cag")]
+    cag::record_execution(cag::now_ticks().saturating_sub(t0));
+    if ran.is_err() {
+        #[cfg(feature = "perf-cag")]
+        cag::bump_xdp_aborted();
         return Err(MapError::InvalidValue);
     }
+    #[cfg(feature = "perf-cag")]
+    cag::bump_xdp_pass();
 
     let out = *buf;
     let ok = critical_section::with(|cs| {

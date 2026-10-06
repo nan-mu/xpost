@@ -119,7 +119,7 @@ artifact = "../build/firewall/firewall.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall", "-c", "firewall"] }
 
 # ---------------------------------------------------------------------------
-# exec_bench — function-call XDP (exec ingress; map input/output; cagt)
+# exec_bench — function-call XDP (exec ingress; map input/output; CAGT on eBPF)
 # One libbpf-mcu tests/xdp/<name>.c per [[xdp]] name (same as just_tx).
 # ---------------------------------------------------------------------------
 
