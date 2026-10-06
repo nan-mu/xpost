@@ -32,11 +32,6 @@ heapless = "0.8"
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
 hal_perf = { path = "../hal_perf" }
 
-[features]
-# Formal HAL CAG arm: local dataplane CAG report (no xpost Trace ring).
-default = ["perf-cag"]
-perf-cag = []
-
 [profile.dev]
 opt-level = "s"
 

@@ -3,7 +3,7 @@
 //! eBPF 臂加载 `libbpf-mcu/tests/xdp/<name>.c` 打出的 XDP ELF。HAL 臂在
 //! `exec_bench_hal::run_hal` 上跑同一 32 字节布局。每格结束后读 `get perf`：
 //! eBPF 报告含 Counter/Aggregate/Gauge/Trace（`xdp_begin`/`xdp_end` 各应至少
-//! 一次）；HAL 报告是 CAG，`xdp_invocations` 应 ≥ 1。缺少这些则本格 `bail`。
+//! 一次）；HAL 报告同样是 CAGT，`xdp_begin` 应至少一次。缺少这些则本格 `bail`。
 //!
 //! ```text
 //! exec_bench:
@@ -35,7 +35,8 @@
 //!
 //! 每格写入 `exec_bench_config` + `exec_bench_data`（DDL：`sql/exec_bench.sql`）。
 //! eBPF 的 `get perf` 写入共享 `xdp_*` 表，并把 Trace 写入 `trace_event`
-//!（collector 标签 `xdp_t`）。HAL 的 CAG 写入 `exec_bench_hal_*`。HAL 没有 Trace。
+//!（collector 标签 `xdp_t`）。HAL 的 CAGT 写入 `exec_bench_hal_*`，Trace 写入
+//! 同一 `trace_event`（`config_id` 指向 HAL 格）。
 //! 格失败则 `bail`，该格不入库。
 //!
 //! `exec_bench_config`：
@@ -353,7 +354,7 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
                 }
                 let decoded = db::decode_report_msg(&msg)?;
                 match arm {
-                    Arm::Ebpf => {
+                    Arm::Ebpf | Arm::Hal => {
                         if decoded.mask & db::MASK_T == 0 {
                             bail!("{}/{}: get/perf missing Trace section (mask={:#x})", arm.as_db(), wl.name, decoded.mask);
                         }
@@ -364,12 +365,6 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
                             .unwrap_or(0);
                         if n_begin == 0 {
                             bail!("{}/{}: Trace has no xdp_begin", arm.as_db(), wl.name);
-                        }
-                    }
-                    Arm::Hal => {
-                        let inv = decoded.counters.get("xdp_invocations").copied().unwrap_or(0);
-                        if inv < 1 {
-                            bail!("{}/{}: HAL CAG xdp_invocations={inv}", arm.as_db(), wl.name);
                         }
                     }
                 }

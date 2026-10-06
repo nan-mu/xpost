@@ -22,8 +22,7 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use heapless::FnvIndexMap;
 use log::error;
-#[allow(unused_imports)] // PerfError only when neither perf-cag
-use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
+use xpost_serial::reply::{MapError, OkReply, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
 use exec_bench_hal::{cag, run_hal, wire};
@@ -145,28 +144,14 @@ serial_task! {
             },
         )
         .on_clear_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(feature = "perf-cag")]
-            {
-                cag::clear_perf();
-                reply.ok(OkReply::ClearPerf);
-            }
-            #[cfg(not(feature = "perf-cag"))]
-            {
-                reply.error(&PerfError::Unavailable);
-            }
+            cag::clear_perf();
+            reply.ok(OkReply::ClearPerf);
         })
         .on_get_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(feature = "perf-cag")]
-            {
-                let n = cag::report_payload_len();
-                reply.get_perf(n, |write| {
-                    cag::report_perf(write);
-                });
-            }
-            #[cfg(not(feature = "perf-cag"))]
-            {
-                reply.error(&PerfError::Unavailable);
-            }
+            let n = cag::report_payload_len();
+            reply.get_perf(n, |write| {
+                cag::report_perf(write);
+            });
         })
         .build()
     }
@@ -242,19 +227,16 @@ fn run_exec() -> Result<(), MapError> {
     let buf: &mut [u8; VALUE_LEN] = unsafe { &mut *addr_of_mut!(RUN_BUF) };
     buf.copy_from_slice(&in_val);
 
-    #[cfg(feature = "perf-cag")]
     cag::bump_xdp_invocations();
-    #[cfg(feature = "perf-cag")]
+    cag::push_xdp_begin();
     let t0 = cag::now_ticks();
     let ran = run_hal(buf);
-    #[cfg(feature = "perf-cag")]
     cag::record_execution(cag::now_ticks().saturating_sub(t0));
     if ran.is_err() {
-        #[cfg(feature = "perf-cag")]
         cag::bump_xdp_aborted();
+        cag::push_xdp_end(0);
         return Err(MapError::InvalidValue);
     }
-    #[cfg(feature = "perf-cag")]
     cag::bump_xdp_pass();
 
     let out = *buf;
@@ -262,10 +244,14 @@ fn run_exec() -> Result<(), MapError> {
         WORKLOAD.borrow(cs).borrow_mut().insert(KEY_OUT, out).is_ok()
     });
     if !ok {
+        cag::push_xdp_end(0);
         return Err(MapError::Full);
     }
 
-    // Unsolicited transcript marker for host `GetFinish` (not OkReply::Finish).
+    // Twin of eBPF bpf_printk("OK finish"); host GetFinish waits on this line.
+    cag::push_helper_enter(cag::TRACE_HELPER_PRINTK);
     esp_println::Printer::write_bytes(b"OK finish\n");
+    cag::push_helper_leave(cag::TRACE_HELPER_PRINTK);
+    cag::push_xdp_end(cag::TRACE_XDP_PASS);
     Ok(())
 }

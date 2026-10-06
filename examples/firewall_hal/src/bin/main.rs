@@ -27,11 +27,9 @@ use firewall_hal::wire;
 use heapless::{FnvIndexMap, Vec as HVec};
 use log::error;
 use static_cell::StaticCell;
-#[allow(unused_imports)] // PerfError only when perf-cag is off
-use xpost_serial::reply::{MapError, OkReply, PerfError};
+use xpost_serial::reply::{MapError, OkReply};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
-#[cfg(feature = "perf-cag")]
 use firewall_hal::cag;
 
 #[panic_handler]
@@ -191,20 +189,15 @@ async fn udp_task(
         let Ok((n, meta)) = socket.recv_from(&mut buf).await else {
             continue;
         };
-        #[cfg(feature = "perf-cag")]
         let t0 = cag::now_ticks();
-        #[cfg(feature = "perf-cag")]
         {
             cag::bump_rx_packets();
             cag::bump_xdp_invocations();
             cag::set_rx_queue_depth(1);
         }
-        #[cfg(feature = "perf-cag")]
         let t_dispatch_end = cag::now_ticks();
-        #[cfg(feature = "perf-cag")]
         cag::record_dispatch(t_dispatch_end.saturating_sub(t0));
         let Some(key) = ip_key_from_addr(meta.endpoint.addr) else {
-            #[cfg(feature = "perf-cag")]
             {
                 cag::bump_bad_md();
                 cag::bump_xdp_aborted();
@@ -214,10 +207,8 @@ async fn udp_task(
             }
             continue;
         };
-        #[cfg(feature = "perf-cag")]
         let t_map = cag::now_ticks();
         let blocked = is_blocked(key);
-        #[cfg(feature = "perf-cag")]
         {
             let now = cag::now_ticks();
             cag::bump_helper_map();
@@ -226,7 +217,6 @@ async fn udp_task(
         }
         if blocked {
             DROP.fetch_add(1, Ordering::Relaxed);
-            #[cfg(feature = "perf-cag")]
             {
                 cag::bump_xdp_drop();
                 cag::bump_rx_discarded();
@@ -243,7 +233,6 @@ async fn udp_task(
                 let _ = LEGAL_TOKENS.borrow(cs).borrow_mut().push(token);
             });
         }
-        #[cfg(feature = "perf-cag")]
         {
             cag::bump_xdp_pass();
             cag::bump_rx_delivered();
@@ -472,28 +461,14 @@ serial_task! {
             },
         )
         .on_clear_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(feature = "perf-cag")]
-            {
-                cag::clear_perf();
-                reply.ok(OkReply::ClearPerf);
-            }
-            #[cfg(not(feature = "perf-cag"))]
-            {
-                reply.error(&PerfError::Unavailable);
-            }
+            cag::clear_perf();
+            reply.ok(OkReply::ClearPerf);
         })
         .on_get_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(feature = "perf-cag")]
-            {
-                let n = cag::report_payload_len();
-                reply.get_perf(n, |write| {
-                    cag::report_perf(write);
-                });
-            }
-            #[cfg(not(feature = "perf-cag"))]
-            {
-                reply.error(&PerfError::Unavailable);
-            }
+            let n = cag::report_payload_len();
+            reply.get_perf(n, |write| {
+                cag::report_perf(write);
+            });
         })
         .build()
     }

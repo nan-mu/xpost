@@ -251,10 +251,8 @@ pub async fn write_perf(
     } else {
         write_xdp(client, exam_id, config_id, report).await?;
     }
-    if firmware.is_trace() {
-        if let Some(tr) = &report.trace {
-            write_trace(client, exam_id, config_id, tr).await?;
-        }
+    if let Some(tr) = &report.trace {
+        write_trace(client, exam_id, config_id, tr).await?;
     }
     Ok(())
 }

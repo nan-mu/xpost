@@ -2,10 +2,10 @@
 //!
 //! # Wire layout
 //!
-//! CAG payload matches `xpost::ext::perf` / host decode
-//! (`184 + 8×176 + 32 = 1624` bytes). **Every** named slot below has storage
-//! and an encode position; firmwares call the bump/record APIs they can fill.
-//! Unhooked slots stay **0** on the wire — that is intentional, not missing.
+//! CAGT payload matches `xpost::ext::perf` / host decode
+//! (`184 + 8×176 + 32 + 5136 = 6760` bytes). Counter, Aggregate, Gauge, and
+//! Trace are always present. Firmwares call the bump/record/push APIs they can
+//! fill. Unhooked slots stay **0** on the wire.
 //!
 //! # Counter catalog (46 × u32 LE)
 //!
@@ -78,13 +78,16 @@
 //! | `rx_queue_depth` | in-flight RX work items | 1 on enter, 0 on leave |
 //! | `tx_queue_depth` | TX queue depth | mirror inflight or 0 |
 //! | `tx_inflight` | outstanding TX | 1 around `send_to` |
-//! | `trace_buffer_usage` | Trace ring fill (HAL CAG: always 0) | reserved |
+//! | `trace_buffer_usage` | Trace radio ring fill | `push_trace` |
 
 #![no_std]
 
+use core::cell::RefCell;
 use core::convert::Infallible;
 use core::sync::atomic::Ordering;
 
+use critical_section::Mutex;
+use heapless::Deque;
 use portable_atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize};
 
 /// Counter section length (46 × u32 LE).
@@ -93,8 +96,29 @@ pub const COUNTER_WIRE_LEN: usize = 184;
 pub const AGGREGATE_WIRE_LEN: usize = 8 * 176;
 /// Gauge section length (4 × (current,peak) u32).
 pub const GAUGE_WIRE_LEN: usize = 32;
-/// Full CAG payload length (`perf-cag` / mask `0x7`).
+/// Radio / XDP Trace ring capacity (matches xpost).
+pub const TRACE_CAP: usize = 256;
+/// App Trace ring capacity (reserved; HAL writers use the radio ring).
+pub const TRACE_APP_CAP: usize = 64;
+/// Trace section: hdr(16) + radio[CAP] + app[APP_CAP].
+pub const TRACE_WIRE_LEN: usize = 16 + TRACE_CAP * 16 + TRACE_APP_CAP * 16;
+/// CAG payload length (mask `0x7` fragment).
 pub const CAG_WIRE_LEN: usize = COUNTER_WIRE_LEN + AGGREGATE_WIRE_LEN + GAUGE_WIRE_LEN;
+/// Full CAGT payload (mask `0xf`).
+pub const CAGT_WIRE_LEN: usize = CAG_WIRE_LEN + TRACE_WIRE_LEN;
+
+/// Wire `kind` for `xdp_begin`.
+pub const KIND_XDP_BEGIN: u8 = 2;
+/// Wire `kind` for `xdp_end`.
+pub const KIND_XDP_END: u8 = 3;
+/// Wire `kind` for `helper_enter`.
+pub const KIND_HELPER_ENTER: u8 = 11;
+/// Wire `kind` for `helper_leave`.
+pub const KIND_HELPER_LEAVE: u8 = 12;
+/// `arg0` on `xdp_end` for XDP_PASS.
+pub const TRACE_XDP_PASS: u32 = 2;
+/// `arg0` on helper events for `bpf_trace_printk` / UART finish twin.
+pub const TRACE_HELPER_PRINTK: u32 = 6;
 
 const HIST_BUCKETS: usize = 16;
 const AGG_COUNT: usize = 8;
@@ -364,6 +388,16 @@ struct State {
     tx_queue_depth: Gauge,
     tx_inflight: Gauge,
     trace_buffer_usage: Gauge,
+    radio: Mutex<RefCell<Deque<Event, TRACE_CAP>>>,
+    radio_dropped: AtomicUsize,
+}
+
+#[derive(Clone, Copy)]
+struct Event {
+    kind: u8,
+    arg0: u32,
+    arg1: u32,
+    t_us: u32,
 }
 
 impl State {
@@ -386,6 +420,8 @@ impl State {
             tx_queue_depth: Gauge::new(),
             tx_inflight: Gauge::new(),
             trace_buffer_usage: Gauge::new(),
+            radio: Mutex::new(RefCell::new(Deque::new())),
+            radio_dropped: AtomicUsize::new(0),
         }
     }
 
@@ -402,6 +438,10 @@ impl State {
         self.tx_queue_depth.reset();
         self.tx_inflight.reset();
         self.trace_buffer_usage.reset();
+        self.radio_dropped.store(0, Ordering::Relaxed);
+        critical_section::with(|cs| {
+            self.radio.borrow(cs).borrow_mut().clear();
+        });
     }
 }
 
@@ -547,22 +587,69 @@ pub fn note_block_end() -> Option<u32> {
     Some(dur)
 }
 
-/// Reset every CAG accumulator.
+/// Reset every CAG and Trace accumulator.
 pub fn clear_perf() {
     STATE.reset();
 }
 
-/// Payload length for the compiled CAG layout.
-pub const fn report_payload_len() -> usize {
-    CAG_WIRE_LEN
+/// Push one radio-ring event (newest-wins overwrite).
+pub fn push_trace(kind: u8, arg0: u32, arg1: u32) {
+    let ev = Event {
+        kind,
+        arg0,
+        arg1,
+        t_us: now_ticks() as u32,
+    };
+    let n = critical_section::with(|cs| {
+        let mut q = STATE.radio.borrow(cs).borrow_mut();
+        if q.is_full() {
+            let _ = q.pop_front();
+            STATE.radio_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        let _ = q.push_back(ev);
+        q.len()
+    });
+    STATE.trace_buffer_usage.set(n);
 }
 
-/// Stream the CAG report through `write` (raw LE bytes, no framing).
+/// Trace `xdp_begin`.
+#[inline]
+pub fn push_xdp_begin() {
+    push_trace(KIND_XDP_BEGIN, 0, 0);
+}
+
+/// Trace `xdp_end` (`arg0` = XDP action).
+#[inline]
+pub fn push_xdp_end(action: u32) {
+    push_trace(KIND_XDP_END, action, 0);
+}
+
+/// Trace `helper_enter` (`arg0` = helper id).
+#[inline]
+pub fn push_helper_enter(helper_id: u32) {
+    push_trace(KIND_HELPER_ENTER, helper_id, 0);
+}
+
+/// Trace `helper_leave` (`arg0` = helper id).
+#[inline]
+pub fn push_helper_leave(helper_id: u32) {
+    push_trace(KIND_HELPER_LEAVE, helper_id, 0);
+}
+
+/// Payload length for the compiled CAGT layout.
+pub const fn report_payload_len() -> usize {
+    CAGT_WIRE_LEN
+}
+
+/// Stream the CAGT report through `write` (raw LE bytes, no framing).
 pub fn report_perf(mut write: impl FnMut(&[u8]) -> Result<(), Infallible>) {
-    let mut buf = [0u8; CAG_WIRE_LEN];
+    let mut buf = [0u8; CAGT_WIRE_LEN];
     encode_counter(&mut buf[..COUNTER_WIRE_LEN]);
     encode_aggregate(&mut buf[COUNTER_WIRE_LEN..COUNTER_WIRE_LEN + AGGREGATE_WIRE_LEN]);
-    encode_gauge(&mut buf[COUNTER_WIRE_LEN + AGGREGATE_WIRE_LEN..]);
+    encode_gauge(
+        &mut buf[COUNTER_WIRE_LEN + AGGREGATE_WIRE_LEN..COUNTER_WIRE_LEN + AGGREGATE_WIRE_LEN + GAUGE_WIRE_LEN],
+    );
+    encode_trace(&mut buf[CAG_WIRE_LEN..]);
     let _ = write(&buf);
 }
 
@@ -616,6 +703,39 @@ fn encode_gauge(out: &mut [u8]) {
     ];
     for (i, v) in vals.iter().enumerate() {
         out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+fn encode_trace(out: &mut [u8]) {
+    debug_assert_eq!(out.len(), TRACE_WIRE_LEN);
+    let mut radio = [Event {
+        kind: 0,
+        arg0: 0,
+        arg1: 0,
+        t_us: 0,
+    }; TRACE_CAP];
+    let (nr, dropped) = critical_section::with(|cs| {
+        let q = STATE.radio.borrow(cs).borrow();
+        let n = q.len();
+        for (i, ev) in q.iter().enumerate() {
+            radio[i] = *ev;
+        }
+        (n, STATE.radio_dropped.load(Ordering::Relaxed))
+    });
+    out[0..4].copy_from_slice(&(nr as u32).to_le_bytes());
+    out[4..8].copy_from_slice(&(dropped as u32).to_le_bytes());
+    out[8..12].copy_from_slice(&0u32.to_le_bytes());
+    out[12..16].copy_from_slice(&0u32.to_le_bytes());
+    let radio_base = 16;
+    for (i, ev) in radio.iter().enumerate() {
+        let off = radio_base + i * 16;
+        out[off] = ev.kind;
+        out[off + 1] = 0;
+        out[off + 2] = 0;
+        out[off + 3] = 0;
+        out[off + 4..off + 8].copy_from_slice(&ev.arg0.to_le_bytes());
+        out[off + 8..off + 12].copy_from_slice(&ev.arg1.to_le_bytes());
+        out[off + 12..off + 16].copy_from_slice(&ev.t_us.to_le_bytes());
     }
 }
 

@@ -53,10 +53,6 @@ critical-section = "1.2.0"
 portable-atomic = { version = "1", default-features = false }
 static_cell      = "2.1.1"
 
-[features]
-# Formal HAL CAG arm: local dataplane CAG report (no xpost).
-perf-cag = []
-
 [profile.dev]
 opt-level = "s"
 

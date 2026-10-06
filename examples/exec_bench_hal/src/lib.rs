@@ -2,7 +2,7 @@
 
 //! Native HAL twin of `exec_bench` (no `xpost` runtime).
 //!
-//! Re-export [`hal_perf`] for CAG report + App serial map wire helpers.
+//! Re-export [`hal_perf`] for the always-on CAGT report and App serial map wire.
 //! Workload bytes are interpreted here, not in `xpost-serial`.
 
 pub use hal_perf as cag;
