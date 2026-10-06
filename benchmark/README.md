@@ -35,7 +35,9 @@ pixi run check
 
 `report.toml` 为每个特性固定一个已完成批次。三项网络实验各有 13 个发送速率。HASH 固定 200 条黑名单，并在同一窗口混发非法流与合法流。EXEC 固定八项计算任务，每条路径各执行一次。配置缺行、重复条件或中断批次会使任务失败。指标缺测保留为空，异常记录进入 `audit.json`。
 
-EXEC 导出 32 字节输入输出及性能记录。输入输出在快照和 CSV 中使用十六进制编码。分析检查两条路径的输入输出一致性。当前批次没有计算计时样本，因此不生成速度对比图。
+EXEC 导出 32 字节输入输出及性能记录。输入输出在快照和 CSV 中使用十六进制编码。分析检查两条路径的输入输出一致性。当前批次有 16 个条件、64 条 Trace 事件。
+
+`[exec_bench].require_trace = true` 要求全部条件具有完整计时。分析检查事件配对、顺序和打印区间的嵌套关系。旧快照未配置此项时，缺测仍保留为空。
 
 更新批次时，应同时审阅 `report.md` 中的数值和结论。图片任务不会自动改写这些结论。当前重点负载点和 HASH 配对组写在绘图代码中。若实验网格改变，也应修改对应图件。
 
@@ -48,8 +50,10 @@ EXEC 导出 32 字节输入输出及性能记录。输入输出在快照和 CSV 
 - TX 的回包吞吐率为 `ok / 30`。Loss 为 `(sent - ok) / sent`。RTT 只包含成功回复。
 - `rx_processing` 在 HAL 与 XDP 上覆盖不同片段。累计片段计时比例不等于整机 CPU 利用率。
 - ARRAY 火焰时间线使用真实 Trace 区间。HAL 没有同类 Trace，不合成 HAL 时间线。
-- EXEC 的 workload 时间是 Trace：`(xdp_end − xdp_begin) − printk helper(id 6)`。UART `OK finish` 只做主机握手。`host_command_ms` 不是计算耗时。
-- EXEC 的 `ebpf` 是数据库路径名。当前构建脚本直接将 C 编译成 RV32IMC 机器码。
+- EXEC 的调用耗时为 Trace 总区间减去区间内的打印耗时。打印使用 helper 6，即 `OK finish` 的输出函数。
+- EXEC 的 HAL 区间包含结果写回，XDP 区间不含。图中展示绝对耗时，不计算算法加速比。
+- EXEC 保留 `invoke_us`、`printk_us` 和相减后的 `runtime_us`。`host_command_ms` 仅表示主机命令总耗时。
+- EXEC 通过 libbpf-mcu 构建。BPF 与 RV32IMC 目标分别从 C 编译，安装的是 RV32IMC 产物。
 
 ## 维护入口
 

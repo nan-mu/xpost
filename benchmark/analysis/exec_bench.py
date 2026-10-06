@@ -11,35 +11,47 @@ WORKLOADS = ("incr", "square", "bitswap", "fib", "buf", "memcpy", "fletcher32", 
 
 
 def attach_trace_runtime(config: pd.DataFrame, trace: pd.DataFrame) -> pd.DataFrame:
-    """Workload time is invoke span minus printk helper id 6."""
-    invoke, printk, runtime = [], [], []
-    empty = trace is None or trace.empty
+    """Subtract only complete, non-overlapping printk spans inside one invocation."""
+    records = []
+    if not trace.empty and not set(trace.config_id).issubset(set(config.config_id)):
+        raise ValueError("exec_bench: Trace references another condition")
     for cid in config.config_id:
-        if empty:
-            invoke.append(pd.NA)
-            printk.append(pd.NA)
-            runtime.append(pd.NA)
+        missing = dict(invoke_us=float("nan"), printk_us=float("nan"),
+                       runtime_us=float("nan"), trace_status="missing")
+        if trace.empty:
+            records.append(missing)
             continue
         events = trace[trace.config_id == cid]
         if events.empty:
-            invoke.append(pd.NA)
-            printk.append(pd.NA)
-            runtime.append(pd.NA)
+            records.append(missing)
             continue
-        intervals, _ = pair_intervals(events)
-        xdp = intervals[intervals.kind == "xdp_begin"] if not intervals.empty else intervals
-        hp = intervals[(intervals.kind == "helper_enter") & (intervals.arg0 == PRINTK_HELPER_ID)] if not intervals.empty else intervals
-        inv = (xdp.end_us.iloc[0] - xdp.start_us.iloc[0]) if len(xdp) else pd.NA
-        pr = (hp.end_us.iloc[0] - hp.start_us.iloc[0]) if len(hp) else pd.NA
-        invoke.append(inv)
-        printk.append(pr)
-        if pd.isna(inv) or pd.isna(pr):
-            runtime.append(pd.NA)
-        else:
-            runtime.append(inv - pr)
-    config["invoke_us"] = invoke
-    config["printk_us"] = printk
-    config["runtime_us"] = runtime
+        if events.seq.duplicated().any() or not events.sort_values("seq").t_us.is_monotonic_increasing:
+            raise ValueError(f"exec_bench: invalid Trace order for {cid}")
+        intervals, unmatched = pair_intervals(events)
+        if unmatched:
+            raise ValueError(f"exec_bench: unmatched Trace events for {cid}")
+        xdp = intervals[intervals.kind == "xdp_begin"]
+        hp = intervals[(intervals.kind == "helper_enter") & (intervals.arg0 == PRINTK_HELPER_ID)]
+        if xdp.empty or hp.empty:
+            records.append(missing)
+            continue
+        if len(xdp) != 1:
+            raise ValueError(f"exec_bench: expected one invocation for {cid}")
+        span = xdp.iloc[0]
+        hp = hp.sort_values("start_seq")
+        if (not hp.start_seq.gt(span.start_seq).all() or not hp.end_seq.lt(span.end_seq).all()
+                or hp.start_us.lt(span.start_us).any() or hp.end_us.gt(span.end_us).any()
+                or span.end_arg0 != 2):
+            raise ValueError(f"exec_bench: printk outside successful invocation for {cid}")
+        if len(hp) > 1 and (hp.start_seq.iloc[1:].to_numpy() <= hp.end_seq.iloc[:-1].to_numpy()).any():
+            raise ValueError(f"exec_bench: overlapping printk spans for {cid}")
+        inv = span.end_us - span.start_us
+        pr = (hp.end_us - hp.start_us).sum()
+        if pr > inv:
+            raise ValueError(f"exec_bench: printk duration exceeds invocation for {cid}")
+        records.append(dict(invoke_us=inv, printk_us=pr, runtime_us=inv-pr, trace_status="complete"))
+    for name in ("invoke_us", "printk_us", "runtime_us", "trace_status"):
+        config[name] = [row[name] for row in records]
     return config
 
 
@@ -90,6 +102,8 @@ def derive_exec(tables: dict, settings: dict) -> tuple[dict, dict]:
         config[f"{name}_samples"] = config.config_id.map(metric["count"])
         config[f"{name}_mean_us"] = config.config_id.map(metric.mean_us)
     config = attach_trace_runtime(config, tables["exec_bench_trace"])
+    if settings.get("exec_bench", {}).get("require_trace", False) and config.runtime_us.isna().any():
+        raise ValueError("exec_bench: pinned report requires complete invocation and printk Trace for all conditions")
     result["exec_bench"] = config
     audit = {
         "experiment": "exec_bench", "exam_id": exam_id,
@@ -100,7 +114,7 @@ def derive_exec(tables: dict, settings: dict) -> tuple[dict, dict]:
         "execution_missing_conditions": int(config.execution_samples.isna().sum()),
         "runtime_us_missing_conditions": int(config.runtime_us.isna().sum()),
         "trace_rows": len(tables["exec_bench_trace"]),
-        "timing_scope": "runtime_us is Trace (xdp_end-xdp_begin) minus printk helper id 6",
-        "build_scope": "current build compiles C directly to RV32IMC; ebpf is the database arm label",
+        "timing_scope": "runtime_us subtracts nested printk spans from Trace invocation; HAL includes output-map insertion, XDP excludes it",
+        "build_scope": "libbpf-mcu compiles BPF and RV32IMC independently from C; the loaded image comes from the RV32IMC build",
     }
     return result, audit

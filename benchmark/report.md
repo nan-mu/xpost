@@ -133,52 +133,68 @@ CDF 是累计分布，表示 RTT 不超过横轴数值的成功回复比例。�
 
 2000 pps 时，XDP 的 p99 达到 410.86 ms，回包吞吐率降至 825.0 pps。400 pps 的 XDP p99 也曾达到 196.65 ms。少量回复等待很久的现象并非随负载单调加重。单次测量尚不能确定退化原因。
 
-## EXEC：无 Wi-Fi 的函数调用与计算结果
+## EXEC：HAVM 八项任务的函数调用开销
 
-EXEC 检查设备能否加载程序、执行计算并返回正确结果。两套固件均不启用 Wi-Fi。输入和输出通过 USB 串口传输，主机不发送 UDP 包。程序交换数据的容器名为 `workload`，键 `0` 保存输入，键 `1` 保存输出。每份数据固定为 32 字节。
+网络实验包含无线收发与协议栈处理。EXEC 关闭 Wi-Fi，单独检查程序调用路径。测试选题沿用 HAVM 论文第 7 节、表 1：前四项考察算术与逻辑，`buf`、`memcpy` 考察内存访问，最后两项考察数据处理。本地 `buf` 对应论文的 `sock buf` 项。这一分组用于观察不同任务下的耗时变化。[Yuan 等，HAVM（CAV 2024）](https://link.springer.com/chapter/10.1007/978-3-031-65627-9_16)
 
-数据库用 `ebpf` 标记加载 XDP ELF 的路径。XDP ELF 由 `libbpf-mcu` 从 `tests/xdp/<name>.c` 编译并打包。HAL 路径调用固件中的 Rust `run_hal`。
+XDP 路径加载 libbpf-mcu 构建的 XDP ELF，即程序机器码与元数据的容器。HAL 路径调用固件中的原生 Rust 函数。两条路径接收相同的 32 字节输入，并返回 32 字节输出。数据容器名为 `workload`：键 `0` 保存输入，键 `1` 保存输出。USB 串口负责传输数据，设备不收发 UDP 包。
 
 ```text
-for 固件 in [加载 XDP ELF 的固件, HAL 固件]:
+for 固件 in [XDP, HAL]:
     烧录固件，等待串口报告就绪
     for 任务 in [incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort]:
-        if 当前固件加载 XDP ELF:
+        if 当前固件为 XDP:
             清空设备中已安装的 XDP 程序
-            安装以任务命名的 XDP ELF
+            安装当前任务的 XDP ELF
             等待设备报告 OK init
         清空性能记录
         向 workload[0] 写入固定的 32 字节输入
-        发送 enable exec，执行一次计算
+        发送 enable exec，执行一次任务
         等待设备报告 OK finish
         尝试发送 disable exec
         读取 workload[1]
         将全部 32 字节与预期结果比较
         若启用、完成等待或结果检查失败：终止实验
         写入输入、输出和检查结果
-        读取性能记录，写入数据库
+        读取性能记录
+        若缺少调用或打印的 Trace 起止事件：终止采集
+        写入性能记录
 ```
 
-流水线对应 [exec_bench.rs](../xpost-test/common/src/exam/exec_bench.rs)。两条路径使用相同输入。每个 XDP 名对应 `libbpf-mcu/tests/xdp/<name>.c`。HAL 使用 [exec_bench_hal `run_hal`](../examples/exec_bench_hal/src/lib.rs)。当前每个条件只执行一次，没有预热或循环计时。
+流水线对应 [exec_bench.rs](../xpost-test/common/src/exam/exec_bench.rs)。每个 XDP 名对应 `libbpf-mcu/tests/xdp/<name>.c`。HAL 实现位于 [exec_bench_hal](../examples/exec_bench_hal/src/lib.rs)。每个条件执行一次，没有预热或循环计时。
 
-**16 个条件全部通过输出检查。** 本批次完成于 2026-10-06 07:16（UTC+8）。每项任务的两条路径均返回相同的 32 字节结果。下表列出任务含义与主要输出，完整输入输出见[逐条件数据](outputs/report/exec_bench_points.csv)。
+**16 个条件全部通过，且均有完整计时。** 本批次完成于 2026-10-06 20:54（UTC+8），共保存 64 条 Trace 事件。Trace 是设备记录的带时间戳事件。每次调用各有一对起止事件和一对完成打印事件。`OK finish` 用于通知主机，打印耗时从调用总时长中扣除：
 
-| 任务 | 固定输入与计算 | 主要输出 | 加载 XDP ELF | HAL |
+```text
+调用总时长 invoke_us = xdp_end − xdp_begin
+完成打印耗时 printk_us = helper_leave − helper_enter   # helper id = 6
+扣除打印后的调用耗时 runtime_us = invoke_us − printk_us
+```
+
+这里的「调用耗时」仍包含算法以外的工作。XDP 区间覆盖调用入口、计算及返回，不含结果写回。HAL 区间覆盖计算及结果写回。计时点分别见 [exec_call](../src/ext/exec_call/mod.rs) 和 [HAL run_exec](../examples/exec_bench_hal/src/bin/main.rs)。因此，两组数值描述各自调用路径，不用于计算算法加速比。
+
+| 任务 | 本次输入与计算 | 主要输出 | XDP 调用耗时 | HAL 调用耗时 |
 |---|---|---|---|---|
-| `incr` | 将 32 位整数 0 加一 | 1 | 通过 | 通过 |
-| `square` | 计算 32 位整数 3 的平方 | 9 | 通过 | 通过 |
-| `bitswap` | 反转 `0xA5A55A5A` 的 32 个二进制位 | `0x5A5AA5A5` | 通过 | 通过 |
-| `fib` | 计算第 30 个斐波那契数，F(0)=0、F(1)=1 | 832040 | 通过 | 通过 |
-| `buf` | 对 16 字节逐项加上下标，按字节溢出回绕后求和 | 总和 1952 | 通过 | 通过 |
-| `memcpy` | 将前 8 字节复制到后 8 字节 | 两段内容一致 | 通过 | 通过 |
-| `fletcher32` | 对固定 16 字节计算 Fletcher-32 校验和 | `0x03A15BD3` | 通过 | 通过 |
-| `bsort` | 对固定的 6 个无符号 32 位整数冒泡排序 | 6 个数按升序排列 | 通过 | 通过 |
+| `incr` | 将 32 位整数 0 加一 | 1 | 53 µs | 207 µs |
+| `square` | 计算 32 位整数 3 的平方 | 9 | 53 µs | 22 µs |
+| `bitswap` | 反转 `0xA5A55A5A` 的 32 个二进制位 | `0x5A5AA5A5` | 52 µs | 34 µs |
+| `fib` | 计算 F(30)，F(0)=0、F(1)=1 | 832040 | 55 µs | 22 µs |
+| `buf` | 对 16 字节逐项加上下标，按字节溢出回绕后求和 | 总和 1952 | 55 µs | 33 µs |
+| `memcpy` | 将前 8 字节复制到后 8 字节 | 两段内容一致 | 53 µs | 25 µs |
+| `fletcher32` | 对固定 16 字节计算 Fletcher-32 校验和 | `0x03A15BD3` | 54 µs | 34 µs |
+| `bsort` | 对固定的 6 个无符号 32 位整数冒泡排序 | 6 个数按升序排列 | 57 µs | 28 µs |
 
-**本批次尚不能比较计算耗时。** 两条路径的 `execution` 计时样本数均为 0。HAL 的全部聚合计时样本数也为 0。样本缺失不代表计算耗时为零。当前[调用接口](../src/ext/exec_call/mod.rs)直接进入程序执行路径。两套固件均未在计算函数前后记录耗时。
+表中耗时均已扣除完成打印。两条路径的完整输出逐字节一致。原始输入输出、调用总时长及扣除量见[逐条件数据](outputs/report/exec_bench_points.csv)。
 
-加载 XDP ELF 的路径每项任务记录一次 helper 调用，耗时为 **296–303 µs**。helper 是程序调用的固件函数。此处调用用于输出 `OK finish`，不能代表任务计算耗时。主机从启用到尝试停用的总耗时为 **629.05–633.05 ms**，其中包含命令传输和完成等待。两种时间均不能用来计算相对 HAL 的加速比。本批次没有 Trace 事件，不能绘制执行时间线。
+![图 7：HAVM 八项任务的单次调用耗时与完成打印耗时。XDP 扣除打印后为 52–57 µs，HAL 除 incr 的 207 µs 外为 22–34 µs。](outputs/report/figures/exec_runtime.png)
 
-这些结果支持八组固定输入的功能检查。它们尚不支持任意输入下的正确性、计算性能或 eBPF 编译性能结论。性能比较仍缺少两条路径边界一致的计算计时及重复测量。
+**图 7。** 左图展示扣除打印后的调用耗时，右图单列扣除量。条形从零开始，两个面板使用不同横轴范围。每个条件只有一次观测，没有误差条。XDP 的完成打印耗时为 **389–395 µs**，占调用总时长约 **87%–88%**。直接使用总时长，会把打印开销计入任务耗时。
+
+XDP 八项调用集中在 **52–57 µs**。HAL 除 `incr` 外为 **22–34 µs**。HAL 的 `incr` 为 **207 µs**，明显高于其余任务。它也是 HAL 启动后的首项测试。当前没有预热和重复测量，尚不能确定这一差异的原因。单次结果也不足以区分固定调用开销与算法本身的差异。
+
+HAVM 在 nRF52840 的 Cortex-M4 上比较三种虚拟机，本实验在 ESP32-C3 上比较 XDP 与原生 Rust。八项选题相同，但本次输入大小、平台和计时边界须独立说明。论文中的微秒数不作为本实验的对照数据。[HAVM 实验条件](https://link.springer.com/chapter/10.1007/978-3-031-65627-9_16)
+
+当前 libbpf-mcu 的 [BPF 构建规则](../../libbpf-mcu/make/ninja/bpf.ninja)与 [RV32IMC 构建规则](../../libbpf-mcu/make/ninja/esp32c3.ninja)分别从 C 编译。设备加载 RV32IMC 分支的产物。此次计时反映加载程序后的调用成本，不能据此评价 eBPF 字节码到机器码的转换效率。固件构建采用 `opt-level = "s"`，RV32IMC 程序采用 Clang `-O2`。编译选项与计时边界的差异也限制了对算法性能的解释。
 
 ## 测量条件与数据缺口
 
@@ -187,6 +203,6 @@ for 固件 in [加载 XDP ELF 的固件, HAL 固件]:
 - **TX 曾出现发送积压。** 待提交队列最多 32 包，提交中及未释放的包最多 64 个。[发送队列记录](outputs/report/figures/tx_pressure.png)没有记录积压持续时间，不能单独解释 RTT。
 - **没有重复测量。** 每个条件只测量一次，无法估计重复测量的波动。设备计时以微秒为单位，零次测量的均值为空。数据库未保存每批固件版本，计时位置按当前源码解释。
 
-批次由 [report.toml](report.toml) 固定。EXEC 使用完整批次 `8ddfc239-809e-4810-ab7f-1328681549f0`，未合并此前中断的批次。网络实验继续使用原有三个批次。[逐点数据与来源记录](outputs/report/)可用于复算。`provenance.json` 记录原始快照路径及 SHA-256。在 `benchmark/` 执行 `pixi run figures` 生成图片和数据，离线步骤见 [README](README.md)。
+批次由 [report.toml](report.toml) 固定。EXEC 使用完整批次 `e6d06f75-8472-4f01-a9d7-6d772141a125`，未合并此前中断的批次。网络实验继续使用原有三个批次。[逐点数据与来源记录](outputs/report/)可用于复算。`provenance.json` 记录原始快照路径及 SHA-256。在 `benchmark/` 执行 `pixi run figures` 生成图片和数据，离线步骤见 [README](README.md)。
 
 参考：[XDP 实验材料](https://github.com/tohojo/xdp-paper)、[Active Benchmarking](https://www.brendangregg.com/activebenchmarking.html)、[火焰图与时间线](https://www.brendangregg.com/flamegraphs.html)。图件使用工作区科学可视化技能，软件引用为 [Kassis 等，Scientific Agent Skills（2026）](https://doi.org/10.48550/arXiv.2609.00065)。

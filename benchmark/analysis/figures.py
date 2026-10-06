@@ -265,6 +265,42 @@ def tx_pressure(data):
     return fig
 
 
+def exec_runtime(data):
+    """Absolute durations with explicit print subtraction; no speedup inference."""
+    from .exec_bench import WORKLOADS
+    points = data["exec_bench"]
+    labels = ["incr · 加一", "square · 平方", "bitswap · 位反转", "fib · 斐波那契",
+              "buf · 缓冲区读写", "memcpy · 内存复制", "fletcher32 · 校验和", "bsort · 冒泡排序"]
+    y = np.array([0, 1, 2, 3, 4.6, 5.6, 7.2, 8.2])
+    fig, axes = plt.subplots(1, 2, figsize=(12.8, 7.4), sharey=True, layout="constrained")
+    for ax, field, title in zip(axes, ("runtime_us", "printk_us"),
+                               ("A · 扣除完成打印后的调用耗时", "B · 扣除的完成打印耗时")):
+        for arm, label, offset, color, hatch in (
+            ("ebpf", "XDP：加载程序", -.18, BLUE, ""),
+            ("hal", "HAL：原生 Rust", .18, ORANGE, "///"),
+        ):
+            values = points[points.firmware == arm].set_index("workload")[field].reindex(WORKLOADS)
+            numeric = values.to_numpy(dtype=float)
+            bars = ax.barh(y + offset, numeric, height=.32, color=color, hatch=hatch,
+                           edgecolor="white", linewidth=.5, label=label)
+            ax.bar_label(bars, labels=["缺测" if pd.isna(v) else f"{v:g}" for v in numeric],
+                         padding=4, fontsize=10)
+        finite = points[field].dropna()
+        ax.set(xlabel="耗时（µs，越短越好）", title=title,
+               xlim=(0, max(1, float(finite.max()) if len(finite) else 1) * 1.18))
+        ax.set_yticks(y, labels)
+        ax.grid(axis="y", visible=False)
+        for boundary, text in ((-.65, "算术与逻辑"), (3.85, "内存访问"), (6.45, "数据处理")):
+            ax.axhline(boundary, color="#ABB5BC", lw=.7)
+            ax.text(.98, boundary, text, transform=ax.get_yaxis_transform(), ha="right",
+                    va="bottom", fontsize=9, color=GRAY)
+        ax.legend(loc="lower right", frameon=False, fontsize=10)
+    axes[0].set_ylim(9, -1.2)
+    fig.suptitle("EXEC · 八项任务的单次观测（每项、每条路径 n = 1）")
+    fig.supxlabel("A = 调用总时长 − B；HAL 包含结果写回，XDP 不含。两图横轴范围不同。", fontsize=11)
+    return fig
+
+
 def render_all(data, tables, settings, directory):
     directory.mkdir(parents=True, exist_ok=True)
     metadata = []
@@ -276,4 +312,6 @@ def render_all(data, tables, settings, directory):
             save(maker(), directory, stem, metadata)
         fig, trace = array_flame(tables)
         save(fig, directory, "array_flame", metadata)
+        if "exec_bench" in data and data["exec_bench"].runtime_us.notna().any():
+            save(exec_runtime(data), directory, "exec_runtime", metadata)
     return metadata, trace

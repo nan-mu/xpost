@@ -4,7 +4,7 @@ import unittest
 import pandas as pd
 
 from analysis.data import encode_value
-from analysis.exec_bench import WORKLOADS, derive_exec
+from analysis.exec_bench import WORKLOADS, attach_trace_runtime, derive_exec
 
 
 def fixture():
@@ -108,6 +108,66 @@ class ExecBenchTests(unittest.TestCase):
         self.assertTrue(ebpf.runtime_us.eq(60).all())
         self.assertTrue(points.query("firmware == 'hal'").runtime_us.isna().all())
         self.assertEqual(audit["runtime_us_missing_conditions"], 8)
+
+    def test_current_report_rejects_missing_trace(self):
+        tables, settings = fixture()
+        settings["exec_bench"] = {"require_trace": True}
+        with self.assertRaisesRegex(ValueError, "requires complete"):
+            derive_exec(tables, settings)
+
+    def test_trace_rejects_unmatched_reversed_duplicate_and_external_print(self):
+        events = [
+            dict(config_id="c", seq=0, kind="xdp_begin", t_us=100, arg0=0),
+            dict(config_id="c", seq=1, kind="helper_enter", t_us=110, arg0=6),
+            dict(config_id="c", seq=2, kind="helper_leave", t_us=150, arg0=6),
+            dict(config_id="c", seq=3, kind="xdp_end", t_us=170, arg0=2),
+        ]
+        config = pd.DataFrame([dict(config_id="c")])
+        for change in ("unmatched", "reversed", "duplicate", "external", "aborted", "second_invoke"):
+            with self.subTest(change=change):
+                trace = pd.DataFrame(events)
+                if change == "unmatched":
+                    trace = trace.drop(2)
+                elif change == "reversed":
+                    trace.loc[2, "t_us"] = 105
+                elif change == "duplicate":
+                    trace.loc[2, "seq"] = 1
+                elif change == "external":
+                    trace.loc[3, ["seq", "t_us"]] = [-1, 90]
+                    trace.loc[0, ["seq", "t_us"]] = [-2, 80]
+                elif change == "aborted":
+                    trace.loc[3, "arg0"] = 0
+                else:
+                    other = trace.copy()
+                    other.seq += 4
+                    other.t_us += 100
+                    trace = pd.concat([trace, other])
+                with self.assertRaises(ValueError):
+                    attach_trace_runtime(config.copy(), trace)
+
+    def test_two_prints_are_summed_but_other_helpers_are_not_subtracted(self):
+        events = pd.DataFrame([
+            dict(config_id="c", seq=i, kind=k, t_us=t, arg0=a)
+            for i, (k, t, a) in enumerate([
+                ("xdp_begin", 0, 0), ("helper_enter", 10, 6), ("helper_leave", 20, 6),
+                ("helper_enter", 25, 1), ("helper_leave", 30, 1),
+                ("helper_enter", 40, 6), ("helper_leave", 60, 6), ("xdp_end", 80, 2),
+            ])
+        ])
+        result = attach_trace_runtime(pd.DataFrame([dict(config_id="c")]), events)
+        self.assertEqual(result.printk_us.iloc[0], 30)
+        self.assertEqual(result.runtime_us.iloc[0], 50)
+
+    def test_nested_prints_cannot_be_double_subtracted(self):
+        trace = pd.DataFrame([
+            dict(config_id="c", seq=i, kind=k, t_us=i * 10, arg0=a)
+            for i, (k, a) in enumerate([
+                ("xdp_begin", 0), ("helper_enter", 6), ("helper_enter", 6),
+                ("helper_leave", 6), ("helper_leave", 6), ("xdp_end", 2),
+            ])
+        ])
+        with self.assertRaisesRegex(ValueError, "overlapping"):
+            attach_trace_runtime(pd.DataFrame([dict(config_id="c")]), trace)
 
 
 if __name__ == "__main__":
