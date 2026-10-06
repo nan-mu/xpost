@@ -1,0 +1,22 @@
+ts	phase	decision	why	evidence	result
+2026-10-05T21:47:50Z	start	exit predicate: fish exit 0 + new formal.exam note=exec_bench with all exec_bench_data.ok=true and matching config rows for ebpf+hal workloads	autonomous verify of current default.toml run=[exec_bench]	.audit/exec-bench-test.tsv	open
+2026-10-05T21:47:50Z	preflight	agent health ok on :9240; docker quirky_villani up; no prior exec_bench exam in recent formal.exam	need live agent and build host before fish run	curl /health; docker ps	ready
+2026-10-05T21:48:35Z	iter1	staged examples/exec_bench_common beside STAGE_ROOT for path dep	docker cargo failed missing ../../examples/exec_bench_common	xpost-test/.cargo/docker-toolchain/bin/cargo	build retry next
+2026-10-05T21:49:07Z	iter1b	nested STAGE under xpost/ so examples path stays in bind mount	container only mounts xpost-test-docker, not .cache/examples	xpost-test/.cargo/docker-toolchain/bin/cargo	retry build
+2026-10-05T21:59:39Z	start	exit: fish exit0 + formal.exam note=exec_bench + all cells ok=true + matching data rows	run until correct test results	.audit/exec-bench-test.tsv	open
+2026-10-05T21:59:55Z	iter0	honest audit: flow matches docstring; fixtures are HAL/eBPF-layout guesses not yet DUT-proven; fw artifacts missing will build on flash	predicate not met yet	.audit/exec-bench-test.tsv	starting fish
+2026-10-05T22:01:02Z	iter1	restart xpost-agent to reload profiles.toml with exec-bench-*	stale agent lacked fw names	agent restart + health	retry fish
+2026-10-05T22:02:28Z	iter2	fix exec_bench partitions.csv xdp row to 0x40,0x00 like just_xdp	esp-idf-part panic on data+0x40 subtype	examples/exec_bench/partitions.csv	retry fish
+2026-10-05T22:04:02Z	iter3	build.sh prefers Homebrew llvm clang for riscv32	Apple clang cannot target riscv32	examples/exec_bench/ebpf/build.sh	retry fish
+2026-10-05T22:04:57Z	iter4	build.sh: absolute ld.lld + isolated host cargo target dir	fuse-ld=lld miss + polluted xpost-build/target	examples/exec_bench/ebpf/build.sh	retry fish
+2026-10-05T22:06:59Z	iter5	build.sh runs cargo from xpost-build/ to avoid exec_bench build-std	cwd ebpf inherited build-std poisoned host cargo	examples/exec_bench/ebpf/build.sh	retry fish
+2026-10-05T22:08:06Z	iter6	per-workload named elfs + restart agent for profiles reload	xdp name must match Compact ELF name	profiles.toml + build.sh	retry fish
+2026-10-05T22:10:10Z	iter7	raise HASH MAX_VAL_BYTES 16→32 for workload map	DUT MapCreate(Oom) because value_size=32 rejected as AllocError	src/map/kinds/hash.rs	retry fish
+2026-10-05T22:12:39Z	iter8	skip eBPF flash_xdp; rely on fw co-flash incr lease	Overwrite→switch Storage→enable exec Logic; shared image so map opcode enough	xpost-test/common/src/exam/exec_bench.rs	retry fish
+2026-10-05T23:02:33Z	iter9	EspFlashXdpTable::read pads to 4-byte like visit_bytes	incr image_len=0x3f6 fails esp-storage READ_SIZE=4; discover already padded; switch did not	src/xdp/table/storage.rs	verify next fish
+2026-10-05T23:03:12Z	iter9b	restore clear+flash_xdp per eBPF workload	Storage root cause was unaligned read not Overwrite; clear keeps Created at 0	xpost-test/common/src/exam/exec_bench.rs	verify next fish
+2026-10-05T23:06:35Z	iter10	-fno-jump-tables in exec_bench build.sh	switch jr used .rodata table past packed .text → insn fault 0x00c12382	examples/exec_bench/ebpf/build.sh	retry fish
+2026-10-05T23:13:28Z	iter11	HAL delay 800ms before OK init	host remakes GetInit after espflash; immediate HAL init was lost before UART reopen	examples/exec_bench_hal/src/bin/main.rs	get init OK; full fish next
+2026-10-05T23:18:19Z	iter12	fish exit 0 exec_bench done	predicate advanced	terminal 351920	verify DB ok=true next
+2026-10-05T23:20:17Z	done	predicate met exam=8ddfc239 16/16 ok=true	fish exit0 + postgres BOOL_AND(ok)	formal.exam 8ddfc239-809e-4810-ab7f-1328681549f0	PASS
+2026-10-05T23:23:00Z	followup	reconcile storage.rs pad keep; drop switch read_len; PR #16 updated	Storage subagent agreed on align cause; Laziness one boundary	c384dfd https://github.com/nan-mu/xpost/pull/16	done

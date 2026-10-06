@@ -1,0 +1,5 @@
+ts	phase	decision	why	evidence	result
+2026-10-06T11:10:00Z	start	migrate exec XDP from build.sh to libbpf-mcu like just_tx; HAL stays native Rust with std bit reverse	user asked libbpf-mcu toolchain and verified OSS where it fits	profiles.toml just_tx; AGENTS.md pixi vs build.sh	open
+2026-10-06T11:10:00Z	frame	done when pixi -c <stem> writes ../build/<stem>/<stem>.elf for 8 names, HAL fixture tests pass, profiles match just_tx shape	prove on real pack output not compile-only	predicate	open
+2026-10-06T11:10:00Z	design	8 stems not one dispatcher because [[xdp]].name must equal ELF stem; split also drops the switch that needed -fno-jump-tables on the old packer	libbpf-mcu -c matches tests/**/<stem>.c; agent name check	libbpf-mcu/make/build.py; xpost-serial flash/xdp.rs	open
+2026-10-06T11:20:00Z	verify	pixi packed 8 stems to ../build/<name>/<name>.elf	libbpf-mcu pack is the cold artifact	/Volumes/SSD/bs/build/incr/incr.elf	VERIFIED pack
