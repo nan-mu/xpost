@@ -393,7 +393,7 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
                     bail!("{}/{}: get/perf empty after ok cell", arm.as_db(), wl.name);
                 }
                 let decoded = db::decode_report_msg(&msg)?;
-                require_exec_trace(arm, wl.name, &decoded)?;
+                require_exec_trace(*arm, wl.name, &decoded)?;
                 db::write_perf(
                     client,
                     exam_id,
