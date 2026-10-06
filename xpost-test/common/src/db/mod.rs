@@ -23,7 +23,7 @@ pub use write::{
     insert_just_tx_config, insert_just_tx_data, stop_exam, write_perf,
 };
 
-pub use decode::{decode_report_msg, MASK_T};
+pub use decode::{decode_report_msg, DecodedReport, MASK_T};
 
 const FORMAL_SQL: &str = include_str!("../../../sql/formal.sql");
 const JUST_DROP_SQL: &str = include_str!("../../../sql/just_drop.sql");

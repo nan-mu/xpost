@@ -132,7 +132,10 @@ HAL reports use the compatible CAGT layout from `examples/hal_perf`.
 `Command::GetFinish` waits for unsolicited `OK finish` on the host.
 Neither command sends a UART request.
 `enable exec` runs one computation in the exec firmware.
-The XDP image emits `OK finish` through `bpf_printk`. The HAL firmware writes the same UART marker.
+The XDP image emits `OK finish` through `bpf_printk`.
+The HAL firmware writes the same UART marker.
+This line is the host wait for `GetFinish`.
+It is not the workload time.
 Cold installation selects an image by its XDP name.
 
 ## Test procedure
@@ -266,11 +269,13 @@ The `ebpf` database label identifies the image-loading path.
 eBPF-arm firmware compiles Counter, Aggregate, Gauge, and Trace into the report.
 `exec_call::invoke` records `xdp_invocations` / `xdp_action` (Trace `xdp_begin` / `xdp_end` and the `execution` aggregate).
 HAL `enable exec` records the same counter names plus `execution` ticks through `hal_perf`.
-It also pushes Trace `xdp_begin` / helper printk twins / `xdp_end`.
-The exam writes eBPF Trace into `trace_event` (`firmware` tag `xdp_t`) and HAL CAGT into `exec_bench_hal_*` plus `trace_event`.
-It aborts a cell if Trace lacks `xdp_begin`.
-Helper timing can include the `OK finish` print.
-Do not report helper timing or the host command interval as computation latency.
+It also pushes Trace `xdp_begin`, printk helper enter/leave (id 6), and `xdp_end`.
+The exam writes eBPF Trace into `trace_event` (`firmware` tag `xdp_t`).
+It writes HAL CAGT into `exec_bench_hal_*` plus `trace_event`.
+It aborts a cell if Trace lacks `xdp_begin`, `xdp_end`, or the printk helper pair.
+`OK finish` is the host wait only.
+Workload time is `(xdp_end − xdp_begin) − (helper_leave − helper_enter)` for helper id 6.
+Do not report helper time or the host command interval as computation latency.
 
 ### HAL smoke test
 

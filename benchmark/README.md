@@ -1,10 +1,10 @@
 # benchmark
 
-阅读入口是 [report.md](report.md)。正文按 ARRAY、HASH、TX 组织实验设计、结果和解释。图片由 Python 生成。正文独立维护，绘图任务不改写正文，也不生成 Jupyter 或网页报告。
+阅读入口是 [report.md](report.md)。正文按 ARRAY、HASH、TX、EXEC 组织实验设计与结果。图片由 Python 生成。正文独立维护，绘图任务不改写正文，也不生成 Jupyter 或网页报告。
 
 ## 生成图片
 
-在仓库根目录运行：
+在仓库根目录执行：
 
 ```bash
 cd benchmark
@@ -13,15 +13,17 @@ pixi run figures
 
 任务从 PostgreSQL 只读导出固定批次，再生成图片和 CSV。它使用 `report.toml` 指定的批次及网格。连接参数来自 `.env`，参见 `.env.example`。任务不刷写固件，也不发测试流量。
 
-离线重画当前快照：
+离线重画指定快照：
 
 ```bash
-pixi run replay --snapshot outputs/snapshots/20261005T172042.719090Z
+pixi run replay --snapshot outputs/snapshots/<id>
 ```
+
+快照路径见 `outputs/report/provenance.json`。旧快照仍可离线重画原有三项网络实验。
 
 每张图提供 PNG、SVG、PDF。正文引用 PNG。文件位于 `outputs/report/figures/`。同目录的上一级保存逐点 CSV、Trace 原始事件、审计结果和来源记录。
 
-运行分析检查：
+执行分析检查：
 
 ```bash
 pixi run check
@@ -31,11 +33,13 @@ pixi run check
 
 `outputs/snapshots/<时间戳>/` 保存压缩原始行和清单。导出采用只读、可重复读事务。清单保存查询、参数、行数和 SHA-256。连接密码不进入清单。离线任务检查数据 SHA-256，再检查实验网格。
 
-`report.toml` 为每个特性固定一个已完成批次。当前有 13 个发送速率。HASH 固定 200 条黑名单，并在同一窗口混发非法流与合法流。配置缺行、重复条件或中断批次会使任务失败。指标缺测保留为空，异常记录进入 `audit.json`。
+`report.toml` 为每个特性固定一个已完成批次。三项网络实验各有 13 个发送速率。HASH 固定 200 条黑名单，并在同一窗口混发非法流与合法流。EXEC 固定八项计算任务，每条路径各执行一次。配置缺行、重复条件或中断批次会使任务失败。指标缺测保留为空，异常记录进入 `audit.json`。
+
+EXEC 导出 32 字节输入输出及性能记录。输入输出在快照和 CSV 中使用十六进制编码。分析检查两条路径的输入输出一致性。当前批次没有计算计时样本，因此不生成速度对比图。
 
 更新批次时，应同时审阅 `report.md` 中的数值和结论。图片任务不会自动改写这些结论。当前重点负载点和 HASH 配对组写在绘图代码中。若实验网格改变，也应修改对应图件。
 
-`outputs/` 不进入 Git。共享结果时，应保存报告、图片目录和原始快照。没有本地快照时，运行 `pixi run figures` 从数据库重新导出。
+`outputs/` 不进入 Git。共享结果时，应保存报告、图片目录和原始快照。没有本地快照时，执行 `pixi run figures` 从数据库重新导出。
 
 ## 指标约定
 
@@ -44,6 +48,8 @@ pixi run check
 - TX 的回包吞吐率为 `ok / 30`。Loss 为 `(sent - ok) / sent`。RTT 只包含成功回复。
 - `rx_processing` 在 HAL 与 XDP 上覆盖不同片段。累计片段计时比例不等于整机 CPU 利用率。
 - ARRAY 火焰时间线使用真实 Trace 区间。HAL 没有同类 Trace，不合成 HAL 时间线。
+- EXEC 的 workload 时间是 Trace：`(xdp_end − xdp_begin) − printk helper(id 6)`。UART `OK finish` 只做主机握手。`host_command_ms` 不是计算耗时。
+- EXEC 的 `ebpf` 是数据库路径名。当前构建脚本直接将 C 编译成 RV32IMC 机器码。
 
 ## 维护入口
 
@@ -51,6 +57,7 @@ pixi run check
 - `report.toml`：批次 UUID 和预期网格。
 - `analysis/data.py`：只读导出与快照检查。
 - `analysis/metrics.py`：指标公式、网格检查和事件配对。
+- `analysis/exec_bench.py`：计算任务的结果与计时样本检查。
 - `analysis/figures.py`：图件定义与导出。
 - `analysis/report.py`：生成图片、CSV、审计和来源记录。
 - `tests/`：指标与数据质量检查。

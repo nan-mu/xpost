@@ -1,9 +1,10 @@
 //! 测量 DUT 上 **无 Wi-Fi 的 `exec` 入口** 做一次函数计算（相对 HAL 对照）。
 //!
 //! eBPF 臂加载 `libbpf-mcu/tests/xdp/<name>.c` 打出的 XDP ELF。HAL 臂在
-//! `exec_bench_hal::run_hal` 上跑同一 32 字节布局。每格结束后读 `get perf`：
-//! eBPF 报告含 Counter/Aggregate/Gauge/Trace（`xdp_begin`/`xdp_end` 各应至少
-//! 一次）；HAL 报告同样是 CAGT，`xdp_begin` 应至少一次。缺少这些则本格 `bail`。
+//! `exec_bench_hal::run_hal` 上跑同一 32 字节布局。每格结束后读 `get perf`。
+//! 报告必须含 Trace。`xdp_begin` 与 `xdp_end` 各至少一次。printk helper 对
+//!（`helper_enter`/`helper_leave`，arg0=6）各至少一次。缺少则本格 `bail`。
+//! 运行时间用 Trace：`(xdp_end − xdp_begin) − (helper_leave − helper_enter)`。
 //!
 //! ```text
 //! exec_bench:
@@ -27,8 +28,8 @@
 //! 主机只走 agent map 协议（`update map` / `get map` 的 32 字节 hex），不解释
 //! opcode。固件约定值布局为 `[0..4]` LE opcode、`[4..8]` LE param、`[8..]` payload。
 //! eBPF 臂把 map[0] 拷进 `exec_call::invoke`，再把结果写回 map[1]；镜像用
-//! `bpf_printk` 打出 `OK finish`。HAL 臂对同一 32 字节做 `run_hal`，再在 UART
-//! 上打出同样的 `OK finish`。本模块用固定 hex fixture 比对 map[1]。eBPF 每个
+//! `bpf_printk` 打出 `OK finish`，只供主机等待。HAL 臂对同一 32 字节做 `run_hal`，
+//! 再在 UART 上打出同样的 `OK finish`。运行时间不从该打印读取。
 //! workload 先 `clear xdp *` 再 `flash xdp`，使新容器落在 offset 0。
 //!
 //! **数据处理**
@@ -69,6 +70,45 @@ const KEY_OUT_DUMP: &str = "01";
 const FW_EBPF: &str = "exec-bench-ebpf";
 const FW_HAL: &str = "exec-bench-hal";
 const MAP_VALUE_LEN: usize = 32;
+const KIND_XDP_BEGIN: u8 = 2;
+const KIND_XDP_END: u8 = 3;
+const KIND_HELPER_ENTER: u8 = 11;
+const KIND_HELPER_LEAVE: u8 = 12;
+const HELPER_PRINTK: u32 = 6;
+
+fn require_exec_trace(arm: Arm, name: &str, decoded: &db::DecodedReport) -> Result<()> {
+    if decoded.mask & db::MASK_T == 0 {
+        bail!(
+            "{}/{}: get/perf missing Trace section (mask={:#x})",
+            arm.as_db(),
+            name,
+            decoded.mask
+        );
+    }
+    let Some(tr) = decoded.trace.as_ref() else {
+        bail!("{}/{}: Trace section decoded empty", arm.as_db(), name);
+    };
+    let has = |kind: u8| tr.events.iter().any(|e| e.kind == kind);
+    let has_printk = |kind: u8| {
+        tr.events
+            .iter()
+            .any(|e| e.kind == kind && e.arg0 == HELPER_PRINTK)
+    };
+    if !has(KIND_XDP_BEGIN) {
+        bail!("{}/{}: Trace has no xdp_begin", arm.as_db(), name);
+    }
+    if !has(KIND_XDP_END) {
+        bail!("{}/{}: Trace has no xdp_end", arm.as_db(), name);
+    }
+    if !has_printk(KIND_HELPER_ENTER) || !has_printk(KIND_HELPER_LEAVE) {
+        bail!(
+            "{}/{}: Trace has no printk helper pair (enter/leave arg0=6)",
+            arm.as_db(),
+            name
+        );
+    }
+    Ok(())
+}
 
 /// Wire fixtures for `update map` / `get map` (64 hex chars = 32 bytes).
 /// Names match cold XDP image stems under the eBPF profile.
@@ -353,21 +393,7 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
                     bail!("{}/{}: get/perf empty after ok cell", arm.as_db(), wl.name);
                 }
                 let decoded = db::decode_report_msg(&msg)?;
-                match arm {
-                    Arm::Ebpf | Arm::Hal => {
-                        if decoded.mask & db::MASK_T == 0 {
-                            bail!("{}/{}: get/perf missing Trace section (mask={:#x})", arm.as_db(), wl.name, decoded.mask);
-                        }
-                        let n_begin = decoded
-                            .trace
-                            .as_ref()
-                            .map(|t| t.events.iter().filter(|e| e.kind == 2).count())
-                            .unwrap_or(0);
-                        if n_begin == 0 {
-                            bail!("{}/{}: Trace has no xdp_begin", arm.as_db(), wl.name);
-                        }
-                    }
-                }
+                require_exec_trace(arm, wl.name, &decoded)?;
                 db::write_perf(
                     client,
                     exam_id,
