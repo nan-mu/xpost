@@ -19,15 +19,11 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
-use just_tx_hal::wire;
+use just_tx_hal::{cag, wire};
 use log::error;
 use static_cell::StaticCell;
-#[allow(unused_imports)] // PerfError only when perf-cag is off
-use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
+use xpost_serial::reply::{MapError, OkReply, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
-
-#[cfg(feature = "perf-cag")]
-use just_tx_hal::cag;
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -164,19 +160,15 @@ async fn udp_task(
         let Ok((n, meta)) = socket.recv_from(&mut buf).await else {
             continue;
         };
-        #[cfg(feature = "perf-cag")]
         let t0 = cag::now_ticks();
-        #[cfg(feature = "perf-cag")]
         {
             cag::bump_rx_packets();
             cag::bump_xdp_invocations();
             cag::set_rx_queue_depth(1);
         }
         NET_RX.fetch_add(1, Ordering::Relaxed);
-        #[cfg(feature = "perf-cag")]
         let t_map = cag::now_ticks();
         RXCNT[IPPROTO_UDP as usize].fetch_add(1, Ordering::Relaxed);
-        #[cfg(feature = "perf-cag")]
         {
             cag::bump_helper_map();
             let t1 = cag::now_ticks();
@@ -185,7 +177,6 @@ async fn udp_task(
             cag::record_execution(t1.saturating_sub(t_map));
         }
         let dest = ack_endpoint(meta.endpoint.addr, meta.endpoint.port);
-        #[cfg(feature = "perf-cag")]
         {
             cag::bump_xdp_tx();
             cag::bump_rx_delivered();
@@ -193,10 +184,8 @@ async fn udp_task(
             cag::set_tx_inflight(1);
             cag::note_block_start();
         }
-        #[cfg(feature = "perf-cag")]
         let t_tx = cag::now_ticks();
         let send_ok = socket.send_to(&buf[..n], dest).await.is_ok();
-        #[cfg(feature = "perf-cag")]
         {
             let _ = cag::note_block_end();
             let now = cag::now_ticks();
@@ -290,28 +279,14 @@ serial_task! {
             },
         )
         .on_clear_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(feature = "perf-cag")]
-            {
-                cag::clear_perf();
-                reply.ok(OkReply::ClearPerf);
-            }
-            #[cfg(not(feature = "perf-cag"))]
-            {
-                reply.error(&PerfError::Unavailable);
-            }
+            cag::clear_perf();
+            reply.ok(OkReply::ClearPerf);
         })
         .on_get_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(feature = "perf-cag")]
-            {
-                let n = cag::report_payload_len();
-                reply.get_perf(n, |write| {
-                    cag::report_perf(write);
-                });
-            }
-            #[cfg(not(feature = "perf-cag"))]
-            {
-                reply.error(&PerfError::Unavailable);
-            }
+            let n = cag::report_payload_len();
+            reply.get_perf(n, |write| {
+                cag::report_perf(write);
+            });
         })
         .build()
     }

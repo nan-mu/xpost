@@ -22,9 +22,17 @@ def read_settings(path: Path | None = None) -> dict:
     settings = tomllib.loads((path or ROOT / "report.toml").read_text())
     if settings["schema"] != "formal":
         raise ValueError("This report requires the formal schema.")
-    if set(settings["exams"]) != set(EXPERIMENTS):
-        raise ValueError("Pin one exam UUID for each of the three features in report.toml.")
+    selected = set(settings["exams"])
+    if not set(EXPERIMENTS).issubset(selected) or selected - set(EXPERIMENTS) - {"exec_bench"}:
+        raise ValueError("Pin the three network exams and optionally exec_bench in report.toml.")
     return settings
+
+
+def encode_value(value):
+    """Preserve BYTEA values as reversible hex in source snapshots."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).hex()
+    return str(value)
 
 
 def fetch_snapshot(settings: dict, output: Path | None = None) -> Path:
@@ -44,17 +52,18 @@ def fetch_snapshot(settings: dict, output: Path | None = None) -> Path:
             tables[key] = connection.execute(statement, params).fetchall()
 
         query("exams", "SELECT * FROM formal.exam ORDER BY started_at, id")
-        for experiment in EXPERIMENTS:
+        for experiment in settings["exams"]:
             exam_id = settings["exams"][experiment]
             config = f"formal.{experiment}_config"
-            query(f"{experiment}_config", f"SELECT * FROM {config} WHERE exam_id = %s ORDER BY firmware, target_pps, id", (exam_id,))
+            order = "workload" if experiment == "exec_bench" else "target_pps"
+            query(f"{experiment}_config", f"SELECT * FROM {config} WHERE exam_id = %s ORDER BY firmware, {order}, id", (exam_id,))
             query(f"{experiment}_data", f"SELECT d.* FROM formal.{experiment}_data d JOIN {config} c ON d.config_id = c.id WHERE c.exam_id = %s ORDER BY d.config_id, d.id", (exam_id,))
             for kind in ("counter", "agg", "gauge"):
                 query(f"{experiment}_xdp_{kind}", f"SELECT p.* FROM formal.xdp_{kind} p JOIN {config} c ON p.config_id = c.id WHERE c.exam_id = %s ORDER BY p.config_id, p.name", (exam_id,))
                 query(f"{experiment}_hal_{kind}", f"SELECT p.* FROM formal.{experiment}_hal_{kind} p JOIN {config} c ON p.config_id = c.id WHERE c.exam_id = %s ORDER BY p.config_id, p.name", (exam_id,))
             query(f"{experiment}_trace", f"SELECT t.* FROM formal.trace_event t JOIN {config} c ON t.config_id = c.id WHERE c.exam_id = %s ORDER BY t.config_id, t.seq", (exam_id,))
     # No connection address, username or password is exported.
-    payload = json.dumps(tables, ensure_ascii=False, default=str, separators=(",", ":")).encode()
+    payload = json.dumps(tables, ensure_ascii=False, default=encode_value, separators=(",", ":")).encode()
     dest.mkdir(parents=True, exist_ok=False)
     with gzip.open(dest / "source.json.gz", "wb") as handle:
         handle.write(payload)

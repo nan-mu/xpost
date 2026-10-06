@@ -219,6 +219,12 @@ pub(super) mod printk {
     }
 
     fn emit(fmt: &[u8], args: &[usize]) -> Result<(), ()> {
+        // `bpf_printk` passes `sizeof(fmt)`, which includes the C NUL.
+        // Format as a C string so the UART line has no trailing NUL.
+        let fmt = match fmt.iter().position(|&b| b == 0) {
+            Some(n) => &fmt[..n],
+            None => fmt,
+        };
         let tokens = parse_bpf_format(fmt).ok_or(())?;
 
         let nspecs = tokens
@@ -231,6 +237,16 @@ pub(super) mod printk {
 
         let msg = zip_format(&tokens, args);
         log::info!("XDP: {}", msg);
+        // Also emit the formatted body as a raw UART line so host transcript
+        // waits (e.g. GetFinish → `OK finish`) can observe eBPF printk without
+        // depending on log level / `XDP:` prefixes.
+        {
+            use core::fmt::Write as _;
+            let mut line: String<288> = String::new();
+            let _ = write!(line, "{msg}");
+            esp_println::Printer::write_bytes(line.as_bytes());
+            esp_println::Printer::write_bytes(b"\n");
+        }
         Ok(())
     }
 

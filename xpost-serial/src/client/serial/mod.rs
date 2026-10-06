@@ -8,6 +8,7 @@ pub mod perf;
 pub use perf::{Report, decode as decode_perf, mask_for_len};
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use futures::FutureExt;
 
@@ -15,7 +16,7 @@ use crate::client::error::{Interrupted, RequestError, RequestTimeout};
 use crate::client::port::AppLink;
 use crate::client::record::{Found, SharedRecord, WriteRecord};
 use crate::client::{DEFAULT_REQUEST_TIMEOUT, GET_MAP_TIMEOUT};
-use crate::r#type::command::{Command, GET_INIT_TIMEOUT};
+use crate::r#type::command::{Command, GET_FINISH_TIMEOUT, GET_INIT_TIMEOUT};
 
 /// Occupy App UART, exchange one command (or host-only wait), release fd on return.
 pub(crate) async fn run_op<E>(
@@ -28,6 +29,7 @@ where
 {
     let req_timeout = match cmd {
         Command::GetInit => GET_INIT_TIMEOUT,
+        Command::GetFinish => GET_FINISH_TIMEOUT,
         Command::GetMap { .. } => GET_MAP_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     };
@@ -37,10 +39,14 @@ where
         let mut rec = record.lock();
         cmd.write_to(&mut rec);
     }
-    // GetInit: open reader only — never serialize / write a UART verb.
-    // Lower bound is last flash Begin (else 15s lookback if never flashed).
+    // GetInit / GetFinish: open reader only — never serialize / write a UART verb.
+    // GetInit: lower bound is last flash Begin (else 15s lookback if never flashed).
+    // GetFinish: short lookback so `OK finish` printed during `enable exec` is accepted.
     let after = match cmd {
         Command::GetInit => record.init_after(),
+        Command::GetFinish => SystemTime::now()
+            .checked_sub(Duration::from_millis(500))
+            .unwrap_or(SystemTime::UNIX_EPOCH),
         _ => uart.write_command(cmd.to_string().as_str())?,
     };
 
@@ -66,11 +72,14 @@ pub(crate) fn ok_label(ok: &crate::r#type::reply::OkReply<'_>) -> &'static str {
         OkReply::Ping => "OK ping",
         OkReply::EnableXdp => "OK enable xdp",
         OkReply::DisableXdp => "OK disable xdp",
+        OkReply::EnableExec => "OK enable exec",
+        OkReply::DisableExec => "OK disable exec",
         OkReply::ClearMap => "OK clear map",
         OkReply::ClearPerf => "OK clear perf",
         OkReply::GetMap { .. } => "OK get map",
         OkReply::UpdateMap => "OK update map",
         OkReply::GetPerf { .. } => "OK get perf",
         OkReply::Init => "OK init",
+        OkReply::Finish => "OK finish",
     }
 }

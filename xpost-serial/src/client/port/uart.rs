@@ -160,7 +160,9 @@ fn reader_loop(port: Box<dyn AppBytePort>, record: SharedRecord, stop: Arc<Atomi
         match reader.read_line(&mut buf) {
             Ok(0) => break,
             Ok(_) => {
-                let line = buf.trim_end_matches(['\r', '\n']).to_string();
+                let line = buf
+                    .trim_end_matches(['\r', '\n', '\0'])
+                    .to_string();
                 if line.is_empty() {
                     continue;
                 }

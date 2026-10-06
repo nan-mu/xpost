@@ -3,9 +3,10 @@
 # Formal firmware tags (DB `firmware` enum — not Cargo feature names):
 #   xdp_cag → perf-cag (counter+aggregate+gauge)
 #   xdp_t   → perf-t   (counter+trace)
-#   hal     → examples/*_hal with local CAG report (no xpost runtime; Trace is XDP-only)
+#   hal     → examples/*_hal CAGT report (no xpost runtime; Trace ring is in hal_perf)
 #
-# Firmware build: cwd = examples/<project>, `cargo build --release --features …`.
+# Firmware build: cwd = examples/<project>, `cargo build --release` plus XDP
+# feature arguments when the profile lists them.
 
 # ---------------------------------------------------------------------------
 # just_tx (examples/just_xdp + cold just_tx.elf)
@@ -68,7 +69,7 @@ build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "
 xdp = ["firewall"]
 
 # ---------------------------------------------------------------------------
-# HAL CAG arms (no cold XDP; app-layer policy + local CAG wire report)
+# HAL CAGT arms (no cold XDP; app-layer policy + local CAGT wire report)
 # ---------------------------------------------------------------------------
 
 [[fw]]
@@ -76,7 +77,7 @@ name = "just-tx-hal"
 target = "esp32c3"
 partition_table = "examples/just_tx_hal/partitions.csv"
 artifact = "examples/just_tx_hal/target/riscv32imc-unknown-none-elf/release/just_tx_hal"
-build = { cwd = "examples/just_tx_hal", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
+build = { cwd = "examples/just_tx_hal", command = ["cargo", "build", "--release"] }
 xdp = []
 
 [[fw]]
@@ -84,7 +85,7 @@ name = "just-drop-hal"
 target = "esp32c3"
 partition_table = "examples/just_drop_hal/partitions.csv"
 artifact = "examples/just_drop_hal/target/riscv32imc-unknown-none-elf/release/just_drop_hal"
-build = { cwd = "examples/just_drop_hal", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
+build = { cwd = "examples/just_drop_hal", command = ["cargo", "build", "--release"] }
 xdp = []
 
 [[fw]]
@@ -92,7 +93,7 @@ name = "firewall-hal"
 target = "esp32c3"
 partition_table = "examples/firewall_hal/partitions.csv"
 artifact = "examples/firewall_hal/target/riscv32imc-unknown-none-elf/release/firewall_hal"
-build = { cwd = "examples/firewall_hal", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
+build = { cwd = "examples/firewall_hal", command = ["cargo", "build", "--release"] }
 xdp = []
 
 # ---------------------------------------------------------------------------
@@ -117,3 +118,71 @@ name = "firewall"
 fw = "firewall-cag"
 artifact = "../build/firewall/firewall.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall", "-c", "firewall"] }
+
+# ---------------------------------------------------------------------------
+# exec_bench — function-call XDP (exec ingress; map input/output; CAGT on eBPF)
+# One libbpf-mcu tests/xdp/<name>.c per [[xdp]] name (same as just_tx).
+# ---------------------------------------------------------------------------
+
+[[fw]]
+name = "exec-bench-ebpf"
+target = "esp32c3"
+partition_table = "examples/exec_bench/partitions.csv"
+artifact = "examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench"
+build = { cwd = "examples/exec_bench", command = ["cargo", "build", "--release"] }
+xdp = ["incr"]
+
+[[xdp]]
+name = "incr"
+fw = "exec-bench-ebpf"
+artifact = "../build/incr/incr.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "incr"] }
+
+[[xdp]]
+name = "square"
+fw = "exec-bench-ebpf"
+artifact = "../build/square/square.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "square"] }
+
+[[xdp]]
+name = "bitswap"
+fw = "exec-bench-ebpf"
+artifact = "../build/bitswap/bitswap.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "bitswap"] }
+
+[[xdp]]
+name = "fib"
+fw = "exec-bench-ebpf"
+artifact = "../build/fib/fib.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "fib"] }
+
+[[xdp]]
+name = "buf"
+fw = "exec-bench-ebpf"
+artifact = "../build/buf/buf.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "buf"] }
+
+[[xdp]]
+name = "memcpy"
+fw = "exec-bench-ebpf"
+artifact = "../build/memcpy/memcpy.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "memcpy"] }
+
+[[xdp]]
+name = "fletcher32"
+fw = "exec-bench-ebpf"
+artifact = "../build/fletcher32/fletcher32.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "fletcher32"] }
+
+[[xdp]]
+name = "bsort"
+fw = "exec-bench-ebpf"
+artifact = "../build/bsort/bsort.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "bsort"] }
+
+[[fw]]
+name = "exec-bench-hal"
+target = "esp32c3"
+partition_table = "examples/exec_bench_hal/partitions.csv"
+artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal"
+build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build", "--release"] }

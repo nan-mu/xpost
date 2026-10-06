@@ -1,0 +1,67 @@
+[workspace]
+
+[package]
+edition      = "2024"
+name         = "exec_bench"
+rust-version = "1.88"
+version      = "0.1.0"
+
+[[bin]]
+name = "exec_bench"
+path = "./src/bin/main.rs"
+
+[package.metadata.espflash]
+partition_table = "partitions.csv"
+
+[package.metadata.xpost]
+schema_version = 1
+
+[[package.metadata.xpost.slots.entries]]
+name = "a"
+length = 0xE00
+mount = "rx"
+primary = true
+
+[package.metadata.xpost.xdp_table]
+partition = "xdp"
+image_capacity = 0x1000
+
+[dependencies]
+esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
+# `esp-radio` feature required: root `xpost` always links esp-radio (wifi+xdp).
+# This example does not bring up Wi-Fi; it only needs the RTOS adapter symbols.
+esp-rtos = { version = "0.3.0", features = [
+  "embassy",
+  "esp-alloc",
+  "esp-radio",
+  "esp32c3",
+  "log-04",
+] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c3", "log-04"] }
+log = "0.4.27"
+esp-alloc = "0.10.0"
+esp-println = { version = "0.17.0", features = ["esp32c3", "log-04"] }
+embassy-executor = { version = "0.10.0", features = ["log"] }
+embassy-time = { version = "0.5.0", features = ["log"] }
+critical-section = "1.2.0"
+xpost = { path = "../..", features = [
+  "exec-call",
+  "perf-counter",
+  "perf-aggregate",
+  "perf-gauge",
+  "perf-trace",
+] }
+xpost-type = { path = "../../xpost-type" }
+xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
+
+[build-dependencies]
+xpost-build = { path = "../../xpost-build" }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug         = 2
+lto           = "fat"
+opt-level     = "s"

@@ -146,6 +146,27 @@ impl XpostMcp {
             .await
     }
 
+    #[tool(description = "App EnableExec (function-call invoke)")]
+    async fn enable_exec(&self) -> Result<CallToolResult, McpError> {
+        let shared = self.shared.clone();
+        self.run_op(move || ops::enable_exec(shared.as_ref(), "mcp"))
+            .await
+    }
+
+    #[tool(description = "App DisableExec")]
+    async fn disable_exec(&self) -> Result<CallToolResult, McpError> {
+        let shared = self.shared.clone();
+        self.run_op(move || ops::disable_exec(shared.as_ref(), "mcp"))
+            .await
+    }
+
+    #[tool(description = "Host wait for unsolicited OK finish (eBPF printk)")]
+    async fn get_finish(&self) -> Result<CallToolResult, McpError> {
+        let shared = self.shared.clone();
+        self.run_op(move || ops::get_finish(shared.as_ref(), "mcp"))
+            .await
+    }
+
     #[tool(description = "App ClearMap")]
     async fn clear_map(
         &self,

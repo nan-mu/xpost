@@ -403,6 +403,7 @@ impl XdpRt {
             self.primary = prev_primary;
             return Err(XdpSwitchError::ScratchTooSmall);
         }
+        // Unaligned image_len is fine: EspFlashXdpTable::read pads like visit_bytes.
         if let Err(e) = self.table.read(aot_abs, &mut buf[..image_len]) {
             self.primary = prev_primary;
             return Err(e.into());

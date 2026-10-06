@@ -56,6 +56,37 @@ impl AgentClient {
         Ok(())
     }
 
+    /// `POST /v1/flash/xdp` — build+write named XDP image into cold table.
+    pub async fn flash_xdp(&self, name: &str) -> Result<()> {
+        let body = serde_json::json!({ "name": name });
+        let msg = self.post_json("/v1/flash/xdp", &body).await?;
+        log::info!("flash_xdp: {msg}");
+        Ok(())
+    }
+
+    /// `POST /v1/clear/xdp` — `name` `"*"` clears the whole cold table.
+    pub async fn clear_xdp(&self, name: &str) -> Result<()> {
+        let body = serde_json::json!({ "name": name });
+        let msg = self.post_json("/v1/clear/xdp", &body).await?;
+        log::info!("clear_xdp: {msg}");
+        Ok(())
+    }
+
+    /// `POST /v1/enable/exec`.
+    pub async fn enable_exec(&self) -> Result<String> {
+        self.post_json("/v1/enable/exec", &serde_json::json!({})).await
+    }
+
+    /// `POST /v1/disable/exec`.
+    pub async fn disable_exec(&self) -> Result<String> {
+        self.post_json("/v1/disable/exec", &serde_json::json!({})).await
+    }
+
+    /// `POST /v1/get/finish` — host-only wait for UART `OK finish`.
+    pub async fn get_finish(&self) -> Result<String> {
+        self.post_json("/v1/get/finish", &serde_json::json!({})).await
+    }
+
     /// `POST /v1/enable/xdp`.
     pub async fn enable_xdp(&self) -> Result<String> {
         self.post_json("/v1/enable/xdp", &serde_json::json!({})).await

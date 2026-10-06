@@ -98,11 +98,36 @@ impl XdpTableStorage for EspFlashXdpTable {
 
     fn read(&mut self, offset: usize, out: &mut [u8]) -> Result<(), FlashError> {
         use embedded_storage::nor_flash::ReadNorFlash;
+        if out.is_empty() {
+            return Ok(());
+        }
         if offset.saturating_add(out.len()) > self.partition_len as usize {
             return Err(FlashError::Storage);
         }
-        self.flash
-            .read(self.abs(offset)?, out)
-            .map_err(|_| FlashError::Storage)
+        // esp-storage without `bytewise-read` requires WORD_SIZE alignment on
+        // offset and length (`NotAligned` → Storage). Compact ELF image payloads
+        // need not be 4-byte sized; pad the physical read like xpost_elf::visit_bytes.
+        #[repr(C, align(4))]
+        struct Block([u8; 68]);
+        let mut block = Block([0; 68]);
+        let end = offset + out.len();
+        let mut current = offset;
+        let mut written = 0usize;
+        while current < end {
+            let n = (end - current).min(64);
+            let prefix = current & 3;
+            let physical_start = current & !3;
+            let physical_len = (prefix + n + 3) & !3;
+            if physical_start.saturating_add(physical_len) > self.partition_len as usize {
+                return Err(FlashError::Storage);
+            }
+            self.flash
+                .read(self.abs(physical_start)?, &mut block.0[..physical_len])
+                .map_err(|_| FlashError::Storage)?;
+            out[written..written + n].copy_from_slice(&block.0[prefix..prefix + n]);
+            current += n;
+            written += n;
+        }
+        Ok(())
     }
 }

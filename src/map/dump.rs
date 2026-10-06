@@ -10,13 +10,14 @@
 //!
 //! ```text
 //! hash <occupancy> <cap>\n
-//! <key-token> <u64>\n
+//! <key-token> <value-token>\n
 //! …
 //! ```
 //!
 //! ARRAY slots are decimal indices `0..size-1`. HASH keys are dotted IPv4 when
-//! the key is 4 bytes (network order); otherwise lowercase hex. Values are the
-//! little-endian integer formed from up to 8 value bytes, printed in decimal.
+//! the key is 4 bytes (network order); otherwise lowercase hex. HASH values are
+//! the little-endian u64 (decimal) when the value is ≤ 8 bytes; otherwise
+//! lowercase hex of the full value.
 
 /// Decimal digit count for `n` (at least 1).
 pub fn dec_len(mut n: u64) -> usize {
@@ -133,7 +134,7 @@ pub fn write_hash_header(size: u32, cap: u32, write: &mut impl FnMut(&[u8])) {
 pub fn hash_entry_len(key: &[u8], value: &[u8]) -> usize {
     let mut scratch = [0u8; 64];
     let key_tok = format_hash_key(key, &mut scratch);
-    key_tok.len() + 1 + dec_len(value_as_u64(value)) + 1
+    key_tok.len() + 1 + format_hash_value_len(value) + 1
 }
 
 /// Write one HASH entry line.
@@ -142,6 +143,34 @@ pub fn write_hash_entry(key: &[u8], value: &[u8], write: &mut impl FnMut(&[u8]))
     let key_tok = format_hash_key(key, &mut scratch);
     write(key_tok);
     write(b" ");
-    write_dec(value_as_u64(value), write);
+    write_hash_value(value, write);
     write(b"\n");
+}
+
+fn format_hash_value_len(value: &[u8]) -> usize {
+    if value.len() > 8 {
+        value.len() * 2
+    } else {
+        dec_len(value_as_u64(value))
+    }
+}
+
+fn write_hash_value(value: &[u8], write: &mut impl FnMut(&[u8])) {
+    if value.len() > 8 {
+        const HEX: &[u8] = b"0123456789abcdef";
+        // Emit hex in small chunks to avoid large stack temps.
+        let mut chunk = [0u8; 16];
+        let mut i = 0usize;
+        while i < value.len() {
+            let n = (value.len() - i).min(8);
+            for (j, b) in value[i..i + n].iter().enumerate() {
+                chunk[j * 2] = HEX[(b >> 4) as usize];
+                chunk[j * 2 + 1] = HEX[(b & 0xf) as usize];
+            }
+            write(&chunk[..n * 2]);
+            i += n;
+        }
+    } else {
+        write_dec(value_as_u64(value), write);
+    }
 }

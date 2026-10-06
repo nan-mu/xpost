@@ -163,6 +163,7 @@ pub enum PerfExperiment {
     JustTx,
     JustDrop,
     Firewall,
+    ExecBench,
 }
 
 pub async fn insert_firewall_config(
@@ -245,14 +246,13 @@ pub async fn write_perf(
             PerfExperiment::JustTx => write_just_tx_hal(client, config_id, report).await?,
             PerfExperiment::JustDrop => write_just_drop_hal(client, config_id, report).await?,
             PerfExperiment::Firewall => write_firewall_hal(client, config_id, report).await?,
+            PerfExperiment::ExecBench => write_exec_bench_hal(client, config_id, report).await?,
         }
     } else {
         write_xdp(client, exam_id, config_id, report).await?;
     }
-    if firmware.is_trace() {
-        if let Some(tr) = &report.trace {
-            write_trace(client, exam_id, config_id, tr).await?;
-        }
+    if let Some(tr) = &report.trace {
+        write_trace(client, exam_id, config_id, tr).await?;
     }
     Ok(())
 }
@@ -380,6 +380,76 @@ async fn write_firewall_hal(
         "firewall_hal_gauge",
     )
     .await
+}
+
+async fn write_exec_bench_hal(
+    client: &Client,
+    config_id: ConfigId,
+    report: &DecodedReport,
+) -> Result<()> {
+    write_hal_tables(
+        client,
+        config_id,
+        report,
+        "exec_bench_hal_counter",
+        "exec_bench_hal_agg",
+        "exec_bench_hal_gauge",
+    )
+    .await
+}
+
+pub async fn insert_exec_bench_config(
+    client: &Client,
+    exam_id: ExamId,
+    firmware: &str,
+    workload: &str,
+    input: &[u8],
+    started_at: SystemTime,
+    stopped_at: SystemTime,
+) -> Result<ConfigId> {
+    let row = client
+        .query_one(
+            r#"
+            INSERT INTO exec_bench_config (
+                exam_id, firmware, workload, input, started_at, stopped_at
+            ) VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id
+            "#,
+            &[
+                &exam_id,
+                &firmware,
+                &workload,
+                &input,
+                &started_at,
+                &stopped_at,
+            ],
+        )
+        .await
+        .context("INSERT exec_bench_config")?;
+    Ok(row.get(0))
+}
+
+pub async fn insert_exec_bench_data(
+    client: &Client,
+    config_id: ConfigId,
+    rep: i32,
+    ok: bool,
+    output: Option<&[u8]>,
+) -> Result<()> {
+    client
+        .execute(
+            r#"
+            INSERT INTO exec_bench_data (config_id, rep, ok, output)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (config_id, rep) DO UPDATE SET
+                ok = EXCLUDED.ok,
+                output = EXCLUDED.output
+            "#,
+            &[&config_id, &rep, &ok, &output],
+        )
+        .await
+        .context("INSERT exec_bench_data")?;
+    Ok(())
 }
 
 async fn write_hal_tables(

@@ -41,7 +41,7 @@ impl RequestHandler for DefaultHandler {
     fn handle(&mut self, command: Command<'_>, reply: ReplyWriter<'_>) {
         match command {
             Command::Ping => reply.ok(OkReply::Ping),
-            Command::GetInit => reply.error(&ServerError::Unknown),
+            Command::GetInit | Command::GetFinish => reply.error(&ServerError::Unknown),
             _ => reply.error(&ServerError::Unsupported),
         }
     }
@@ -89,6 +89,10 @@ impl<R, W, H: RequestHandler, const N: usize> SerialHandlerBuilder<R, W, H, N> {
         on_enable_xdp() => Command::EnableXdp);
     register!(/// Register XDP disable execution and reply generation.
         on_disable_xdp() => Command::DisableXdp);
+    register!(/// Register function-call exec enable and reply generation.
+        on_enable_exec() => Command::EnableExec);
+    register!(/// Register function-call exec disable and reply generation.
+        on_disable_exec() => Command::DisableExec);
     register!(/// Register map clearing by name.
         on_clear_map(name: &str) => Command::ClearMap { name });
     register!(/// Register map reporting; `ReplyWriter::get_map` streams its payload.

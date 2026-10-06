@@ -50,6 +50,10 @@ fixed_ok! {
     parse_enable_xdp_reply => EnableXdp: [b"enable", b"xdp"];
     /// `OK disable xdp`
     parse_disable_xdp_reply => DisableXdp: [b"disable", b"xdp"];
+    /// `OK enable exec`
+    parse_enable_exec_reply => EnableExec: [b"enable", b"exec"];
+    /// `OK disable exec`
+    parse_disable_exec_reply => DisableExec: [b"disable", b"exec"];
     /// `OK clear map`
     parse_clear_map_reply => ClearMap: [b"clear", b"map"];
     /// `OK clear perf`
@@ -58,6 +62,8 @@ fixed_ok! {
     parse_update_map_reply => UpdateMap: [b"update", b"map"];
     /// `OK init` — unsolicited settle line (not a command reply).
     parse_init_reply => Init: [b"init"];
+    /// `OK finish` — unsolicited completion line (e.g. eBPF printk; not a command reply).
+    parse_finish_reply => Finish: [b"finish"];
 }
 
 // —— variable OK (length-prefixed blob) ——————————————————————————————————————

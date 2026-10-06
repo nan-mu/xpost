@@ -21,6 +21,7 @@ impl Firmware {
         matches!(self, Self::Hal)
     }
 
+    #[allow(dead_code)]
     pub fn is_trace(self) -> bool {
         matches!(self, Self::XdpT)
     }

@@ -1,13 +1,13 @@
 # xpost 实验报告
 
-实验比较 ESP32-C3 上的两条处理路径。HAL 在应用层处理 UDP 包。XDP 在无线驱动入口处理包。
+前三项实验比较 ESP32-C3 上的两条网络处理路径。HAL 在应用层处理 UDP 包。XDP 在无线驱动入口处理包。新增的 EXEC 实验检查无 Wi-Fi 时的函数调用与计算结果。
 
 ```text
 HAL：无线驱动 → 协议栈解析并交付 UDP → 应用计数、过滤或回复
 XDP：无线驱动 → XDP 程序计数、过滤或返回 → 仅放行的包进入协议栈
 ```
 
-TR3000 向设备发包，每个条件持续 30 秒。pps 表示每秒包数。设定速率为 400、600、800、1000、1200、1400、1600、2000、2400、2800、3200、3600、4000 pps。每个条件测量一次。图中横轴使用设定速率，计算比例时使用主机实际发送数。
+网络实验由 TR3000 向设备发包，每个条件持续 30 秒。pps 表示每秒包数。设定速率为 400、600、800、1000、1200、1400、1600、2000、2400、2800、3200、3600、4000 pps。每个条件测量一次。图中横轴使用设定速率，计算比例时使用主机实际发送数。
 
 ## ARRAY：按源地址计数
 
@@ -131,15 +131,78 @@ CDF 是累计分布，表示 RTT 不超过横轴数值的成功回复比例。�
 
 **图 6。** 800 pps 时，XDP 分布位于 HAL 左侧，即等待更短。1000、1200 pps 时，多数 XDP 回复仍快，但少量回复明显变慢。1400 pps 时，XDP 的主要分布也移至 HAL 右侧。横轴为对数刻度，四图范围相同。
 
-2000 pps 时，XDP 的 p99 达到 410.86 ms，回包吞吐率降至 825.0 pps。400 pps 的 XDP p99 也曾达到 196.65 ms。少量回复等待很久的现象并非随负载单调加重。单次运行尚不能确定退化原因。
+2000 pps 时，XDP 的 p99 达到 410.86 ms，回包吞吐率降至 825.0 pps。400 pps 的 XDP p99 也曾达到 196.65 ms。少量回复等待很久的现象并非随负载单调加重。单次测量尚不能确定退化原因。
+
+## EXEC：HAVM 八项任务的函数调用开销
+
+网络实验包含无线收发与协议栈处理。EXEC 关闭 Wi-Fi，单独检查程序调用路径。测试选题沿用 HAVM 论文第 7 节、表 1：前四项考察算术与逻辑，`buf`、`memcpy` 考察内存访问，最后两项考察数据处理。本地 `buf` 对应论文的 `sock buf` 项。这一分组用于观察不同任务下的耗时变化。[Yuan 等，HAVM（CAV 2024）](https://link.springer.com/chapter/10.1007/978-3-031-65627-9_16)
+
+XDP 路径加载 libbpf-mcu 构建的 XDP ELF，即程序机器码与元数据的容器。HAL 路径调用固件中的原生 Rust 函数。两条路径接收相同的 32 字节输入，并返回 32 字节输出。数据容器名为 `workload`：键 `0` 保存输入，键 `1` 保存输出。USB 串口负责传输数据，设备不收发 UDP 包。
+
+```text
+for 固件 in [XDP, HAL]:
+    烧录固件，等待串口报告就绪
+    for 任务 in [incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort]:
+        if 当前固件为 XDP:
+            清空设备中已安装的 XDP 程序
+            安装当前任务的 XDP ELF
+            等待设备报告 OK init
+        清空性能记录
+        向 workload[0] 写入固定的 32 字节输入
+        发送 enable exec，执行一次任务
+        等待设备报告 OK finish
+        尝试发送 disable exec
+        读取 workload[1]
+        将全部 32 字节与预期结果比较
+        若启用、完成等待或结果检查失败：终止实验
+        写入输入、输出和检查结果
+        读取性能记录
+        若缺少调用或打印的 Trace 起止事件：终止采集
+        写入性能记录
+```
+
+流水线对应 [exec_bench.rs](../xpost-test/common/src/exam/exec_bench.rs)。每个 XDP 名对应 `libbpf-mcu/tests/xdp/<name>.c`。HAL 实现位于 [exec_bench_hal](../examples/exec_bench_hal/src/lib.rs)。每个条件执行一次，没有预热或循环计时。
+
+**16 个条件全部通过，且均有完整计时。** 本批次完成于 2026-10-06 20:54（UTC+8），共保存 64 条 Trace 事件。Trace 是设备记录的带时间戳事件。每次调用各有一对起止事件和一对完成打印事件。`OK finish` 用于通知主机，打印耗时从调用总时长中扣除：
+
+```text
+调用总时长 invoke_us = xdp_end − xdp_begin
+完成打印耗时 printk_us = helper_leave − helper_enter   # helper id = 6
+扣除打印后的调用耗时 runtime_us = invoke_us − printk_us
+```
+
+这里的「调用耗时」仍包含算法以外的工作。XDP 区间覆盖调用入口、计算及返回，不含结果写回。HAL 区间覆盖计算及结果写回。计时点分别见 [exec_call](../src/ext/exec_call/mod.rs) 和 [HAL run_exec](../examples/exec_bench_hal/src/bin/main.rs)。因此，两组数值描述各自调用路径，不用于计算算法加速比。
+
+| 任务 | 本次输入与计算 | 主要输出 | XDP 调用耗时 | HAL 调用耗时 |
+|---|---|---|---|---|
+| `incr` | 将 32 位整数 0 加一 | 1 | 53 µs | 207 µs |
+| `square` | 计算 32 位整数 3 的平方 | 9 | 53 µs | 22 µs |
+| `bitswap` | 反转 `0xA5A55A5A` 的 32 个二进制位 | `0x5A5AA5A5` | 52 µs | 34 µs |
+| `fib` | 计算 F(30)，F(0)=0、F(1)=1 | 832040 | 55 µs | 22 µs |
+| `buf` | 对 16 字节逐项加上下标，按字节溢出回绕后求和 | 总和 1952 | 55 µs | 33 µs |
+| `memcpy` | 将前 8 字节复制到后 8 字节 | 两段内容一致 | 53 µs | 25 µs |
+| `fletcher32` | 对固定 16 字节计算 Fletcher-32 校验和 | `0x03A15BD3` | 54 µs | 34 µs |
+| `bsort` | 对固定的 6 个无符号 32 位整数冒泡排序 | 6 个数按升序排列 | 57 µs | 28 µs |
+
+表中耗时均已扣除完成打印。两条路径的完整输出逐字节一致。原始输入输出、调用总时长及扣除量见[逐条件数据](outputs/report/exec_bench_points.csv)。
+
+![图 7：HAVM 八项任务的单次调用耗时与完成打印耗时。XDP 扣除打印后为 52–57 µs，HAL 除 incr 的 207 µs 外为 22–34 µs。](outputs/report/figures/exec_runtime.png)
+
+**图 7。** 左图展示扣除打印后的调用耗时，右图单列扣除量。条形从零开始，两个面板使用不同横轴范围。每个条件只有一次观测，没有误差条。XDP 的完成打印耗时为 **389–395 µs**，占调用总时长约 **87%–88%**。直接使用总时长，会把打印开销计入任务耗时。
+
+XDP 八项调用集中在 **52–57 µs**。HAL 除 `incr` 外为 **22–34 µs**。HAL 的 `incr` 为 **207 µs**，明显高于其余任务。它也是 HAL 启动后的首项测试。当前没有预热和重复测量，尚不能确定这一差异的原因。单次结果也不足以区分固定调用开销与算法本身的差异。
+
+HAVM 在 nRF52840 的 Cortex-M4 上比较三种虚拟机，本实验在 ESP32-C3 上比较 XDP 与原生 Rust。八项选题相同，但本次输入大小、平台和计时边界须独立说明。论文中的微秒数不作为本实验的对照数据。[HAVM 实验条件](https://link.springer.com/chapter/10.1007/978-3-031-65627-9_16)
+
+当前 libbpf-mcu 的 [BPF 构建规则](../../libbpf-mcu/make/ninja/bpf.ninja)与 [RV32IMC 构建规则](../../libbpf-mcu/make/ninja/esp32c3.ninja)分别从 C 编译。设备加载 RV32IMC 分支的产物。此次计时反映加载程序后的调用成本，不能据此评价 eBPF 字节码到机器码的转换效率。固件构建采用 `opt-level = "s"`，RV32IMC 程序采用 Clang `-O2`。编译选项与计时边界的差异也限制了对算法性能的解释。
 
 ## 测量条件与数据缺口
 
 - **负载未完全达到设定值。** TX 设定 4000 pps 时，HAL 实际发送 3395.8 pps，XDP 为 3315.6 pps。[实际发送曲线](outputs/report/figures/load.png)保留了这一区别。HASH 混发时，非法流发出率接近设定值，合法流另加固定 1024 包。
 - **HASH 本批计时完整。** 26 个混发条件均有 `map_operation` 计时样本。详见[计时次数](outputs/report/figures/quality.png)。
 - **TX 曾出现发送积压。** 待提交队列最多 32 包，提交中及未释放的包最多 64 个。[发送队列记录](outputs/report/figures/tx_pressure.png)没有记录积压持续时间，不能单独解释 RTT。
-- **没有重复运行。** 每个条件只测量一次，无法估计重复测量的波动。设备计时以微秒为单位，零次测量的均值为空。数据库未保存每批固件版本，计时位置按当前源码解释。
+- **没有重复测量。** 每个条件只测量一次，无法估计重复测量的波动。设备计时以微秒为单位，零次测量的均值为空。数据库未保存每批固件版本，计时位置按当前源码解释。
 
-批次由 [report.toml](report.toml) 固定。原始快照为 `outputs/snapshots/20261005T210251.287496Z`。[逐点数据与来源记录](outputs/report/)可用于复算。在 `benchmark/` 运行 `pixi run figures` 生成图片，离线步骤见 [README](README.md)。
+批次由 [report.toml](report.toml) 固定。EXEC 使用完整批次 `e6d06f75-8472-4f01-a9d7-6d772141a125`，未合并此前中断的批次。网络实验继续使用原有三个批次。[逐点数据与来源记录](outputs/report/)可用于复算。`provenance.json` 记录原始快照路径及 SHA-256。在 `benchmark/` 执行 `pixi run figures` 生成图片和数据，离线步骤见 [README](README.md)。
 
 参考：[XDP 实验材料](https://github.com/tohojo/xdp-paper)、[Active Benchmarking](https://www.brendangregg.com/activebenchmarking.html)、[火焰图与时间线](https://www.brendangregg.com/flamegraphs.html)。图件使用工作区科学可视化技能，软件引用为 [Kassis 等，Scientific Agent Skills（2026）](https://doi.org/10.48550/arXiv.2609.00065)。
