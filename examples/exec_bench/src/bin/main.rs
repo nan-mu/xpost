@@ -36,7 +36,7 @@ extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-/// Compact ELF V0 map value size for `workload` (see `ebpf/bpf.toml`).
+/// Map value size for `workload` (XDP ELF metadata from libbpf-mcu).
 const VALUE_LEN: usize = 32;
 const MAP_NAME: &str = "workload";
 const KEY_IN: u8 = 0;

@@ -8,7 +8,7 @@
 
 //! Native HAL twin of `exec_bench`: same host pipeline (map / enable exec /
 //! `OK finish` / perf), no XDP lease and no `xpost` runtime. Workload bytes are
-//! opaque at the serial boundary; [`exec_bench_common::run_hal`] interprets them.
+//! opaque at the serial boundary; [`exec_bench_hal::run_hal`] interprets them.
 
 use core::cell::RefCell;
 use core::convert::Infallible;
@@ -26,8 +26,7 @@ use log::error;
 use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
-use exec_bench_common::{self as bench};
-use exec_bench_hal::{cag, wire};
+use exec_bench_hal::{cag, run_hal, wire};
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -243,7 +242,7 @@ fn run_exec() -> Result<(), MapError> {
     let buf: &mut [u8; VALUE_LEN] = unsafe { &mut *addr_of_mut!(RUN_BUF) };
     buf.copy_from_slice(&in_val);
 
-    if bench::run_hal(buf).is_err() {
+    if run_hal(buf).is_err() {
         return Err(MapError::InvalidValue);
     }
 

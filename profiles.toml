@@ -119,8 +119,8 @@ artifact = "../build/firewall/firewall.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall", "-c", "firewall"] }
 
 # ---------------------------------------------------------------------------
-# exec_bench — function-call eBPF (exec ingress; map input/output; cagt)
-# Per-workload [[xdp]] names share one cold image for now.
+# exec_bench — function-call XDP (exec ingress; map input/output; cagt)
+# One libbpf-mcu tests/xdp/<name>.c per [[xdp]] name (same as just_tx).
 # ---------------------------------------------------------------------------
 
 [[fw]]
@@ -134,50 +134,50 @@ xdp = ["incr"]
 [[xdp]]
 name = "incr"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/incr.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "incr"] }
+artifact = "../build/incr/incr.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "incr"] }
 
 [[xdp]]
 name = "square"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/square.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "square"] }
+artifact = "../build/square/square.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "square"] }
 
 [[xdp]]
 name = "bitswap"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/bitswap.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "bitswap"] }
+artifact = "../build/bitswap/bitswap.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "bitswap"] }
 
 [[xdp]]
 name = "fib"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/fib.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "fib"] }
+artifact = "../build/fib/fib.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "fib"] }
 
 [[xdp]]
 name = "buf"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/buf.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "buf"] }
+artifact = "../build/buf/buf.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "buf"] }
 
 [[xdp]]
 name = "memcpy"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/memcpy.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "memcpy"] }
+artifact = "../build/memcpy/memcpy.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "memcpy"] }
 
 [[xdp]]
 name = "fletcher32"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/fletcher32.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "fletcher32"] }
+artifact = "../build/fletcher32/fletcher32.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "fletcher32"] }
 
 [[xdp]]
 name = "bsort"
 fw = "exec-bench-ebpf"
-artifact = "examples/exec_bench/bsort.elf"
-build = { cwd = "examples/exec_bench/ebpf", command = ["./build.sh", "bsort"] }
+artifact = "../build/bsort/bsort.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "bsort"] }
 
 [[fw]]
 name = "exec-bench-hal"

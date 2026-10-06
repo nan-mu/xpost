@@ -1,13 +1,13 @@
 # xpost 实验报告
 
-实验比较 ESP32-C3 上的两条处理路径。HAL 在应用层处理 UDP 包。XDP 在无线驱动入口处理包。
+前三项实验比较 ESP32-C3 上的两条网络处理路径。HAL 在应用层处理 UDP 包。XDP 在无线驱动入口处理包。新增的 EXEC 实验检查无 Wi-Fi 时的函数调用与计算结果。
 
 ```text
 HAL：无线驱动 → 协议栈解析并交付 UDP → 应用计数、过滤或回复
 XDP：无线驱动 → XDP 程序计数、过滤或返回 → 仅放行的包进入协议栈
 ```
 
-TR3000 向设备发包，每个条件持续 30 秒。pps 表示每秒包数。设定速率为 400、600、800、1000、1200、1400、1600、2000、2400、2800、3200、3600、4000 pps。每个条件测量一次。图中横轴使用设定速率，计算比例时使用主机实际发送数。
+网络实验由 TR3000 向设备发包，每个条件持续 30 秒。pps 表示每秒包数。设定速率为 400、600、800、1000、1200、1400、1600、2000、2400、2800、3200、3600、4000 pps。每个条件测量一次。图中横轴使用设定速率，计算比例时使用主机实际发送数。
 
 ## ARRAY：按源地址计数
 
@@ -131,15 +131,62 @@ CDF 是累计分布，表示 RTT 不超过横轴数值的成功回复比例。�
 
 **图 6。** 800 pps 时，XDP 分布位于 HAL 左侧，即等待更短。1000、1200 pps 时，多数 XDP 回复仍快，但少量回复明显变慢。1400 pps 时，XDP 的主要分布也移至 HAL 右侧。横轴为对数刻度，四图范围相同。
 
-2000 pps 时，XDP 的 p99 达到 410.86 ms，回包吞吐率降至 825.0 pps。400 pps 的 XDP p99 也曾达到 196.65 ms。少量回复等待很久的现象并非随负载单调加重。单次运行尚不能确定退化原因。
+2000 pps 时，XDP 的 p99 达到 410.86 ms，回包吞吐率降至 825.0 pps。400 pps 的 XDP p99 也曾达到 196.65 ms。少量回复等待很久的现象并非随负载单调加重。单次测量尚不能确定退化原因。
+
+## EXEC：无 Wi-Fi 的函数调用与计算结果
+
+EXEC 检查设备能否加载程序、执行计算并返回正确结果。两套固件均不启用 Wi-Fi。输入和输出通过 USB 串口传输，主机不发送 UDP 包。程序交换数据的容器名为 `workload`，键 `0` 保存输入，键 `1` 保存输出。每份数据固定为 32 字节。
+
+数据库用 `ebpf` 标记加载 XDP ELF 的路径。XDP ELF 由 `libbpf-mcu` 从 `tests/xdp/<name>.c` 编译并打包。HAL 路径调用固件中的 Rust `run_hal`。
+
+```text
+for 固件 in [加载 XDP ELF 的固件, HAL 固件]:
+    烧录固件，等待串口报告就绪
+    for 任务 in [incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort]:
+        if 当前固件加载 XDP ELF:
+            清空设备中已安装的 XDP 程序
+            安装以任务命名的 XDP ELF
+            等待设备报告 OK init
+        清空性能记录
+        向 workload[0] 写入固定的 32 字节输入
+        发送 enable exec，执行一次计算
+        等待设备报告 OK finish
+        尝试发送 disable exec
+        读取 workload[1]
+        将全部 32 字节与预期结果比较
+        若启用、完成等待或结果检查失败：终止实验
+        写入输入、输出和检查结果
+        读取性能记录，写入数据库
+```
+
+流水线对应 [exec_bench.rs](../xpost-test/common/src/exam/exec_bench.rs)。两条路径使用相同输入。每个 XDP 名对应 `libbpf-mcu/tests/xdp/<name>.c`。HAL 使用 [exec_bench_hal `run_hal`](../examples/exec_bench_hal/src/lib.rs)。当前每个条件只执行一次，没有预热或循环计时。
+
+**16 个条件全部通过输出检查。** 本批次完成于 2026-10-06 07:16（UTC+8）。每项任务的两条路径均返回相同的 32 字节结果。下表列出任务含义与主要输出，完整输入输出见[逐条件数据](outputs/report/exec_bench_points.csv)。
+
+| 任务 | 固定输入与计算 | 主要输出 | 加载 XDP ELF | HAL |
+|---|---|---|---|---|
+| `incr` | 将 32 位整数 0 加一 | 1 | 通过 | 通过 |
+| `square` | 计算 32 位整数 3 的平方 | 9 | 通过 | 通过 |
+| `bitswap` | 反转 `0xA5A55A5A` 的 32 个二进制位 | `0x5A5AA5A5` | 通过 | 通过 |
+| `fib` | 计算第 30 个斐波那契数，F(0)=0、F(1)=1 | 832040 | 通过 | 通过 |
+| `buf` | 对 16 字节逐项加上下标，按字节溢出回绕后求和 | 总和 1952 | 通过 | 通过 |
+| `memcpy` | 将前 8 字节复制到后 8 字节 | 两段内容一致 | 通过 | 通过 |
+| `fletcher32` | 对固定 16 字节计算 Fletcher-32 校验和 | `0x03A15BD3` | 通过 | 通过 |
+| `bsort` | 对固定的 6 个无符号 32 位整数冒泡排序 | 6 个数按升序排列 | 通过 | 通过 |
+
+**本批次尚不能比较计算耗时。** 两条路径的 `execution` 计时样本数均为 0。HAL 的全部聚合计时样本数也为 0。样本缺失不代表计算耗时为零。当前[调用接口](../src/ext/exec_call/mod.rs)直接进入程序执行路径。两套固件均未在计算函数前后记录耗时。
+
+加载 XDP ELF 的路径每项任务记录一次 helper 调用，耗时为 **296–303 µs**。helper 是程序调用的固件函数。此处调用用于输出 `OK finish`，不能代表任务计算耗时。主机从启用到尝试停用的总耗时为 **629.05–633.05 ms**，其中包含命令传输和完成等待。两种时间均不能用来计算相对 HAL 的加速比。本批次没有 Trace 事件，不能绘制执行时间线。
+
+这些结果支持八组固定输入的功能检查。它们尚不支持任意输入下的正确性、计算性能或 eBPF 编译性能结论。性能比较仍缺少两条路径边界一致的计算计时及重复测量。
 
 ## 测量条件与数据缺口
 
 - **负载未完全达到设定值。** TX 设定 4000 pps 时，HAL 实际发送 3395.8 pps，XDP 为 3315.6 pps。[实际发送曲线](outputs/report/figures/load.png)保留了这一区别。HASH 混发时，非法流发出率接近设定值，合法流另加固定 1024 包。
 - **HASH 本批计时完整。** 26 个混发条件均有 `map_operation` 计时样本。详见[计时次数](outputs/report/figures/quality.png)。
 - **TX 曾出现发送积压。** 待提交队列最多 32 包，提交中及未释放的包最多 64 个。[发送队列记录](outputs/report/figures/tx_pressure.png)没有记录积压持续时间，不能单独解释 RTT。
-- **没有重复运行。** 每个条件只测量一次，无法估计重复测量的波动。设备计时以微秒为单位，零次测量的均值为空。数据库未保存每批固件版本，计时位置按当前源码解释。
+- **没有重复测量。** 每个条件只测量一次，无法估计重复测量的波动。设备计时以微秒为单位，零次测量的均值为空。数据库未保存每批固件版本，计时位置按当前源码解释。
 
-批次由 [report.toml](report.toml) 固定。原始快照为 `outputs/snapshots/20261005T210251.287496Z`。[逐点数据与来源记录](outputs/report/)可用于复算。在 `benchmark/` 运行 `pixi run figures` 生成图片，离线步骤见 [README](README.md)。
+批次由 [report.toml](report.toml) 固定。EXEC 使用完整批次 `8ddfc239-809e-4810-ab7f-1328681549f0`，未合并此前中断的批次。网络实验继续使用原有三个批次。[逐点数据与来源记录](outputs/report/)可用于复算。`provenance.json` 记录原始快照路径及 SHA-256。在 `benchmark/` 执行 `pixi run figures` 生成图片和数据，离线步骤见 [README](README.md)。
 
 参考：[XDP 实验材料](https://github.com/tohojo/xdp-paper)、[Active Benchmarking](https://www.brendangregg.com/activebenchmarking.html)、[火焰图与时间线](https://www.brendangregg.com/flamegraphs.html)。图件使用工作区科学可视化技能，软件引用为 [Kassis 等，Scientific Agent Skills（2026）](https://doi.org/10.48550/arXiv.2609.00065)。

@@ -31,7 +31,6 @@ critical-section = "1.2.0"
 heapless = "0.8"
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
 hal_perf = { path = "../hal_perf" }
-exec_bench_common = { path = "../exec_bench_common" }
 
 [features]
 # Formal HAL CAG arm: local dataplane CAG report (no xpost).

@@ -17,13 +17,20 @@ import pandas as pd
 def build(snapshot: Path, output: Path | None = None) -> Path:
     manifest, tables = load_snapshot(snapshot)
     data, audit = derive(tables, manifest["settings"])
+    if "exec_bench" in manifest["settings"]["exams"]:
+        from .exec_bench import derive_exec
+        exec_data, exec_audit = derive_exec(tables, manifest["settings"])
+        data.update(exec_data)
+        audit["exec_bench"] = exec_audit
+        if exec_audit["execution_zero_sample_conditions"] or exec_audit["execution_missing_conditions"]:
+            audit["warnings"].append("EXEC has missing execution timing; do not interpret missing means as zero latency.")
     output = output or ROOT / "outputs" / "report"
     output.mkdir(parents=True, exist_ok=True)
     figures, trace = render_all(data, tables, manifest["settings"], output / "figures")
     audit["array_trace"] = trace
     if trace["unmatched_events"] or not trace["selected"]:
         audit["warnings"].append("ARRAY Trace has missing pairs or no eligible RX segment.")
-    for experiment in EXPERIMENTS:
+    for experiment in manifest["settings"]["exams"]:
         data[experiment].to_csv(output / f"{experiment}_points.csv", index=False)
         for kind in ("agg", "counter", "gauge"):
             data[f"{experiment}_{kind}"].to_csv(output / f"{experiment}_{kind}.csv", index=False)
@@ -40,6 +47,13 @@ def build(snapshot: Path, output: Path | None = None) -> Path:
         *[ROOT.parent / f"examples/{e}_hal/src/bin/main.rs" for e in EXPERIMENTS],
         *[ROOT.parent / f"xpost-test/common/src/exam/{e}.rs" for e in EXPERIMENTS],
     ]
+    if "exec_bench" in manifest["settings"]["exams"]:
+        paths += [ROOT.parent / p for p in (
+            "xpost-test/common/src/exam/exec_bench.rs", "xpost-test/config/exec_bench.toml",
+            "xpost-test/sql/exec_bench.sql", "examples/exec_bench/src/bin/main.rs",
+            "examples/exec_bench_hal/src/bin/main.rs", "examples/exec_bench_hal/src/lib.rs",
+            "src/ext/exec_call/mod.rs", "src/xdp/ingress/mod.rs", "profiles.toml",
+        )]
     provenance = dict(
         snapshot=str(snapshot), source_sha256=manifest["source_sha256"], settings=manifest["settings"],
         versions=dict(python=platform.python_version(), matplotlib=matplotlib.__version__,

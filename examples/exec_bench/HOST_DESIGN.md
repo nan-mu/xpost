@@ -79,9 +79,9 @@ offset  size  field
 ```
 
 Opcode names ↔ LE u32 values and expected output checks belong in the
-xpost-test exam module (draft: [`exec_bench.rs`](exec_bench.rs) + shared twin
-[`exec_bench_common`](../exec_bench_common/src/lib.rs) for HAL semantics /
-expected bytes). The App never sees these names.
+xpost-test exam module (draft: [`exec_bench.rs`](exec_bench.rs); HAL
+compute is [`run_hal`](../exec_bench_hal/src/lib.rs)). The App never sees
+these names.
 
 `update map` input for each cell: host builds the 32-byte blob (or a wire
 token whose UTF-8 bytes are that blob / a prefix) and stores the same bytes

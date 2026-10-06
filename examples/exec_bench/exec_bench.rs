@@ -51,7 +51,7 @@
 //! [8..32] payload
 //! ```
 //!
-//! opcode 名与语义见 [`exec_bench_common`](../exec_bench_common/src/lib.rs)；
+//! opcode 名与语义见 `xpost-test` `exam/exec_bench.rs` 的 hex fixture；
 //! harness 用它对 `get map` 读到的 output 字节做校验，**不要**把该抽象放进
 //! App 或 `xpost-serial`。
 //!
