@@ -219,6 +219,12 @@ pub(super) mod printk {
     }
 
     fn emit(fmt: &[u8], args: &[usize]) -> Result<(), ()> {
+        // `bpf_printk` passes `sizeof(fmt)`, which includes the C NUL.
+        // Format as a C string so the UART line has no trailing NUL.
+        let fmt = match fmt.iter().position(|&b| b == 0) {
+            Some(n) => &fmt[..n],
+            None => fmt,
+        };
         let tokens = parse_bpf_format(fmt).ok_or(())?;
 
         let nspecs = tokens

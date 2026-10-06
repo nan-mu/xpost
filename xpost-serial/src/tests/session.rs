@@ -237,6 +237,51 @@ fn get_finish_ok_from_uart_injection() {
 }
 
 #[test]
+fn get_finish_ok_strips_printk_nul() {
+    // `bpf_printk` fmt_size includes a C NUL. Some helpers wrote that byte on UART.
+    use std::thread;
+    use std::time::Duration;
+
+    use crate::client::{MemoryPair, SerialHandler};
+    use crate::server::SerialHandler as ServerHandler;
+    use crate::tests::harness::TestError;
+
+    let pair = MemoryPair::new();
+    let inject = pair.server.clone();
+    let client = SerialHandler::open_memory(pair.client);
+    let read_end = pair.server.clone();
+    let write_end = pair.server;
+    let handler = ServerHandler::builder(
+        move || read_end.read_byte(),
+        move |bytes: &[u8]| write_end.write_all(bytes),
+        [0u8; 128],
+    )
+    .build();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_t = std::sync::Arc::clone(&stop);
+    let join = thread::spawn(move || {
+        let mut handler = handler;
+        handler.start();
+        while !stop_t.load(std::sync::atomic::Ordering::Acquire) {
+            if !handler.pump() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+    thread::sleep(Duration::from_millis(20));
+    let _ = inject.write_all(b"OK finish\0\n");
+    thread::sleep(Duration::from_millis(20));
+    let ok = client
+        .request::<TestError>(&Command::GetFinish)
+        .expect("get finish ok with trailing NUL");
+    assert!(matches!(ok, OkReply::Finish));
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    client.shutdown();
+    let _ = join.join();
+}
+
+#[test]
 fn unregistered_is_unsupported() {
     with_session(
         |b| b.build(),
