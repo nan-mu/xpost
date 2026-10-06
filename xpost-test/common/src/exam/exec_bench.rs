@@ -1,38 +1,49 @@
-//! Function-call compute via `exec` ingress (Wi-Fi-free; default cagt).
-//!
-//! Host speaks only the agent map protocol (`update map` / `get map` hex blobs).
-//! Workload semantics live in firmware (XDP map or HAL heapless twin), not here.
+//! 测量 DUT 上 **无 Wi-Fi 的 `exec` 入口** 执行函数计算的耗时（相对 HAL 对照）。
 //!
 //! ```text
-//! exec_bench (ebpf):
-//!   agent flash fw exec-bench-ebpf
-//!   for workload in {incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort}:
-//!     agent clear xdp *
-//!     agent flash xdp workload
-//!     agent clear perf
-//!     agent update map workload
-//!     agent enable exec
-//!     agent get finish
-//!     agent disable exec
-//!     agent get perf
-//!     agent get map
-//!     upload to db
-//!
-//! exec_bench (hal):
-//!   agent flash fw exec-bench-hal
-//!   for workload in {…}:
-//!     agent clear perf
-//!     agent update map workload
-//!     agent enable exec
-//!     agent get finish
-//!     agent disable exec
-//!     agent get perf
-//!     agent get map
-//!     upload to db
+//! exec_bench:
+//!   for fw in {ebpf, hal}:
+//!     agent flash fw
+//!     for workload in {incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort}:
+//!       if ebpf:
+//!         agent clear xdp *
+//!         agent flash xdp workload
+//!       agent clear perf
+//!       agent update map(workload) key 0
+//!       agent enable exec
+//!       agent get finish
+//!       agent disable exec
+//!       agent get map(workload)
+//!       agent get perf
+//!       upload to db
 //! ```
 //!
-//! Cold `clear` before each `flash xdp` keeps the new container at offset 0
-//! (append after a different name is not flash-sector aligned).
+//! 主机只走 agent map 协议（`update map` / `get map` 的 32 字节 hex），不解释
+//! opcode。语义在 XDP 镜像或 HAL heapless 孪生里。固件约定值布局为 `[0..4]` LE
+//! opcode、`[4..8]` LE param、`[8..]` payload。eBPF 臂把 map[0] 拷进 `exec`
+//! invoke，再把结果写回 map[1]；镜像用 `bpf_printk` 打出 `OK finish`。HAL 臂对
+//! 同一 32 字节做 `run_hal`，再在 UART 上打出同样的 `OK finish`。本模块用固定
+//! hex fixture 比对 map[1]。eBPF 每个 workload 先 `clear xdp *` 再 `flash xdp`，
+//! 使新容器落在 offset 0（换名追加不对齐 flash sector）。
+//!
+//! **数据处理**
+//!
+//! 每格写入 `exec_bench_config` + `exec_bench_data`（DDL：`sql/exec_bench.sql`）。
+//! Perf（`agent get perf`）另落共享 / HAL CAG 表，不在此列。
+//! 格失败则 `bail`，该格不入库。
+//!
+//! `exec_bench_config`：
+//! - `exam_id` — 本轮 `exam` 行
+//! - `firmware` — 当前臂（`ebpf` / `hal`）
+//! - `workload` — Compact ELF / opcode 名（`incr` … `bsort`）
+//! - `input` — 写入 map[0] 的 32 字节
+//! - `started_at` / `stopped_at` — 该格 `enable exec` 到 `disable exec` 的墙钟
+//!
+//! `exec_bench_data`（每格一行，`rep` 当前恒为 1）：
+//! - `config_id` — 所属 `exec_bench_config`
+//! - `rep` — 重复序号
+//! - `ok` — `enable`/`finish` 成功且 map[1] 与期望 32 字节一致
+//! - `output` — `agent get map(workload)` 读到的 map[1] 32 字节
 
 use std::time::{Duration, Instant, SystemTime};
 
