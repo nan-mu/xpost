@@ -92,6 +92,9 @@ HAL profiles have an empty or omitted `xdp` list and skip this step.
 Network XDP profiles build through `pixi run build --firmware ... -c <name>` in `../libbpf-mcu`.
 The exec XDP profiles use the same command with firmware `examples/exec_bench/.../exec_bench`.
 Each exec name is its own `libbpf-mcu/tests/xdp/<name>.c` (incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort).
+Check `libbpf-mcu/make/ninja/{bpf,esp32c3}.ninja` before describing the compiler pipeline.
+Current rules compile BPF and RV32IMC separately from C. The installed image comes from the RV32IMC build.
+Do not describe this build as translating eBPF bytecode into RV32IMC.
 
 Each listed network firmware project reads `WIFI_SSID` and `WIFI_PASS` from its own `.env` file:
 
@@ -246,6 +249,9 @@ The host accepts `xdp` as an alias for the `ebpf` arm.
 The eight workloads and their 32-byte input/output fixtures reside in `xpost-test/common/src/exam/exec_bench.rs`.
 The configuration does not select workloads or repetition counts.
 Each arm runs each workload once. The collector stores `rep = 1`.
+The task selection follows the eight benchmarks in the HAVM paper (CAV 2024, Section 7, Table 1).
+Group them as arithmetic/logic (`incr`, `square`, `bitswap`, `fib`), memory access (`buf`, `memcpy`), and data processing (`fletcher32`, `bsort`).
+State the local input sizes and platform. Shared task names do not establish an identical reproduction of HAVM's experiment.
 
 The host performs these steps for each workload:
 
@@ -272,10 +278,18 @@ HAL `enable exec` records the same counter names plus `execution` ticks through 
 It also pushes Trace `xdp_begin`, printk helper enter/leave (id 6), and `xdp_end`.
 The exam writes eBPF Trace into `trace_event` (`firmware` tag `xdp_t`).
 It writes HAL CAGT into `exec_bench_hal_*` plus `trace_event`.
-It aborts a cell if Trace lacks `xdp_begin`, `xdp_end`, or the printk helper pair.
+It aborts collection if Trace lacks `xdp_begin`, `xdp_end`, or the printk helper pair.
+This check occurs after the condition and result rows enter the database.
 `OK finish` is the host wait only.
-Workload time is `(xdp_end − xdp_begin) − (helper_leave − helper_enter)` for helper id 6.
+The report's `runtime_us` is the invocation interval minus its nested printk intervals (helper id 6).
+This value includes work outside the algorithm itself.
+HAL Trace includes result-map insertion. XDP Trace excludes the carrier's result-map insertion.
+The HAL `execution` aggregate measures `run_hal` only. The XDP aggregate includes invocation and printk work.
+Do not treat these aggregate timers as equivalent.
+Check Trace pairs, event order, nesting, and successful return before subtracting printk time.
+Keep the full invocation and printk durations beside the derived value.
 Do not report helper time or the host command interval as computation latency.
+Do not report algorithm speedup ratios from these differently scoped intervals.
 
 ### HAL smoke test
 
@@ -367,7 +381,8 @@ Trace provides the only timeline.
 Each event has a timestamp.
 Nested intervals use paired `Begin` and `End` events on the same ring.
 The application-category ring slots remain reserved and empty.
-Current HAL firmware reports CAG only.
+Current HAL firmware encodes CAGT. The exec HAL firmware writes events to the radio-category ring.
+The pinned network batches predate HAL Trace collection and contain no HAL timeline.
 Formal runs at high packet rates use Counter, Aggregate, and Gauge data instead of continuous Trace collection.
 
 The `xpost-type` crate defines the shared traits for xpost and esp-radio: `EspRadioTrace: XdpProg`.
@@ -398,6 +413,8 @@ TX reports reply throughput, end-to-end loss, and RTT.
 HASH distinguishes intended policy drops from missing legal tokens.
 Its legal-flow delivery ratio uses token-set matching through `firewall_result`, without ACKs.
 EXEC reports output checks and available timing samples. Missing execution samples do not mean zero execution time.
+`[exec_bench].require_trace = true` in `benchmark/report.toml` requires complete Trace timing for all sixteen EXEC conditions.
+Older snapshots can omit this setting and retain missing timing values.
 `benchmark/analysis/exec_bench.py` checks the EXEC conditions independently from the network rate grids.
 The export preserves its 32-byte inputs and outputs as hex strings.
 Older snapshots without EXEC remain valid for the three network experiments.
