@@ -1,7 +1,6 @@
-# Compact ELF metadata for firewall.elf (HASH blacklist).
-# AOT image: firewall.bin (RISC-V, linked map_vma = 0x40380278).
+# Map metadata for the cold firewall image (HASH blacklist).
+# The installed XDP ELF is ../build/firewall/firewall.elf from libbpf-mcu.
 
-source = "examples/firewall/firewall.c"
 size = 9264
 
 [xdp]
