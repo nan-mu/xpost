@@ -764,6 +764,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-println"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42dee1e9ac7c3539bf6464db1707b0edd7557168f98278cf3c84fe70e63c6ce6"
+dependencies = [
+ "document-features",
+ "esp-metadata-generated 0.4.0",
+ "esp-sync",
+ "log",
+]
+
+[[package]]
 name = "esp-radio"
 version = "0.18.0"
 dependencies = [
@@ -1996,6 +2008,7 @@ dependencies = [
  "embassy-time",
  "embedded-storage",
  "esp-hal",
+ "esp-println",
  "esp-radio",
  "esp-storage",
  "hashbrown",
