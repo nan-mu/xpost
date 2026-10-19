@@ -14,9 +14,8 @@ version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
 # HAL smoke: `dev`. Formal: just_tx / just_drop / firewall / exec_bench. Wipe: formal-clear.
-# This binary reruns the conditions the 2026-10-19 batch cannot plot.
-# just_drop f8f46f17 and exec_bench 16b7c489 stay in the database.
-run = ["just_tx", "firewall", "lookup"]
+# Firewall and the helper side run. just_tx exam 5052f5b7 is already stored.
+run = ["firewall", "lookup"]
 
 [postgres]
 host = "192.168.110.96"

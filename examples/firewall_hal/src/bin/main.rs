@@ -9,6 +9,7 @@
 
 use core::cell::RefCell;
 use core::convert::Infallible;
+use core::ptr::{addr_of, addr_of_mut};
 
 use alloc::string::ToString;
 use portable_atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -24,7 +25,7 @@ use firewall_hal::map_crud::{
     self, MapCrudAck, STATUS_BAD, STATUS_CONFLICT, STATUS_NOT_FOUND, STATUS_OK,
 };
 use firewall_hal::wire;
-use heapless::{FnvIndexMap, Vec as HVec};
+use heapless::FnvIndexMap;
 use log::error;
 use static_cell::StaticCell;
 use xpost_serial::reply::{MapError, OkReply};
@@ -60,12 +61,10 @@ type BlacklistMap = FnvIndexMap<u32, u32, MAX_BLACKLIST>;
 static BLACKLIST: critical_section::Mutex<RefCell<BlacklistMap>> =
     critical_section::Mutex::new(RefCell::new(FnvIndexMap::new()));
 
-type LegalVec = HVec<u16, LEGAL_CAP>;
-static LEGAL_TOKENS: critical_section::Mutex<RefCell<LegalVec>> =
-    critical_section::Mutex::new(RefCell::new(HVec::new()));
-static LEGAL_SNAP: critical_section::Mutex<RefCell<[u16; LEGAL_CAP]>> =
-    critical_section::Mutex::new(RefCell::new([0u16; LEGAL_CAP]));
+static LEGAL_LEN: AtomicUsize = AtomicUsize::new(0);
 static LEGAL_DROPPED: AtomicUsize = AtomicUsize::new(0);
+#[unsafe(link_section = ".bss")]
+static mut LEGAL_TOKENS: [u16; LEGAL_CAP] = [0; LEGAL_CAP];
 
 static NET_RESOURCES: StaticCell<StackResources<5>> = StaticCell::new();
 static UDP_RX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
@@ -243,16 +242,21 @@ async fn udp_task(
 }
 
 fn note_legal(token: u16) {
-    let overflow = critical_section::with(|cs| {
-        LEGAL_TOKENS.borrow(cs).borrow_mut().push(token).is_err()
+    critical_section::with(|_| {
+        let len = LEGAL_LEN.load(Ordering::Relaxed);
+        if len >= LEGAL_CAP {
+            LEGAL_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        unsafe {
+            (*addr_of_mut!(LEGAL_TOKENS))[len] = token;
+        }
+        LEGAL_LEN.store(len + 1, Ordering::Relaxed);
     });
-    if overflow {
-        LEGAL_DROPPED.fetch_add(1, Ordering::Relaxed);
-    }
 }
 
 fn clear_legal_tokens() {
-    critical_section::with(|cs| LEGAL_TOKENS.borrow(cs).borrow_mut().clear());
+    LEGAL_LEN.store(0, Ordering::Relaxed);
     LEGAL_DROPPED.store(0, Ordering::Relaxed);
 }
 
@@ -266,22 +270,16 @@ fn reply_dropped(reply: ReplyWriter<'_>) {
     });
 }
 
+fn legal_token(i: u32) -> u64 {
+    u64::from(unsafe { (*addr_of!(LEGAL_TOKENS))[i as usize] })
+}
+
 fn reply_legal_tokens(reply: ReplyWriter<'_>) {
-    let n = critical_section::with(|cs| {
-        let tokens = LEGAL_TOKENS.borrow(cs).borrow();
-        let n = tokens.len();
-        LEGAL_SNAP.borrow(cs).borrow_mut()[..n].copy_from_slice(tokens.as_slice());
-        n
-    });
-    let size = n as u32;
-    let len = critical_section::with(|cs| {
-        let snap = LEGAL_SNAP.borrow(cs).borrow();
-        wire::array_blob_len(size, |i| u64::from(snap[i as usize]))
-    });
-    reply.get_map(len, |write| {
-        critical_section::with(|cs| {
-            let snap = LEGAL_SNAP.borrow(cs).borrow();
-            wire::write_array_blob(size, |i| u64::from(snap[i as usize]), &mut |chunk| {
+    critical_section::with(|_| {
+        let size = LEGAL_LEN.load(Ordering::Relaxed) as u32;
+        let len = wire::array_blob_len(size, legal_token);
+        reply.get_map(len, |write| {
+            wire::write_array_blob(size, legal_token, &mut |chunk| {
                 let _ = write(chunk);
             });
         });

@@ -340,14 +340,15 @@ impl AggregateSet {
     }
 }
 
-/// Low 32 bits of the cycle counter. A short interval uses `wrapping_sub`.
+/// Low 32 bits of the machine cycle counter. A short interval uses `wrapping_sub`.
+/// The user `rdcycle` alias traps on ESP32-C3.
 #[cfg(feature = "perf-lookup")]
 #[inline]
 pub(crate) fn lookup_cycles() -> u32 {
     let mut cycles: u32;
     unsafe {
         core::arch::asm!(
-            "rdcycle {cycles}",
+            "csrr {cycles}, mcycle",
             cycles = out(reg) cycles,
             options(nomem, nostack)
         );

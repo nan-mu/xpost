@@ -197,11 +197,13 @@ The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` setti
 
 - Only `just_tx`: `run = ["just_tx"]`.
 - Only `firewall`: `run = ["firewall"]`.
+- Current selection: `run = ["firewall", "lookup"]`.
+- All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
+- All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
+
 `lookup` runs the helper side experiment.
 It compares `just-tx-cag` and `just-tx-cag-lookup` at 1400 pps, five rounds, XPOST only.
 It then runs `just_drop` and `firewall` at 400, 1400, and 4000 pps with `perf-lookup` on, XPOST only.
-- All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
-- All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
 
 The experiment files contain `formal` and `arms` settings.
 The three network experiment files use `formal = true` and `arms = ["hal", "xdp"]`.
