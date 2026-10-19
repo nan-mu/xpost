@@ -197,14 +197,21 @@ The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` setti
 
 - Only `just_tx`: `run = ["just_tx"]`.
 - Only `firewall`: `run = ["firewall"]`.
-- Current selection: `run = ["exec_bench"]`.
+- Current selection: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
 - All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
 - All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
 
 The experiment files contain `formal` and `arms` settings.
 The three network experiment files use `formal = true` and `arms = ["hal", "xdp"]`.
 These network settings apply to the CAG and Trace stages below.
-The CAG stage runs each grid point for 30 seconds per arm, in the configured arm order.
+The collector repeats the CAG grid five times.
+Each repeat stores `round`, `plan_seed`, and `hal_first`.
+Odd rounds boot HAL first.
+Even rounds boot the XDP arm first.
+Both arms in one round share one rate order.
+The collector reflashes an arm before that arm's rates.
+Trace stays one packet after the five rounds.
+The unused `rounds` field in `just_drop.toml` does not set this count.
 With the current configuration, each experiment then runs an `xdp_t` stage with one packet.
 `just_tx` skips this Trace stage for HAL-only arms.
 `just_drop` and `firewall` always append it.
@@ -247,8 +254,11 @@ The `exec-bench-hal` profile omits `xdp`, which defaults to an empty list.
 `exec_bench.toml` uses `formal = true` and `arms = ["ebpf", "hal"]`.
 The host accepts `xdp` as an alias for the `ebpf` arm.
 The eight workloads and their 32-byte input/output fixtures reside in `xpost-test/common/src/exam/exec_bench.rs`.
-The configuration does not select workloads or repetition counts.
-Each arm runs each workload once. The collector stores `rep = 1`.
+The configuration does not select workloads.
+Each arm installs a workload once.
+That install runs five times.
+The collector stores `rep` as 1 through 5.
+Each repetition has its own config row.
 The task selection follows the eight benchmarks in the HAVM paper (CAV 2024, Section 7, Table 1).
 Group them as arithmetic/logic (`incr`, `square`, `bitswap`, `fib`), memory access (`buf`, `memcpy`), and data processing (`fletcher32`, `bsort`).
 State the local input sizes and platform. Shared task names do not establish an identical reproduction of HAVM's experiment.
@@ -257,14 +267,15 @@ The host performs these steps for each workload:
 
 1. For the eBPF arm, clear the cold table with `clear xdp *`.
 2. For that arm, install the workload XDP ELF and wait for `OK init`.
-3. Clear the performance report.
-4. Write the input to key `0` in map `workload`.
-5. Send `enable exec`.
-6. Wait for `OK finish`.
-7. Attempt `disable exec`.
-8. Read key `1` from map `workload`.
-9. Compare all 32 output bytes with the expected fixture.
-10. Store the successful condition and its performance report.
+3. Do steps 4 through 11 five times.
+4. Clear the performance report.
+5. Write the input to key `0` in map `workload`.
+6. Send `enable exec`.
+7. Wait for `OK finish`.
+8. Attempt `disable exec`.
+9. Read key `1` from map `workload`.
+10. Compare all 32 output bytes with the expected fixture.
+11. Store the successful condition and its performance report.
 
 Clearing the cold table before each exec image places the image at offset zero for flash-sector alignment.
 The host aborts on enable, finish, or output-check failure before inserting that condition.
@@ -373,10 +384,11 @@ The `EspRadioTrace` integration resides in `ext/perf/trace/`, beside the ring st
 
 - `esp-radio`: `xpost::esp_radio::new` calls `wifi::new(device, config, &ingress::XDP_PROG)`.
 - `perf-counter`: Counter storage and `EspRadioTrace` hooks on the mounted program.
-- `perf-aggregate`: One stretch histogram per pipeline span and per dispatched helper.
-  XDP records helper time in those per-helper histograms.
+- `perf-aggregate`: Stretch histograms for pipeline spans. Lookup timing is a separate feature.
+  `perf-lookup` records only `map_lookup_elem`, in `rdcycle` counts, into fixed edges.
+  A zero return is `lookup_null`. It is not a proven map miss.
+  Main network builds leave `perf-lookup` off.
   HAL `map_operation` remains its own aggregate.
-  The helper dispatcher does not fill `map_operation`.
 - `perf-gauge`: Current and peak values.
 - `perf-trace`: Event rings grouped by category.
 
