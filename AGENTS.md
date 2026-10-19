@@ -417,23 +417,21 @@ Enabling the Cargo feature `ringbuf` triggers `compile_error!`.
 ## Benchmark analysis
 
 Read `benchmark/README.md` before analysis work.
-`benchmark/report.md` presents ARRAY, HASH, TX, then EXEC.
+`benchmark/report.md` locks the 2026-10-19 exams and explains source-address counting.
+It refuses firewall, reply, deployment, verification, resource, and lookup-helper figures when the locked rows do not support the design.
 Read `xpost-test/common/src/exam/{just_drop,firewall,just_tx,exec_bench}.rs` before interpreting results.
 Check the current firmware and build scripts too. Comments and older design drafts can describe unimplemented behavior.
 `benchmark/analysis/` generates figures and evidence tables from a fixed database snapshot. It does not rewrite the report prose or generate notebooks.
-`benchmark/report.toml` pins one completed exam per feature and the expected experiment grid.
+`benchmark/report.toml` pins one completed exam per task, the 13-rate grid, and five rounds.
 From `benchmark/`, run `pixi run figures` for a read-only database export and figure build, or `pixi run replay --snapshot outputs/snapshots/<id>` to rebuild offline.
 Figures, CSV tables, and provenance go under `benchmark/outputs/report/`. Review the Markdown narrative when changing batches.
-TX reports reply throughput, end-to-end loss, and RTT.
-HASH distinguishes intended policy drops from missing legal tokens.
-Its legal-flow delivery ratio uses token-set matching through `firewall_result`, without ACKs.
-EXEC reports output checks and available timing samples. Missing execution samples do not mean zero execution time.
-`[exec_bench].require_trace = true` in `benchmark/report.toml` requires complete Trace timing for all sixteen EXEC conditions.
-Older snapshots can omit this setting and retain missing timing values.
-`benchmark/analysis/exec_bench.py` checks the EXEC conditions independently from the network rate grids.
-The export preserves its 32-byte inputs and outputs as hex strings.
-Older snapshots without EXEC remain valid for the three network experiments.
-Timed-region duration is not whole-device CPU utilization. Older snapshots may lack HAL Trace.
+The count figure uses map increments over actual sends, and event rate over 30 seconds.
+The x-axis is sends divided by the recorded start-stop interval, which includes the 200 ms drain.
+Ratios above 1 stay unchanged. They are not unique-packet coverage.
+Firewall figures require a legal share near 10% of actual sends. The locked batch fixes 1024 legal packets, so it is not plotted.
+Reply figures require separate matched replies and valid RTT rows. Timestamp-only `ok` rows are not `G(t)`.
+EXEC exports the collector's 32-byte output check for five repetitions. It does not export invocation timing or a speedup.
+A lookup sample count of 0 is missing instrumentation, not zero helper cost.
 Keep zero-sample means missing, distinguish target from actual send rate, and do not compare differently scoped HAL/XDP timers as speedup ratios.
 Run `pixi run check` for analysis checks.
 Regenerating the report requires no device operation.
