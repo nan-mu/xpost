@@ -78,9 +78,11 @@ const SWEEP_PPS: &[f64] = &[
 
 #[derive(Clone, Debug)]
 struct ProbeSample {
+    seq: i64,
     t_tx: SystemTime,
     t_rx: Option<SystemTime>,
-    got_rx: bool,
+    saw_tx: bool,
+    saw_rx: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +124,10 @@ pub struct JustTxOpts {
     /// Legacy flag; formal just_tx ignores this (`dev` is handled in `exam::dev`).
     pub is_dev: bool,
     pub formal: bool,
+    pub rates: Option<&'static [f64]>,
+    /// Two XPOST passes per round at the given rates. Pass 0 is `perf-cag`. Pass 1 adds `perf-lookup`.
+    pub lookup_pair: bool,
+    pub skip_trace: bool,
 }
 
 fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
@@ -151,10 +157,15 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     let esp_s = cfg.target.esp_ip.to_string();
 
     let window = WINDOW_S;
-    let grid: &[f64] = SWEEP_PPS;
+    let grid: &[f64] = opts.rates.unwrap_or(SWEEP_PPS);
 
     // Arms from just_tx.toml; xdp_t always last.
-    let arms = arms_from_cfg(&cfg.just_tx.arms)?;
+    let arms = if opts.lookup_pair {
+        vec![Firmware::XdpCag]
+    } else {
+        arms_from_cfg(&cfg.just_tx.arms)?
+    };
+    let passes = if opts.lookup_pair { 2 } else { 1 };
 
     RoundUi::banner(&format!(
         "{name} arms={:?} +xdp_t grid={:?} window={}s formal={formal} agent={endpoint} esp={esp_s} pg=true",
@@ -174,17 +185,22 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     ));
 
     let plans = super::repeat::plans(grid);
-    let n_flashes = arms.len() * plans.len() + 1; // + xdp_t
+    let n_flashes = arms.len() * plans.len() * passes + usize::from(!opts.skip_trace);
     let mut eta = BudgetEta::new();
     eta.add_flashes(n_flashes);
     let per_arm = READY_BUDGET + (WARMUP + window + DRAIN).saturating_mul(grid.len() as u32);
-    eta.add_fixed(per_arm.saturating_mul((arms.len() * plans.len()) as u32));
+    eta.add_fixed(per_arm.saturating_mul((arms.len() * plans.len() * passes) as u32));
     eta.add_fixed(READY_BUDGET + Duration::from_secs(5)); // trace one-shot
 
     let ui = RoundUi::new();
     let exam_id = if let Some(client) = pg.as_mut() {
         ui.check_start("INSERT exam");
-        let id = db::insert_exam(client, Some("just_tx")).await?;
+        let note = if opts.lookup_pair {
+            "lookup-tx-1400"
+        } else {
+            "just_tx"
+        };
+        let id = db::insert_exam(client, Some(note)).await?;
         ui.check_ok(&format!("exam={id}"));
         Some(id)
     } else {
@@ -199,11 +215,20 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
             plan.hal_first,
             plan.seed
         ));
-        let ordered = plan.order_firmware(&arms);
-        for fw in &ordered {
+        let ordered = if opts.lookup_pair {
+            vec![Firmware::XdpCag, Firmware::XdpCag]
+        } else {
+            plan.order_firmware(&arms)
+        };
+        for (pass, fw) in ordered.iter().enumerate() {
         ui.begin_round();
         ui.set_eta(&eta.fmt());
-        let profile = profile_for(*fw);
+        let lookup = opts.lookup_pair && pass == 1;
+        let profile = if lookup {
+            "just-tx-cag-lookup"
+        } else {
+            profile_for(*fw)
+        };
         let path = path_for(*fw);
         ui.check_pending(&format!("烧录 `{profile}`"));
         ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
@@ -219,15 +244,16 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                 let samples: Vec<TxSample> = stats
                     .samples
                     .iter()
-                    .filter(|s| s.got_rx)
-                    .filter_map(|s| {
-                        s.t_rx.map(|t_rx| TxSample {
-                            t_tx: s.t_tx,
-                            t_rx,
-                        })
+                    .map(|s| TxSample {
+                        seq: s.seq,
+                        t_tx: s.t_tx,
+                        t_rx: s.t_rx,
+                        saw_tx: s.saw_tx,
+                        saw_rx: s.saw_rx,
                     })
                     .collect();
-                let ok = samples.len() as i64;
+                let ok = stats.ok as i64;
+                let matched = samples.iter().filter(|s| s.saw_rx).count() as i64;
                 let cfg_id = db::insert_just_tx_config(
                     client,
                     exam_id,
@@ -238,6 +264,8 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                     stats.stopped_at,
                     stats.sent as i64,
                     ok,
+                    matched,
+                    lookup,
                     Some(db::CellRepeat {
                         round: plan.round,
                         plan_seed: plan.seed,
@@ -274,7 +302,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
 
     // Trace arm (XDP): skip when `arms` is HAL-only.
     let want_xdp_t = arms.iter().any(|a| matches!(a, Firmware::XdpCag));
-    if want_xdp_t {
+    if want_xdp_t && !opts.skip_trace {
         ui.begin_round();
         ui.set_eta(&eta.fmt());
         let fw = Firmware::XdpT;
@@ -305,6 +333,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
             ui.check_start("写入 trace");
             let ok = i64::from(got_rx);
+            let matched = i64::from(t1.is_some());
             let cfg_id = db::insert_just_tx_config(
                 client,
                 exam_id,
@@ -315,13 +344,23 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                 stopped_at,
                 1,
                 ok,
+                matched,
+                false,
                 None,
             )
             .await?;
-            if let (true, Some(t_rx)) = (got_rx, t_rx) {
-                db::insert_just_tx_data(client, cfg_id, &[TxSample { t_tx, t_rx }])
-                    .await?;
-            }
+            db::insert_just_tx_data(
+                client,
+                cfg_id,
+                &[TxSample {
+                    seq: seq as i64,
+                    t_tx,
+                    t_rx,
+                    saw_tx: t0.is_some(),
+                    saw_rx: t1.is_some(),
+                }],
+            )
+            .await?;
             let msg = agent.get_perf().await.context("get/perf")?;
             let decoded = db::decode_report_msg(&msg)?;
             db::write_perf(
@@ -526,9 +565,11 @@ async fn probe_window(
             ok_n += 1;
         }
         samples.push(ProbeSample {
+            seq: i64::try_from(*seq).unwrap_or(i64::MAX),
             t_tx: *t_tx,
             t_rx,
-            got_rx,
+            saw_tx: t0.is_some(),
+            saw_rx: t1.is_some(),
         });
         if i % 32 == 0 || i + 1 == seqs.len() {
             ui.check_note(&format!("{ok_n}/{sent_n} ok"));

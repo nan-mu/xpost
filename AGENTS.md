@@ -192,12 +192,14 @@ Continue to read its terminal output.
 ### Experiment settings
 
 The `run` list in `config/default.toml` selects the experiments and their order.
-The supported entries are `just_tx`, `just_drop`, `firewall`, `exec_bench`, `dev`, and `formal-clear`.
+The supported entries are `just_tx`, `just_drop`, `firewall`, `exec_bench`, `lookup`, `dev`, and `formal-clear`.
 The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` settings.
 
 - Only `just_tx`: `run = ["just_tx"]`.
 - Only `firewall`: `run = ["firewall"]`.
-- Current selection: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
+`lookup` runs the helper side experiment.
+It compares `just-tx-cag` and `just-tx-cag-lookup` at 1400 pps, five rounds, XPOST only.
+It then runs `just_drop` and `firewall` at 400, 1400, and 4000 pps with `perf-lookup` on, XPOST only.
 - All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
 - All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
 
@@ -223,24 +225,36 @@ Legacy fields in `just_drop.toml`, including `fixed_pps`, `trace_pps`, `rounds`,
 The `just_drop` experiment reads `get map counter` into `just_drop_data`.
 The counter uses the last byte of the IPv4 source address as its bucket index.
 
-The `firewall.toml` file sets `blacklist_size = 200` and `legal_packets = 1024`.
-Each firewall CAG cell sends illegal traffic from blacklist source IPs at the selected rate for 30 seconds.
-The same window includes exactly `legal_packets` unique little-endian `u16` tokens from a source IP outside the blacklist.
-The DUT stores legal tokens in the virtual map `firewall_result` (`get map` / `clear map`).
+The `firewall.toml` file sets `blacklist_size = 200`.
+Each firewall CAG cell paces one stream at the target rate for 30 seconds.
+Every 10th packet is a unique little-endian `u16` from a source IP outside the blacklist.
+The other packets rotate across the blacklist.
+The DUT stores legal tokens in the virtual map `firewall_result`, up to 16384 entries.
+`firewall_dropped` counts tokens the buffer refused.
+`drop_sample` stores that count.
 Legal flows do not ACK.
 `firewall_config.sent` stores the illegal send count.
 `legal_sent` stores the legal send count. `matched` stores the matched token count.
 Despite its name, `loss` stores the delivery ratio `matched / legal_sent`.
 The firewall Trace stage uses eight blacklist entries and sends one matching packet.
 
+`just_tx_data` stores one row per send.
+`seq` is the probe id.
+`t_rx` is null when the two kernel stamps do not form an RTT.
+`saw_tx` and `saw_rx` record each stamp.
+`just_tx_config.ok` counts complete RTT rows.
+`matched` counts rows with `saw_rx`.
+`lookup` marks the helper-timing firmware pass.
+
 The network XDP firmware projects are `examples/just_xdp` and `examples/firewall`.
 Their board features are `perf-cag` and `perf-t`, with no default feature.
 HAL firmware uses `examples/just_tx_hal`, `examples/just_drop_hal`, `examples/firewall_hal`, and `examples/exec_bench_hal`.
 Those crates have no Cargo perf feature.
 `hal_perf` always encodes Counter, Aggregate, Gauge, and Trace.
-The `profiles.toml` registry contains eleven `[[fw]]` names:
+The `profiles.toml` registry contains fourteen `[[fw]]` names:
 
 - XDP: `just-tx-cag`, `just-tx-t`, `just-drop-cag`, `just-drop-t`, `firewall-cag`, and `firewall-t`.
+- Lookup side runs: `just-tx-cag-lookup`, `just-drop-cag-lookup`, and `firewall-cag-lookup`.
 - HAL: `just-tx-hal`, `just-drop-hal`, and `firewall-hal`.
 - Exec: `exec-bench-ebpf` and `exec-bench-hal`.
 

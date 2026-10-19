@@ -51,6 +51,9 @@ async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
                 cfg,
                 exam::JustDropPpsOpts {
                     formal: cfg.just_drop.formal,
+                    rates: None,
+                    lookup: false,
+                    skip_trace: false,
                 },
             )
             .await
@@ -60,6 +63,9 @@ async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
                 cfg,
                 exam::FirewallOpts {
                     formal: cfg.firewall.formal,
+                    rates: None,
+                    lookup: false,
+                    skip_trace: false,
                 },
             )
             .await
@@ -72,6 +78,44 @@ async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
                 exam::JustTxOpts {
                     is_dev: false,
                     formal: cfg.just_tx.formal,
+                    rates: None,
+                    lookup_pair: false,
+                    skip_trace: false,
+                },
+            )
+            .await
+        }
+        "lookup" => {
+            let mut harness = pipeline::open_harness(cfg).await?;
+            exam::run_just_tx(
+                cfg,
+                &mut harness,
+                exam::JustTxOpts {
+                    is_dev: false,
+                    formal: true,
+                    rates: Some(&[1400.0]),
+                    lookup_pair: true,
+                    skip_trace: true,
+                },
+            )
+            .await?;
+            exam::run_just_drop_pps(
+                cfg,
+                exam::JustDropPpsOpts {
+                    formal: true,
+                    rates: Some(exam::LOOKUP_RATES),
+                    lookup: true,
+                    skip_trace: true,
+                },
+            )
+            .await?;
+            exam::run_firewall(
+                cfg,
+                exam::FirewallOpts {
+                    formal: true,
+                    rates: Some(exam::LOOKUP_RATES),
+                    lookup: true,
+                    skip_trace: true,
                 },
             )
             .await

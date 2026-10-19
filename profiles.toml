@@ -68,6 +68,30 @@ artifact = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewal
 build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-t"] }
 xdp = ["firewall"]
 
+[[fw]]
+name = "just-tx-cag-lookup"
+target = "esp32c3"
+partition_table = "examples/just_xdp/partitions.csv"
+artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-cag,perf-lookup"] }
+xdp = ["just_tx"]
+
+[[fw]]
+name = "just-drop-cag-lookup"
+target = "esp32c3"
+partition_table = "examples/just_xdp/partitions.csv"
+artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-cag,perf-lookup"] }
+xdp = ["just_drop"]
+
+[[fw]]
+name = "firewall-cag-lookup"
+target = "esp32c3"
+partition_table = "examples/firewall/partitions.csv"
+artifact = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
+build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-cag,perf-lookup"] }
+xdp = ["firewall"]
+
 # ---------------------------------------------------------------------------
 # HAL CAGT arms (no cold XDP; app-layer policy + local CAGT wire report)
 # ---------------------------------------------------------------------------

@@ -9,12 +9,13 @@
 //!       agent clear map(firewall_result)
 //!       agent clear perf
 //!       agent enable xdp
-//!       # 同一 30s 窗口混发：
-//!       #   非法：blacklist 源 IP，按 rate pacing
-//!       #   合法：miss 源 IP，唯一随机 u16，恰好 legal_packets（默认 1024）
+//!       # 同一 30s 窗口按目标速率发一串包。每 10 个里第 1 个是合法包。
+//!       #   非法：黑名单源 IP 轮换，载荷 D
+//!       #   合法：名单外源 IP，唯一递增 u16
 //!       agent disable xdp
 //!       agent get map(blacklist)
 //!       agent get map(firewall_result)
+//!       agent get map(firewall_dropped)
 //!       agent get perf
 //!       upload to db
 //!       agent clear map(blacklist)
@@ -29,7 +30,8 @@
 //!
 //! 非法流源 IP 在黑名单内：XDP/HAL 命中则 DROP 并给对应键加一。
 //! 合法流源 IP 不在黑名单：载荷为唯一 LE u16，DUT 写入虚拟 map `firewall_result`，不回 ACK。
-//! `loss = matched / legal_packets`（集合匹配交付比）。
+//! `loss = matched / legal_sent`（集合匹配交付比）。
+//! `drop_sample` 是设备缓冲拒绝的合法令牌数，不计入网络丢失。
 //!
 //! **数据处理**
 //!
@@ -39,7 +41,7 @@
 //! - `exam_id` / `firmware` / `blacklist_size` / `traffic`（混发为 `mixed`）
 //! - `target_pps` / `window_s` / `started_at` / `stopped_at`
 //! - `sent` — 非法流实际发送数
-//! - `legal_sent` / `matched` / `loss` — 合法流统计（Trace 臂为 NULL）
+//! - `legal_sent` / `matched` / `loss` / `drop_sample` — 合法流统计（Trace 臂为 NULL）
 //!
 //! `firewall_data`：blacklist 各键命中计数。
 
@@ -48,7 +50,6 @@ use std::net::Ipv4Addr;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
-use rand::RngExt;
 use crate::agent::AgentClient;
 use crate::db::{self, Firmware};
 use crate::exam::just_drop::PpsPath;
@@ -72,6 +73,9 @@ const SWEEP_PPS: &[f64] = &[
 
 pub struct FirewallOpts {
     pub formal: bool,
+    pub rates: Option<&'static [f64]>,
+    pub lookup: bool,
+    pub skip_trace: bool,
 }
 
 fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
@@ -89,11 +93,12 @@ fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
     Ok(out)
 }
 
-fn profile_for(fw: Firmware) -> &'static str {
-    match fw {
-        Firmware::XdpCag => "firewall-cag",
-        Firmware::XdpT => "firewall-t",
-        Firmware::Hal => "firewall-hal",
+fn profile_for(fw: Firmware, lookup: bool) -> &'static str {
+    match (fw, lookup) {
+        (Firmware::XdpCag, true) => "firewall-cag-lookup",
+        (Firmware::XdpCag, false) => "firewall-cag",
+        (Firmware::XdpT, _) => "firewall-t",
+        (Firmware::Hal, _) => "firewall-hal",
     }
 }
 
@@ -131,22 +136,6 @@ fn miss_ip(esp: Ipv4Addr, blacklist: &[Ipv4Addr], avoid: &[Ipv4Addr]) -> Ipv4Add
     Ipv4Addr::new(o[0], o[1], o[2], 254)
 }
 
-fn unique_legal_tokens(n: usize) -> Result<Vec<u16>> {
-    if n > usize::from(u16::MAX) + 1 {
-        bail!("legal_packets {n} exceeds u16 space");
-    }
-    let mut set = HashSet::with_capacity(n);
-    let mut out = Vec::with_capacity(n);
-    let mut rng = rand::rng();
-    while out.len() < n {
-        let v: u16 = rng.random();
-        if set.insert(v) {
-            out.push(v);
-        }
-    }
-    Ok(out)
-}
-
 pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
     let endpoint = cfg
         .agent
@@ -155,13 +144,16 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
     let agent = AgentClient::new(endpoint.clone());
     let formal = opts.formal || cfg.firewall.formal;
     let window = WINDOW_S;
-    let grid: &[f64] = SWEEP_PPS;
-    let arms = arms_from_cfg(&cfg.firewall.arms)?;
+    let grid: &[f64] = opts.rates.unwrap_or(SWEEP_PPS);
+    let arms = if opts.lookup {
+        vec![Firmware::XdpCag]
+    } else {
+        arms_from_cfg(&cfg.firewall.arms)?
+    };
     let size = cfg.firewall.blacklist_size;
-    let legal_n = cfg.firewall.legal_packets as usize;
 
     RoundUi::banner(&format!(
-        "firewall hash arms={:?} blacklist={size} legal={legal_n} mixed +xdp_t grid={:?} window={}s formal={formal} agent={endpoint} esp={}",
+        "firewall hash arms={:?} blacklist={size} legal=1/10 mixed +xdp_t grid={:?} window={}s formal={formal} agent={endpoint} esp={}",
         arms.iter().map(|a| a.as_db()).collect::<Vec<_>>(),
         grid.iter().map(|p| *p as u32).collect::<Vec<_>>(),
         window.as_secs(),
@@ -174,14 +166,19 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
     let plans = super::repeat::plans(grid);
     let cells = arms.len() * grid.len() * plans.len();
     let mut eta = BudgetEta::new();
-    eta.add_flashes(arms.len() * plans.len() + 1);
+    eta.add_flashes(arms.len() * plans.len() + usize::from(!opts.skip_trace));
     eta.add_fixed((READY_BUDGET + window).saturating_mul(cells as u32));
     eta.add_fixed(READY_BUDGET + Duration::from_secs(5));
 
     let ui = RoundUi::new();
     let exam_id = if let Some(client) = pg.as_mut() {
         ui.check_start("INSERT exam");
-        let id = db::insert_exam(client, Some("firewall")).await?;
+        let note = if opts.lookup {
+            "lookup-firewall"
+        } else {
+            "firewall"
+        };
+        let id = db::insert_exam(client, Some(note)).await?;
         ui.check_ok(&format!("exam={id}"));
         Some(id)
     } else {
@@ -200,7 +197,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
         ));
         let ordered = plan.order_firmware(&arms);
         for fw in &ordered {
-        let profile = profile_for(*fw);
+        let profile = profile_for(*fw, opts.lookup);
         let path = path_for(*fw);
         flash_ready(cfg, &agent, &ui, &mut eta, profile).await?;
 
@@ -210,7 +207,6 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
             bail!("could only allocate {} blacklist IPs (want {size})", rules.len());
         }
         let miss = miss_ip(esp, &rules, &avoid);
-        let illegal_src = rules[0];
 
         for &pps in &plan.rates {
             ui.check_start(&format!("insert blacklist n={size}"));
@@ -221,17 +217,15 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
             agent.clear_perf().await.context("clear/perf")?;
             agent.enable_xdp().await.context("enable/xdp")?;
             let started_at = SystemTime::now();
-            let tokens = unique_legal_tokens(legal_n)?;
-            let (illegal_sent, legal_sent) = paced_mixed(
+            let (illegal_sent, legal_sent, tokens) = paced_mixed(
                 cfg,
                 &ui,
                 &eta,
                 path,
                 window,
                 pps,
-                illegal_src,
+                &rules,
                 miss,
-                &tokens,
             )
             .await?;
             tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
@@ -239,6 +233,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
             agent.disable_xdp().await.context("disable/xdp")?;
             let map_rows = dump_blacklist(&agent).await.context("get/map blacklist")?;
             let returned = dump_legal_tokens(&agent).await.context("get/map firewall_result")?;
+            let dropped = dump_dropped(&agent).await.context("get/map firewall_dropped")?;
             let matched = match_tokens(&tokens, &returned);
             let loss = if legal_sent == 0 {
                 0.0
@@ -247,7 +242,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
             };
 
             ui.permanent(&format!(
-                "    {} mixed @{pps:.0}: illegal={illegal_sent} legal={legal_sent} matched={matched} loss={loss:.4} map={}",
+                "    {} mixed @{pps:.0}: illegal={illegal_sent} legal={legal_sent} matched={matched} dropped={dropped} loss={loss:.4} map={}",
                 fw.as_db(),
                 map_rows.len()
             ));
@@ -268,6 +263,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                     Some(legal_sent as i64),
                     Some(matched as i64),
                     Some(loss),
+                    Some(dropped as i64),
                     Some(db::CellRepeat {
                         round: plan.round,
                         plan_seed: plan.seed,
@@ -296,10 +292,9 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
         }
     }
 
-    // Trace one-shot (seed a tiny blacklist for a representative hit path).
-    {
+    if !opts.skip_trace {
         let fw = Firmware::XdpT;
-        let profile = profile_for(fw);
+        let profile = profile_for(fw, false);
         flash_ready(cfg, &agent, &ui, &mut eta, profile).await?;
         let rules = blacklist_ips(esp, 8, &[esp, host_ip]);
         seed_blacklist(&agent, &rules).await?;
@@ -327,6 +322,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 None,
                 None,
                 None,
+                None,
             )
             .await?;
             let msg = agent.get_perf().await.context("get/perf")?;
@@ -349,7 +345,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
         db::stop_exam(client, exam_id).await?;
     }
     RoundUi::banner(&format!(
-        "firewall done arms={} blacklist={size} legal={legal_n} grid={}",
+        "firewall done arms={} blacklist={size} legal=1/10 grid={}",
         arms.len(),
         grid.len()
     ));
@@ -431,6 +427,20 @@ async fn dump_legal_tokens(agent: &AgentClient) -> Result<Vec<u16>> {
     Ok(out)
 }
 
+async fn dump_dropped(agent: &AgentClient) -> Result<u64> {
+    let map = agent
+        .get_map("firewall_dropped")
+        .await
+        .context("get/map firewall_dropped")?;
+    let Some(entry) = map.entries.first() else {
+        return Ok(0);
+    };
+    entry
+        .value
+        .parse()
+        .with_context(|| format!("firewall_dropped value {:?}", entry.value))
+}
+
 fn match_tokens(sent: &[u16], returned: &[u16]) -> usize {
     let set: HashSet<u16> = sent.iter().copied().collect();
     let mut seen = HashSet::new();
@@ -442,7 +452,9 @@ fn match_tokens(sent: &[u16], returned: &[u16]) -> usize {
     seen.len()
 }
 
-/// Mix illegal @ `target_pps` for `window` with exactly `tokens.len()` legal packets.
+const LEGAL_EVERY: u64 = 10;
+
+/// One paced stream at `target_pps`. Every 10th packet is legal.
 async fn paced_mixed(
     cfg: &FileConfig,
     ui: &RoundUi,
@@ -450,10 +462,9 @@ async fn paced_mixed(
     path: PpsPath,
     window: Duration,
     target_pps: f64,
-    illegal_src: Ipv4Addr,
+    illegal_srcs: &[Ipv4Addr],
     legal_src: Ipv4Addr,
-    tokens: &[u16],
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, Vec<u16>)> {
     let esp = cfg.target.esp_ip;
     let esp_mac = cfg.esp_mac_bytes()?;
     let src_mac = match cfg.src_mac_override()? {
@@ -471,21 +482,17 @@ async fn paced_mixed(
     .context("RawTx::open")?;
 
     let pps = target_pps.max(1.0);
-    let illegal_iv = Duration::from_secs_f64(1.0 / pps);
-    let legal_n = tokens.len();
-    let legal_iv = if legal_n == 0 {
-        window
-    } else {
-        window / legal_n as u32
-    };
-    let expect_illegal = (pps * window.as_secs_f64()).max(1.0);
+    let iv = Duration::from_secs_f64(1.0 / pps);
+    let expect = (pps * window.as_secs_f64()).max(1.0);
     let start = Instant::now();
     let deadline = start + window;
     let mut illegal_sent = 0u64;
     let mut legal_sent = 0u64;
-    let mut legal_i = 0usize;
-    let mut next_illegal = start;
-    let mut next_legal = start;
+    let mut illegal_i = 0usize;
+    let mut next_token = 1u16;
+    let mut tokens = Vec::new();
+    let mut i = 0u64;
+    let mut next = start;
     let mut last_paint = Instant::now() - Duration::from_secs(1);
 
     ui.live_set(
@@ -496,68 +503,53 @@ async fn paced_mixed(
 
     loop {
         let now = Instant::now();
-        let past_window = now >= deadline;
-        if past_window && legal_i >= legal_n {
+        if now >= deadline {
             break;
         }
+        if now < next {
+            let sleep = next.saturating_duration_since(now);
+            if sleep.is_zero() {
+                tokio::task::yield_now().await;
+            } else {
+                tokio::time::sleep(sleep.min(Duration::from_millis(5))).await;
+            }
+            continue;
+        }
 
-        let legal_due = legal_i < legal_n && (now >= next_legal || past_window);
-        let illegal_due = !past_window && now >= next_illegal;
-
-        if legal_due && (!illegal_due || next_legal <= next_illegal) {
-            let payload = tokens[legal_i].to_le_bytes();
+        if i % LEGAL_EVERY == 0 {
+            let token = next_token;
+            next_token = next_token
+                .checked_add(1)
+                .context("legal u16 token space exhausted")?;
             if raw
-                .send_udp(legal_src, esp, STIM_PORT, &payload)
+                .send_udp(legal_src, esp, STIM_PORT, &token.to_le_bytes())
                 .is_ok()
             {
                 legal_sent += 1;
+                tokens.push(token);
             }
-            legal_i += 1;
-            next_legal = start + legal_iv.saturating_mul(legal_i as u32);
-            continue;
-        }
-
-        if illegal_due {
-            if raw
-                .send_udp(illegal_src, esp, STIM_PORT, b"D")
-                .is_ok()
-            {
+        } else {
+            let src = illegal_srcs[illegal_i % illegal_srcs.len()];
+            illegal_i += 1;
+            if raw.send_udp(src, esp, STIM_PORT, b"D").is_ok() {
                 illegal_sent += 1;
             }
-            next_illegal += illegal_iv;
-            if last_paint.elapsed() >= Duration::from_millis(100) {
-                let frac = (illegal_sent as f64 / expect_illegal).clamp(0.0, 1.0);
-                ui.live_set(
-                    &format!("{} mixed @{:.0}pps", path.as_str(), pps),
-                    &[(
-                        "tx",
-                        frac,
-                        &format!("{illegal_sent}/{expect_illegal:.0}+{legal_sent}/{legal_n}"),
-                    )],
-                );
-                ui.set_eta(&eta.fmt());
-                last_paint = Instant::now();
-            }
-            continue;
         }
-
-        let mut wake = deadline;
-        if !past_window && next_illegal < wake {
-            wake = next_illegal;
-        }
-        if legal_i < legal_n && next_legal < wake {
-            wake = next_legal;
-        }
-        let sleep = wake.saturating_duration_since(Instant::now());
-        if sleep.is_zero() {
-            tokio::task::yield_now().await;
-        } else {
-            tokio::time::sleep(sleep.min(Duration::from_millis(5))).await;
+        i += 1;
+        next += iv;
+        if last_paint.elapsed() >= Duration::from_millis(100) {
+            let frac = (i as f64 / expect).clamp(0.0, 1.0);
+            ui.live_set(
+                &format!("{} mixed @{:.0}pps", path.as_str(), pps),
+                &[("tx", frac, &format!("{illegal_sent}+{legal_sent}/{i}"))],
+            );
+            ui.set_eta(&eta.fmt());
+            last_paint = Instant::now();
         }
     }
 
     ui.live_clear();
-    Ok((illegal_sent, legal_sent))
+    Ok((illegal_sent, legal_sent, tokens))
 }
 
 /// Trace arm: one fixed-src UDP to DUT echo port (hit path).

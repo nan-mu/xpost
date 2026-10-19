@@ -1,8 +1,11 @@
 -- just_tx — TX bounce experiment (workload-specific).
 -- Loaded after formal.sql (needs exam + firmware).
 --
--- just_tx_data holds successful RTT samples only (got_rx=true).
--- Loss = just_tx_config.sent - just_tx_config.ok.
+-- just_tx_data holds one row per send.
+-- seq identifies the probe. t_rx is null when the RTT pair is incomplete.
+-- saw_tx / saw_rx record each kernel stamp independently of a valid RTT.
+-- ok counts rows with both stamps and t_rx >= t_tx.
+-- matched counts rows with saw_rx. Loss is not sent - ok.
 
 CREATE TABLE IF NOT EXISTS just_tx_config (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -14,6 +17,8 @@ CREATE TABLE IF NOT EXISTS just_tx_config (
     stopped_at TIMESTAMPTZ NOT NULL,
     sent BIGINT NOT NULL CHECK (sent >= 0),
     ok BIGINT NOT NULL CHECK (ok >= 0),
+    matched BIGINT,
+    lookup BOOLEAN NOT NULL DEFAULT false,
     round INT,
     plan_seed BIGINT,
     hal_first BOOLEAN
@@ -24,13 +29,23 @@ CREATE INDEX IF NOT EXISTS just_tx_config_exam ON just_tx_config (exam_id);
 ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS round INT;
 ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS plan_seed BIGINT;
 ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS hal_first BOOLEAN;
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS matched BIGINT;
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS lookup BOOLEAN NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS just_tx_data (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     config_id UUID NOT NULL REFERENCES just_tx_config (id) ON DELETE CASCADE,
+    seq BIGINT,
     t_tx TIMESTAMPTZ NOT NULL,
-    t_rx TIMESTAMPTZ NOT NULL
+    t_rx TIMESTAMPTZ,
+    saw_tx BOOLEAN,
+    saw_rx BOOLEAN
 );
+
+ALTER TABLE just_tx_data ADD COLUMN IF NOT EXISTS seq BIGINT;
+ALTER TABLE just_tx_data ADD COLUMN IF NOT EXISTS saw_tx BOOLEAN;
+ALTER TABLE just_tx_data ADD COLUMN IF NOT EXISTS saw_rx BOOLEAN;
+ALTER TABLE just_tx_data ALTER COLUMN t_rx DROP NOT NULL;
 
 CREATE INDEX IF NOT EXISTS just_tx_data_config ON just_tx_data (config_id);
 

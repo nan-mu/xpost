@@ -47,8 +47,9 @@ const CTRL_PORT: u16 = 8081;
 const REPLY_PORT: u16 = 18080;
 const MAP_BLACKLIST: &str = "blacklist";
 const MAP_FIREWALL_RESULT: &str = "firewall_result";
+const MAP_DROPPED: &str = "firewall_dropped";
 const MAX_BLACKLIST: usize = 256;
-const LEGAL_CAP: usize = 1024;
+const LEGAL_CAP: usize = 16384;
 
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
 static DROP: AtomicUsize = AtomicUsize::new(0);
@@ -64,6 +65,7 @@ static LEGAL_TOKENS: critical_section::Mutex<RefCell<LegalVec>> =
     critical_section::Mutex::new(RefCell::new(HVec::new()));
 static LEGAL_SNAP: critical_section::Mutex<RefCell<[u16; LEGAL_CAP]>> =
     critical_section::Mutex::new(RefCell::new([0u16; LEGAL_CAP]));
+static LEGAL_DROPPED: AtomicUsize = AtomicUsize::new(0);
 
 static NET_RESOURCES: StaticCell<StackResources<5>> = StaticCell::new();
 static UDP_RX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
@@ -229,9 +231,7 @@ async fn udp_task(
         // Legal flow: store LE u16 token; never ACK.
         if n >= 2 {
             let token = u16::from_le_bytes([buf[0], buf[1]]);
-            critical_section::with(|cs| {
-                let _ = LEGAL_TOKENS.borrow(cs).borrow_mut().push(token);
-            });
+            note_legal(token);
         }
         {
             cag::bump_xdp_pass();
@@ -242,8 +242,28 @@ async fn udp_task(
     }
 }
 
+fn note_legal(token: u16) {
+    let overflow = critical_section::with(|cs| {
+        LEGAL_TOKENS.borrow(cs).borrow_mut().push(token).is_err()
+    });
+    if overflow {
+        LEGAL_DROPPED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 fn clear_legal_tokens() {
     critical_section::with(|cs| LEGAL_TOKENS.borrow(cs).borrow_mut().clear());
+    LEGAL_DROPPED.store(0, Ordering::Relaxed);
+}
+
+fn reply_dropped(reply: ReplyWriter<'_>) {
+    let n = LEGAL_DROPPED.load(Ordering::Relaxed) as u64;
+    let len = wire::array_blob_len(1, |_| n);
+    reply.get_map(len, |write| {
+        wire::write_array_blob(1, |_| n, &mut |chunk| {
+            let _ = write(chunk);
+        });
+    });
 }
 
 fn reply_legal_tokens(reply: ReplyWriter<'_>) {
@@ -402,6 +422,10 @@ serial_task! {
         .on_get_map(|name: &str, reply: ReplyWriter<'_>| {
             if name == MAP_FIREWALL_RESULT {
                 reply_legal_tokens(reply);
+                return;
+            }
+            if name == MAP_DROPPED {
+                reply_dropped(reply);
                 return;
             }
             if name != MAP_BLACKLIST {

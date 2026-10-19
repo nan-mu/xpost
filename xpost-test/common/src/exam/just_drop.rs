@@ -99,6 +99,9 @@ impl PpsPath {
 
 pub struct JustDropPpsOpts {
     pub formal: bool,
+    pub rates: Option<&'static [f64]>,
+    pub lookup: bool,
+    pub skip_trace: bool,
 }
 
 fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
@@ -116,11 +119,12 @@ fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
     Ok(out)
 }
 
-fn profile_for(fw: Firmware) -> &'static str {
-    match fw {
-        Firmware::XdpCag => "just-drop-cag",
-        Firmware::XdpT => "just-drop-t",
-        Firmware::Hal => "just-drop-hal",
+fn profile_for(fw: Firmware, lookup: bool) -> &'static str {
+    match (fw, lookup) {
+        (Firmware::XdpCag, true) => "just-drop-cag-lookup",
+        (Firmware::XdpCag, false) => "just-drop-cag",
+        (Firmware::XdpT, _) => "just-drop-t",
+        (Firmware::Hal, _) => "just-drop-hal",
     }
 }
 
@@ -159,9 +163,13 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
     let esp_s = cfg.target.esp_ip.to_string();
     let formal = opts.formal;
     let window = WINDOW_S;
-    let grid: &[f64] = SWEEP_PPS;
+    let grid: &[f64] = opts.rates.unwrap_or(SWEEP_PPS);
     let source_seed = SOURCE_SEED_DEFAULT;
-    let arms = arms_from_cfg(&cfg.just_drop.arms)?;
+    let arms = if opts.lookup {
+        vec![Firmware::XdpCag]
+    } else {
+        arms_from_cfg(&cfg.just_drop.arms)?
+    };
 
     RoundUi::banner(&format!(
         "just_drop array arms={:?} +xdp_t grid={:?} window={}s seed={source_seed:#x} formal={formal} agent={endpoint} esp={esp_s} pg=true",
@@ -175,7 +183,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
 
     let plans = super::repeat::plans(grid);
     let mut eta = BudgetEta::new();
-    eta.add_flashes(arms.len() * plans.len() + 1);
+    eta.add_flashes(arms.len() * plans.len() + usize::from(!opts.skip_trace));
     eta.add_fixed(
         (READY_BUDGET + window)
             .saturating_mul((arms.len() * grid.len() * plans.len()) as u32),
@@ -185,7 +193,12 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
     let ui = RoundUi::new();
     let exam_id = if let Some(client) = pg.as_mut() {
         ui.check_start("INSERT exam");
-        let id = db::insert_exam(client, Some("just_drop")).await?;
+        let note = if opts.lookup {
+            "lookup-just_drop"
+        } else {
+            "just_drop"
+        };
+        let id = db::insert_exam(client, Some(note)).await?;
         ui.check_ok(&format!("exam={id}"));
         Some(id)
     } else {
@@ -204,7 +217,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         ));
         let ordered = plan.order_firmware(&arms);
         for fw in &ordered {
-        let profile = profile_for(*fw);
+        let profile = profile_for(*fw, opts.lookup);
         let path = path_for(*fw);
         flash_and_arm(cfg, &agent, &ui, &mut eta, path, profile).await?;
 
@@ -279,10 +292,9 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         }
     }
 
-    // Trace one-shot.
-    {
+    if !opts.skip_trace {
         let fw = Firmware::XdpT;
-        let profile = profile_for(fw);
+        let profile = profile_for(fw, false);
         flash_and_arm(cfg, &agent, &ui, &mut eta, PpsPath::Xdp, profile).await?;
         agent.clear_perf().await.context("clear/perf")?;
         let started_at = SystemTime::now();

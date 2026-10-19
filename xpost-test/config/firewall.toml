@@ -8,4 +8,6 @@
 formal = true
 arms = ["hal", "xdp"]
 blacklist_size = 200
+# The sender ignores this count. Each window paces one stream at the target rate.
+# Every 10th packet is a unique legal token. The device cap is 16384.
 legal_packets = 1024

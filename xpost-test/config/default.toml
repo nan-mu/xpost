@@ -14,8 +14,9 @@ version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
 # HAL smoke: `dev`. Formal: just_tx / just_drop / firewall / exec_bench. Wipe: formal-clear.
-# Four formal experiments. The collector repeats each network grid five times.
-run = ["just_tx", "just_drop", "firewall", "exec_bench"]
+# This binary reruns the conditions the 2026-10-19 batch cannot plot.
+# just_drop f8f46f17 and exec_bench 16b7c489 stay in the database.
+run = ["just_tx", "firewall", "lookup"]
 
 [postgres]
 host = "192.168.110.96"

@@ -18,11 +18,14 @@ pub struct CellRepeat {
     pub hal_first: bool,
 }
 
-/// Successful bounce sample (`t_rx` observed). Loss rows are not stored.
+/// One probe send. `t_rx` is set only when both kernel stamps form an RTT.
 #[derive(Clone, Debug)]
 pub struct TxSample {
+    pub seq: i64,
     pub t_tx: SystemTime,
-    pub t_rx: SystemTime,
+    pub t_rx: Option<SystemTime>,
+    pub saw_tx: bool,
+    pub saw_rx: bool,
 }
 
 pub async fn insert_exam(client: &Client, note: Option<&str>) -> Result<ExamId> {
@@ -57,6 +60,8 @@ pub async fn insert_just_tx_config(
     stopped_at: SystemTime,
     sent: i64,
     ok: i64,
+    matched: i64,
+    lookup: bool,
     repeat: Option<CellRepeat>,
 ) -> Result<ConfigId> {
     let round = repeat.map(|r| r.round);
@@ -67,9 +72,9 @@ pub async fn insert_just_tx_config(
             r#"
             INSERT INTO just_tx_config (
                 exam_id, firmware, target_pps, window_s,
-                started_at, stopped_at, sent, ok,
+                started_at, stopped_at, sent, ok, matched, lookup,
                 round, plan_seed, hal_first
-            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING id
             "#,
             &[
@@ -81,6 +86,8 @@ pub async fn insert_just_tx_config(
                 &stopped_at,
                 &sent,
                 &ok,
+                &matched,
+                &lookup,
                 &round,
                 &plan_seed,
                 &hal_first,
@@ -91,7 +98,7 @@ pub async fn insert_just_tx_config(
     Ok(row.get(0))
 }
 
-/// Bulk-insert successful RTT samples via `UNNEST` (one round-trip).
+/// Bulk-insert one row per send via `UNNEST` (one round-trip).
 pub async fn insert_just_tx_data(
     client: &Client,
     config_id: ConfigId,
@@ -100,16 +107,25 @@ pub async fn insert_just_tx_data(
     if samples.is_empty() {
         return Ok(());
     }
+    let seq: Vec<i64> = samples.iter().map(|s| s.seq).collect();
     let t_tx: Vec<SystemTime> = samples.iter().map(|s| s.t_tx).collect();
-    let t_rx: Vec<SystemTime> = samples.iter().map(|s| s.t_rx).collect();
+    let t_rx: Vec<Option<SystemTime>> = samples.iter().map(|s| s.t_rx).collect();
+    let saw_tx: Vec<bool> = samples.iter().map(|s| s.saw_tx).collect();
+    let saw_rx: Vec<bool> = samples.iter().map(|s| s.saw_rx).collect();
     client
         .execute(
             r#"
-            INSERT INTO just_tx_data (config_id, t_tx, t_rx)
-            SELECT $1, u.t_tx, u.t_rx
-            FROM UNNEST($2::timestamptz[], $3::timestamptz[]) AS u(t_tx, t_rx)
+            INSERT INTO just_tx_data (config_id, seq, t_tx, t_rx, saw_tx, saw_rx)
+            SELECT $1, u.seq, u.t_tx, u.t_rx, u.saw_tx, u.saw_rx
+            FROM UNNEST(
+                $2::bigint[],
+                $3::timestamptz[],
+                $4::timestamptz[],
+                $5::boolean[],
+                $6::boolean[]
+            ) AS u(seq, t_tx, t_rx, saw_tx, saw_rx)
             "#,
-            &[&config_id, &t_tx, &t_rx],
+            &[&config_id, &seq, &t_tx, &t_rx, &saw_tx, &saw_rx],
         )
         .await
         .context("INSERT just_tx_data UNNEST")?;
@@ -204,6 +220,7 @@ pub async fn insert_firewall_config(
     legal_sent: Option<i64>,
     matched: Option<i64>,
     loss: Option<f64>,
+    drop_sample: Option<i64>,
     repeat: Option<CellRepeat>,
 ) -> Result<ConfigId> {
     let round = repeat.map(|r| r.round);
@@ -214,9 +231,9 @@ pub async fn insert_firewall_config(
             r#"
             INSERT INTO firewall_config (
                 exam_id, firmware, blacklist_size, traffic, target_pps, window_s,
-                started_at, stopped_at, sent, legal_sent, matched, loss,
+                started_at, stopped_at, sent, legal_sent, matched, loss, drop_sample,
                 round, plan_seed, hal_first
-            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             RETURNING id
             "#,
             &[
@@ -232,6 +249,7 @@ pub async fn insert_firewall_config(
                 &legal_sent,
                 &matched,
                 &loss,
+                &drop_sample,
                 &round,
                 &plan_seed,
                 &hal_first,

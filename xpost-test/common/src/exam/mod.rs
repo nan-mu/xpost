@@ -12,3 +12,6 @@ pub use exec_bench::{ExecBenchOpts, run_exec_bench};
 pub use firewall::{FirewallOpts, run_firewall};
 pub use just_drop::{JustDropPpsOpts, run_just_drop_pps};
 pub use just_tx::{JustTxOpts, run_just_tx};
+
+/// Side-experiment rates for helper histograms. Not the main load grid.
+pub const LOOKUP_RATES: &[f64] = &[400.0, 1400.0, 4000.0];

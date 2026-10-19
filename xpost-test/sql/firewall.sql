@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS firewall_config (
     sent BIGINT NOT NULL CHECK (sent >= 0),
     legal_sent BIGINT CHECK (legal_sent IS NULL OR legal_sent >= 0),
     matched BIGINT CHECK (matched IS NULL OR matched >= 0),
+    drop_sample BIGINT CHECK (drop_sample IS NULL OR drop_sample >= 0),
     loss DOUBLE PRECISION,
     round INT,
     plan_seed BIGINT,
@@ -25,6 +26,7 @@ CREATE INDEX IF NOT EXISTS firewall_config_exam ON firewall_config (exam_id);
 -- Existing DBs created before legal-flow columns / mixed traffic.
 ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS legal_sent BIGINT;
 ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS matched BIGINT;
+ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS drop_sample BIGINT;
 ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS loss DOUBLE PRECISION;
 ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS round INT;
 ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS plan_seed BIGINT;
