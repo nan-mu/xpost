@@ -24,4 +24,4 @@ Mac scp 到 `target/dev-flame.report` 后 `pixi run python -m utils.export_flame
   下是否同事），常跨多个 exam 对比。见 `benchmark/README.md`。
 - 近期：先跑完全部 formal 实验；数据仅作轻量健全性检查。深度作图与章节写作延后，
   且应对齐 Methodology 的功能分节，而非实验名。
-- `benchmark/backup/` 冻结归档，勿改删。
+- 2026-10-04 当时的规则是保留 `benchmark/backup/`。该目录已从工作区删除。7z 在 git 标签 `archive/just-tx-formal-20260928`。

@@ -466,7 +466,7 @@ Exclude internal reasoning, intermediate work notes, and prompt-like instruction
 Use readable legends that identify the compared paths and quantities.
 Do not create speedup plots without comparable timing boundaries and nonzero sample counts.
 
-## Archive protection
+## Archived measurements
 
-The `benchmark/backup/` directory contains frozen archives.
-Do not change or delete these files without an explicit user request.
+The 2026-09-28 formal just_tx dump is git tag `archive/just-tx-formal-20260928`.
+Do not restore `benchmark/backup/` in the working tree.
