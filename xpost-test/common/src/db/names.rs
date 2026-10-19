@@ -38,6 +38,9 @@ pub fn map_agg_name(wire: &str) -> Option<&'static str> {
         "tx_block" => "tx_block",
         "helper_execution" => "helper_execution",
         "map_operation" => "map_operation",
+        "lookup_non_null" => "lookup_non_null",
+        "lookup_null" => "lookup_null",
+        "lookup_timer_empty" => "lookup_timer_empty",
         _ => return None,
     })
 }

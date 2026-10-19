@@ -33,6 +33,8 @@ esp-radio = []
 perf-counter = ["esp-radio/xdp-observe"]
 # Aggregate latency histograms → `xpost::ext::perf::aggregate()`.
 perf-aggregate = ["esp-radio/xdp-observe"]
+# `map_lookup_elem` cycle histogram only. Main network builds leave this off.
+perf-lookup = ["perf-aggregate"]
 # Gauge current/peak → `xpost::ext::perf::gauge()`.
 perf-gauge = ["esp-radio/xdp-observe"]
 # Trace rings (sole timeline) → `xpost::ext::perf::trace()`.

@@ -13,10 +13,17 @@ CREATE TABLE IF NOT EXISTS just_tx_config (
     started_at TIMESTAMPTZ NOT NULL,
     stopped_at TIMESTAMPTZ NOT NULL,
     sent BIGINT NOT NULL CHECK (sent >= 0),
-    ok BIGINT NOT NULL CHECK (ok >= 0)
+    ok BIGINT NOT NULL CHECK (ok >= 0),
+    round INT,
+    plan_seed BIGINT,
+    hal_first BOOLEAN
 );
 
 CREATE INDEX IF NOT EXISTS just_tx_config_exam ON just_tx_config (exam_id);
+
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS round INT;
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS plan_seed BIGINT;
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS hal_first BOOLEAN;
 
 CREATE TABLE IF NOT EXISTS just_tx_data (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

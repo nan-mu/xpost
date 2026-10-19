@@ -5,6 +5,7 @@ pub mod exec_bench;
 pub mod firewall;
 pub mod just_drop;
 pub mod just_tx;
+pub mod repeat;
 
 pub use dev::run_dev;
 pub use exec_bench::{ExecBenchOpts, run_exec_bench};

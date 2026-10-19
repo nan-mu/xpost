@@ -1,4 +1,8 @@
-//! Aggregate latency + stretchable histogram (`feature = "perf-aggregate"`).
+//! Aggregate latency histograms (`feature = "perf-aggregate"`).
+//!
+//! Pipeline spans keep a stretch histogram. `map_lookup_elem` uses fixed edges
+//! and is recorded only with `perf-lookup`. A zero return is `lookup_null`.
+//! That value is not a proven miss.
 
 use core::sync::atomic::Ordering;
 
@@ -89,89 +93,86 @@ impl Aggregate {
     }
 
     fn insert_hist(&self, ticks: u64) {
-        // Initialize window on first sample.
-        if self
-            .ready
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            self.lo.store(ticks, Ordering::Relaxed);
-            self.width.store(1, Ordering::Relaxed);
-        }
-
-        // Stretch until `ticks` fits. Critical section keeps merge consistent.
+        // The critical section owns the window so a grow cannot tear buckets.
         critical_section::with(|_| {
-            loop {
+            if self.ready.load(Ordering::Relaxed) == 0 {
+                self.lo.store(ticks, Ordering::Relaxed);
+                self.width.store(1, Ordering::Relaxed);
+                for b in &self.buckets {
+                    b.store(0, Ordering::Relaxed);
+                }
+                self.ready.store(1, Ordering::Relaxed);
+            }
+            for _ in 0..96 {
                 let lo = self.lo.load(Ordering::Relaxed);
                 let width = self.width.load(Ordering::Relaxed).max(1);
-                let hi = lo.saturating_add(width.saturating_mul(HIST_BUCKETS as u64));
-                if ticks >= lo && ticks < hi {
-                    let idx = ((ticks - lo) / width) as usize;
-                    let idx = idx.min(HIST_BUCKETS - 1);
-                    self.buckets[idx].fetch_add(1, Ordering::Relaxed);
-                    return;
+                if ticks >= lo {
+                    let idx = (ticks - lo) / width;
+                    if idx < HIST_BUCKETS as u64 {
+                        self.buckets[idx as usize].fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
                 }
-                if ticks < lo {
-                    self.expand_down(lo, width);
-                } else {
-                    self.expand_up(width);
+                if !self.grow(ticks) {
+                    break;
                 }
             }
+            let lo = self.lo.load(Ordering::Relaxed);
+            let idx = if ticks < lo { 0 } else { HIST_BUCKETS - 1 };
+            self.buckets[idx].fetch_add(1, Ordering::Relaxed);
         });
     }
 
-    /// Merge pairwise, double width (range grows upward from same `lo`).
-    fn expand_up(&self, width: u64) {
-        let mut merged = [0u64; HIST_BUCKETS];
-        for i in 0..(HIST_BUCKETS / 2) {
-            merged[i] = self.buckets[2 * i].load(Ordering::Relaxed)
-                + self.buckets[2 * i + 1].load(Ordering::Relaxed);
-        }
-        for i in 0..HIST_BUCKETS {
-            self.buckets[i].store(merged[i], Ordering::Relaxed);
-        }
-        self.width
-            .store(width.saturating_mul(2).max(1), Ordering::Relaxed);
-    }
-
-    /// Shift content into upper half, lower `lo`, then merge if needed via loop.
-    fn expand_down(&self, lo: u64, width: u64) {
-        let half = HIST_BUCKETS / 2;
-        let shift = (half as u64).saturating_mul(width);
-        let new_lo = lo.saturating_sub(shift);
-        // Move buckets[0..half) → buckets[half..N)
-        for i in (0..half).rev() {
-            let v = self.buckets[i].swap(0, Ordering::Relaxed);
-            self.buckets[i + half].store(
-                self.buckets[i + half].load(Ordering::Relaxed) + v,
-                Ordering::Relaxed,
-            );
-        }
-        self.lo.store(new_lo, Ordering::Relaxed);
-        // If still too narrow after one shift, expand_up next loop iteration.
-        // When new sample is still below new_lo (shift saturated at 0), double width.
-        if new_lo == lo {
-            self.expand_up(width);
-            // After expand_up, also move lo down by old half-range in new units:
-            // width doubled; subtract half*new_width equivalent — keep simple: set lo=0.
-            if lo > 0 {
-                // Fold: treat as growing both ways by resetting lo toward 0.
-                let w = self.width.load(Ordering::Relaxed).max(1);
-                let cur_lo = self.lo.load(Ordering::Relaxed);
-                if cur_lo > 0 {
-                    // One more down-shift in new width units.
-                    let half_span = (half as u64).saturating_mul(w);
-                    self.lo.store(cur_lo.saturating_sub(half_span), Ordering::Relaxed);
-                    for i in (0..half).rev() {
-                        let v = self.buckets[i].swap(0, Ordering::Relaxed);
-                        self.buckets[i + half].store(
-                            self.buckets[i + half].load(Ordering::Relaxed) + v,
-                            Ordering::Relaxed,
-                        );
-                    }
-                }
+    /// Double `width` and slide `lo` on that grid.
+    ///
+    /// `lo` stays a multiple of `width`. Each old bucket merges into one new
+    /// bucket. A sample below `lo` shifts the window down. A sample above it
+    /// shifts by at most one bucket so the next width stays aligned.
+    /// Returns false when `width` cannot double.
+    fn grow(&self, ticks: u64) -> bool {
+        let width = self.width.load(Ordering::Relaxed).max(1);
+        let Some(new_width) = width.checked_mul(2) else {
+            return false;
+        };
+        let lo = self.lo.load(Ordering::Relaxed);
+        debug_assert_eq!(lo % width, 0);
+        let unit = lo / width;
+        let parity = (unit % 2) as usize;
+        let max_shift = (unit as usize).min(HIST_BUCKETS);
+        let max_aligned = if max_shift % 2 == parity {
+            max_shift
+        } else {
+            max_shift.saturating_sub(1)
+        };
+        let shift = if ticks < lo {
+            let need = ((lo - ticks + width - 1) / width) as usize;
+            let need_aligned = if need % 2 == parity { need } else { need + 1 };
+            if need_aligned <= max_aligned {
+                need_aligned
+            } else {
+                max_aligned
             }
+        } else if parity == 0 || max_aligned == 0 {
+            0
+        } else {
+            1
+        };
+        if ticks < lo && shift == 0 {
+            return false;
         }
+        let mut merged = [0u64; HIST_BUCKETS];
+        for i in 0..HIST_BUCKETS {
+            let dst = (shift + i) / 2;
+            debug_assert!(dst < HIST_BUCKETS);
+            merged[dst] = merged[dst].saturating_add(self.buckets[i].load(Ordering::Relaxed));
+        }
+        for (i, count) in merged.iter().enumerate() {
+            self.buckets[i].store(*count, Ordering::Relaxed);
+        }
+        self.lo
+            .store(lo - (shift as u64) * width, Ordering::Relaxed);
+        self.width.store(new_width, Ordering::Relaxed);
+        true
     }
 
     pub fn snapshot(&self) -> AggregateSnapshot {
@@ -203,6 +204,10 @@ impl Aggregate {
 }
 
 /// Named aggregates for the mounted program.
+///
+/// Slots 6 and 7 stay empty here. HAL fills `helper_execution` and `map_operation`.
+/// The last three slots are fixed-edge lookup histograms. `width == 0` means
+/// [`LOOKUP_EDGE`] version [`LOOKUP_HIST_VERSION`], not a uniform bin width.
 pub struct AggregateSet {
     pub rx_processing: Aggregate,
     pub xdp_execution: Aggregate,
@@ -210,10 +215,94 @@ pub struct AggregateSet {
     pub post_action: Aggregate,
     pub tx_submission: Aggregate,
     pub tx_block: Aggregate,
-    pub helper_execution: Aggregate,
-    pub map_operation: Aggregate,
-    helper_start: AtomicU64,
-    map_start: AtomicU64,
+    pub lookup_non_null: FixedHist,
+    pub lookup_null: FixedHist,
+    pub lookup_timer_empty: FixedHist,
+}
+
+/// Lower edge of each lookup bucket, in `rdcycle` counts.
+/// Bucket `i` is `[LOOKUP_EDGE[i], LOOKUP_EDGE[i+1])`.
+/// The last bucket is `[LOOKUP_EDGE[15], +inf)`.
+pub const LOOKUP_HIST_VERSION: u64 = 1;
+pub const LOOKUP_EDGE: [u64; HIST_BUCKETS] = [
+    0, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288,
+];
+
+/// Fixed-edge histogram. Samples are never moved into a new window.
+pub struct FixedHist {
+    count: AtomicU64,
+    total_ticks: AtomicU64,
+    min_ticks: AtomicU64,
+    max_ticks: AtomicU64,
+    buckets: [AtomicU64; HIST_BUCKETS],
+}
+
+impl FixedHist {
+    pub const fn new() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            total_ticks: AtomicU64::new(0),
+            min_ticks: AtomicU64::new(u64::MAX),
+            max_ticks: AtomicU64::new(0),
+            buckets: [const { AtomicU64::new(0) }; HIST_BUCKETS],
+        }
+    }
+
+    #[cfg(feature = "perf-lookup")]
+    pub fn record(&self, ticks: u64) {
+        let idx = lookup_bucket(ticks);
+        critical_section::with(|_| {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            self.total_ticks.fetch_add(ticks, Ordering::Relaxed);
+            let _ = self
+                .min_ticks
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |m| {
+                    (ticks < m).then_some(ticks)
+                });
+            let _ = self
+                .max_ticks
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |m| {
+                    (ticks > m).then_some(ticks)
+                });
+            self.buckets[idx].fetch_add(1, Ordering::Relaxed);
+        });
+    }
+
+    pub fn snapshot(&self) -> AggregateSnapshot {
+        let min = self.min_ticks.load(Ordering::Relaxed);
+        AggregateSnapshot {
+            count: self.count.load(Ordering::Relaxed),
+            total_ticks: self.total_ticks.load(Ordering::Relaxed),
+            min_ticks: if min == u64::MAX { 0 } else { min },
+            max_ticks: self.max_ticks.load(Ordering::Relaxed),
+            lo: LOOKUP_HIST_VERSION,
+            width: 0,
+            buckets: core::array::from_fn(|i| self.buckets[i].load(Ordering::Relaxed)),
+        }
+    }
+
+    pub fn reset(&self) {
+        self.count.store(0, Ordering::Relaxed);
+        self.total_ticks.store(0, Ordering::Relaxed);
+        self.min_ticks.store(u64::MAX, Ordering::Relaxed);
+        self.max_ticks.store(0, Ordering::Relaxed);
+        for b in &self.buckets {
+            b.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Bucket index for [`LOOKUP_EDGE`]. `ticks` stays in that bucket for the life of the histogram.
+#[cfg(feature = "perf-lookup")]
+pub fn lookup_bucket(ticks: u64) -> usize {
+    let mut idx = 0usize;
+    for (i, edge) in LOOKUP_EDGE.iter().enumerate().skip(1) {
+        if ticks < *edge {
+            return i - 1;
+        }
+        idx = i;
+    }
+    idx
 }
 
 impl AggregateSet {
@@ -225,10 +314,9 @@ impl AggregateSet {
             post_action: Aggregate::new(),
             tx_submission: Aggregate::new(),
             tx_block: Aggregate::new(),
-            helper_execution: Aggregate::new(),
-            map_operation: Aggregate::new(),
-            helper_start: AtomicU64::new(0),
-            map_start: AtomicU64::new(0),
+            lookup_non_null: FixedHist::new(),
+            lookup_null: FixedHist::new(),
+            lookup_timer_empty: FixedHist::new(),
         }
     }
 
@@ -246,61 +334,36 @@ impl AggregateSet {
         self.post_action.reset();
         self.tx_submission.reset();
         self.tx_block.reset();
-        self.helper_execution.reset();
-        self.map_operation.reset();
-        self.helper_start.store(0, Ordering::Relaxed);
-        self.map_start.store(0, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn helper_enter(&self) {
-        self.helper_start
-            .store(Self::now_ticks().max(1), Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn helper_leave(&self) {
-        let t0 = self.helper_start.swap(0, Ordering::Relaxed);
-        if t0 == 0 {
-            return;
-        }
-        let now = Self::now_ticks();
-        self.helper_execution.record(now.saturating_sub(t0));
-    }
-
-    #[inline]
-    pub(crate) fn map_enter(&self) {
-        self.map_start
-            .store(Self::now_ticks().max(1), Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn map_leave(&self) {
-        let t0 = self.map_start.swap(0, Ordering::Relaxed);
-        if t0 == 0 {
-            return;
-        }
-        let now = Self::now_ticks();
-        self.map_operation.record(now.saturating_sub(t0));
+        self.lookup_non_null.reset();
+        self.lookup_null.reset();
+        self.lookup_timer_empty.reset();
     }
 }
 
+/// Low 32 bits of the cycle counter. A short interval uses `wrapping_sub`.
+#[cfg(feature = "perf-lookup")]
 #[inline]
-pub(crate) fn helper_enter() {
-    crate::xdp::ingress::XDP_PROG.aggregate.helper_enter();
+pub(crate) fn lookup_cycles() -> u32 {
+    let mut cycles: u32;
+    unsafe {
+        core::arch::asm!(
+            "rdcycle {cycles}",
+            cycles = out(reg) cycles,
+            options(nomem, nostack)
+        );
+    }
+    cycles
 }
 
+/// Record one lookup `dt` after both cycle reads. `returned_null` is the raw pointer result.
+#[cfg(feature = "perf-lookup")]
 #[inline]
-pub(crate) fn helper_leave() {
-    crate::xdp::ingress::XDP_PROG.aggregate.helper_leave();
-}
-
-#[inline]
-pub(crate) fn map_enter() {
-    crate::xdp::ingress::XDP_PROG.aggregate.map_enter();
-}
-
-#[inline]
-pub(crate) fn map_leave() {
-    crate::xdp::ingress::XDP_PROG.aggregate.map_leave();
+pub(crate) fn record_lookup(dt: u64, returned_null: bool, empty_dt: u64) {
+    let set = &crate::xdp::ingress::XDP_PROG.aggregate;
+    if returned_null {
+        set.lookup_null.record(dt);
+    } else {
+        set.lookup_non_null.record(dt);
+    }
+    set.lookup_timer_empty.record(empty_dt);
 }

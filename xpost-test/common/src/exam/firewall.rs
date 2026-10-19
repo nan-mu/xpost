@@ -171,9 +171,10 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
     let pg_opts = PgOpts { formal };
     let mut pg = Some(db::connect_and_ensure(pg_opts).await?);
 
-    let cells = arms.len() * grid.len();
+    let plans = super::repeat::plans(grid);
+    let cells = arms.len() * grid.len() * plans.len();
     let mut eta = BudgetEta::new();
-    eta.add_flashes(arms.len() + 1);
+    eta.add_flashes(arms.len() * plans.len() + 1);
     eta.add_fixed((READY_BUDGET + window).saturating_mul(cells as u32));
     eta.add_fixed(READY_BUDGET + Duration::from_secs(5));
 
@@ -189,7 +190,16 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
 
     let esp = cfg.target.esp_ip;
     let host_ip = iface_ipv4(&cfg.probe.iface).unwrap_or(esp);
-    for fw in &arms {
+    for plan in &plans {
+        ui.permanent(&format!(
+            "round {}/{} hal_first={} seed={}",
+            plan.round,
+            plans.len(),
+            plan.hal_first,
+            plan.seed
+        ));
+        let ordered = plan.order_firmware(&arms);
+        for fw in &ordered {
         let profile = profile_for(*fw);
         let path = path_for(*fw);
         flash_ready(cfg, &agent, &ui, &mut eta, profile).await?;
@@ -202,7 +212,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
         let miss = miss_ip(esp, &rules, &avoid);
         let illegal_src = rules[0];
 
-        for &pps in grid {
+        for &pps in &plan.rates {
             ui.check_start(&format!("insert blacklist n={size}"));
             seed_blacklist(&agent, &rules).await?;
             ui.check_ok(&format!("{} entries", rules.len()));
@@ -258,6 +268,11 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                     Some(legal_sent as i64),
                     Some(matched as i64),
                     Some(loss),
+                    Some(db::CellRepeat {
+                        round: plan.round,
+                        plan_seed: plan.seed,
+                        hal_first: plan.hal_first,
+                    }),
                 )
                 .await?;
                 db::insert_firewall_data(client, cfg_id, &map_rows).await?;
@@ -277,6 +292,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
             let _ = agent.clear_map(MAP_NAME).await;
             eta.consume_fixed(window);
             ui.set_eta(&eta.fmt());
+        }
         }
     }
 
@@ -307,6 +323,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 started_at,
                 stopped_at,
                 sent as i64,
+                None,
                 None,
                 None,
                 None,

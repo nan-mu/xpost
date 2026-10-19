@@ -58,21 +58,29 @@ fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
         idx as u32,
         0,
     );
-    #[cfg(feature = "perf-aggregate")]
-    crate::ext::perf::aggregate::helper_enter();
-    #[cfg(feature = "perf-aggregate")]
-    let is_map = matches!(
-        idx,
-        HelperIdx::BPF_FUNC_MAP_LOOKUP_ELEM
-            | HelperIdx::BPF_FUNC_MAP_UPDATE_ELEM
-            | HelperIdx::BPF_FUNC_MAP_DELETE_ELEM
-    );
-    #[cfg(feature = "perf-aggregate")]
-    if is_map {
-        crate::ext::perf::aggregate::map_enter();
-    }
     let ret = match idx {
-        HelperIdx::BPF_FUNC_MAP_LOOKUP_ELEM => inner::map_lookup_elem::inner(a1, a2),
+        HelperIdx::BPF_FUNC_MAP_LOOKUP_ELEM => {
+            #[cfg(feature = "perf-lookup")]
+            {
+                // Two `rdcycle` reads bracket only the helper body.
+                // Return class and bucketing run after the second read.
+                let t0 = crate::ext::perf::aggregate::lookup_cycles();
+                let ret = inner::map_lookup_elem::inner(a1, a2);
+                let t1 = crate::ext::perf::aggregate::lookup_cycles();
+                let e0 = crate::ext::perf::aggregate::lookup_cycles();
+                let e1 = crate::ext::perf::aggregate::lookup_cycles();
+                crate::ext::perf::aggregate::record_lookup(
+                    t1.wrapping_sub(t0) as u64,
+                    ret == 0,
+                    e1.wrapping_sub(e0) as u64,
+                );
+                ret
+            }
+            #[cfg(not(feature = "perf-lookup"))]
+            {
+                inner::map_lookup_elem::inner(a1, a2)
+            }
+        }
         HelperIdx::BPF_FUNC_MAP_UPDATE_ELEM => inner::map_update_elem::inner(a1, a2, a3, a4),
         HelperIdx::BPF_FUNC_MAP_DELETE_ELEM => inner::map_delete_elem::inner(a1, a2),
         HelperIdx::BPF_FUNC_KTIME_GET_NS => inner::ktime_get_ns::inner(),
@@ -82,12 +90,6 @@ fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
         // Deleted / deferred / unsupported helpers: fail closed.
         _ => usize::MAX,
     };
-    #[cfg(feature = "perf-aggregate")]
-    if is_map {
-        crate::ext::perf::aggregate::map_leave();
-    }
-    #[cfg(feature = "perf-aggregate")]
-    crate::ext::perf::aggregate::helper_leave();
     #[cfg(feature = "perf-trace")]
     crate::ext::perf::trace().push(
         crate::ext::perf::trace::EventKind::HelperLeave,

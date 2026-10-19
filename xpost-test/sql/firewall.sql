@@ -14,7 +14,10 @@ CREATE TABLE IF NOT EXISTS firewall_config (
     sent BIGINT NOT NULL CHECK (sent >= 0),
     legal_sent BIGINT CHECK (legal_sent IS NULL OR legal_sent >= 0),
     matched BIGINT CHECK (matched IS NULL OR matched >= 0),
-    loss DOUBLE PRECISION
+    loss DOUBLE PRECISION,
+    round INT,
+    plan_seed BIGINT,
+    hal_first BOOLEAN
 );
 
 CREATE INDEX IF NOT EXISTS firewall_config_exam ON firewall_config (exam_id);
@@ -23,6 +26,9 @@ CREATE INDEX IF NOT EXISTS firewall_config_exam ON firewall_config (exam_id);
 ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS legal_sent BIGINT;
 ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS matched BIGINT;
 ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS loss DOUBLE PRECISION;
+ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS round INT;
+ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS plan_seed BIGINT;
+ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS hal_first BOOLEAN;
 ALTER TABLE firewall_config DROP CONSTRAINT IF EXISTS firewall_config_traffic_check;
 ALTER TABLE firewall_config
     ADD CONSTRAINT firewall_config_traffic_check

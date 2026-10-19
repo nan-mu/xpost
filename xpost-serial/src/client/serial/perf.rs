@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::io;
 
 pub const COUNTER_WIRE_LEN: usize = 184;
-pub const AGGREGATE_WIRE_LEN: usize = 8 * 176;
+pub const AGGREGATE_WIRE_LEN: usize = 11 * 176;
 pub const GAUGE_WIRE_LEN: usize = 32;
 pub const TRACE_CAP: usize = 256;
 pub const TRACE_APP_CAP: usize = 64;
@@ -100,7 +100,7 @@ pub const COUNTER_NAMES: [&str; 46] = [
     "block_since_us",
 ];
 
-pub const AGG_NAMES: [&str; 8] = [
+pub const AGG_NAMES: [&str; 11] = [
     "rx_processing",
     "xdp_execution",
     "xdp_dispatch",
@@ -109,6 +109,9 @@ pub const AGG_NAMES: [&str; 8] = [
     "tx_block",
     "helper_execution",
     "map_operation",
+    "lookup_non_null",
+    "lookup_null",
+    "lookup_timer_empty",
 ];
 
 pub const GAUGE_NAMES: [&str; 4] = [
@@ -224,7 +227,7 @@ fn decode_aggregates(buf: &[u8]) -> io::Result<Vec<AggSnap>> {
     if buf.len() != AGGREGATE_WIRE_LEN {
         return Err(std::io::Error::other("aggregate section len"));
     }
-    let mut out = Vec::with_capacity(8);
+    let mut out = Vec::with_capacity(AGG_NAMES.len());
     for (i, name) in AGG_NAMES.iter().enumerate() {
         let off = i * 176;
         let mut o = off;

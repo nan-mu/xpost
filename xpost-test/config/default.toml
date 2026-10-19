@@ -14,8 +14,8 @@ version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
 # HAL smoke: `dev`. Formal: just_tx / just_drop / firewall / exec_bench. Wipe: formal-clear.
-# PR consolidating exec_bench: run exec_bench only (operator-acked).
-run = ["exec_bench"]
+# Four formal experiments. The collector repeats each network grid five times.
+run = ["just_tx", "just_drop", "firewall", "exec_bench"]
 
 [postgres]
 host = "192.168.110.96"

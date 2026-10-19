@@ -22,11 +22,19 @@ CREATE TYPE xdp_agg_name AS ENUM (
     'tx_submission',
     'tx_block',
     'helper_execution',
-    'map_operation'
+    'map_operation',
+    'lookup_non_null',
+    'lookup_null',
+    'lookup_timer_empty'
 );
 EXCEPTION
     WHEN duplicate_object THEN NULL;
 END $$;
+
+-- Existing databases keep the type above. New helper histograms are added here.
+ALTER TYPE xdp_agg_name ADD VALUE IF NOT EXISTS 'lookup_non_null';
+ALTER TYPE xdp_agg_name ADD VALUE IF NOT EXISTS 'lookup_null';
+ALTER TYPE xdp_agg_name ADD VALUE IF NOT EXISTS 'lookup_timer_empty';
 
 DO $$ BEGIN
 CREATE TYPE xdp_gauge_name AS ENUM (

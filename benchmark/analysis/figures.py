@@ -16,7 +16,7 @@ from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
 
-from .metrics import ARMS, LABELS, pair_intervals
+from .metrics import ARMS, LABELS, map_helper_frame, pair_intervals
 
 BLUE, ORANGE, INK, GRAY = "#0072B2", "#A65000", "#172B3A", "#526673"
 ARM_STYLE = {"xdp_cag": dict(color=BLUE, marker="o", ls="-"), "hal": dict(color=ORANGE, marker="s", ls="--")}
@@ -93,7 +93,7 @@ def quality(data, settings):
             ax.text(j, i, label, ha="center", va="center", fontsize=8.5, color=INK)
     ax.set_xticks(range(len(settings["rates"])), settings["rates"])
     ax.set_yticks(range(len(labels)), labels, fontsize=9)
-    ax.set(xlabel="设定发送强度（包/秒）；格内为 map_operation 的计时样本数，k = 千次")
+    ax.set(xlabel="设定发送强度（包/秒）；格内为 map 计时样本数，k = 千次")
     ax.grid(False)
     fig.suptitle("附图 A · map_operation 计时样本覆盖")
     ax.legend(handles=[Patch(fc=cmap(i), label=s) for i,s in enumerate(["指标行缺失", "0 次：无计时样本", "1–99 次：样本很少", "≥100 次：有样本，仍需检查口径"])],
@@ -118,7 +118,7 @@ def load_delivery(data):
 def map_points(data, experiment):
     """Keep missing metric rows as gaps on the complete configuration grid."""
     config = data[experiment].query("window_s > 0")
-    metrics = data[f"{experiment}_agg"].query("name == 'map_operation'")
+    metrics = map_helper_frame(data[f"{experiment}_agg"])
     return config.merge(metrics[["config_id", "mean_us"]], left_on="id", right_on="config_id",
                         how="left", validate="one_to_one")
 

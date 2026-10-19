@@ -13,8 +13,9 @@ CREATE TABLE IF NOT EXISTS exec_bench_config (
 
 CREATE INDEX IF NOT EXISTS exec_bench_config_exam ON exec_bench_config (exam_id);
 
--- One row per repetition; perf lives in shared formal/xdp_* tables (eBPF)
--- or exec_bench_hal_* (HAL CAG). eBPF Trace rows go to shared trace_event.
+-- One config and one data row per repetition.
+-- Perf rows are unique on config_id, so a shared config would overwrite timing.
+-- eBPF Trace rows go to shared trace_event. HAL CAG rows go to exec_bench_hal_*.
 CREATE TABLE IF NOT EXISTS exec_bench_data (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     config_id UUID NOT NULL REFERENCES exec_bench_config (id) ON DELETE CASCADE,

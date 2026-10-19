@@ -1081,6 +1081,7 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "esp-hal",
+ "heapless 0.8.0",
  "portable-atomic",
 ]
 

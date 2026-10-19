@@ -30,9 +30,16 @@ async fn main() -> Result<()> {
         cfg.version, cfg.target.esp_ip, cfg.target.esp_mac, cfg.probe.iface, cfg.run
     );
 
+    let mut failed = Vec::new();
     for name in &cfg.run {
         info!("run experiment {name}");
-        dispatch(&cfg, name).await?;
+        if let Err(err) = dispatch(&cfg, name).await {
+            eprintln!("experiment {name} failed: {err:#}");
+            failed.push(format!("{name}: {err:#}"));
+        }
+    }
+    if !failed.is_empty() {
+        anyhow::bail!("{}", failed.join("\n"));
     }
     Ok(())
 }

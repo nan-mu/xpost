@@ -3,7 +3,7 @@ from itertools import product
 
 import pandas as pd
 
-from .metrics import combine_perf, pair_intervals, ratio
+from .metrics import HELPER_HIST_NAMES, combine_perf, microsecond_mean, pair_intervals, ratio
 
 PRINTK_HELPER_ID = 6
 
@@ -65,18 +65,22 @@ def derive_exec(tables: dict, settings: dict) -> tuple[dict, dict]:
     required = {"id", "exam_id", "firmware", "workload", "input", "started_at", "stopped_at"}
     if not required.issubset(config.columns):
         raise ValueError("exec_bench: missing configuration columns/rows")
-    keys = list(config[["firmware", "workload"]].itertuples(index=False, name=None))
-    if len(keys) != 16 or set(keys) != set(product(("ebpf", "hal"), WORKLOADS)):
-        raise ValueError("exec_bench: expected one condition per arm and workload")
+    keys = config.groupby(["firmware", "workload"]).size()
+    expected = set(product(("ebpf", "hal"), WORKLOADS))
+    if set(keys.index) != expected or keys.nunique() != 1 or int(keys.iloc[0]) not in (1, 5):
+        raise ValueError("exec_bench: each arm and workload must occur once or five times")
     if config.id.duplicated().any() or not config.exam_id.eq(exam_id).all():
         raise ValueError("exec_bench: duplicate IDs or another exam")
     raw = tables["exec_bench_data"]
     if not {"config_id", "rep", "ok", "output"}.issubset(raw.columns):
         raise ValueError("exec_bench: missing result columns/rows")
-    if len(raw) != 16 or set(raw.config_id) != set(config.id) or not raw.rep.eq(1).all():
-        raise ValueError("exec_bench: expected one result per condition with rep=1")
+    if set(raw.config_id) != set(config.id) or raw.groupby("config_id").size().ne(1).any():
+        raise ValueError("exec_bench: expected one result row per condition")
     config = config.merge(raw[["config_id", "rep", "ok", "output"]], left_on="id",
                           right_on="config_id", validate="one_to_one")
+    reps = config.groupby(["firmware", "workload"]).rep.apply(lambda s: sorted(int(v) for v in s))
+    if not reps.map(lambda s: s == list(range(1, len(s) + 1))).all():
+        raise ValueError("exec_bench: repetitions must be numbered from 1 without gaps")
     if not config.ok.eq(True).all():
         raise ValueError("exec_bench: collector reported an output-check failure")
     for field in ("input", "output"):
@@ -96,11 +100,20 @@ def derive_exec(tables: dict, settings: dict) -> tuple[dict, dict]:
         result[f"exec_bench_{kind}"] = perf.merge(
             config, on="config_id", suffixes=("_metric", ""), validate="many_to_one")
     agg = result["exec_bench_agg"]
-    agg["mean_us"] = ratio(agg.total_ticks, agg["count"])
+    agg["mean_us"] = microsecond_mean(agg)
     for name in ("execution", "helper_execution"):
         metric = agg[agg.name == name].set_index("config_id")
         config[f"{name}_samples"] = config.config_id.map(metric["count"])
         config[f"{name}_mean_us"] = config.config_id.map(metric.mean_us)
+    per = agg[agg.name.isin(HELPER_HIST_NAMES)]
+    if not per.empty:
+        summed = per.groupby("config_id")[["count", "total_ticks"]].sum()
+        summed = summed[summed["count"] > 0]
+        summed["mean_us"] = ratio(summed.total_ticks, summed["count"])
+        missing = config["helper_execution_samples"].fillna(0).eq(0)
+        hit = missing & config.config_id.isin(summed.index)
+        config.loc[hit, "helper_execution_samples"] = config.loc[hit, "config_id"].map(summed["count"])
+        config.loc[hit, "helper_execution_mean_us"] = config.loc[hit, "config_id"].map(summed.mean_us)
     config = attach_trace_runtime(config, tables["exec_bench_trace"])
     if settings.get("exec_bench", {}).get("require_trace", False) and config.runtime_us.isna().any():
         raise ValueError("exec_bench: pinned report requires complete invocation and printk Trace for all conditions")

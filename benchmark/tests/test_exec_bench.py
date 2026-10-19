@@ -47,6 +47,26 @@ class ExecBenchTests(unittest.TestCase):
         self.assertEqual(audit["execution_zero_sample_conditions"], 16)
         self.assertTrue(points.host_command_ms.eq(631).all())
 
+    def test_five_repetitions_keep_one_result_each(self):
+        tables, settings = fixture()
+        configs, results, aggs = [], [], []
+        for row in tables["exec_bench_config"].itertuples(index=False):
+            for rep in range(1, 6):
+                cid = f"{row.id}-r{rep}"
+                configs.append(dict(id=cid, exam_id=row.exam_id, firmware=row.firmware,
+                                     workload=row.workload, input=row.input,
+                                     started_at=row.started_at, stopped_at=row.stopped_at))
+                results.append(dict(config_id=cid, rep=rep, ok=True, output="01" * 32))
+                aggs.append(dict(config_id=cid, name="execution", count=0, total_ticks=0, buckets=[0]))
+        tables["exec_bench_config"] = pd.DataFrame(configs)
+        tables["exec_bench_data"] = pd.DataFrame(results)
+        tables["exec_bench_xdp_agg"] = pd.DataFrame([a for a in aggs if a["config_id"].startswith("ebpf")])
+        tables["exec_bench_hal_agg"] = pd.DataFrame([a for a in aggs if a["config_id"].startswith("hal")])
+        data, _ = derive_exec(tables, settings)
+        self.assertEqual(len(data["exec_bench"]), 80)
+        reps = data["exec_bench"].groupby(["firmware", "workload"]).rep.apply(lambda s: sorted(s))
+        self.assertTrue(reps.map(lambda s: list(s) == [1, 2, 3, 4, 5]).all())
+
     def test_absent_perf_remains_missing(self):
         tables, settings = fixture()
         tables["exec_bench_hal_agg"] = pd.DataFrame()
@@ -57,7 +77,7 @@ class ExecBenchTests(unittest.TestCase):
     def test_duplicate_condition_cannot_replace_missing_workload(self):
         tables, settings = fixture()
         tables["exec_bench_config"].loc[0, "workload"] = "square"
-        with self.assertRaisesRegex(ValueError, "one condition"):
+        with self.assertRaisesRegex(ValueError, "once or five times"):
             derive_exec(tables, settings)
 
     def test_incomplete_and_failed_results_are_rejected(self):

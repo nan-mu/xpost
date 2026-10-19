@@ -173,11 +173,12 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         cfg.probe.iface
     ));
 
-    let n_flashes = arms.len() + 1; // + xdp_t
+    let plans = super::repeat::plans(grid);
+    let n_flashes = arms.len() * plans.len() + 1; // + xdp_t
     let mut eta = BudgetEta::new();
     eta.add_flashes(n_flashes);
     let per_arm = READY_BUDGET + (WARMUP + window + DRAIN).saturating_mul(grid.len() as u32);
-    eta.add_fixed(per_arm.saturating_mul(arms.len() as u32));
+    eta.add_fixed(per_arm.saturating_mul((arms.len() * plans.len()) as u32));
     eta.add_fixed(READY_BUDGET + Duration::from_secs(5)); // trace one-shot
 
     let ui = RoundUi::new();
@@ -190,7 +191,16 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         None
     };
 
-    for fw in &arms {
+    for plan in &plans {
+        ui.permanent(&format!(
+            "round {}/{} hal_first={} seed={}",
+            plan.round,
+            plans.len(),
+            plan.hal_first,
+            plan.seed
+        ));
+        let ordered = plan.order_firmware(&arms);
+        for fw in &ordered {
         ui.begin_round();
         ui.set_eta(&eta.fmt());
         let profile = profile_for(*fw);
@@ -200,7 +210,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         ui.check_pending("DUT ready");
         flash_and_ready(cfg, &agent, &ui, &mut eta, path, spoof, profile).await?;
 
-        for &pps in grid {
+        for &pps in &plan.rates {
             agent.clear_perf().await.context("clear/perf")?;
             let stats = probe_window(harness, &agent, &ui, &eta, path, spoof, pps, window).await?;
             log_window(&ui, path, pps as usize, &stats);
@@ -228,6 +238,11 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                     stats.stopped_at,
                     stats.sent as i64,
                     ok,
+                    Some(db::CellRepeat {
+                        round: plan.round,
+                        plan_seed: plan.seed,
+                        hal_first: plan.hal_first,
+                    }),
                 )
                 .await?;
                 db::insert_just_tx_data(client, cfg_id, &samples).await?;
@@ -254,6 +269,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
             tokio::time::sleep(COOLDOWN).await;
         }
         ui.end_round();
+        }
     }
 
     // Trace arm (XDP): skip when `arms` is HAL-only.
@@ -299,6 +315,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                 stopped_at,
                 1,
                 ok,
+                None,
             )
             .await?;
             if let (true, Some(t_rx)) = (got_rx, t_rx) {

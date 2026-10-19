@@ -9,6 +9,12 @@ from .data import EXPERIMENTS
 
 LABELS = {"just_drop": "按来源计数（ARRAY）", "firewall": "查黑名单（HASH）", "just_tx": "原路返回（XDP_TX）"}
 ARMS = {"hal": "HAL：应用层处理", "xdp_cag": "XDP：驱动入口处理"}
+MAP_HELPER_NAMES = ("map_lookup", "map_update", "map_delete")
+HELPER_HIST_NAMES = MAP_HELPER_NAMES + (
+    "ktime_get_ns", "trace_printk", "csum_diff", "xdp_adjust_tail",
+)
+# These totals are rdcycle counts. They are not pipeline microseconds.
+LOOKUP_CYCLE_NAMES = ("lookup_non_null", "lookup_null", "lookup_timer_empty")
 
 
 def ratio(numerator, denominator):
@@ -16,11 +22,48 @@ def ratio(numerator, denominator):
     return numerator / denominator.where(denominator > 0)
 
 
+def microsecond_mean(frame):
+    """Mean for microsecond spans. Lookup cycle rows stay missing."""
+    mean = ratio(frame.total_ticks, frame["count"])
+    if "name" in frame.columns:
+        mean = mean.mask(frame.name.isin(LOOKUP_CYCLE_NAMES))
+    return mean
+
+
+def map_helper_frame(agg: pd.DataFrame) -> pd.DataFrame:
+    """One map-timing row per config.
+
+    Prefer the per-helper histograms when they have samples.
+    Older batches only have the lumped `map_operation` row.
+    """
+    cols = ["config_id", "count", "total_ticks"]
+    lumped = agg.loc[agg.name == "map_operation", cols].copy()
+    per = agg[agg.name.isin(MAP_HELPER_NAMES)]
+    if per.empty:
+        out = lumped
+    else:
+        summed = per.groupby("config_id", as_index=False)[["count", "total_ticks"]].sum()
+        out = summed.merge(lumped, on="config_id", how="outer", suffixes=("_per", "_lumped"))
+        use_per = out["count_per"].fillna(0).gt(0)
+        out["count"] = out["count_per"].where(use_per, out["count_lumped"])
+        out["total_ticks"] = out["total_ticks_per"].where(use_per, out["total_ticks_lumped"])
+        out = out[cols]
+    out = out.copy()
+    out["mean_us"] = ratio(out.total_ticks, out["count"])
+    return out
+
+
 def cell_keys(frame: pd.DataFrame, experiment: str) -> list[tuple]:
     cols = ["firmware", "target_pps"]
     if experiment == "firewall":
         cols += ["blacklist_size", "traffic"]
     return list(frame[cols].itertuples(index=False, name=None))
+
+
+def _stimulus_rounds(actual: pd.DataFrame):
+    if "round" not in actual.columns or actual["round"].isna().all():
+        return [actual]
+    return [part for _, part in actual.groupby("round", sort=True)]
 
 
 def validate_grid(config: pd.DataFrame, experiment: str, settings: dict) -> dict:
@@ -31,11 +74,13 @@ def validate_grid(config: pd.DataFrame, experiment: str, settings: dict) -> dict
     expected = set(product(("hal", "xdp_cag"), settings["rates"]))
     if experiment == "firewall":
         expected = set(product(("hal", "xdp_cag"), settings["rates"], settings["blacklist_sizes"], settings["traffic"]))
-    keys = cell_keys(actual, experiment)
-    duplicates = len(keys) - len(set(keys))
-    missing, unexpected = expected - set(keys), set(keys) - expected
-    if missing or unexpected or duplicates:
-        raise ValueError(f"{experiment}: grid mismatch: missing={sorted(missing)}, unexpected={sorted(unexpected)}, duplicates={duplicates}")
+    rounds = _stimulus_rounds(actual)
+    for part in rounds:
+        keys = cell_keys(part, experiment)
+        duplicates = len(keys) - len(set(keys))
+        missing, unexpected = expected - set(keys), set(keys) - expected
+        if missing or unexpected or duplicates:
+            raise ValueError(f"{experiment}: grid mismatch: missing={sorted(missing)}, unexpected={sorted(unexpected)}, duplicates={duplicates}")
     if not actual.window_s.eq(settings["window_s"]).all():
         raise ValueError(f"{experiment}: stimulus durations differ from report.toml")
     if not config.exam_id.eq(settings["exams"][experiment]).all():
@@ -47,7 +92,7 @@ def validate_grid(config: pd.DataFrame, experiment: str, settings: dict) -> dict
         raise ValueError(f"{experiment}: unrecognized configurations outside the stimulus grid")
     if config.id.duplicated().any() or (actual.sent <= 0).any():
         raise ValueError(f"{experiment}: duplicate IDs or no sent packets")
-    return {"experiment": experiment, "exam_id": config.exam_id.iloc[0], "cag_cells": len(actual), "trace_cells": len(trace)}
+    return {"experiment": experiment, "exam_id": config.exam_id.iloc[0], "cag_cells": len(actual), "trace_cells": len(trace), "rounds": len(rounds)}
 
 
 def combine_perf(tables: dict, experiment: str, kind: str) -> pd.DataFrame:
@@ -64,7 +109,7 @@ def combine_perf(tables: dict, experiment: str, kind: str) -> pd.DataFrame:
 
 
 def derive(tables: dict, settings: dict) -> tuple[dict[str, pd.DataFrame], dict]:
-    result, audit = {}, {"grids": [], "warnings": [], "units": "device ticks = microseconds (current firmware); host RTT = milliseconds"}
+    result, audit = {}, {"grids": [], "warnings": [], "units": "pipeline device ticks = microseconds; lookup_* totals are rdcycle counts; host RTT = milliseconds"}
     exams = tables["exams"].set_index("id")
     for e in EXPERIMENTS:
         config = tables[e + "_config"].copy()
@@ -82,8 +127,8 @@ def derive(tables: dict, settings: dict) -> tuple[dict[str, pd.DataFrame], dict]
             perf = combine_perf(tables, e, kind)
             result[f"{e}_{kind}"] = perf.merge(config, left_on="config_id", right_on="id", suffixes=("_metric", ""), validate="many_to_one")
         agg = result[f"{e}_agg"]
-        agg["mean_us"] = ratio(agg.total_ticks, agg["count"])
-        counts = agg[agg.name == "map_operation"].set_index("config_id")["count"]
+        agg["mean_us"] = microsecond_mean(agg)
+        counts = map_helper_frame(agg).set_index("config_id")["count"]
         config["map_samples"] = config.id.map(counts)
         for metric in ("rx_packets", "rx_delivered", "xdp_pass", "xdp_drop", "rx_queue_overflow", "tx_enq_fail_claim", "tx_enq_fail_ring", "tx_fail_bad_buf", "tx_completed"):
             p = result[f"{e}_counter"]
@@ -147,7 +192,7 @@ def derive(tables: dict, settings: dict) -> tuple[dict[str, pd.DataFrame], dict]
         grid["small_sample_cells"] = int(cag.map_samples.between(1, 99).sum())
         for field in ("zero_sample_cells", "missing_sample_cells", "small_sample_cells"):
             if grid[field]:
-                audit["warnings"].append(f"{e}: {field}={grid[field]} for map_operation")
+                audit["warnings"].append(f"{e}: {field}={grid[field]} for map timing")
         grid["min_send_achievement_pct"] = float(cag.send_achievement_pct.min())
         # Histogram mass is a consistency check, never an exact percentile estimator.
         if not all(sum(row.buckets) == row.count for row in agg.itertuples()):

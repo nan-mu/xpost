@@ -8,7 +8,7 @@ use core::convert::Infallible;
 #[cfg(feature = "perf-counter")]
 pub const COUNTER_WIRE_LEN: usize = 184;
 #[cfg(feature = "perf-aggregate")]
-pub const AGGREGATE_WIRE_LEN: usize = 8 * 176;
+pub const AGGREGATE_WIRE_LEN: usize = 11 * 176;
 #[cfg(feature = "perf-gauge")]
 pub const GAUGE_WIRE_LEN: usize = 32;
 #[cfg(feature = "perf-trace")]
@@ -143,36 +143,55 @@ fn encode_counter(out: &mut [u8; COUNTER_WIRE_LEN]) {
 #[cfg(feature = "perf-aggregate")]
 fn encode_aggregate(out: &mut [u8; AGGREGATE_WIRE_LEN]) {
     let a = crate::ext::perf::aggregate();
+    // Slots 6 and 7 are HAL `helper_execution` / `map_operation`. XDP leaves them empty.
     let snaps = [
-        a.rx_processing.snapshot(),
-        a.xdp_execution.snapshot(),
-        a.xdp_dispatch.snapshot(),
-        a.post_action.snapshot(),
-        a.tx_submission.snapshot(),
-        a.tx_block.snapshot(),
-        a.helper_execution.snapshot(),
-        a.map_operation.snapshot(),
+        Some(a.rx_processing.snapshot()),
+        Some(a.xdp_execution.snapshot()),
+        Some(a.xdp_dispatch.snapshot()),
+        Some(a.post_action.snapshot()),
+        Some(a.tx_submission.snapshot()),
+        Some(a.tx_block.snapshot()),
+        None,
+        None,
+        Some(a.lookup_non_null.snapshot()),
+        Some(a.lookup_null.snapshot()),
+        Some(a.lookup_timer_empty.snapshot()),
     ];
-    for (i, snap) in snaps.iter().enumerate() {
-        let off = i * 176;
-        let mut o = off;
-        for v in [
-            snap.count,
-            snap.total_ticks,
-            snap.min_ticks,
-            snap.max_ticks,
-            snap.lo,
-            snap.width,
-        ] {
-            out[o..o + 8].copy_from_slice(&v.to_le_bytes());
-            o += 8;
+    let mut o = 0usize;
+    for snap in snaps {
+        match snap {
+            Some(snap) => {
+                for v in [
+                    snap.count,
+                    snap.total_ticks,
+                    snap.min_ticks,
+                    snap.max_ticks,
+                    snap.lo,
+                    snap.width,
+                ] {
+                    out[o..o + 8].copy_from_slice(&v.to_le_bytes());
+                    o += 8;
+                }
+                for b in snap.buckets {
+                    out[o..o + 8].copy_from_slice(&b.to_le_bytes());
+                    o += 8;
+                }
+            }
+            None => {
+                for _ in 0..5 {
+                    out[o..o + 8].copy_from_slice(&0u64.to_le_bytes());
+                    o += 8;
+                }
+                out[o..o + 8].copy_from_slice(&1u64.to_le_bytes());
+                o += 8;
+                for _ in 0..16 {
+                    out[o..o + 8].copy_from_slice(&0u64.to_le_bytes());
+                    o += 8;
+                }
+            }
         }
-        for b in snap.buckets {
-            out[o..o + 8].copy_from_slice(&b.to_le_bytes());
-            o += 8;
-        }
-        debug_assert_eq!(o, off + 176);
     }
+    debug_assert_eq!(o, AGGREGATE_WIRE_LEN);
 }
 
 #[cfg(feature = "perf-gauge")]

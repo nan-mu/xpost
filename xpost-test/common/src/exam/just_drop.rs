@@ -173,11 +173,12 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
     let pg_opts = PgOpts { formal };
     let mut pg = Some(db::connect_and_ensure(pg_opts).await?);
 
+    let plans = super::repeat::plans(grid);
     let mut eta = BudgetEta::new();
-    eta.add_flashes(arms.len() + 1);
+    eta.add_flashes(arms.len() * plans.len() + 1);
     eta.add_fixed(
         (READY_BUDGET + window)
-            .saturating_mul((arms.len() * grid.len()) as u32),
+            .saturating_mul((arms.len() * grid.len() * plans.len()) as u32),
     );
     eta.add_fixed(READY_BUDGET + Duration::from_secs(5));
 
@@ -193,12 +194,21 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
 
     let esp = cfg.target.esp_ip;
 
-    for fw in &arms {
+    for plan in &plans {
+        ui.permanent(&format!(
+            "round {}/{} hal_first={} seed={}",
+            plan.round,
+            plans.len(),
+            plan.hal_first,
+            plan.seed
+        ));
+        let ordered = plan.order_firmware(&arms);
+        for fw in &ordered {
         let profile = profile_for(*fw);
         let path = path_for(*fw);
         flash_and_arm(cfg, &agent, &ui, &mut eta, path, profile).await?;
 
-        for &pps in grid {
+        for &pps in &plan.rates {
             agent.clear_perf().await.context("clear/perf")?;
             agent
                 .clear_map(MAP_NAME)
@@ -237,6 +247,11 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
                     started_at,
                     stopped_at,
                     sent as i64,
+                    Some(db::CellRepeat {
+                        round: plan.round,
+                        plan_seed: plan.seed,
+                        hal_first: plan.hal_first,
+                    }),
                 )
                 .await?;
                 let rows: Vec<(i32, i64)> = slots
@@ -260,6 +275,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
             }
             eta.consume_fixed(window);
             ui.set_eta(&eta.fmt());
+        }
         }
     }
 
@@ -285,6 +301,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
                 started_at,
                 stopped_at,
                 sent as i64,
+                None,
             )
             .await?;
             let msg = agent.get_perf().await.context("get/perf")?;

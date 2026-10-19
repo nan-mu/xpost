@@ -3,7 +3,7 @@
 //! # Wire layout
 //!
 //! CAGT payload matches `xpost::ext::perf` / host decode
-//! (`184 + 8×176 + 32 + 5136 = 6760` bytes). Counter, Aggregate, Gauge, and
+//! (`184 + 11×176 + 32 + 5136 = 7288` bytes). Counter, Aggregate, Gauge, and
 //! Trace are always present. Firmwares call the bump/record/push APIs they can
 //! fill. Unhooked slots stay **0** on the wire.
 //!
@@ -58,7 +58,7 @@
 //! | `tx_block_max_us` | max TX block µs | `note_block_end` |
 //! | `block_since_us` | internal block start (export 0) | always 0 on wire |
 //!
-//! # Aggregate catalog (8 × 176 B stretch hist)
+//! # Aggregate catalog (8 filled slots + 3 zero lookup slots, 176 B each)
 //!
 //! | wire / DB name | meaning | HAL cut-in |
 //! |---|---|---|
@@ -70,6 +70,10 @@
 //! | `tx_block` | blocked wait inside TX | `note_block_start/end` |
 //! | `helper_execution` | generic helper body | non-map helper analog |
 //! | `map_operation` | ARRAY/HASH lookup+inc/update | around counter/blacklist |
+//!
+//! Slots after `map_operation` are the XDP lookup histograms
+//! (`lookup_non_null`, `lookup_null`, `lookup_timer_empty`).
+//! HAL writes them empty. `lo = 1` and `width = 0` mark lookup edge version 1.
 //!
 //! # Gauge catalog (4 × current+peak u32)
 //!
@@ -92,8 +96,8 @@ use portable_atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicUsize};
 
 /// Counter section length (46 × u32 LE).
 pub const COUNTER_WIRE_LEN: usize = 184;
-/// Aggregate section length (8 × 176).
-pub const AGGREGATE_WIRE_LEN: usize = 8 * 176;
+/// Aggregate section length (8 HAL slots + 3 XDP lookup slots).
+pub const AGGREGATE_WIRE_LEN: usize = 11 * 176;
 /// Gauge section length (4 × (current,peak) u32).
 pub const GAUGE_WIRE_LEN: usize = 32;
 /// Radio / XDP Trace ring capacity (matches xpost).
@@ -122,6 +126,7 @@ pub const TRACE_HELPER_PRINTK: u32 = 6;
 
 const HIST_BUCKETS: usize = 16;
 const AGG_COUNT: usize = 8;
+const AGG_SLOTS: usize = 11;
 const COUNTER_COUNT: usize = 46;
 
 // Counter wire indices (must match host `COUNTER_NAMES` / xpost encode).
@@ -245,75 +250,81 @@ impl Agg {
     }
 
     fn insert_hist(&self, ticks: u64) {
-        if self
-            .ready
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            self.lo.store(ticks, Ordering::Relaxed);
-            self.width.store(1, Ordering::Relaxed);
-        }
+        // Same window grow as `xpost::ext::perf::aggregate`.
         critical_section::with(|_| {
-            loop {
+            if self.ready.load(Ordering::Relaxed) == 0 {
+                self.lo.store(ticks, Ordering::Relaxed);
+                self.width.store(1, Ordering::Relaxed);
+                for b in &self.buckets {
+                    b.store(0, Ordering::Relaxed);
+                }
+                self.ready.store(1, Ordering::Relaxed);
+            }
+            for _ in 0..96 {
                 let lo = self.lo.load(Ordering::Relaxed);
                 let width = self.width.load(Ordering::Relaxed).max(1);
-                let hi = lo.saturating_add(width.saturating_mul(HIST_BUCKETS as u64));
-                if ticks >= lo && ticks < hi {
-                    let idx = ((ticks - lo) / width) as usize;
-                    self.buckets[idx.min(HIST_BUCKETS - 1)].fetch_add(1, Ordering::Relaxed);
-                    return;
+                if ticks >= lo {
+                    let idx = (ticks - lo) / width;
+                    if idx < HIST_BUCKETS as u64 {
+                        self.buckets[idx as usize].fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
                 }
-                if ticks < lo {
-                    self.expand_down(lo, width);
-                } else {
-                    self.expand_up(width);
+                if !self.grow(ticks) {
+                    break;
                 }
             }
+            let lo = self.lo.load(Ordering::Relaxed);
+            let idx = if ticks < lo { 0 } else { HIST_BUCKETS - 1 };
+            self.buckets[idx].fetch_add(1, Ordering::Relaxed);
         });
     }
 
-    fn expand_up(&self, width: u64) {
-        let mut merged = [0u64; HIST_BUCKETS];
-        for i in 0..(HIST_BUCKETS / 2) {
-            merged[i] = self.buckets[2 * i].load(Ordering::Relaxed)
-                + self.buckets[2 * i + 1].load(Ordering::Relaxed);
-        }
-        for i in 0..HIST_BUCKETS {
-            self.buckets[i].store(merged[i], Ordering::Relaxed);
-        }
-        self.width
-            .store(width.saturating_mul(2).max(1), Ordering::Relaxed);
-    }
-
-    fn expand_down(&self, lo: u64, width: u64) {
-        let half = HIST_BUCKETS / 2;
-        let shift = (half as u64).saturating_mul(width);
-        let new_lo = lo.saturating_sub(shift);
-        for i in (0..half).rev() {
-            let v = self.buckets[i].swap(0, Ordering::Relaxed);
-            self.buckets[i + half].store(
-                self.buckets[i + half].load(Ordering::Relaxed) + v,
-                Ordering::Relaxed,
-            );
-        }
-        self.lo.store(new_lo, Ordering::Relaxed);
-        if new_lo == lo {
-            self.expand_up(width);
-            let w = self.width.load(Ordering::Relaxed).max(1);
-            let cur_lo = self.lo.load(Ordering::Relaxed);
-            if cur_lo > 0 {
-                let half_span = (half as u64).saturating_mul(w);
-                self.lo
-                    .store(cur_lo.saturating_sub(half_span), Ordering::Relaxed);
-                for i in (0..half).rev() {
-                    let v = self.buckets[i].swap(0, Ordering::Relaxed);
-                    self.buckets[i + half].store(
-                        self.buckets[i + half].load(Ordering::Relaxed) + v,
-                        Ordering::Relaxed,
-                    );
-                }
+    /// Double `width` and slide `lo` on that grid. See xpost `Aggregate::grow`.
+    fn grow(&self, ticks: u64) -> bool {
+        let width = self.width.load(Ordering::Relaxed).max(1);
+        let Some(new_width) = width.checked_mul(2) else {
+            return false;
+        };
+        let lo = self.lo.load(Ordering::Relaxed);
+        debug_assert_eq!(lo % width, 0);
+        let unit = lo / width;
+        let parity = (unit % 2) as usize;
+        let max_shift = (unit as usize).min(HIST_BUCKETS);
+        let max_aligned = if max_shift % 2 == parity {
+            max_shift
+        } else {
+            max_shift.saturating_sub(1)
+        };
+        let shift = if ticks < lo {
+            let need = ((lo - ticks + width - 1) / width) as usize;
+            let need_aligned = if need % 2 == parity { need } else { need + 1 };
+            if need_aligned <= max_aligned {
+                need_aligned
+            } else {
+                max_aligned
             }
+        } else if parity == 0 || max_aligned == 0 {
+            0
+        } else {
+            1
+        };
+        if ticks < lo && shift == 0 {
+            return false;
         }
+        let mut merged = [0u64; HIST_BUCKETS];
+        for i in 0..HIST_BUCKETS {
+            let dst = (shift + i) / 2;
+            debug_assert!(dst < HIST_BUCKETS);
+            merged[dst] = merged[dst].saturating_add(self.buckets[i].load(Ordering::Relaxed));
+        }
+        for (i, count) in merged.iter().enumerate() {
+            self.buckets[i].store(*count, Ordering::Relaxed);
+        }
+        self.lo
+            .store(lo - (shift as u64) * width, Ordering::Relaxed);
+        self.width.store(new_width, Ordering::Relaxed);
+        true
     }
 
     fn reset(&self) {
@@ -686,6 +697,11 @@ fn encode_aggregate(out: &mut [u8]) {
     for (i, agg) in STATE.aggs.iter().enumerate() {
         let off = i * 176;
         agg.encode(&mut out[off..off + 176]);
+    }
+    // XDP lookup histograms. HAL leaves them empty. lo = edge version, width = 0.
+    for i in AGG_COUNT..AGG_SLOTS {
+        let o = i * 176 + 32;
+        out[o..o + 8].copy_from_slice(&1u64.to_le_bytes());
     }
 }
 

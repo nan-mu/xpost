@@ -73,6 +73,7 @@ static_cell      = "2.1.1"
 # Formal firmware tags: xdp_cag → perf-cag; xdp_t → perf-t.
 perf-cag = ["xpost/perf-counter", "xpost/perf-aggregate", "xpost/perf-gauge"]
 perf-t = ["xpost/perf-counter", "xpost/perf-trace"]
+perf-lookup = ["xpost/perf-lookup"]
 
 [build-dependencies]
 xpost-build = { path = "../../xpost-build" }

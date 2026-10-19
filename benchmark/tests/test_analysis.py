@@ -11,7 +11,7 @@ import pandas as pd
 
 from analysis.data import EXPERIMENTS, load_snapshot
 from analysis.figures import map_points
-from analysis.metrics import derive, pair_intervals, ratio, validate_grid
+from analysis.metrics import derive, microsecond_mean, pair_intervals, ratio, validate_grid
 
 
 def fixture():
@@ -57,6 +57,16 @@ class MetricTests(unittest.TestCase):
         self.assertTrue(actual.iloc[:2].isna().all())
         self.assertEqual(actual.iloc[2], 1.1)
 
+    def test_lookup_cycle_rows_are_not_microseconds(self):
+        frame = pd.DataFrame({
+            "name": ["rx_processing", "lookup_non_null", "lookup_null"],
+            "total_ticks": [50, 320, 0],
+            "count": [10, 4, 0],
+        })
+        mean = microsecond_mean(frame)
+        self.assertEqual(mean.iloc[0], 5)
+        self.assertTrue(mean.iloc[1:].isna().all())
+
     def test_formulas_preserve_measurement_boundaries(self):
         tables, settings = fixture()
         data, audit = derive(tables, settings)
@@ -89,6 +99,22 @@ class MetricTests(unittest.TestCase):
         config.loc[1, "firmware"] = "hal"
         with self.assertRaisesRegex(ValueError, "grid mismatch"):
             validate_grid(config, "just_drop", settings)
+
+    def test_each_round_must_contain_the_full_grid(self):
+        tables, settings = fixture()
+        config = tables["just_drop_config"].copy()
+        extra = config[config.window_s > 0].copy()
+        config.loc[config.window_s > 0, "round"] = 1
+        extra["round"] = 2
+        extra["id"] = extra["id"] + "-r2"
+        repeated = pd.concat([config, extra], ignore_index=True)
+        grid = validate_grid(repeated, "just_drop", settings)
+        self.assertEqual(grid["rounds"], 2)
+        self.assertEqual(grid["cag_cells"], 4)
+        extra.loc[extra.firmware == "xdp_cag", "firmware"] = "hal"
+        broken = pd.concat([config, extra], ignore_index=True)
+        with self.assertRaisesRegex(ValueError, "grid mismatch"):
+            validate_grid(broken, "just_drop", settings)
 
     def test_rtt_count_must_agree_with_success_count(self):
         tables, settings = fixture()

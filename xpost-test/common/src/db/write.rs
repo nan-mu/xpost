@@ -10,6 +10,14 @@ use super::decode::DecodedReport;
 use super::names::{Firmware, HAL_COUNTER_NAMES, map_agg_name, map_trace_kind};
 use super::{ConfigId, ExamId};
 
+/// One recorded pass of a network cell. Trace rows omit it.
+#[derive(Clone, Copy, Debug)]
+pub struct CellRepeat {
+    pub round: i32,
+    pub plan_seed: i64,
+    pub hal_first: bool,
+}
+
 /// Successful bounce sample (`t_rx` observed). Loss rows are not stored.
 #[derive(Clone, Debug)]
 pub struct TxSample {
@@ -49,14 +57,19 @@ pub async fn insert_just_tx_config(
     stopped_at: SystemTime,
     sent: i64,
     ok: i64,
+    repeat: Option<CellRepeat>,
 ) -> Result<ConfigId> {
+    let round = repeat.map(|r| r.round);
+    let plan_seed = repeat.map(|r| r.plan_seed);
+    let hal_first = repeat.map(|r| r.hal_first);
     let row = client
         .query_one(
             r#"
             INSERT INTO just_tx_config (
                 exam_id, firmware, target_pps, window_s,
-                started_at, stopped_at, sent, ok
-            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8)
+                started_at, stopped_at, sent, ok,
+                round, plan_seed, hal_first
+            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING id
             "#,
             &[
@@ -68,6 +81,9 @@ pub async fn insert_just_tx_config(
                 &stopped_at,
                 &sent,
                 &ok,
+                &round,
+                &plan_seed,
+                &hal_first,
             ],
         )
         .await
@@ -110,14 +126,19 @@ pub async fn insert_just_drop_config(
     started_at: SystemTime,
     stopped_at: SystemTime,
     sent: i64,
+    repeat: Option<CellRepeat>,
 ) -> Result<ConfigId> {
+    let round = repeat.map(|r| r.round);
+    let plan_seed = repeat.map(|r| r.plan_seed);
+    let hal_first = repeat.map(|r| r.hal_first);
     let row = client
         .query_one(
             r#"
             INSERT INTO just_drop_config (
                 exam_id, firmware, target_pps, window_s, source_seed,
-                started_at, stopped_at, sent
-            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8)
+                started_at, stopped_at, sent,
+                round, plan_seed, hal_first
+            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING id
             "#,
             &[
@@ -129,6 +150,9 @@ pub async fn insert_just_drop_config(
                 &started_at,
                 &stopped_at,
                 &sent,
+                &round,
+                &plan_seed,
+                &hal_first,
             ],
         )
         .await
@@ -180,14 +204,19 @@ pub async fn insert_firewall_config(
     legal_sent: Option<i64>,
     matched: Option<i64>,
     loss: Option<f64>,
+    repeat: Option<CellRepeat>,
 ) -> Result<ConfigId> {
+    let round = repeat.map(|r| r.round);
+    let plan_seed = repeat.map(|r| r.plan_seed);
+    let hal_first = repeat.map(|r| r.hal_first);
     let row = client
         .query_one(
             r#"
             INSERT INTO firewall_config (
                 exam_id, firmware, blacklist_size, traffic, target_pps, window_s,
-                started_at, stopped_at, sent, legal_sent, matched, loss
-            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                started_at, stopped_at, sent, legal_sent, matched, loss,
+                round, plan_seed, hal_first
+            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             RETURNING id
             "#,
             &[
@@ -203,6 +232,9 @@ pub async fn insert_firewall_config(
                 &legal_sent,
                 &matched,
                 &loss,
+                &round,
+                &plan_seed,
+                &hal_first,
             ],
         )
         .await

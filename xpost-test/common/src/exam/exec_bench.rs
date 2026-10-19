@@ -47,7 +47,7 @@
 //! - `input` — 写入 map[0] 的 32 字节
 //! - `started_at` / `stopped_at` — 该格 `enable exec` 到 `disable exec` 的墙钟
 //!
-//! `exec_bench_data`（每格一行，`rep` 当前恒为 1）：
+//! `exec_bench_data`（每格一行，`rep` 为 1 到 5）：
 //! - `config_id` — 所属 `exec_bench_config`
 //! - `rep` — 重复序号
 //! - `ok` — `enable`/`finish` 成功且 map[1] 与期望 32 字节一致
@@ -278,7 +278,11 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
         0
     };
     eta.add_flashes(ebpf_cells);
-    eta.add_fixed(READY_BUDGET.saturating_mul((arms.len() * workloads.len()) as u32));
+    eta.add_fixed(
+        READY_BUDGET.saturating_mul(
+            (arms.len() * workloads.len() * super::repeat::ROUNDS as usize) as u32,
+        ),
+    );
 
     let ui = RoundUi::new();
     let exam_id = if let Some(client) = pg.as_mut() {
@@ -313,6 +317,7 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
             let input = map_value_bytes(wl.input_hex)?;
             let expect = map_value_bytes(wl.expect_hex)?;
 
+            for rep in 1..=super::repeat::ROUNDS {
             agent.clear_perf().await.context("clear/perf")?;
             agent
                 .update_map_batch(MAP_NAME, &[(KEY_IN.to_string(), wl.input_hex.to_string())])
@@ -358,7 +363,7 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
             }
 
             ui.permanent(&format!(
-                "    {}/{}: ok={ok} wall_ms={} out_len={}",
+                "    {}/{} rep={rep}: ok={ok} wall_ms={} out_len={}",
                 arm.as_db(),
                 wl.name,
                 wall.as_millis(),
@@ -367,7 +372,7 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
 
             if !ok {
                 bail!(
-                    "exec_bench {}/{} failed (enable={:?} finish={:?})",
+                    "exec_bench {}/{} rep={rep} failed (enable={:?} finish={:?})",
                     arm.as_db(),
                     wl.name,
                     enable.as_ref().map(|_| "ok").map_err(|e| format!("{e:#}")),
@@ -387,7 +392,7 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
                     stopped_at,
                 )
                 .await?;
-                db::insert_exec_bench_data(client, cfg_id, 1, ok, output.as_deref()).await?;
+                db::insert_exec_bench_data(client, cfg_id, rep, ok, output.as_deref()).await?;
                 let msg = agent.get_perf().await.context("get/perf")?;
                 if msg.is_empty() {
                     bail!("{}/{}: get/perf empty after ok cell", arm.as_db(), wl.name);
@@ -408,6 +413,7 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
 
             eta.consume_fixed(Duration::from_secs(5));
             ui.set_eta(&eta.fmt());
+            }
         }
     }
 

@@ -2200,6 +2200,7 @@ dependencies = [
  "embassy-time",
  "embedded-storage",
  "esp-hal",
+ "esp-println",
  "esp-radio",
  "esp-storage",
  "hashbrown 0.17.1",
