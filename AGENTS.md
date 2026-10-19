@@ -373,7 +373,10 @@ The `EspRadioTrace` integration resides in `ext/perf/trace/`, beside the ring st
 
 - `esp-radio`: `xpost::esp_radio::new` calls `wifi::new(device, config, &ingress::XDP_PROG)`.
 - `perf-counter`: Counter storage and `EspRadioTrace` hooks on the mounted program.
-- `perf-aggregate`: Latency aggregates and a stretch histogram for high packet rates.
+- `perf-aggregate`: One stretch histogram per pipeline span and per dispatched helper.
+  XDP records helper time in those per-helper histograms.
+  HAL `map_operation` remains its own aggregate.
+  The helper dispatcher does not fill `map_operation`.
 - `perf-gauge`: Current and peak values.
 - `perf-trace`: Event rings grouped by category.
 
