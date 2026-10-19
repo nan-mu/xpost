@@ -220,12 +220,13 @@ pub struct AggregateSet {
     pub lookup_timer_empty: FixedHist,
 }
 
-/// Lower edge of each lookup bucket, in `rdcycle` counts.
+/// Lower edge of each lookup bucket, in microseconds from [`AggregateSet::now_ticks`].
 /// Bucket `i` is `[LOOKUP_EDGE[i], LOOKUP_EDGE[i+1])`.
 /// The last bucket is `[LOOKUP_EDGE[15], +inf)`.
-pub const LOOKUP_HIST_VERSION: u64 = 1;
+/// ESP32-C3 traps both `rdcycle` and `mcycle`, so this clock is the systimer.
+pub const LOOKUP_HIST_VERSION: u64 = 2;
 pub const LOOKUP_EDGE: [u64; HIST_BUCKETS] = [
-    0, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288,
+    0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
 ];
 
 /// Fixed-edge histogram. Samples are never moved into a new window.
@@ -340,20 +341,12 @@ impl AggregateSet {
     }
 }
 
-/// Low 32 bits of the machine cycle counter. A short interval uses `wrapping_sub`.
-/// The user `rdcycle` alias traps on ESP32-C3.
+/// Low 32 bits of [`AggregateSet::now_ticks`], in microseconds.
+/// ESP32-C3 traps `rdcycle` and `mcycle`.
 #[cfg(feature = "perf-lookup")]
 #[inline]
 pub(crate) fn lookup_cycles() -> u32 {
-    let mut cycles: u32;
-    unsafe {
-        core::arch::asm!(
-            "csrr {cycles}, mcycle",
-            cycles = out(reg) cycles,
-            options(nomem, nostack)
-        );
-    }
-    cycles
+    AggregateSet::now_ticks() as u32
 }
 
 /// Record one lookup `dt` after both cycle reads. `returned_null` is the raw pointer result.

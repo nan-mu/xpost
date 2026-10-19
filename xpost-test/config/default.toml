@@ -14,8 +14,8 @@ version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
 # HAL smoke: `dev`. Formal: just_tx / just_drop / firewall / exec_bench. Wipe: formal-clear.
-# Firewall and the helper side run. just_tx exam 5052f5b7 is already stored.
-run = ["firewall", "lookup"]
+# Helper side run. Firewall exam from this boot fix stays in the database.
+run = ["lookup"]
 
 [postgres]
 host = "192.168.110.96"

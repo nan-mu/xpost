@@ -197,7 +197,7 @@ The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` setti
 
 - Only `just_tx`: `run = ["just_tx"]`.
 - Only `firewall`: `run = ["firewall"]`.
-- Current selection: `run = ["firewall", "lookup"]`.
+- Current selection: `run = ["lookup"]`.
 - All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
 - All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
 
@@ -401,7 +401,7 @@ The `EspRadioTrace` integration resides in `ext/perf/trace/`, beside the ring st
 - `esp-radio`: `xpost::esp_radio::new` calls `wifi::new(device, config, &ingress::XDP_PROG)`.
 - `perf-counter`: Counter storage and `EspRadioTrace` hooks on the mounted program.
 - `perf-aggregate`: Stretch histograms for pipeline spans. Lookup timing is a separate feature.
-  `perf-lookup` records only `map_lookup_elem`, in `rdcycle` counts, into fixed edges.
+  `perf-lookup` records only `map_lookup_elem`, in systimer microseconds, into fixed edges.
   A zero return is `lookup_null`. It is not a proven map miss.
   Main network builds leave `perf-lookup` off.
   HAL `map_operation` remains its own aggregate.
