@@ -25,6 +25,9 @@ target/
 # Ignore .DS_Store file in mac
 **/.DS_Store
 
+# Removed analysis package. Local leftovers stay on disk and out of git.
+/benchmark/
+
 # Local DUT secrets (track config.example.toml instead)
 /config.toml
 examples/*/config.toml

@@ -38,7 +38,7 @@ Use **XDP ELF** or **`xdp.elf`** instead of "Compact ELF" in documents and logs.
 - `xpost-build` provides build tools, including `xpost-link` and `xpost-compact-elf`.
   Preserve these executable names. Call their cold-install artifacts XDP ELFs.
 - `xpost-test` controls the complete test procedure.
-- `benchmark` contains Python analysis tools and a feature-oriented Markdown experiment report.
+- Git history keeps the benchmark analysis package. The work tree does not include its tracked files. New figures do not use that package.
 
 The root workspace members are `.`, `esp-radio`, `xpost-macros`, `xpost-elf`, and `xpost-type`.
 It excludes `xpost-build`, `xpost-agent`, `xpost-serial`, `xpost-test`, and `examples`.
@@ -432,32 +432,11 @@ Enabling the Cargo feature `ringbuf` triggers `compile_error!`.
 
 ## Benchmark analysis
 
-Read `benchmark/README.md` before analysis work.
-`benchmark/report.md` locks the 2026-10-19 exams and explains source-address counting.
-It refuses firewall, reply, deployment, verification, resource, and lookup-helper figures when the locked rows do not support the design.
-Read `xpost-test/common/src/exam/{just_drop,firewall,just_tx,exec_bench}.rs` before interpreting results.
-Check the current firmware and build scripts too. Comments and older design drafts can describe unimplemented behavior.
-`benchmark/analysis/` generates figures and evidence tables from a fixed database snapshot. It does not rewrite the report prose or generate notebooks.
-`benchmark/report.toml` pins one completed exam per task, the 13-rate grid, and five rounds.
-From `benchmark/`, run `pixi run figures` for a read-only database export and figure build, or `pixi run replay --snapshot outputs/snapshots/<id>` to rebuild offline.
-Figures, CSV tables, and provenance go under `benchmark/outputs/report/`. Review the Markdown narrative when changing batches.
-The count figure uses map increments over actual sends, and event rate over 30 seconds.
-The x-axis is sends divided by the recorded start-stop interval, which includes the 200 ms drain.
-Ratios above 1 stay unchanged. They are not unique-packet coverage.
-Firewall figures require a legal share near 10% of actual sends. The locked batch fixes 1024 legal packets, so it is not plotted.
-Reply figures require separate matched replies and valid RTT rows. Timestamp-only `ok` rows are not `G(t)`.
-EXEC exports the collector's 32-byte output check for five repetitions. It does not export invocation timing or a speedup.
-A lookup sample count of 0 is missing instrumentation, not zero helper cost.
-Keep zero-sample means missing, distinguish target from actual send rate, and do not compare differently scoped HAL/XDP timers as speedup ratios.
-Run `pixi run check` for analysis checks.
-Regenerating the report requires no device operation.
-Use `benchmark/pixi.toml` for the Python environment and `benchmark/utils/db.py` for database access.
-The database helper reads `benchmark/.env`.
-Set `PGSCHEMA=formal` in that file for formal results.
-The standalone `export_flame_svg.py` and `export_speedscope.py` retain legacy report/schema inputs.
-They are not the current formal collector's export path.
-Keep analysis organized by feature or metric, as specified in the benchmark README.
-Do not restore the deleted per-experiment notebooks without an explicit request.
+Git history keeps the previous analysis code, report, and exam pins.
+The work tree does not include those tracked files.
+Do not restore those files for a new figure.
+Do not run the old `pixi` figure or replay tasks.
+A new figure needs a new analysis path.
 
 ## Documentation style
 
@@ -486,3 +465,4 @@ Do not create speedup plots without comparable timing boundaries and nonzero sam
 
 The 2026-09-28 formal just_tx dump is git tag `archive/just-tx-formal-20260928`.
 Do not restore `benchmark/backup/` in the working tree.
+Do not restore the deleted benchmark analysis package unless the user asks.
