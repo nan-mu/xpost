@@ -412,6 +412,7 @@ The `EspRadioTrace` integration resides in `ext/perf/trace/`, beside the ring st
 - `perf-counter`: Counter storage and `EspRadioTrace` hooks on the mounted program.
 - `perf-aggregate`: Stretch histograms for pipeline spans. Lookup timing is a separate feature.
   `perf-lookup` records only `map_lookup_elem`, in systimer microseconds, into fixed edges.
+  The timer read is `lookup_ticks_us`.
   `update map lookup_timing` sets that gate while the image is released.
   A closed gate writes no lookup sample.
   A zero return is `lookup_null`. It is not a proven map miss.
@@ -448,7 +449,18 @@ Git history keeps the previous analysis code, report, and exam pins.
 The work tree does not include those tracked files.
 Do not restore those files for a new figure.
 Do not run the old `pixi` figure or replay tasks.
-A new figure needs a new analysis path.
+The current analysis entry is `analysis/`.
+It reads pinned exams, audits them, and then plots.
+Do not compute a send rate from `started_at` and `stopped_at`.
+Those two instants include the drain interval.
+New TX and firewall rows store `send_begin`, `send_end`, and `drain_end`.
+`send_elapsed_ns` is the monotonic send interval.
+`export_elapsed_ns` counts management and export after drain.
+A null send interval stays missing.
+Do not fill that null with 30 seconds.
+Lookup histograms use fixed-edge version 2.
+The unit is systimer microseconds.
+A lookup row with `count` 0 has no mean and no quantile.
 
 ## Documentation style
 
