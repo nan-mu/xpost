@@ -197,7 +197,7 @@ The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` setti
 
 - Only `just_tx`: `run = ["just_tx"]`.
 - Only `firewall`: `run = ["firewall"]`.
-- Current selection: `run = ["just_tx", "firewall", "lookup"]`.
+- Current selection: `run = ["just_tx"]`.
 - All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
 - All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
 
@@ -257,6 +257,8 @@ The firewall Trace stage uses eight blacklist entries and sends one matching pac
 `pkt_matched` counts rows with `pkt_rx`.
 `stamp_drops` and `pkt_drops` count lost events on each channel.
 `lookup` marks the runtime helper-timing switch.
+The host announces the stimulus neighbor once per second.
+It does not send an ARP frame before every probe.
 
 The network XDP firmware projects are `examples/just_xdp` and `examples/firewall`.
 Their board features are `perf-cag` and `perf-t`, with no default feature.
