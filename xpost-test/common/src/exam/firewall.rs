@@ -277,13 +277,15 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 )
                 .await?;
                 db::insert_firewall_data(client, cfg_id, &map_rows).await?;
-                db::insert_firewall_ident(
-                    client,
-                    cfg_id,
-                    &encode_u16s(&tokens),
-                    &encode_u16s(&returned),
-                )
-                .await?;
+                let sent_bytes = encode_u16s(&tokens);
+                let recv_bytes = encode_u16s(&returned);
+                let sent_back = decode_u16s(&sent_bytes).context("sent token bytes")?;
+                let recv_back = decode_u16s(&recv_bytes).context("recv token bytes")?;
+                let recomputed = match_tokens(&sent_back, &recv_back);
+                if recomputed != matched {
+                    bail!("token bytes recompute {recomputed}, stored matched {matched}");
+                }
+                db::insert_firewall_ident(client, cfg_id, &sent_bytes, &recv_bytes).await?;
                 let msg = agent.get_perf().await.context("get/perf")?;
                 let decoded = db::decode_report_msg(&msg)?;
                 db::write_perf(
