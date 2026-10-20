@@ -89,6 +89,10 @@ pub fn clear_map(name: &str) -> Result<(), AppMapError> {
 /// ARRAY: `key` = decimal slot, `value` = decimal `u64`.
 /// HASH: `key` = dotted IPv4, `value` = decimal integer (truncated to value size).
 pub fn update_map(name: &str, key: &[u8], value: &[u8]) -> Result<(), AppMapError> {
+    if name == "lookup_timing" {
+        let _ = key;
+        return set_lookup_timing(value);
+    }
     let (mut maps, idx) = lock_map(name)?;
     let ty = maps.get(idx)?.map_type();
     let val = parse_u64_token(value).ok_or(AppMapError::InvalidValue)?;
@@ -115,6 +119,31 @@ pub fn update_map(name: &str, key: &[u8], value: &[u8]) -> Result<(), AppMapErro
                     other => other.into(),
                 })
         }
+    }
+}
+
+/// Set the lookup histogram gate. The image must be released.
+/// Firmware built without `perf-lookup` rejects the command.
+fn set_lookup_timing(value: &[u8]) -> Result<(), AppMapError> {
+    #[cfg(not(feature = "perf-lookup"))]
+    {
+        let _ = value;
+        return Err(AppMapError::Unsupported);
+    }
+    #[cfg(feature = "perf-lookup")]
+    {
+        let on = match value {
+            b"0" => false,
+            b"1" => true,
+            _ => return Err(AppMapError::InvalidValue),
+        };
+        let xdp_lock = XDP_RT.try_get().ok_or(AppMapError::NoRt)?;
+        let xdp = xdp_lock.try_lock().map_err(|_| AppMapError::Busy)?;
+        if xdp.leased() {
+            return Err(AppMapError::Busy);
+        }
+        crate::ext::perf::aggregate::set_lookup_timing(on);
+        Ok(())
     }
 }
 

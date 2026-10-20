@@ -505,6 +505,11 @@ impl XdpRt {
         self.lease(maps)
     }
 
+    /// True while an image is leased.
+    pub fn leased(&self) -> bool {
+        self.leased
+    }
+
     /// Disable datapath: clear aliases, drop map users, clear VMR table.
     pub fn release(&mut self) -> Result<(), XdpReleaseError> {
         if !self.leased {

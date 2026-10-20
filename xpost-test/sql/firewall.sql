@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS firewall_data (
 
 CREATE INDEX IF NOT EXISTS firewall_data_config ON firewall_data (config_id);
 
+-- Little-endian u16 token lists. The host recomputes the intersection from these bytes.
+CREATE TABLE IF NOT EXISTS firewall_legal_ident (
+    config_id UUID PRIMARY KEY REFERENCES firewall_config (id) ON DELETE CASCADE,
+    sent_tokens BYTEA NOT NULL,
+    recv_tokens BYTEA NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS firewall_hal_counter (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     config_id UUID NOT NULL REFERENCES firewall_config (id) ON DELETE CASCADE,

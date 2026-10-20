@@ -213,10 +213,14 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
             seed_blacklist(&agent, &rules).await?;
             ui.check_ok(&format!("{} entries", rules.len()));
 
-            let _ = agent.clear_map(MAP_RESULT).await;
+            agent.clear_map(MAP_RESULT).await.context("clear/map firewall_result")?;
             agent.clear_perf().await.context("clear/perf")?;
+            if opts.lookup {
+                super::set_lookup_switch(&agent, true).await?;
+            }
             agent.enable_xdp().await.context("enable/xdp")?;
             let started_at = SystemTime::now();
+            let phase = (plan.seed as u64) % LEGAL_EVERY;
             let (illegal_sent, legal_sent, tokens) = paced_mixed(
                 cfg,
                 &ui,
@@ -226,6 +230,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 pps,
                 &rules,
                 miss,
+                phase,
             )
             .await?;
             tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
@@ -272,6 +277,13 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 )
                 .await?;
                 db::insert_firewall_data(client, cfg_id, &map_rows).await?;
+                db::insert_firewall_ident(
+                    client,
+                    cfg_id,
+                    &encode_u16s(&tokens),
+                    &encode_u16s(&returned),
+                )
+                .await?;
                 let msg = agent.get_perf().await.context("get/perf")?;
                 let decoded = db::decode_report_msg(&msg)?;
                 db::write_perf(
@@ -454,7 +466,8 @@ fn match_tokens(sent: &[u16], returned: &[u16]) -> usize {
 
 const LEGAL_EVERY: u64 = 10;
 
-/// One paced stream at `target_pps`. Every 10th packet is legal.
+/// One paced stream at `target_pps`. One packet in each group of 10 is legal.
+/// `legal_phase` is that packet's index inside the group.
 async fn paced_mixed(
     cfg: &FileConfig,
     ui: &RoundUi,
@@ -464,6 +477,7 @@ async fn paced_mixed(
     target_pps: f64,
     illegal_srcs: &[Ipv4Addr],
     legal_src: Ipv4Addr,
+    legal_phase: u64,
 ) -> Result<(u64, u64, Vec<u16>)> {
     let esp = cfg.target.esp_ip;
     let esp_mac = cfg.esp_mac_bytes()?;
@@ -516,7 +530,7 @@ async fn paced_mixed(
             continue;
         }
 
-        if i % LEGAL_EVERY == 0 {
+        if i % LEGAL_EVERY == legal_phase {
             let token = next_token;
             next_token = next_token
                 .checked_add(1)
@@ -572,4 +586,41 @@ async fn send_one(cfg: &FileConfig, src: Ipv4Addr) -> Result<u64> {
     raw.send_udp(src, esp, STIM_PORT, b"D")
         .context("send_one")?;
     Ok(1)
+}
+
+pub(crate) fn encode_u16s(xs: &[u16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(xs.len() * 2);
+    for x in xs {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out
+}
+
+pub(crate) fn decode_u16s(bytes: &[u8]) -> Option<Vec<u16>> {
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_u16s, encode_u16s, match_tokens};
+
+    #[test]
+    fn stored_bytes_recompute_the_intersection() {
+        let sent = [1u16, 2, 3, 4];
+        let recv = [3u16, 3, 9];
+        let sent_b = encode_u16s(&sent);
+        let recv_b = encode_u16s(&recv);
+        let sent2 = decode_u16s(&sent_b).unwrap();
+        let recv2 = decode_u16s(&recv_b).unwrap();
+        assert_eq!(match_tokens(&sent2, &recv2), 1);
+        assert_ne!(sent_b, recv_b);
+    }
 }

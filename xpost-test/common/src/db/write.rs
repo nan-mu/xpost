@@ -26,6 +26,11 @@ pub struct TxSample {
     pub t_rx: Option<SystemTime>,
     pub saw_tx: bool,
     pub saw_rx: bool,
+    pub pkt_rx: bool,
+    pub pkt_n: i32,
+    pub kernel_tx_ns: Option<i64>,
+    pub kernel_rx_ns: Option<i64>,
+    pub rx_stamp_n: i32,
 }
 
 pub async fn insert_exam(client: &Client, note: Option<&str>) -> Result<ExamId> {
@@ -62,6 +67,9 @@ pub async fn insert_just_tx_config(
     ok: i64,
     matched: i64,
     lookup: bool,
+    stamp_drops: i64,
+    pkt_drops: i64,
+    pkt_matched: i64,
     repeat: Option<CellRepeat>,
 ) -> Result<ConfigId> {
     let round = repeat.map(|r| r.round);
@@ -73,8 +81,12 @@ pub async fn insert_just_tx_config(
             INSERT INTO just_tx_config (
                 exam_id, firmware, target_pps, window_s,
                 started_at, stopped_at, sent, ok, matched, lookup,
+                stamp_drops, pkt_drops, pkt_matched,
                 round, plan_seed, hal_first
-            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ) VALUES (
+                $1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16
+            )
             RETURNING id
             "#,
             &[
@@ -88,6 +100,9 @@ pub async fn insert_just_tx_config(
                 &ok,
                 &matched,
                 &lookup,
+                &stamp_drops,
+                &pkt_drops,
+                &pkt_matched,
                 &round,
                 &plan_seed,
                 &hal_first,
@@ -112,20 +127,49 @@ pub async fn insert_just_tx_data(
     let t_rx: Vec<Option<SystemTime>> = samples.iter().map(|s| s.t_rx).collect();
     let saw_tx: Vec<bool> = samples.iter().map(|s| s.saw_tx).collect();
     let saw_rx: Vec<bool> = samples.iter().map(|s| s.saw_rx).collect();
+    let pkt_rx: Vec<bool> = samples.iter().map(|s| s.pkt_rx).collect();
+    let pkt_n: Vec<i32> = samples.iter().map(|s| s.pkt_n).collect();
+    let kernel_tx_ns: Vec<Option<i64>> = samples.iter().map(|s| s.kernel_tx_ns).collect();
+    let kernel_rx_ns: Vec<Option<i64>> = samples.iter().map(|s| s.kernel_rx_ns).collect();
+    let rx_stamp_n: Vec<i32> = samples.iter().map(|s| s.rx_stamp_n).collect();
     client
         .execute(
             r#"
-            INSERT INTO just_tx_data (config_id, seq, t_tx, t_rx, saw_tx, saw_rx)
-            SELECT $1, u.seq, u.t_tx, u.t_rx, u.saw_tx, u.saw_rx
+            INSERT INTO just_tx_data (
+                config_id, seq, t_tx, t_rx, saw_tx, saw_rx,
+                pkt_rx, pkt_n, kernel_tx_ns, kernel_rx_ns, rx_stamp_n
+            )
+            SELECT $1, u.seq, u.t_tx, u.t_rx, u.saw_tx, u.saw_rx,
+                   u.pkt_rx, u.pkt_n, u.kernel_tx_ns, u.kernel_rx_ns, u.rx_stamp_n
             FROM UNNEST(
                 $2::bigint[],
                 $3::timestamptz[],
                 $4::timestamptz[],
                 $5::boolean[],
-                $6::boolean[]
-            ) AS u(seq, t_tx, t_rx, saw_tx, saw_rx)
+                $6::boolean[],
+                $7::boolean[],
+                $8::int[],
+                $9::bigint[],
+                $10::bigint[],
+                $11::int[]
+            ) AS u(
+                seq, t_tx, t_rx, saw_tx, saw_rx,
+                pkt_rx, pkt_n, kernel_tx_ns, kernel_rx_ns, rx_stamp_n
+            )
             "#,
-            &[&config_id, &seq, &t_tx, &t_rx, &saw_tx, &saw_rx],
+            &[
+                &config_id,
+                &seq,
+                &t_tx,
+                &t_rx,
+                &saw_tx,
+                &saw_rx,
+                &pkt_rx,
+                &pkt_n,
+                &kernel_tx_ns,
+                &kernel_rx_ns,
+                &rx_stamp_n,
+            ],
         )
         .await
         .context("INSERT just_tx_data UNNEST")?;
@@ -258,6 +302,25 @@ pub async fn insert_firewall_config(
         .await
         .context("INSERT firewall_config")?;
     Ok(row.get(0))
+}
+
+pub async fn insert_firewall_ident(
+    client: &Client,
+    config_id: ConfigId,
+    sent_tokens: &[u8],
+    recv_tokens: &[u8],
+) -> Result<()> {
+    client
+        .execute(
+            r#"
+            INSERT INTO firewall_legal_ident (config_id, sent_tokens, recv_tokens)
+            VALUES ($1, $2, $3)
+            "#,
+            &[&config_id, &sent_tokens, &recv_tokens],
+        )
+        .await
+        .context("INSERT firewall_legal_ident")?;
+    Ok(())
 }
 
 pub async fn insert_firewall_data(

@@ -227,6 +227,9 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
                 .clear_map(MAP_NAME)
                 .await
                 .context("clear/map counter")?;
+            if opts.lookup {
+                super::set_lookup_switch(&agent, true).await?;
+            }
             agent.enable_xdp().await.context("enable/xdp")?;
             let started_at = SystemTime::now();
             let sent = paced_multi_src(cfg, &ui, &eta, path, window, pps, source_seed).await?;

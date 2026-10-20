@@ -20,7 +20,8 @@ pub use pg::{PgOpts, connect};
 pub use write::{
     CellRepeat, PerfExperiment, TxSample, insert_exam, insert_exec_bench_config,
     insert_exec_bench_data,
-    insert_firewall_config, insert_firewall_data, insert_just_drop_config, insert_just_drop_data,
+    insert_firewall_config, insert_firewall_data, insert_firewall_ident, insert_just_drop_config,
+    insert_just_drop_data,
     insert_just_tx_config, insert_just_tx_data, stop_exam, write_perf,
 };
 

@@ -62,19 +62,23 @@ fn dispatch_helper(idx: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
         HelperIdx::BPF_FUNC_MAP_LOOKUP_ELEM => {
             #[cfg(feature = "perf-lookup")]
             {
-                // Two timer reads bracket only the helper body.
-                // Return class and bucketing run after the second read.
-                let t0 = crate::ext::perf::aggregate::lookup_cycles();
-                let ret = inner::map_lookup_elem::inner(a1, a2);
-                let t1 = crate::ext::perf::aggregate::lookup_cycles();
-                let e0 = crate::ext::perf::aggregate::lookup_cycles();
-                let e1 = crate::ext::perf::aggregate::lookup_cycles();
-                crate::ext::perf::aggregate::record_lookup(
-                    t1.wrapping_sub(t0) as u64,
-                    ret == 0,
-                    e1.wrapping_sub(e0) as u64,
-                );
-                ret
+                if crate::ext::perf::aggregate::lookup_timing_enabled() {
+                    // Two timer reads bracket only the helper body.
+                    // Return class and bucketing run after the second read.
+                    let t0 = crate::ext::perf::aggregate::lookup_cycles();
+                    let ret = inner::map_lookup_elem::inner(a1, a2);
+                    let t1 = crate::ext::perf::aggregate::lookup_cycles();
+                    let e0 = crate::ext::perf::aggregate::lookup_cycles();
+                    let e1 = crate::ext::perf::aggregate::lookup_cycles();
+                    crate::ext::perf::aggregate::record_lookup(
+                        t1.wrapping_sub(t0) as u64,
+                        ret == 0,
+                        e1.wrapping_sub(e0) as u64,
+                    );
+                    ret
+                } else {
+                    inner::map_lookup_elem::inner(a1, a2)
+                }
             }
             #[cfg(not(feature = "perf-lookup"))]
             {

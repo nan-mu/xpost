@@ -25,6 +25,17 @@ static CONFIG: Array<FilterConfig> = Array::with_max_entries(1, 0);
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(4 * 1024 * 1024, 0);
 
+#[map]
+static STAMP_DROPS: Array<u64> = Array::with_max_entries(1, 0);
+
+fn note_stamp_drop() {
+    if let Some(ptr) = STAMP_DROPS.get_ptr_mut(0) {
+        unsafe {
+            *ptr = (*ptr).wrapping_add(1);
+        }
+    }
+}
+
 #[classifier]
 pub fn test_egress(ctx: TcContext) -> i32 {
     match try_stamp(&ctx, true) {
@@ -167,6 +178,8 @@ fn try_stamp(ctx: &TcContext, egress: bool) -> Result<i32, i32> {
                 "echo_ingress seq={} sport={} ns={}", seq, sport, ktime_ns
             );
         }
+    } else {
+        note_stamp_drop();
     }
 
     Ok(TC_ACT_PIPE)
@@ -237,6 +250,8 @@ fn try_stamp_xdp(ctx: &XdpContext) -> Result<u32, u32> {
             seq,
         });
         slot.submit(0);
+    } else {
+        note_stamp_drop();
     }
 
     Ok(xdp_action::XDP_PASS)

@@ -4,8 +4,11 @@
 -- just_tx_data holds one row per send.
 -- seq identifies the probe. t_rx is null when the RTT pair is incomplete.
 -- saw_tx / saw_rx record each kernel stamp independently of a valid RTT.
+-- pkt_rx is an AF_PACKET hit for that seq. It is not a timestamp.
+-- kernel_tx_ns / kernel_rx_ns are raw bpf ktime values. They are not wall clocks.
 -- ok counts rows with both stamps and t_rx >= t_tx.
--- matched counts rows with saw_rx. Loss is not sent - ok.
+-- matched counts rows with saw_rx. pkt_matched counts rows with pkt_rx.
+-- stamp_drops and pkt_drops are channel loss during the window.
 
 CREATE TABLE IF NOT EXISTS just_tx_config (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -31,6 +34,9 @@ ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS plan_seed BIGINT;
 ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS hal_first BOOLEAN;
 ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS matched BIGINT;
 ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS lookup BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS stamp_drops BIGINT;
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS pkt_drops BIGINT;
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS pkt_matched BIGINT;
 
 CREATE TABLE IF NOT EXISTS just_tx_data (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -46,6 +52,11 @@ ALTER TABLE just_tx_data ADD COLUMN IF NOT EXISTS seq BIGINT;
 ALTER TABLE just_tx_data ADD COLUMN IF NOT EXISTS saw_tx BOOLEAN;
 ALTER TABLE just_tx_data ADD COLUMN IF NOT EXISTS saw_rx BOOLEAN;
 ALTER TABLE just_tx_data ALTER COLUMN t_rx DROP NOT NULL;
+ALTER TABLE just_tx_data ADD COLUMN IF NOT EXISTS pkt_rx BOOLEAN;
+ALTER TABLE just_tx_data ADD COLUMN IF NOT EXISTS pkt_n INT;
+ALTER TABLE just_tx_data ADD COLUMN IF NOT EXISTS kernel_tx_ns BIGINT;
+ALTER TABLE just_tx_data ADD COLUMN IF NOT EXISTS kernel_rx_ns BIGINT;
+ALTER TABLE just_tx_data ADD COLUMN IF NOT EXISTS rx_stamp_n INT;
 
 CREATE INDEX IF NOT EXISTS just_tx_data_config ON just_tx_data (config_id);
 

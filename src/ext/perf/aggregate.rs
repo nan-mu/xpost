@@ -6,7 +6,24 @@
 
 use core::sync::atomic::Ordering;
 
-use portable_atomic::{AtomicU32, AtomicU64};
+use portable_atomic::{AtomicBool, AtomicU32, AtomicU64};
+
+/// Runtime gate for lookup histograms. Default off.
+/// Set only while the XDP image is not leased.
+#[cfg(feature = "perf-lookup")]
+static LOOKUP_TIMING: AtomicBool = AtomicBool::new(false);
+
+/// Turn lookup histograms on or off. The caller must hold the image released.
+#[cfg(feature = "perf-lookup")]
+pub fn set_lookup_timing(on: bool) {
+    LOOKUP_TIMING.store(on, Ordering::Relaxed);
+}
+
+/// True when this firmware should record `map_lookup_elem` intervals.
+#[cfg(feature = "perf-lookup")]
+pub fn lookup_timing_enabled() -> bool {
+    LOOKUP_TIMING.load(Ordering::Relaxed)
+}
 
 /// Histogram bucket count (power of two for pairwise merge).
 pub const HIST_BUCKETS: usize = 16;

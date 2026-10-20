@@ -197,13 +197,16 @@ The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` setti
 
 - Only `just_tx`: `run = ["just_tx"]`.
 - Only `firewall`: `run = ["firewall"]`.
-- Current selection: `run = ["lookup"]`.
+- Current selection: `run = ["just_tx", "firewall", "lookup"]`.
 - All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
 - All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
 
 `lookup` runs the helper side experiment.
-It compares `just-tx-cag` and `just-tx-cag-lookup` at 1400 pps, five rounds, XPOST only.
-It then runs `just_drop` and `firewall` at 400, 1400, and 4000 pps with `perf-lookup` on, XPOST only.
+TX at 1400 pps flashes one `just-tx-cag-lookup` firmware per round.
+The host writes `lookup_timing` only while that image is released.
+Odd rounds run the on pass first. Even rounds run the off pass first.
+An off pass records no lookup sample.
+`just_drop` and `firewall` then run at 400, 1400, and 4000 pps with the switch on.
 
 The experiment files contain `formal` and `arms` settings.
 The three network experiment files use `formal = true` and `arms = ["hal", "xdp"]`.
@@ -229,7 +232,8 @@ The counter uses the last byte of the IPv4 source address as its bucket index.
 
 The `firewall.toml` file sets `blacklist_size = 200`.
 Each firewall CAG cell paces one stream at the target rate for 30 seconds.
-Every 10th packet is a unique little-endian `u16` from a source IP outside the blacklist.
+One packet in each group of 10 is a unique little-endian `u16` from a source IP outside the blacklist.
+The legal index inside that group is `plan_seed % 10`.
 The other packets rotate across the blacklist.
 The DUT stores legal tokens in the virtual map `firewall_result`, up to 16384 entries.
 `firewall_dropped` counts tokens the buffer refused.
@@ -238,15 +242,21 @@ Legal flows do not ACK.
 `firewall_config.sent` stores the illegal send count.
 `legal_sent` stores the legal send count. `matched` stores the matched token count.
 Despite its name, `loss` stores the delivery ratio `matched / legal_sent`.
+`firewall_legal_ident` stores the sent and received token bytes.
+A later query recomputes the intersection from those bytes.
 The firewall Trace stage uses eight blacklist entries and sends one matching packet.
 
 `just_tx_data` stores one row per send.
 `seq` is the probe id.
 `t_rx` is null when the two kernel stamps do not form an RTT.
-`saw_tx` and `saw_rx` record each stamp.
+`saw_tx` and `saw_rx` record each kernel stamp.
+`pkt_rx` records an AF_PACKET hit for that seq. It is not a stamp.
+`kernel_tx_ns` and `kernel_rx_ns` store raw bpf time.
 `just_tx_config.ok` counts complete RTT rows.
 `matched` counts rows with `saw_rx`.
-`lookup` marks the helper-timing firmware pass.
+`pkt_matched` counts rows with `pkt_rx`.
+`stamp_drops` and `pkt_drops` count lost events on each channel.
+`lookup` marks the runtime helper-timing switch.
 
 The network XDP firmware projects are `examples/just_xdp` and `examples/firewall`.
 Their board features are `perf-cag` and `perf-t`, with no default feature.
@@ -402,6 +412,8 @@ The `EspRadioTrace` integration resides in `ext/perf/trace/`, beside the ring st
 - `perf-counter`: Counter storage and `EspRadioTrace` hooks on the mounted program.
 - `perf-aggregate`: Stretch histograms for pipeline spans. Lookup timing is a separate feature.
   `perf-lookup` records only `map_lookup_elem`, in systimer microseconds, into fixed edges.
+  `update map lookup_timing` sets that gate while the image is released.
+  A closed gate writes no lookup sample.
   A zero return is `lookup_null`. It is not a proven map miss.
   Main network builds leave `perf-lookup` off.
   HAL `map_operation` remains its own aggregate.

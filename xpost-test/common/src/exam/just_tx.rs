@@ -83,6 +83,11 @@ struct ProbeSample {
     t_rx: Option<SystemTime>,
     saw_tx: bool,
     saw_rx: bool,
+    pkt_rx: bool,
+    pkt_n: i32,
+    kernel_tx_ns: Option<i64>,
+    kernel_rx_ns: Option<i64>,
+    rx_stamp_n: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +99,8 @@ struct WindowStats {
     ok: u64,
     loss: f64,
     samples: Vec<ProbeSample>,
+    stamp_drops: u64,
+    pkt_drops: u64,
     device_rxcnt_delta: u64,
     max_send_gap: Duration,
     host_stalled: bool,
@@ -125,7 +132,7 @@ pub struct JustTxOpts {
     pub is_dev: bool,
     pub formal: bool,
     pub rates: Option<&'static [f64]>,
-    /// Two XPOST passes per round at the given rates. Pass 0 is `perf-cag`. Pass 1 adds `perf-lookup`.
+    /// Two passes of one `perf-lookup` firmware per round. The runtime switch alternates which pass is on.
     pub lookup_pair: bool,
     pub skip_trace: bool,
 }
@@ -165,8 +172,6 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     } else {
         arms_from_cfg(&cfg.just_tx.arms)?
     };
-    let passes = if opts.lookup_pair { 2 } else { 1 };
-
     RoundUi::banner(&format!(
         "{name} arms={:?} +xdp_t grid={:?} window={}s formal={formal} agent={endpoint} esp={esp_s} pg=true",
         arms.iter().map(|a| a.as_db()).collect::<Vec<_>>(),
@@ -185,11 +190,20 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     ));
 
     let plans = super::repeat::plans(grid);
-    let n_flashes = arms.len() * plans.len() * passes + usize::from(!opts.skip_trace);
+    let n_flashes = if opts.lookup_pair {
+        plans.len()
+    } else {
+        arms.len() * plans.len()
+    } + usize::from(!opts.skip_trace);
     let mut eta = BudgetEta::new();
     eta.add_flashes(n_flashes);
     let per_arm = READY_BUDGET + (WARMUP + window + DRAIN).saturating_mul(grid.len() as u32);
-    eta.add_fixed(per_arm.saturating_mul((arms.len() * plans.len() * passes) as u32));
+    let cells = if opts.lookup_pair {
+        plans.len() * 2
+    } else {
+        arms.len() * plans.len()
+    };
+    eta.add_fixed(per_arm.saturating_mul(cells as u32));
     eta.add_fixed(READY_BUDGET + Duration::from_secs(5)); // trace one-shot
 
     let ui = RoundUi::new();
@@ -216,15 +230,14 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
             plan.seed
         ));
         let ordered = if opts.lookup_pair {
-            vec![Firmware::XdpCag, Firmware::XdpCag]
+            vec![Firmware::XdpCag]
         } else {
             plan.order_firmware(&arms)
         };
-        for (pass, fw) in ordered.iter().enumerate() {
+        for fw in &ordered {
         ui.begin_round();
         ui.set_eta(&eta.fmt());
-        let lookup = opts.lookup_pair && pass == 1;
-        let profile = if lookup {
+        let profile = if opts.lookup_pair {
             "just-tx-cag-lookup"
         } else {
             profile_for(*fw)
@@ -235,25 +248,31 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         ui.check_pending("DUT ready");
         flash_and_ready(cfg, &agent, &ui, &mut eta, path, spoof, profile).await?;
 
+        let switch_passes: Vec<bool> = if opts.lookup_pair {
+            // Odd rounds start on. Even rounds start off.
+            if plan.round % 2 == 1 {
+                vec![true, false]
+            } else {
+                vec![false, true]
+            }
+        } else {
+            vec![false]
+        };
+        for lookup in switch_passes {
+            if opts.lookup_pair {
+                super::set_lookup_switch(&agent, lookup).await?;
+                agent.enable_xdp().await.context("enable/xdp")?;
+            }
         for &pps in &plan.rates {
             agent.clear_perf().await.context("clear/perf")?;
             let stats = probe_window(harness, &agent, &ui, &eta, path, spoof, pps, window).await?;
             log_window(&ui, path, pps as usize, &stats);
             if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
                 ui.check_start("写入 postgres");
-                let samples: Vec<TxSample> = stats
-                    .samples
-                    .iter()
-                    .map(|s| TxSample {
-                        seq: s.seq,
-                        t_tx: s.t_tx,
-                        t_rx: s.t_rx,
-                        saw_tx: s.saw_tx,
-                        saw_rx: s.saw_rx,
-                    })
-                    .collect();
+                let samples: Vec<TxSample> = stats.samples.iter().map(tx_sample).collect();
                 let ok = stats.ok as i64;
                 let matched = samples.iter().filter(|s| s.saw_rx).count() as i64;
+                let (pkt_matched, _) = recount_tx(&stats.samples);
                 let cfg_id = db::insert_just_tx_config(
                     client,
                     exam_id,
@@ -266,6 +285,9 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                     ok,
                     matched,
                     lookup,
+                    stats.stamp_drops as i64,
+                    stats.pkt_drops as i64,
+                    pkt_matched as i64,
                     Some(db::CellRepeat {
                         round: plan.round,
                         plan_seed: plan.seed,
@@ -296,6 +318,10 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
             harness.reset_state().await;
             tokio::time::sleep(COOLDOWN).await;
         }
+        if opts.lookup_pair {
+            let _ = agent.disable_xdp().await;
+        }
+        }
         ui.end_round();
         }
     }
@@ -314,14 +340,16 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         flash_and_ready(cfg, &agent, &ui, &mut eta, path, spoof, profile).await?;
         agent.clear_perf().await.context("clear/perf")?;
         harness.reset_state().await;
+        harness.begin_observe().context("begin observe")?;
         let started_at = SystemTime::now();
         let seq = harness.alloc_seq();
         let t_tx = SystemTime::now();
         let _ = harness.send_stimulus(spoof, None, seq).await;
         tokio::time::sleep(DRAIN).await;
+        let (stamp_drops, pkt_drops) = harness.finish_observe().context("finish observe")?;
         let sight = harness.take_seq(seq).await;
         let t0 = sight.t0_ns;
-        let t1 = sight.t_bounce_ns.or(sight.t_echo_ns);
+        let t1 = first_rx_ns(sight.t_bounce_ns, sight.t_echo_ns);
         let (got_rx, t_rx) = match (t0, t1) {
             (Some(a), Some(b)) if b >= a => {
                 let rtt = Duration::from_nanos(b - a);
@@ -332,6 +360,19 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         let stopped_at = SystemTime::now();
         if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
             ui.check_start("写入 trace");
+            let trace_sample = ProbeSample {
+                seq: seq as i64,
+                t_tx,
+                t_rx,
+                saw_tx: t0.is_some(),
+                saw_rx: t1.is_some(),
+                pkt_rx: sight.pkt_n > 0,
+                pkt_n: i32::try_from(sight.pkt_n).unwrap_or(i32::MAX),
+                kernel_tx_ns: t0.and_then(|n| i64::try_from(n).ok()),
+                kernel_rx_ns: t1.and_then(|n| i64::try_from(n).ok()),
+                rx_stamp_n: i32::try_from(sight.rx_stamp_n).unwrap_or(i32::MAX),
+            };
+            let (pkt_matched, _) = recount_tx(&[trace_sample.clone()]);
             let ok = i64::from(got_rx);
             let matched = i64::from(t1.is_some());
             let cfg_id = db::insert_just_tx_config(
@@ -346,21 +387,13 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                 ok,
                 matched,
                 false,
+                stamp_drops as i64,
+                pkt_drops as i64,
+                pkt_matched as i64,
                 None,
             )
             .await?;
-            db::insert_just_tx_data(
-                client,
-                cfg_id,
-                &[TxSample {
-                    seq: seq as i64,
-                    t_tx,
-                    t_rx,
-                    saw_tx: t0.is_some(),
-                    saw_rx: t1.is_some(),
-                }],
-            )
-            .await?;
+            db::insert_just_tx_data(client, cfg_id, &[tx_sample(&trace_sample)]).await?;
             let msg = agent.get_perf().await.context("get/perf")?;
             let decoded = db::decode_report_msg(&msg)?;
             db::write_perf(
@@ -481,6 +514,7 @@ async fn probe_window(
     let before = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
     let _ = agent.clear_perf().await;
     harness.reset_state().await;
+    harness.begin_observe().context("begin observe")?;
     let started_at = SystemTime::now();
     let start = Instant::now();
     let deadline = start + window;
@@ -538,6 +572,7 @@ async fn probe_window(
     ui.live_clear();
     ui.check_start("收集回包");
     tokio::time::sleep(DRAIN).await;
+    let (stamp_drops, pkt_drops) = harness.finish_observe().context("finish observe")?;
 
     let mut samples = Vec::with_capacity(seqs.len());
     let mut ok_n = 0u64;
@@ -547,7 +582,7 @@ async fn probe_window(
     for (i, (seq, t_tx)) in seqs.iter().enumerate() {
         let sight = harness.take_seq(*seq).await;
         let t0 = sight.t0_ns;
-        let t1 = sight.t_bounce_ns.or(sight.t_echo_ns);
+        let t1 = first_rx_ns(sight.t_bounce_ns, sight.t_echo_ns);
         if t0.is_some() {
             n_t0 += 1;
         }
@@ -570,6 +605,11 @@ async fn probe_window(
             t_rx,
             saw_tx: t0.is_some(),
             saw_rx: t1.is_some(),
+            pkt_rx: sight.pkt_n > 0,
+            pkt_n: i32::try_from(sight.pkt_n).unwrap_or(i32::MAX),
+            kernel_tx_ns: t0.and_then(|n| i64::try_from(n).ok()),
+            kernel_rx_ns: t1.and_then(|n| i64::try_from(n).ok()),
+            rx_stamp_n: i32::try_from(sight.rx_stamp_n).unwrap_or(i32::MAX),
         });
         if i % 32 == 0 || i + 1 == seqs.len() {
             ui.check_note(&format!("{ok_n}/{sent_n} ok"));
@@ -599,6 +639,8 @@ async fn probe_window(
         ok: ok_n,
         loss,
         samples,
+        stamp_drops,
+        pkt_drops,
         device_rxcnt_delta: after.saturating_sub(before),
         max_send_gap,
         host_stalled,
@@ -664,4 +706,79 @@ fn gen_lan_ip(esp: Ipv4Addr, avoid: &[Ipv4Addr]) -> Ipv4Addr {
         }
     }
     Ipv4Addr::new(o[0], o[1], o[2], if o[3] == 200 { 201 } else { 200 })
+}
+
+fn first_rx_ns(bounce: Option<u64>, echo: Option<u64>) -> Option<u64> {
+    match (bounce, echo) {
+        (Some(b), Some(e)) => Some(b.min(e)),
+        (Some(b), None) => Some(b),
+        (None, Some(e)) => Some(e),
+        (None, None) => None,
+    }
+}
+
+fn tx_sample(s: &ProbeSample) -> TxSample {
+    TxSample {
+        seq: s.seq,
+        t_tx: s.t_tx,
+        t_rx: s.t_rx,
+        saw_tx: s.saw_tx,
+        saw_rx: s.saw_rx,
+        pkt_rx: s.pkt_rx,
+        pkt_n: s.pkt_n,
+        kernel_tx_ns: s.kernel_tx_ns,
+        kernel_rx_ns: s.kernel_rx_ns,
+        rx_stamp_n: s.rx_stamp_n,
+    }
+}
+
+/// `(pkt_matched, valid_rtt)`. A stamp without a packet is not a match.
+fn recount_tx(samples: &[ProbeSample]) -> (u64, u64) {
+    let matched = samples.iter().filter(|s| s.pkt_rx).count() as u64;
+    let valid = samples
+        .iter()
+        .filter(|s| {
+            s.pkt_rx
+                && matches!(
+                    (s.kernel_tx_ns, s.kernel_rx_ns),
+                    (Some(a), Some(b)) if b >= a
+                )
+        })
+        .count() as u64;
+    (matched, valid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProbeSample, recount_tx};
+    use std::time::SystemTime;
+
+    fn row(pkt_rx: bool, tx: Option<i64>, rx: Option<i64>) -> ProbeSample {
+        ProbeSample {
+            seq: 1,
+            t_tx: SystemTime::UNIX_EPOCH,
+            t_rx: None,
+            saw_tx: tx.is_some(),
+            saw_rx: rx.is_some(),
+            pkt_rx,
+            pkt_n: i32::from(pkt_rx),
+            kernel_tx_ns: tx,
+            kernel_rx_ns: rx,
+            rx_stamp_n: i32::from(rx.is_some()),
+        }
+    }
+
+    #[test]
+    fn packet_without_stamp_keeps_the_match() {
+        let (matched, valid) = recount_tx(&[row(true, Some(10), None)]);
+        assert_eq!(matched, 1);
+        assert_eq!(valid, 0);
+    }
+
+    #[test]
+    fn stamp_without_packet_is_not_a_match() {
+        let (matched, valid) = recount_tx(&[row(false, Some(10), Some(20))]);
+        assert_eq!(matched, 0);
+        assert_eq!(valid, 0);
+    }
 }
