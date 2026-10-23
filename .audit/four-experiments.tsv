@@ -1,0 +1,10 @@
+ts	phase	decision	why	evidence	result
+2026-10-19T09:00:30Z	start	continued the four-experiment repeat after compaction	this run did not write earlier rows because the log did not exist	agent 331b6648-96f5-4e5d-8115-a0aaa4acee0c	open
+2026-10-19T09:00:30Z	frame	five rounds, odd rounds HAL first, shared shuffled rates, reflash each arm, exec rep 1 through 5	one pass cannot show repeatability, and a coin flip can hide one arm order	xpost-test/common/src/exam/repeat.rs	open
+2026-10-19T09:00:30Z	harness	kept old exams valid by leaving round null and checking each round as its own grid	pinned October exams have no round column	benchmark/analysis/metrics.py	tests green
+2026-10-19T09:00:30Z	verify	host planner tests passed and the analysis suite passed 29 tests	the device run is still the real predicate	cargo test five_passes arm_order; pixi run check	tests green
+2026-10-19T09:00:30Z	checkpoint	did not start the board run	a multi-hour run needs the frame seen first, and the agent on port 9240 is stopped	xpost-test/config/default.toml run list	INCONCLUSIVE
+2026-10-19T09:00:30Z	docs	committed only the guide update	the collector code stays uncommitted for review	commit 66aec05	committed
+2026-10-19T09:02:57Z	loop	a later experiment still runs after an earlier one fails, and the process exits non-zero	the old loop stopped the remaining experiments, which would leave them missing	xpost-test/common/src/main.rs	applied
+2026-10-19T09:02:57Z	report	left the report rate pivot on one row per rate	a five-round exam would collide there, and the pinned October exams are still one pass	benchmark/analysis/report.py:39	open
+2026-10-19T09:02:57Z	verify	observed the planner tests and the analysis suite in this session	the verify row named the commands but not their exit status	cargo test 2 passed; pixi run check 29 OK	tests green

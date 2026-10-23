@@ -1,0 +1,9 @@
+when	phase	decision	evidence
+2026-10-20	A	Existing rows cannot draw the helper histogram, the 10% firewall figures, or G(t). Re-run those conditions. Keep the count exam.	lookup counts were 0 under perf-cag. legal_sent was 1024. just_tx_data rows equaled ok and had no seq.
+2026-10-20	A	Delete every formal exam except just_drop f8f46f17 and exec_bench 16b7c489.	Snapshot 20261019T161927.306540Z source_sha256 ccff7035dc734caacce046b8918c74c59d490886ce9fd11da0bbbf12b6006cad matches the gzip payload. Deleted 43 exams.
+2026-10-20	C	Store every TX send with seq, nullable t_rx, saw_tx, and saw_rx. ok stays the complete RTT count. matched counts saw_rx.	xpost-test/sql/just_tx.sql and just_tx.rs. cargo check --release passed.
+2026-10-20	C	Pace one firewall stream. Every 10th packet is legal. Cap is 16384. firewall_dropped is a separate count.	firewall.rs paced_mixed. Both firmware builds linked. XDP .bss is 186232 bytes.
+2026-10-20	C	Lookup histograms use separate profiles and a lookup run. The main grid stays on perf-cag.	profiles.toml just-tx-cag-lookup, just-drop-cag-lookup, firewall-cag-lookup. default.toml run is just_tx, firewall, lookup.
+2026-10-20	C	Device run started. First exam is 5052f5b7 just_tx.	xpost-test banner after upload.
+2026-10-20	E	First firewall cell is one legal packet in ten, and the buffer did not drop tokens.	exam 7aa29b28 config 05de46d1 hal 3600. illegal=97197 legal=10800 dropped=0 matched=6256. legal share=10800/107997.
+2026-10-20	C	XDP firewall boot overflowed the stack by 128 bytes after two 32KB token copies. Keep one 16384-entry BSS array.	serial.log lease/stack overflow at firewall-cag. HAL round 1 had already stored 12000 tokens with dropped=0.
