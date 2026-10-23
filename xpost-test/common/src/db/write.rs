@@ -1,7 +1,7 @@
 //! Typed inserts into formal tables (tokio-postgres repository).
 
 use std::net::Ipv4Addr;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use tokio_postgres::Client;
@@ -16,6 +16,43 @@ pub struct CellRepeat {
     pub round: i32,
     pub plan_seed: i64,
     pub hal_first: bool,
+}
+
+/// Host clocks for one paced window.
+///
+/// `send_elapsed_ns` is the monotonic send interval.
+/// It excludes drain and export.
+/// `export_elapsed_ns` counts management and export after `drain_end`.
+/// `None` on a row means the collector did not record the interval.
+#[derive(Clone, Copy, Debug)]
+pub struct SendSpan {
+    pub send_begin: SystemTime,
+    pub send_end: SystemTime,
+    pub drain_end: SystemTime,
+    pub send_elapsed_ns: i64,
+    pub export_elapsed_ns: i64,
+}
+
+impl SendSpan {
+    pub fn from_elapsed(
+        send_begin: SystemTime,
+        send_end: SystemTime,
+        drain_end: SystemTime,
+        send_elapsed: Duration,
+        export_elapsed: Duration,
+    ) -> Self {
+        Self {
+            send_begin,
+            send_end,
+            drain_end,
+            send_elapsed_ns: elapsed_ns(send_elapsed),
+            export_elapsed_ns: elapsed_ns(export_elapsed),
+        }
+    }
+}
+
+fn elapsed_ns(span: Duration) -> i64 {
+    i64::try_from(span.as_nanos()).unwrap_or(i64::MAX)
 }
 
 /// One probe send. `t_rx` is set only when both kernel stamps form an RTT.
@@ -71,10 +108,16 @@ pub async fn insert_just_tx_config(
     pkt_drops: i64,
     pkt_matched: i64,
     repeat: Option<CellRepeat>,
+    span: Option<SendSpan>,
 ) -> Result<ConfigId> {
     let round = repeat.map(|r| r.round);
     let plan_seed = repeat.map(|r| r.plan_seed);
     let hal_first = repeat.map(|r| r.hal_first);
+    let send_begin = span.map(|s| s.send_begin);
+    let send_end = span.map(|s| s.send_end);
+    let drain_end = span.map(|s| s.drain_end);
+    let send_elapsed_ns = span.map(|s| s.send_elapsed_ns);
+    let export_elapsed_ns = span.map(|s| s.export_elapsed_ns);
     let row = client
         .query_one(
             r#"
@@ -82,10 +125,12 @@ pub async fn insert_just_tx_config(
                 exam_id, firmware, target_pps, window_s,
                 started_at, stopped_at, sent, ok, matched, lookup,
                 stamp_drops, pkt_drops, pkt_matched,
-                round, plan_seed, hal_first
+                round, plan_seed, hal_first,
+                send_begin, send_end, drain_end, send_elapsed_ns, export_elapsed_ns
             ) VALUES (
                 $1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15, $16
+                $11, $12, $13, $14, $15, $16,
+                $17, $18, $19, $20, $21
             )
             RETURNING id
             "#,
@@ -106,6 +151,11 @@ pub async fn insert_just_tx_config(
                 &round,
                 &plan_seed,
                 &hal_first,
+                &send_begin,
+                &send_end,
+                &drain_end,
+                &send_elapsed_ns,
+                &export_elapsed_ns,
             ],
         )
         .await
@@ -266,18 +316,28 @@ pub async fn insert_firewall_config(
     loss: Option<f64>,
     drop_sample: Option<i64>,
     repeat: Option<CellRepeat>,
+    span: Option<SendSpan>,
 ) -> Result<ConfigId> {
     let round = repeat.map(|r| r.round);
     let plan_seed = repeat.map(|r| r.plan_seed);
     let hal_first = repeat.map(|r| r.hal_first);
+    let send_begin = span.map(|s| s.send_begin);
+    let send_end = span.map(|s| s.send_end);
+    let drain_end = span.map(|s| s.drain_end);
+    let send_elapsed_ns = span.map(|s| s.send_elapsed_ns);
+    let export_elapsed_ns = span.map(|s| s.export_elapsed_ns);
     let row = client
         .query_one(
             r#"
             INSERT INTO firewall_config (
                 exam_id, firmware, blacklist_size, traffic, target_pps, window_s,
                 started_at, stopped_at, sent, legal_sent, matched, loss, drop_sample,
-                round, plan_seed, hal_first
-            ) VALUES ($1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                round, plan_seed, hal_first,
+                send_begin, send_end, drain_end, send_elapsed_ns, export_elapsed_ns
+            ) VALUES (
+                $1, $2::text::firmware, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, $18, $19, $20, $21
+            )
             RETURNING id
             "#,
             &[
@@ -297,6 +357,11 @@ pub async fn insert_firewall_config(
                 &round,
                 &plan_seed,
                 &hal_first,
+                &send_begin,
+                &send_end,
+                &drain_end,
+                &send_elapsed_ns,
+                &export_elapsed_ns,
             ],
         )
         .await

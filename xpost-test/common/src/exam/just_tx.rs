@@ -104,6 +104,7 @@ struct WindowStats {
     device_rxcnt_delta: u64,
     max_send_gap: Duration,
     host_stalled: bool,
+    span: db::SendSpan,
 }
 
 impl WindowStats {
@@ -293,6 +294,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                         plan_seed: plan.seed,
                         hal_first: plan.hal_first,
                     }),
+                    Some(stats.span),
                 )
                 .await?;
                 db::insert_just_tx_data(client, cfg_id, &samples).await?;
@@ -341,11 +343,17 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         agent.clear_perf().await.context("clear/perf")?;
         harness.reset_state().await;
         harness.begin_observe().context("begin observe")?;
-        let started_at = SystemTime::now();
+        let send_begin = SystemTime::now();
+        let send_mono = Instant::now();
+        let started_at = send_begin;
         let seq = harness.alloc_seq();
         let t_tx = SystemTime::now();
         let _ = harness.send_stimulus(spoof, None, seq).await;
+        let send_end = SystemTime::now();
+        let send_elapsed = send_mono.elapsed();
         tokio::time::sleep(DRAIN).await;
+        let drain_end = SystemTime::now();
+        let export_mono = Instant::now();
         let (stamp_drops, pkt_drops) = harness.finish_observe().context("finish observe")?;
         let sight = harness.take_seq(seq).await;
         let t0 = sight.t0_ns;
@@ -391,6 +399,13 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                 pkt_drops as i64,
                 pkt_matched as i64,
                 None,
+                Some(db::SendSpan::from_elapsed(
+                    send_begin,
+                    send_end,
+                    drain_end,
+                    send_elapsed,
+                    export_mono.elapsed(),
+                )),
             )
             .await?;
             db::insert_just_tx_data(client, cfg_id, &[tx_sample(&trace_sample)]).await?;
@@ -515,8 +530,10 @@ async fn probe_window(
     let _ = agent.clear_perf().await;
     harness.reset_state().await;
     harness.begin_observe().context("begin observe")?;
-    let started_at = SystemTime::now();
-    let start = Instant::now();
+    let send_begin = SystemTime::now();
+    let send_mono = Instant::now();
+    let started_at = send_begin;
+    let start = send_mono;
     let deadline = start + window;
     let mut seqs: Vec<(u64, SystemTime)> = Vec::new();
     let mut last_paint = Instant::now() - Duration::from_secs(1);
@@ -570,8 +587,12 @@ async fn probe_window(
     }
 
     ui.live_clear();
+    let send_end = SystemTime::now();
+    let send_elapsed = send_mono.elapsed();
     ui.check_start("收集回包");
     tokio::time::sleep(DRAIN).await;
+    let drain_end = SystemTime::now();
+    let export_mono = Instant::now();
     let (stamp_drops, pkt_drops) = harness.finish_observe().context("finish observe")?;
 
     let mut samples = Vec::with_capacity(seqs.len());
@@ -644,6 +665,13 @@ async fn probe_window(
         device_rxcnt_delta: after.saturating_sub(before),
         max_send_gap,
         host_stalled,
+        span: db::SendSpan::from_elapsed(
+            send_begin,
+            send_end,
+            drain_end,
+            send_elapsed,
+            export_mono.elapsed(),
+        ),
     })
 }
 

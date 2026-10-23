@@ -31,6 +31,14 @@ ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS loss DOUBLE PRECISION;
 ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS round INT;
 ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS plan_seed BIGINT;
 ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS hal_first BOOLEAN;
+-- Send interval. NULL means the collector did not record it.
+-- Do not treat NULL as 30 seconds.
+-- send_elapsed_ns is a monotonic clock and excludes drain and export.
+ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS send_begin TIMESTAMPTZ;
+ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS send_end TIMESTAMPTZ;
+ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS drain_end TIMESTAMPTZ;
+ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS send_elapsed_ns BIGINT;
+ALTER TABLE firewall_config ADD COLUMN IF NOT EXISTS export_elapsed_ns BIGINT;
 ALTER TABLE firewall_config DROP CONSTRAINT IF EXISTS firewall_config_traffic_check;
 ALTER TABLE firewall_config
     ADD CONSTRAINT firewall_config_traffic_check

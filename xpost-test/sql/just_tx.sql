@@ -37,6 +37,14 @@ ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS lookup BOOLEAN NOT NULL DEFA
 ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS stamp_drops BIGINT;
 ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS pkt_drops BIGINT;
 ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS pkt_matched BIGINT;
+-- Send interval. NULL means the collector did not record it.
+-- Do not treat NULL as 30 seconds.
+-- send_elapsed_ns is a monotonic clock and excludes drain and export.
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS send_begin TIMESTAMPTZ;
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS send_end TIMESTAMPTZ;
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS drain_end TIMESTAMPTZ;
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS send_elapsed_ns BIGINT;
+ALTER TABLE just_tx_config ADD COLUMN IF NOT EXISTS export_elapsed_ns BIGINT;
 
 CREATE TABLE IF NOT EXISTS just_tx_data (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -219,7 +219,9 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 super::set_lookup_switch(&agent, true).await?;
             }
             agent.enable_xdp().await.context("enable/xdp")?;
-            let started_at = SystemTime::now();
+            let send_begin = SystemTime::now();
+            let send_mono = Instant::now();
+            let started_at = send_begin;
             let phase = (plan.seed as u64) % LEGAL_EVERY;
             let (illegal_sent, legal_sent, tokens) = paced_mixed(
                 cfg,
@@ -233,8 +235,12 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 phase,
             )
             .await?;
+            let send_end = SystemTime::now();
+            let send_elapsed = send_mono.elapsed();
             tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
-            let stopped_at = SystemTime::now();
+            let drain_end = SystemTime::now();
+            let export_mono = Instant::now();
+            let stopped_at = drain_end;
             agent.disable_xdp().await.context("disable/xdp")?;
             let map_rows = dump_blacklist(&agent).await.context("get/map blacklist")?;
             let returned = dump_legal_tokens(&agent).await.context("get/map firewall_result")?;
@@ -274,6 +280,13 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                         plan_seed: plan.seed,
                         hal_first: plan.hal_first,
                     }),
+                    Some(db::SendSpan::from_elapsed(
+                        send_begin,
+                        send_end,
+                        drain_end,
+                        send_elapsed,
+                        export_mono.elapsed(),
+                    )),
                 )
                 .await?;
                 db::insert_firewall_data(client, cfg_id, &map_rows).await?;
@@ -314,10 +327,16 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
         seed_blacklist(&agent, &rules).await?;
         agent.clear_perf().await.context("clear/perf")?;
         agent.enable_xdp().await.context("enable/xdp")?;
-        let started_at = SystemTime::now();
+        let send_begin = SystemTime::now();
+        let send_mono = Instant::now();
+        let started_at = send_begin;
         let sent = send_one(cfg, rules[0]).await?;
+        let send_end = SystemTime::now();
+        let send_elapsed = send_mono.elapsed();
         tokio::time::sleep(Duration::from_millis(DRAIN_MS)).await;
-        let stopped_at = SystemTime::now();
+        let drain_end = SystemTime::now();
+        let export_mono = Instant::now();
+        let stopped_at = drain_end;
         let _ = agent.disable_xdp().await;
         if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
             ui.check_start("写入 trace");
@@ -337,6 +356,13 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 None,
                 None,
                 None,
+                Some(db::SendSpan::from_elapsed(
+                    send_begin,
+                    send_end,
+                    drain_end,
+                    send_elapsed,
+                    export_mono.elapsed(),
+                )),
             )
             .await?;
             let msg = agent.get_perf().await.context("get/perf")?;
