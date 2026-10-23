@@ -68,6 +68,7 @@ const COOLDOWN: Duration = Duration::from_secs(3);
 const DRAIN: Duration = Duration::from_millis(1000);
 const RX_READY_TRIES: usize = 40;
 const RX_READY_BURST: u32 = 64;
+const ARP_REFRESH: Duration = Duration::from_secs(1);
 
 // Dense below ~1600 (HAL knee); keep 400-step above.
 const SWEEP_PPS: &[f64] = &[
@@ -343,6 +344,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         agent.clear_perf().await.context("clear/perf")?;
         harness.reset_state().await;
         harness.begin_observe().context("begin observe")?;
+        harness.announce_neighbor(spoof).context("announce neighbor")?;
         let send_begin = SystemTime::now();
         let send_mono = Instant::now();
         let started_at = send_begin;
@@ -510,6 +512,7 @@ async fn probe_window(
 
     if !WARMUP.is_zero() {
         harness.reset_state().await;
+        harness.announce_neighbor(spoof).context("announce neighbor")?;
         let warm_deadline = Instant::now() + WARMUP;
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -529,6 +532,7 @@ async fn probe_window(
     let before = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
     let _ = agent.clear_perf().await;
     harness.reset_state().await;
+    harness.reserve_pending((pps * window.as_secs_f64()).round() as usize);
     harness.begin_observe().context("begin observe")?;
     let send_begin = SystemTime::now();
     let send_mono = Instant::now();
@@ -542,15 +546,21 @@ async fn probe_window(
     let mut host_stalled = false;
     let expect = (pps * window.as_secs_f64()).max(1.0);
 
-    // Delay (not Burst): late ticks skip catch-up; avoids 80–180ms gap → burst pairs.
-    let mut ticker = tokio::time::interval(interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ticker.tick().await;
+    // Absolute slots. A late send does not skip the next probe.
+    let mut next = start;
+    let mut next_arp = start;
 
     while Instant::now() < deadline {
-        ticker.tick().await;
+        let now = Instant::now();
+        if now < next {
+            tokio::time::sleep(next.saturating_duration_since(now)).await;
+        }
         if Instant::now() >= deadline {
             break;
+        }
+        if Instant::now() >= next_arp {
+            harness.announce_neighbor(spoof).context("announce neighbor")?;
+            next_arp += ARP_REFRESH;
         }
         let seq = harness.alloc_seq();
         let t_mono = Instant::now();
@@ -568,6 +578,7 @@ async fn probe_window(
             seqs.push((seq, t_wall));
             last_tx = Some(t_mono);
         }
+        next += interval;
 
         if last_paint.elapsed() >= Duration::from_millis(100) {
             let sent = seqs.len() as f64;

@@ -94,6 +94,7 @@ async fn smoke_just_tx(
     let before = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
 
     harness.reset_state().await;
+    harness.announce_neighbor(spoof).context("announce neighbor")?;
     let pps = SMOKE_PPS.max(1.0);
     let interval = Duration::from_secs_f64(1.0 / pps);
     let start = Instant::now();

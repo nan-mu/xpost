@@ -1,6 +1,6 @@
 //! TC attach + ringbuf event pump + seq-keyed waits.
 
-use std::{collections::HashMap, net::Ipv4Addr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::Ipv4Addr, sync::{Arc, Mutex}, time::Duration};
 
 use anyhow::{Context, Result};
 use aya::{
@@ -12,7 +12,7 @@ use common::{
     FilterConfig, KIND_BOUNCE_INGRESS, KIND_ECHO_INGRESS, KIND_STIM_EGRESS, StampEvent,
 };
 use log::{debug, info, warn};
-use tokio::{sync::{Mutex, Notify}, task::JoinHandle};
+use tokio::task::JoinHandle;
 
 use crate::pipeline::pkt_rx::PktBook;
 use crate::pipeline::RawTx;
@@ -27,7 +27,6 @@ struct Pending {
     t_echo: Option<Sighting>,
     t_bounce: Option<Sighting>,
     rx_stamp_n: u32,
-    notify: Arc<Notify>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -177,7 +176,7 @@ impl Harness {
     }
 
     pub async fn reset_state(&self) {
-        self.pending.lock().await.clear();
+        self.lock_pending().clear();
         self.pkt.reset().await;
         // Let the ringbuf pump drop late events for cleared seqs before the next window.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -211,7 +210,7 @@ impl Harness {
     /// Remove `seq` from the pending map and return TC sightings plus packet-socket hits.
     pub async fn take_seq(&self, seq: u64) -> SeqSight {
         let pkt_n = self.pkt.take(seq).await;
-        let mut map = self.pending.lock().await;
+        let mut map = self.lock_pending();
         match map.remove(&seq) {
             Some(p) => SeqSight {
                 t0_ns: p.t0.map(|s| s.ktime_ns),
@@ -228,7 +227,7 @@ impl Harness {
     }
 
     async fn register_seq(&self, seq: u64) {
-        let mut map = self.pending.lock().await;
+        let mut map = self.lock_pending();
         map.insert(
             seq,
             Pending {
@@ -236,7 +235,6 @@ impl Harness {
                 t_echo: None,
                 t_bounce: None,
                 rx_stamp_n: 0,
-                notify: Arc::new(Notify::new()),
             },
         );
     }
@@ -252,6 +250,20 @@ impl Harness {
         let dst = dst_ip.unwrap_or(self.esp_ip);
         self.raw.send_stimulus(src_ip, dst, seq, &[])?;
         Ok(())
+    }
+
+    /// One neighbor announce. The probe loop refreshes this about once per second.
+    pub fn announce_neighbor(&self, src_ip: Ipv4Addr) -> Result<()> {
+        self.raw.announce_neighbor(src_ip)
+    }
+
+    /// Avoid HashMap growth on the send path.
+    pub fn reserve_pending(&self, n: usize) {
+        self.lock_pending().reserve(n);
+    }
+
+    fn lock_pending(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Pending>> {
+        self.pending.lock().unwrap_or_else(|err| err.into_inner())
     }
 }
 
@@ -275,14 +287,14 @@ async fn event_loop(
                 continue;
             }
             let ev = unsafe { ::core::ptr::read_unaligned(bytes.as_ptr() as *const StampEvent) };
-            handle_event(&pending, ev).await;
+            handle_event(&pending, ev);
         }
         guard.clear_ready();
     }
 }
 
-async fn handle_event(pending: &Mutex<HashMap<u64, Pending>>, ev: StampEvent) {
-    let mut map = pending.lock().await;
+fn handle_event(pending: &Mutex<HashMap<u64, Pending>>, ev: StampEvent) {
+    let mut map = pending.lock().unwrap_or_else(|err| err.into_inner());
     // Only stamp seqs the userspace side registered. Late events after `reset_state`
     // must not re-insert entries (that bloated the map and starved the ringbuf reader).
     let Some(entry) = map.get_mut(&ev.seq) else {
@@ -296,7 +308,6 @@ async fn handle_event(pending: &Mutex<HashMap<u64, Pending>>, ev: StampEvent) {
                     ktime_ns: ev.ktime_ns,
                 });
             }
-            entry.notify.notify_waiters();
         }
         KIND_BOUNCE_INGRESS => {
             debug!(
@@ -309,7 +320,6 @@ async fn handle_event(pending: &Mutex<HashMap<u64, Pending>>, ev: StampEvent) {
                     ktime_ns: ev.ktime_ns,
                 });
             }
-            entry.notify.notify_waiters();
         }
         KIND_ECHO_INGRESS => {
             debug!(
@@ -322,7 +332,6 @@ async fn handle_event(pending: &Mutex<HashMap<u64, Pending>>, ev: StampEvent) {
                     ktime_ns: ev.ktime_ns,
                 });
             }
-            entry.notify.notify_waiters();
         }
         other => warn!("unknown event kind={other} seq={}", ev.seq),
     }

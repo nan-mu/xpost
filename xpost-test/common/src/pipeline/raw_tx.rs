@@ -76,9 +76,7 @@ impl RawTx {
         seq: u64,
         pad: &[u8],
     ) -> Result<()> {
-        // HAL (and any L3 echo) ARPs the stimulus src. Teach the STA our MAC for `src_ip`
-        // so the echo frame returns to this iface for XDP/TC stamp — IP can still be spoofed.
-        self.send_arp_announce(src_ip)?;
+        // Neighbor refresh is separate. One ARP per probe halves the send rate.
         let mut payload = Vec::with_capacity(PAYLOAD_HDR_LEN + pad.len());
         payload.extend_from_slice(&MAGIC_STIM);
         payload.extend_from_slice(&seq.to_le_bytes());
@@ -100,6 +98,11 @@ impl RawTx {
             frame.len()
         );
         Ok(())
+    }
+
+    /// Teach the STA that `src_ip` is this interface. Call once per second, not once per probe.
+    pub fn announce_neighbor(&self, src_ip: Ipv4Addr) -> Result<()> {
+        self.send_arp_announce(src_ip)
     }
 
     /// Send arbitrary UDP payload (e.g. MapCrudOp / HotLoadOp protobuf) to `dst_ip:dport`.
