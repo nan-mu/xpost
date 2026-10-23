@@ -14,8 +14,8 @@ version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
 # HAL smoke: `dev`. Formal: just_tx / just_drop / firewall / exec_bench. Wipe: formal-clear.
-# Packet identity, legal token sets, and the runtime lookup switch.
-run = ["just_tx", "firewall", "lookup"]
+# This bare run checks that HAL and XDP TX submit at the target rate.
+run = ["just_tx"]
 
 [postgres]
 host = "192.168.110.96"
