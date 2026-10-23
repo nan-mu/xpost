@@ -362,11 +362,11 @@ impl AggregateSet {
 /// ESP32-C3 traps `rdcycle` and `mcycle`.
 #[cfg(feature = "perf-lookup")]
 #[inline]
-pub(crate) fn lookup_cycles() -> u32 {
+pub(crate) fn lookup_ticks_us() -> u32 {
     AggregateSet::now_ticks() as u32
 }
 
-/// Record one lookup `dt` after both cycle reads. `returned_null` is the raw pointer result.
+/// Record one lookup `dt` after both timer reads. `returned_null` is the raw pointer result.
 #[cfg(feature = "perf-lookup")]
 #[inline]
 pub(crate) fn record_lookup(dt: u64, returned_null: bool, empty_dt: u64) {
