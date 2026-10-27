@@ -2,15 +2,17 @@
 //!
 //! `case_swap` swaps the IPv4 addresses and UDP ports, then returns `XDP_TX`.
 //! `case_mark` writes destination `203.0.113.77` and returns `XDP_TX`.
-//! Both increment `rxcnt[17]`.
+//! Both increment `rxcnt[17]` and leave the UDP payload unchanged.
 //!
-//! The firmware ELF is flashed once. The second step calls `disable xdp`,
-//! clears the cold table, and installs the other image. tcpdump writes no
-//! pcap. Its stdout and stderr stay in the `case_obs.tcpdump` column.
+//! Map access stays outside the leased window. Warmup watches the wire, then
+//! the exam disables XDP, drains, clears `rxcnt`, and reads the baseline.
+//! It enables only to send `CASE0`..`CASE3`, disables, drains, and reads the
+//! result. Those payloads are five bytes, so a firmware `ACK\n` cannot satisfy
+//! the check. The firmware ELF is flashed once. tcpdump writes no pcap.
 
 use std::net::Ipv4Addr;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use tokio::io::AsyncReadExt;
@@ -23,12 +25,14 @@ use crate::pipeline::{self, BudgetEta, READY_BUDGET, RoundUi, status};
 
 const FW: &str = "case-cag";
 const PORT: u16 = 8080;
-const SENT: u64 = 4;
+const SENT: usize = 4;
 const IPPROTO_UDP: u32 = 17;
 const STIM_SRC: Ipv4Addr = Ipv4Addr::new(192, 168, 110, 50);
 const MARK_DST: &str = "203.0.113.77";
 const READY_TRIES: u32 = 40;
-const DUMP_CAP: usize = 32 * 1024;
+const DUMP_CAP: usize = 64 * 1024;
+const DRAIN: Duration = Duration::from_secs(1);
+const PAYLOAD_LEN: usize = 5;
 
 struct Step {
     seq: i32,
@@ -51,7 +55,7 @@ const STEPS: &[Step] = &[
         action: "XDP_TX",
         mark: false,
         capability: "count, rewrite",
-        expect: "UDP increments rxcnt[17] and returns XDP_TX. Ethernet MACs, IPv4 addresses, and UDP ports are swapped. A DUT-sourced tcpdump line shows 192.168.110.106.8080 > 192.168.110.50.<stim_sport>.",
+        expect: "While XDP is disabled, rxcnt[17] is cleared and read. The scored window then sends CASE0..CASE3 and returns XDP_TX with Ethernet MACs, IPv4 addresses, and UDP ports swapped. Each token appears in a DUT-sourced frame of UDP length 5. rxcnt[17] increases by at least 4; a larger delta is not one-count-per-packet. Firmware ACK\\n is UDP length 4 and does not carry these tokens.",
         replace: false,
     },
     Step {
@@ -62,7 +66,7 @@ const STEPS: &[Step] = &[
         action: "XDP_TX",
         mark: true,
         capability: "count, rewrite",
-        expect: "UDP increments rxcnt[17] and returns XDP_TX. Ethernet MACs are swapped and the IPv4 destination is 203.0.113.77. A DUT-sourced tcpdump line contains 203.0.113.77.",
+        expect: "While XDP is disabled, rxcnt[17] is cleared and read. The scored window then sends CASE0..CASE3 and returns XDP_TX with Ethernet MACs swapped and IPv4 destination 203.0.113.77. Each token appears in a DUT-sourced frame of UDP length 5. rxcnt[17] increases by at least 4; a larger delta is not one-count-per-packet. Router forwards of that destination are not DUT replies.",
         replace: true,
     },
 ];
@@ -103,40 +107,78 @@ async fn run_step(
     exam_id: db::ExamId,
     step: &Step,
 ) -> Result<()> {
+    let mut events = Vec::new();
+    events.push(format!("fw={FW} xdp={} host_ms={}", step.xdp, host_ms()));
     if step.replace {
         agent
             .disable_xdp()
             .await
             .with_context(|| format!("disable xdp before {}", step.xdp))?;
+        events.push(format!("disable_prev {}", host_ms()));
         eprintln!("case seq={} disabled previous image", step.seq);
     }
     agent
         .clear_xdp("*")
         .await
         .with_context(|| format!("clear xdp before {}", step.xdp))?;
+    events.push(format!("clear_cold {}", host_ms()));
     agent
         .flash_xdp(step.xdp)
         .await
         .with_context(|| format!("flash xdp {}", step.xdp))?;
+    events.push(format!("install {} {}", step.xdp, host_ms()));
     agent
         .get_init()
         .await
         .with_context(|| format!("OK init after {}", step.xdp))?;
+    events.push(format!("init {}", host_ms()));
+
+    // Boot leases the image. Stay out of rxcnt until that lease is released.
     agent
         .enable_xdp()
         .await
         .with_context(|| format!("enable xdp {}", step.xdp))?;
-    wait_map(cfg, agent, step).await?;
+    events.push(format!("enable_warmup {}", host_ms()));
+    let mac = format_mac(&cfg.esp_mac_bytes()?);
+    warmup(cfg, step, &mac).await?;
+
+    agent
+        .disable_xdp()
+        .await
+        .with_context(|| format!("disable xdp before baseline {}", step.xdp))?;
+    events.push(format!("disable_baseline {}", host_ms()));
+    tokio::time::sleep(DRAIN).await;
     agent
         .clear_map(step.map)
         .await
         .with_context(|| format!("clear map {}", step.map))?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
     let before = agent.map_slot(step.map, step.slot).await?;
-    let mac = format_mac(&cfg.esp_mac_bytes()?);
-    let dump = capture(cfg, &mac).await?;
+    events.push(format!("map_before {before} {}", host_ms()));
+    if before != 0 {
+        bail!(
+            "case {} baseline rxcnt[{}]={before} after disable and clear",
+            step.xdp,
+            step.slot
+        );
+    }
+
+    agent
+        .enable_xdp()
+        .await
+        .with_context(|| format!("enable xdp for send {}", step.xdp))?;
+    events.push(format!("enable_send {}", host_ms()));
+    let scored: Vec<[u8; PAYLOAD_LEN]> = (0..SENT).map(payload).collect();
+    let refs: Vec<&[u8]> = scored.iter().map(|p| p.as_slice()).collect();
+    let dump = sniff(cfg, &mac, &refs, Duration::from_millis(800)).await?;
+    agent
+        .disable_xdp()
+        .await
+        .with_context(|| format!("disable xdp before read {}", step.xdp))?;
+    events.push(format!("disable_read {}", host_ms()));
+    tokio::time::sleep(DRAIN).await;
     let after = agent.map_slot(step.map, step.slot).await?;
+    events.push(format!("map_after {after} {}", host_ms()));
+
     let needle = if step.mark {
         MARK_DST.to_string()
     } else {
@@ -145,20 +187,18 @@ async fn run_step(
             cfg.target.esp_ip, PORT, STIM_SRC, cfg.target.stim_sport
         )
     };
-    let src = format!("{mac} >");
-    let replies = dump
-        .lines()
-        .filter(|line| line.to_ascii_lowercase().contains(&src.to_ascii_lowercase()) && line.contains(&needle))
-        .count() as u64;
-    let saw_reply = replies > 0;
+    let hits = payload_hits(&dump, &mac, &needle);
+    let matched = hits.iter().filter(|hit| **hit).count();
+    let saw_reply = matched == SENT;
     let delta = after.saturating_sub(before);
-    // rxcnt counts every UDP frame the radio delivers, including retries.
-    let ok = delta >= SENT && saw_reply;
+    // Retries can increment rxcnt more than once per send. Do not require equality.
+    let ok = before == 0 && delta >= SENT as u64 && saw_reply;
     eprintln!(
-        "case seq={} xdp={} ok={ok} action={} {}[{}] {before}->{after} sent={SENT} needle={needle} hits={replies}",
+        "case seq={} xdp={} ok={ok} action={} {}[{}] {before}->{after} sent={SENT} needle={needle} payloads={matched}/{SENT}",
         step.seq, step.xdp, step.action, step.map, step.slot
     );
-    let excerpt: String = dump.lines().take(12).collect::<Vec<_>>().join("\n");
+    let stored = store_text(&events, &hits, &dump);
+    let excerpt: String = stored.lines().take(16).collect::<Vec<_>>().join("\n");
     eprintln!("case tcpdump excerpt:\n{excerpt}");
 
     db::insert_case_obs(
@@ -177,47 +217,42 @@ async fn run_step(
             sent: SENT as i32,
             saw_reply,
             ok,
-            tcpdump: &dump,
+            tcpdump: &stored,
         },
     )
     .await?;
     if !ok {
         bail!(
-            "case {} mismatch: map {before}->{after} (want at least +{SENT}), needle hits={replies} needle={needle}",
+            "case {} mismatch: map {before}->{after} (want at least +{SENT} after a zero baseline), payloads {matched}/{SENT} needle={needle}",
             step.xdp
         );
     }
     Ok(())
 }
 
-async fn wait_map(cfg: &FileConfig, agent: &AgentClient, step: &Step) -> Result<()> {
+async fn warmup(cfg: &FileConfig, step: &Step, mac: &str) -> Result<()> {
+    let warm = b"WARM!";
     for i in 0..READY_TRIES {
-        let before = agent.map_slot(step.map, step.slot).await?;
-        burst(cfg, 2).await?;
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        let after = agent.map_slot(step.map, step.slot).await?;
-        if after > before {
-            eprintln!(
-                "case {} link up {}[{}] {before}->{after}",
-                step.xdp, step.map, step.slot
-            );
-            tokio::time::sleep(Duration::from_secs(1)).await;
+        let dump = sniff(cfg, mac, &[warm], Duration::from_millis(400)).await?;
+        if dump.to_ascii_lowercase().contains(&format!("{mac} >")) {
+            eprintln!("case {} link up", step.xdp);
             return Ok(());
         }
         if i % 5 == 4 {
-            eprintln!("case {} still waiting for {}", step.xdp, step.map);
+            eprintln!("case {} still waiting for a DUT frame", step.xdp);
         }
     }
-    bail!("case {} map {} did not move", step.xdp, step.map);
+    bail!("case {} saw no DUT frame during warmup", step.xdp)
 }
 
-async fn capture(cfg: &FileConfig, mac: &str) -> Result<String> {
+async fn sniff(cfg: &FileConfig, mac: &str, payloads: &[&[u8]], after: Duration) -> Result<String> {
     let mut child = Command::new("tcpdump")
         .args([
             "-e",
             "-n",
             "-l",
             "-tt",
+            "-X",
             "-i",
             &cfg.probe.iface,
             "udp",
@@ -230,8 +265,8 @@ async fn capture(cfg: &FileConfig, mac: &str) -> Result<String> {
         .spawn()
         .context("spawn tcpdump")?;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    burst(cfg, SENT).await?;
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    send_payloads(cfg, payloads).await?;
+    tokio::time::sleep(after).await;
     child.start_kill().ok();
     let mut stdout = child.stdout.take().context("tcpdump stdout")?;
     let mut stderr = child.stderr.take().context("tcpdump stderr")?;
@@ -245,14 +280,10 @@ async fn capture(cfg: &FileConfig, mac: &str) -> Result<String> {
         text.push_str("\n# stderr\n");
         text.push_str(&err);
     }
-    if text.len() > DUMP_CAP {
-        text.truncate(DUMP_CAP);
-        text.push_str("\n[truncated]\n");
-    }
     Ok(text)
 }
 
-async fn burst(cfg: &FileConfig, n: u64) -> Result<()> {
+async fn send_payloads(cfg: &FileConfig, payloads: &[&[u8]]) -> Result<()> {
     let iface = cfg.probe.iface.clone();
     let src_mac = match cfg.src_mac_override()? {
         Some(m) => m,
@@ -261,14 +292,121 @@ async fn burst(cfg: &FileConfig, n: u64) -> Result<()> {
     let dst_mac = cfg.esp_mac_bytes()?;
     let esp = cfg.target.esp_ip;
     let sport = cfg.target.stim_sport;
+    let owned: Vec<Vec<u8>> = payloads.iter().map(|p| p.to_vec()).collect();
     tokio::task::spawn_blocking(move || {
         let raw = pipeline::RawTx::open(&iface, src_mac, dst_mac, esp, PORT, sport)?;
         raw.announce_neighbor(STIM_SRC)?;
-        for _ in 0..n {
-            raw.send_udp(STIM_SRC, esp, PORT, b"CASE")?;
+        for payload in &owned {
+            raw.send_udp(STIM_SRC, esp, PORT, payload)?;
         }
         Ok::<(), anyhow::Error>(())
     })
     .await
     .context("stimulus thread")?
+}
+
+fn payload(i: usize) -> [u8; PAYLOAD_LEN] {
+    let mut body = *b"CASE0";
+    body[4] = b'0' + u8::try_from(i).unwrap_or(0);
+    body
+}
+
+/// DUT-sourced frames whose header has the rewrite and whose dump contains `CASEn`.
+fn payload_hits(dump: &str, mac: &str, needle: &str) -> [bool; SENT] {
+    let src = format!("{mac} >");
+    let mut hits = [false; SENT];
+    for pkt in packets(dump) {
+        let Some(header) = pkt.lines().next() else {
+            continue;
+        };
+        if !header.to_ascii_lowercase().contains(&src.to_ascii_lowercase()) {
+            continue;
+        }
+        if !header.contains(needle) || !header.contains(&format!("UDP, length {PAYLOAD_LEN}")) {
+            continue;
+        }
+        // The fifth payload byte sits on the next hex line. Join only the ASCII columns.
+        let ascii = ascii_columns(&pkt);
+        for (i, hit) in hits.iter_mut().enumerate() {
+            if ascii.contains(&format!("CASE{i}")) {
+                *hit = true;
+            }
+        }
+    }
+    hits
+}
+
+fn ascii_columns(pkt: &str) -> String {
+    let mut ascii = String::new();
+    for line in pkt.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("0x") {
+            continue;
+        }
+        if let Some((_, tail)) = trimmed.rsplit_once("  ") {
+            ascii.push_str(tail.trim());
+        }
+    }
+    ascii
+}
+
+fn packets(dump: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in dump.lines() {
+        if line_is_frame(line) && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        if line_is_frame(line) || !cur.is_empty() {
+            cur.push_str(line);
+            cur.push('\n');
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn line_is_frame(line: &str) -> bool {
+    let Some((sec, rest)) = line.split_once('.') else {
+        return false;
+    };
+    let Some((frac, tail)) = rest.split_once(' ') else {
+        return false;
+    };
+    !sec.is_empty()
+        && sec.bytes().all(|b| b.is_ascii_digit())
+        && !frac.is_empty()
+        && frac.bytes().all(|b| b.is_ascii_digit())
+        && !tail.is_empty()
+}
+
+fn store_text(events: &[String], hits: &[bool; SENT], dump: &str) -> String {
+    let mut text = String::from(
+        "# host control times are not a measured datapath interruption\n",
+    );
+    for event in events {
+        text.push_str("# ");
+        text.push_str(event);
+        text.push('\n');
+    }
+    text.push_str("# payloads");
+    for (i, hit) in hits.iter().enumerate() {
+        text.push_str(&format!(" CASE{i}={}", if *hit { "yes" } else { "no" }));
+    }
+    text.push('\n');
+    text.push_str(dump);
+    if text.len() > DUMP_CAP {
+        text.truncate(DUMP_CAP);
+        text.push_str("\n[truncated]\n");
+    }
+    text
+}
+
+fn host_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }

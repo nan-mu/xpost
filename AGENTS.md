@@ -198,7 +198,7 @@ The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` setti
 - Only `just_tx`: `run = ["just_tx"]`.
 - Only `firewall`: `run = ["firewall"]`.
 - Current selection: `run = ["case"]`.
-- `case` flashes `examples/case_xdp` once. It installs `case_swap`, then disables XDP and installs `case_mark`. tcpdump stdout is stored in `case_obs.tcpdump`. No capture file is written on TR3000.
+- `case` flashes `examples/case_xdp` once. It installs `case_swap`, then disables XDP and installs `case_mark`. `rxcnt` is cleared and read only while XDP is disabled. Scored frames carry `CASE0` through `CASE3`; tcpdump stdout is stored in `case_obs.tcpdump`. No capture file is written on TR3000.
 - All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
 - All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
 
