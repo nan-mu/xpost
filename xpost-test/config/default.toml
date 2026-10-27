@@ -14,7 +14,7 @@ version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
 # HAL smoke: `dev`. Formal: just_tx / just_drop / firewall / exec_bench. Wipe: formal-clear.
-# `case` flashes examples/case_xdp once, then swaps case_tx and case_drop.
+# `case` flashes examples/case_xdp once, then swaps case_swap and case_mark.
 # Capture is tcpdump stdout stored in formal.case_obs. No pcap file.
 run = ["case"]
 

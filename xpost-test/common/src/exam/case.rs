@@ -1,8 +1,8 @@
 //! One firmware, two cold images, tcpdump text in Postgres.
 //!
-//! `case_tx` is `just_tx.c`. UDP increments `rxcnt[17]` and returns `XDP_TX`
-//! after an Ethernet MAC swap. `case_drop` is `just_drop.c`. IPv4 increments
-//! `counter[src_last_octet]` and returns `XDP_DROP`.
+//! `case_swap` swaps the IPv4 addresses and UDP ports, then returns `XDP_TX`.
+//! `case_mark` writes destination `203.0.113.77` and returns `XDP_TX`.
+//! Both increment `rxcnt[17]`.
 //!
 //! The firmware ELF is flashed once. The second step calls `disable xdp`,
 //! clears the cold table, and installs the other image. tcpdump writes no
@@ -26,7 +26,7 @@ const PORT: u16 = 8080;
 const SENT: u64 = 4;
 const IPPROTO_UDP: u32 = 17;
 const STIM_SRC: Ipv4Addr = Ipv4Addr::new(192, 168, 110, 50);
-const DROP_SLOT: u32 = 50;
+const MARK_DST: &str = "203.0.113.77";
 const READY_TRIES: u32 = 40;
 const DUMP_CAP: usize = 32 * 1024;
 
@@ -36,7 +36,7 @@ struct Step {
     map: &'static str,
     slot: u32,
     action: &'static str,
-    expect_reply: bool,
+    mark: bool,
     capability: &'static str,
     expect: &'static str,
     replace: bool,
@@ -45,24 +45,24 @@ struct Step {
 const STEPS: &[Step] = &[
     Step {
         seq: 1,
-        xdp: "case_tx",
+        xdp: "case_swap",
         map: "rxcnt",
         slot: IPPROTO_UDP,
         action: "XDP_TX",
-        expect_reply: true,
-        capability: "count, reply",
-        expect: "UDP to port 8080 increments rxcnt[17] by the send count, swaps Ethernet MACs, and returns XDP_TX. tcpdump shows the DUT MAC as an Ethernet source. Non-UDP would increment another rxcnt slot and return XDP_DROP.",
+        mark: false,
+        capability: "count, rewrite",
+        expect: "UDP increments rxcnt[17] and returns XDP_TX. Ethernet MACs, IPv4 addresses, and UDP ports are swapped. A DUT-sourced tcpdump line shows 192.168.110.106.8080 > 192.168.110.50.<stim_sport>.",
         replace: false,
     },
     Step {
         seq: 2,
-        xdp: "case_drop",
-        map: "counter",
-        slot: DROP_SLOT,
-        action: "XDP_DROP",
-        expect_reply: false,
-        capability: "count, filter",
-        expect: "IPv4 from 192.168.110.50 increments counter[50] by the send count and returns XDP_DROP. No header field changes. tcpdump does not show the DUT MAC as an Ethernet source.",
+        xdp: "case_mark",
+        map: "rxcnt",
+        slot: IPPROTO_UDP,
+        action: "XDP_TX",
+        mark: true,
+        capability: "count, rewrite",
+        expect: "UDP increments rxcnt[17] and returns XDP_TX. Ethernet MACs are swapped and the IPv4 destination is 203.0.113.77. A DUT-sourced tcpdump line contains 203.0.113.77.",
         replace: true,
     },
 ];
@@ -137,16 +137,25 @@ async fn run_step(
     let mac = format_mac(&cfg.esp_mac_bytes()?);
     let dump = capture(cfg, &mac).await?;
     let after = agent.map_slot(step.map, step.slot).await?;
-    let saw_reply = dump.to_ascii_lowercase().contains(&format!("{mac} >"));
+    let needle = if step.mark {
+        MARK_DST.to_string()
+    } else {
+        format!(
+            "{}.{} > {}.{}",
+            cfg.target.esp_ip, PORT, STIM_SRC, cfg.target.stim_sport
+        )
+    };
+    let src = format!("{mac} >");
     let replies = dump
         .lines()
-        .filter(|line| line.to_ascii_lowercase().contains(&format!("{mac} >")))
+        .filter(|line| line.to_ascii_lowercase().contains(&src.to_ascii_lowercase()) && line.contains(&needle))
         .count() as u64;
+    let saw_reply = replies > 0;
     let delta = after.saturating_sub(before);
     // rxcnt counts every UDP frame the radio delivers, including retries.
-    let ok = delta >= SENT && (replies > 0) == step.expect_reply;
+    let ok = delta >= SENT && saw_reply;
     eprintln!(
-        "case seq={} xdp={} ok={ok} action={} {}[{}] {before}->{after} sent={SENT} saw_reply={saw_reply}",
+        "case seq={} xdp={} ok={ok} action={} {}[{}] {before}->{after} sent={SENT} needle={needle} hits={replies}",
         step.seq, step.xdp, step.action, step.map, step.slot
     );
     let excerpt: String = dump.lines().take(12).collect::<Vec<_>>().join("\n");
@@ -174,9 +183,8 @@ async fn run_step(
     .await?;
     if !ok {
         bail!(
-            "case {} mismatch: map {before}->{after} (want at least +{SENT}), replies={replies} want_reply={}",
-            step.xdp,
-            step.expect_reply
+            "case {} mismatch: map {before}->{after} (want at least +{SENT}), needle hits={replies} needle={needle}",
+            step.xdp
         );
     }
     Ok(())

@@ -198,7 +198,7 @@ The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` setti
 - Only `just_tx`: `run = ["just_tx"]`.
 - Only `firewall`: `run = ["firewall"]`.
 - Current selection: `run = ["case"]`.
-- `case` flashes `examples/case_xdp` once. It installs `case_tx`, then disables XDP and installs `case_drop`. tcpdump stdout is stored in `case_obs.tcpdump`. No capture file is written on TR3000.
+- `case` flashes `examples/case_xdp` once. It installs `case_swap`, then disables XDP and installs `case_mark`. tcpdump stdout is stored in `case_obs.tcpdump`. No capture file is written on TR3000.
 - All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
 - All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
 
@@ -275,7 +275,7 @@ The `profiles.toml` registry contains fifteen `[[fw]]` names:
 - Case: `case-cag` (`examples/case_xdp`). Its `xdp` list is empty. The exam installs images itself.
 
 Its network `[[xdp]]` names are `just_tx`, `just_drop`, and `firewall`.
-Its case `[[xdp]]` names are `case_tx` and `case_drop`. Those stems symlink to `just_tx.c` and `just_drop.c`. They are linked against the `case_xdp` firmware ELF.
+Its case `[[xdp]]` names are `case_swap` and `case_mark`. `case_swap.c` swaps the IPv4 addresses and UDP ports. `case_mark.c` writes destination `203.0.113.77`. Both are linked against the `case_xdp` firmware ELF.
 Its exec `[[xdp]]` names are `incr`, `square`, `bitswap`, `fib`, `buf`, `memcpy`, `fletcher32`, and `bsort`.
 The `exec-bench-ebpf` firmware profile installs `incr` by default.
 The `exec-bench-hal` profile omits `xdp`, which defaults to an empty list.
