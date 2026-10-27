@@ -742,3 +742,52 @@ async fn write_trace(
     }
     Ok(())
 }
+
+/// One cold-image step. `tcpdump` is the capture process text, not a file path.
+pub struct CaseObs<'a> {
+    pub seq: i32,
+    pub xdp: &'a str,
+    pub capability: &'a str,
+    pub action: &'a str,
+    pub expect: &'a str,
+    pub map_name: &'a str,
+    pub map_slot: i32,
+    pub map_before: i64,
+    pub map_after: i64,
+    pub sent: i32,
+    pub saw_reply: bool,
+    pub ok: bool,
+    pub tcpdump: &'a str,
+}
+
+pub async fn insert_case_obs(client: &Client, exam_id: ExamId, row: &CaseObs<'_>) -> Result<()> {
+    client
+        .execute(
+            r#"
+            INSERT INTO case_obs (
+                exam_id, seq, xdp, capability, action, expect,
+                map_name, map_slot, map_before, map_after,
+                sent, saw_reply, ok, tcpdump
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            "#,
+            &[
+                &exam_id,
+                &row.seq,
+                &row.xdp,
+                &row.capability,
+                &row.action,
+                &row.expect,
+                &row.map_name,
+                &row.map_slot,
+                &row.map_before,
+                &row.map_after,
+                &row.sent,
+                &row.saw_reply,
+                &row.ok,
+                &row.tcpdump,
+            ],
+        )
+        .await
+        .context("INSERT case_obs")?;
+    Ok(())
+}

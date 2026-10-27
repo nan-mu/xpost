@@ -18,7 +18,7 @@ use crate::config;
 pub use names::Firmware;
 pub use pg::{PgOpts, connect};
 pub use write::{
-    CellRepeat, PerfExperiment, SendSpan, TxSample, insert_exam, insert_exec_bench_config,
+    CellRepeat, PerfExperiment, SendSpan, TxSample, insert_exam,     CaseObs, insert_case_obs, insert_exec_bench_config,
     insert_exec_bench_data,
     insert_firewall_config, insert_firewall_data, insert_firewall_ident, insert_just_drop_config,
     insert_just_drop_data,
@@ -32,6 +32,7 @@ const JUST_DROP_SQL: &str = include_str!("../../../sql/just_drop.sql");
 const JUST_TX_SQL: &str = include_str!("../../../sql/just_tx.sql");
 const FIREWALL_SQL: &str = include_str!("../../../sql/firewall.sql");
 const EXEC_BENCH_SQL: &str = include_str!("../../../sql/exec_bench.sql");
+const CASE_SQL: &str = include_str!("../../../sql/case.sql");
 
 /// Ensure `formal` schema + tables exist (CREATE IF NOT EXISTS / idempotent types).
 /// Does **not** truncate or drop.
@@ -73,6 +74,10 @@ pub async fn ensure(client: &Client, opts: PgOpts) -> Result<()> {
         .batch_execute(EXEC_BENCH_SQL)
         .await
         .with_context(|| format!("ensure exec_bench.sql in {schema}"))?;
+    client
+        .batch_execute(CASE_SQL)
+        .await
+        .with_context(|| format!("ensure case.sql in {schema}"))?;
     info!("formal schema={schema}: ensured (no truncate)");
     Ok(())
 }

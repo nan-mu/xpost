@@ -120,6 +120,7 @@ async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
             )
             .await
         }
+        "case" => exam::run_case(cfg).await,
         "exec_bench" => {
             exam::run_exec_bench(
                 cfg,

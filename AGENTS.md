@@ -192,12 +192,13 @@ Continue to read its terminal output.
 ### Experiment settings
 
 The `run` list in `config/default.toml` selects the experiments and their order.
-The supported entries are `just_tx`, `just_drop`, `firewall`, `exec_bench`, `lookup`, `dev`, and `formal-clear`.
+The supported entries are `just_tx`, `just_drop`, `firewall`, `exec_bench`, `lookup`, `dev`, `formal-clear`, and `case`.
 The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` settings.
 
 - Only `just_tx`: `run = ["just_tx"]`.
 - Only `firewall`: `run = ["firewall"]`.
-- Current selection: `run = ["just_tx"]`.
+- Current selection: `run = ["case"]`.
+- `case` flashes `examples/case_xdp` once. It installs `case_tx`, then disables XDP and installs `case_drop`. tcpdump stdout is stored in `case_obs.tcpdump`. No capture file is written on TR3000.
 - All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
 - All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
 
@@ -265,14 +266,16 @@ Their board features are `perf-cag` and `perf-t`, with no default feature.
 HAL firmware uses `examples/just_tx_hal`, `examples/just_drop_hal`, `examples/firewall_hal`, and `examples/exec_bench_hal`.
 Those crates have no Cargo perf feature.
 `hal_perf` always encodes Counter, Aggregate, Gauge, and Trace.
-The `profiles.toml` registry contains fourteen `[[fw]]` names:
+The `profiles.toml` registry contains fifteen `[[fw]]` names:
 
 - XDP: `just-tx-cag`, `just-tx-t`, `just-drop-cag`, `just-drop-t`, `firewall-cag`, and `firewall-t`.
 - Lookup side runs: `just-tx-cag-lookup`, `just-drop-cag-lookup`, and `firewall-cag-lookup`.
 - HAL: `just-tx-hal`, `just-drop-hal`, and `firewall-hal`.
 - Exec: `exec-bench-ebpf` and `exec-bench-hal`.
+- Case: `case-cag` (`examples/case_xdp`). Its `xdp` list is empty. The exam installs images itself.
 
 Its network `[[xdp]]` names are `just_tx`, `just_drop`, and `firewall`.
+Its case `[[xdp]]` names are `case_tx` and `case_drop`. Those stems symlink to `just_tx.c` and `just_drop.c`. They are linked against the `case_xdp` firmware ELF.
 Its exec `[[xdp]]` names are `incr`, `square`, `bitswap`, `fib`, `buf`, `memcpy`, `fletcher32`, and `bsort`.
 The `exec-bench-ebpf` firmware profile installs `incr` by default.
 The `exec-bench-hal` profile omits `xdp`, which defaults to an empty list.

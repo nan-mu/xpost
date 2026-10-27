@@ -14,8 +14,9 @@ version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
 # HAL smoke: `dev`. Formal: just_tx / just_drop / firewall / exec_bench. Wipe: formal-clear.
-# This bare run checks that HAL and XDP TX submit at the target rate.
-run = ["just_tx"]
+# `case` flashes examples/case_xdp once, then swaps case_tx and case_drop.
+# Capture is tcpdump stdout stored in formal.case_obs. No pcap file.
+run = ["case"]
 
 [postgres]
 host = "192.168.110.96"
