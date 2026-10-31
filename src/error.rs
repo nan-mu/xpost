@@ -20,6 +20,8 @@ pub enum MapCreateError {
     AlreadyExists,
     TypeMismatch,
     Oom,
+    /// Datapath is leased or a flight still owns the maps.
+    Busy,
 }
 
 /// [`crate::map::MapRt::check`].
@@ -27,6 +29,8 @@ pub enum MapCreateError {
 pub enum MapCheckError {
     NotFound,
     TypeMismatch,
+    /// Datapath is leased or a flight still owns the maps.
+    Busy,
 }
 
 /// [`crate::map::MapRt::find`] / [`crate::map::MapGuard`] accessors.
@@ -167,12 +171,14 @@ impl_error_display! {
     Self::AlreadyExists => "already exists",
     Self::TypeMismatch => "map type/layout mismatch",
     Self::Oom => "out of memory",
+    Self::Busy => "busy",
 }
 
 impl_error_display! {
     MapCheckError,
     Self::NotFound => "not found",
     Self::TypeMismatch => "map type/layout mismatch",
+    Self::Busy => "busy",
 }
 
 impl_error_display! {

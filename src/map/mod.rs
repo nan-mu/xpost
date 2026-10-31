@@ -1,7 +1,11 @@
 //! XDP MAP resource pool + BPF map types + helper ABI.
 //!
-//! Control-plane mutation is serialized by [`MAP_RT`]; helpers resolve AOT
-//! VMAs via [`alias`] and operate under a non-nested heap lock.
+//! Control-plane reads and writes require the datapath gate to be open.
+//! `XdpRt::lease` closes it before publishing the datapath. `XdpRt::release`
+//! opens it only after `IN_FLIGHT` drains. A closed gate returns
+//! [`MapUseError::Busy`] (and the create/check equivalents). BPF helpers still
+//! use the maps during a flight. [`MAP_RT`] serializes the control plane;
+//! helpers resolve AOT VMAs via [`alias`] under a non-nested heap lock.
 
 pub(crate) mod alias;
 pub(crate) mod builder;
@@ -28,6 +32,7 @@ pub type MapIdx = usize;
 
 pub(crate) use alias::{clear_map_aliases, set_fast_arrays, set_map_aliases};
 pub(crate) use ops::{helper_delete, helper_lookup, helper_update};
+pub(crate) use state::{close_ctrl, open_ctrl};
 
 use alloc::{string::String, vec::Vec};
 
@@ -38,6 +43,18 @@ use crate::map::{
     ops::MapOps,
     state::HEAP_CLAIMED,
 };
+
+/// Refuse control-plane map access while a lease owns the datapath.
+///
+/// Call with the [`MAP_RT`] guard held. `XdpRt::lease` closes the gate before
+/// it drops that guard. Helpers do not call this.
+fn require_stopped() -> Result<(), MapUseError> {
+    if state::ctrl_open() {
+        Ok(())
+    } else {
+        Err(MapUseError::Busy)
+    }
+}
 
 /// Holds all live map instances.
 pub struct MapRt {
@@ -158,6 +175,9 @@ impl MapRt {
     /// Identity = (name, map_type, key_layout, value_layout). Existing `len` must
     /// be ≥ requested `len` (no resize); smaller capacity rejects the binding.
     pub fn check(&self, spec: &MapMeta) -> Result<MapIdx, MapCheckError> {
+        if require_stopped().is_err() {
+            return Err(MapCheckError::Busy);
+        }
         let idx = self.find_name(&spec.name).ok_or(MapCheckError::NotFound)?;
         let meta = &self.meta[idx];
         if !spec.identity_eq(meta) {
@@ -174,6 +194,9 @@ impl MapRt {
 
     /// Allocate storage and register a new map row.
     pub fn create(&mut self, builder: MapBuilder) -> Result<MapIdx, MapCreateError> {
+        if require_stopped().is_err() {
+            return Err(MapCreateError::Busy);
+        }
         builder.validate()?;
         let name = builder.name.clone().ok_or(MapCreateError::InvalidName)?;
         if self.find_name(&name).is_some() {
@@ -219,11 +242,13 @@ impl MapRt {
     }
 
     pub fn find(&self, name: &str) -> Result<MapIdx, MapUseError> {
+        require_stopped()?;
         self.find_name(name).ok_or(MapUseError::NotFound)
     }
 
     /// Borrow a map without re-locking [`MAP_RT`].
     pub fn get(&self, idx: MapIdx) -> Result<MapGuard<'_>, MapUseError> {
+        require_stopped()?;
         self.meta
             .get(idx)
             .map(|meta| MapGuard { meta })
@@ -231,7 +256,13 @@ impl MapRt {
     }
 
     /// Control-plane HASH lookup: copy up to `out.len()` value bytes; returns value size.
-    pub fn hash_lookup(&self, idx: MapIdx, key: &[u8], out: &mut [u8]) -> Result<usize, MapUseError> {
+    pub fn hash_lookup(
+        &self,
+        idx: MapIdx,
+        key: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, MapUseError> {
+        require_stopped()?;
         let meta = self.meta.get(idx).ok_or(MapUseError::NotFound)?;
         if meta.map_type != MapType::Hash {
             return Err(MapUseError::TypeMismatch);
@@ -256,6 +287,7 @@ impl MapRt {
         value: &[u8],
         flags: u64,
     ) -> Result<(), MapUseError> {
+        require_stopped()?;
         let meta = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
         if meta.map_type != MapType::Hash {
             return Err(MapUseError::TypeMismatch);
@@ -269,6 +301,7 @@ impl MapRt {
 
     /// Control-plane HASH delete.
     pub fn hash_delete(&mut self, idx: MapIdx, key: &[u8]) -> Result<(), MapUseError> {
+        require_stopped()?;
         let meta = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
         if meta.map_type != MapType::Hash {
             return Err(MapUseError::TypeMismatch);
@@ -282,6 +315,7 @@ impl MapRt {
 
     /// Control-plane: remove all HASH entries (capacity unchanged).
     pub fn hash_clear(&mut self, idx: MapIdx) -> Result<(), MapUseError> {
+        require_stopped()?;
         let meta = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
         if meta.map_type != MapType::Hash {
             return Err(MapUseError::TypeMismatch);
@@ -293,6 +327,7 @@ impl MapRt {
 
     /// Control-plane: current HASH occupancy.
     pub fn hash_len(&self, idx: MapIdx) -> Result<usize, MapUseError> {
+        require_stopped()?;
         let meta = self.meta.get(idx).ok_or(MapUseError::NotFound)?;
         if meta.map_type != MapType::Hash {
             return Err(MapUseError::TypeMismatch);
@@ -303,6 +338,7 @@ impl MapRt {
 
     /// Control-plane: HASH value size in bytes.
     pub fn hash_value_size(&self, idx: MapIdx) -> Result<usize, MapUseError> {
+        require_stopped()?;
         let meta = self.meta.get(idx).ok_or(MapUseError::NotFound)?;
         if meta.map_type != MapType::Hash {
             return Err(MapUseError::TypeMismatch);
@@ -316,6 +352,7 @@ impl MapRt {
     where
         F: FnMut(&[u8], &[u8]),
     {
+        require_stopped()?;
         let meta = self.meta.get(idx).ok_or(MapUseError::NotFound)?;
         if meta.map_type != MapType::Hash {
             return Err(MapUseError::TypeMismatch);
@@ -333,6 +370,7 @@ impl MapRt {
         index: u32,
         value: u64,
     ) -> Result<(), MapUseError> {
+        require_stopped()?;
         let meta = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
         if meta.map_type != MapType::Array {
             return Err(MapUseError::TypeMismatch);
@@ -343,17 +381,12 @@ impl MapRt {
         let n = map.value_size.min(8);
         let mut buf = [0u8; 8];
         buf[..n].copy_from_slice(&bytes[..n]);
-        MapOps::update(
-            map,
-            &key as *const u32 as *const u8,
-            buf.as_ptr(),
-            0,
-        )
-        .map_err(map_op_to_use)
+        MapOps::update(map, &key as *const u32 as *const u8, buf.as_ptr(), 0).map_err(map_op_to_use)
     }
 
     /// Control-plane: zero every ARRAY element (capacity unchanged).
     pub fn array_clear(&mut self, idx: MapIdx) -> Result<(), MapUseError> {
+        require_stopped()?;
         let meta = self.meta.get_mut(idx).ok_or(MapUseError::NotFound)?;
         if meta.map_type != MapType::Array {
             return Err(MapUseError::TypeMismatch);
@@ -365,6 +398,7 @@ impl MapRt {
 
     /// Byte length of the App-mode `get map` ASCII blob for `idx`.
     pub fn map_blob_len(&self, idx: MapIdx) -> Result<usize, MapUseError> {
+        require_stopped()?;
         let map_type = self.meta.get(idx).ok_or(MapUseError::NotFound)?.map_type;
         match map_type {
             MapType::Array => {
@@ -392,6 +426,7 @@ impl MapRt {
         idx: MapIdx,
         mut write: impl FnMut(&[u8]),
     ) -> Result<(), MapUseError> {
+        require_stopped()?;
         let map_type = self.meta.get(idx).ok_or(MapUseError::NotFound)?.map_type;
         match map_type {
             MapType::Array => {
@@ -455,6 +490,7 @@ impl MapGuard<'_> {
 
     /// Control-plane: read ARRAY element `index` as little-endian u64 (zero-extend).
     pub fn array_get_u64(&self, index: u32) -> Result<u64, MapUseError> {
+        require_stopped()?;
         if self.meta.map_type != MapType::Array {
             return Err(MapUseError::TypeMismatch);
         }

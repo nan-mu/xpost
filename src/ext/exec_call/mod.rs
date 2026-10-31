@@ -11,7 +11,8 @@ use xpost_type::XdpAction;
 ///
 /// Same contract as the network datapath: returns a Linux-style [`XdpAction`]
 /// and a visible window (subslice of `buf`). When no image is leased, returns
-/// [`XdpAction::Pass`] and the full buffer (inactive path).
+/// [`XdpAction::Pass`] and the full buffer. A flight fault returns
+/// [`XdpAction::Drop`].
 ///
 /// When perf backends are compiled in, this records the same XDP begin/end
 /// hooks as Wi-Fi ingress (`xdp_invocations` / `xdp_action`) so `get perf`

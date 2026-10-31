@@ -13,8 +13,8 @@
 //! This crate targets RV32 only; typecheck with `cargo check` / `cargo check-c3`
 //! (root `.cargo/config.toml` sets `--target riscv32imc-unknown-none-elf`).
 
-mod stack;
 mod prog;
+mod stack;
 
 pub(crate) mod ctx;
 #[cfg(feature = "esp-radio")]
@@ -58,7 +58,9 @@ struct RunResult {
 /// Lease flight for the crate-mounted [`XdpProg`](prog::XdpProg).
 ///
 /// Returns Linux-style [`XdpAction`](xpost_type::XdpAction) + window. Driver
-/// maps to Pass/Drop/Tx. Invalid md windows bump soft-fail and fail closed.
+/// maps to Pass/Drop/Tx. A clear [`ACTIVE`] flag passes the frame (feature off).
+/// After [`ACTIVE`] is set, a flight fault counts a runtime error and returns
+/// [`XdpAction::Drop`].
 #[esp_hal::ram]
 pub(crate) fn run<'a>(frame: &'a mut [u8]) -> (xpost_type::XdpAction, &'a mut [u8]) {
     use xpost_type::XdpAction;
@@ -67,28 +69,23 @@ pub(crate) fn run<'a>(frame: &'a mut [u8]) -> (xpost_type::XdpAction, &'a mut [u
         return (XdpAction::Pass, frame);
     }
     let Some(result) = xdp(frame) else {
-        return (XdpAction::Pass, frame);
+        return (XdpAction::Drop, frame);
     };
     let act = XdpAction::from(result.action);
     let window = result.window;
-    let valid =
-        (window.data.cast_const() == frame.as_ptr()) & (window.len <= frame.len());
+    let valid = (window.data.cast_const() == frame.as_ptr()) & (window.len <= frame.len());
     if !valid {
         #[cfg(feature = "perf-counter")]
         crate::ext::perf::counter::inc_bad_md();
-        let bad = match act {
-            XdpAction::Tx => XdpAction::Drop,
-            other => other,
-        };
-        return (bad, frame);
+        return (XdpAction::Drop, frame);
     }
     (act, &mut frame[..window.len])
 }
 
 /// Claim `IN_FLIGHT`, validate lease/entry, [`inner_xdp`] the image, return md window.
 ///
-/// Returns `None` when not leased, raced with release, or reentrancy is
-/// detected. Caller treats as PASS.
+/// Returns `None` when the flight cannot start or the md length is corrupt.
+/// Each path bumps a runtime-error counter. Caller drops the frame.
 #[esp_hal::ram]
 fn xdp(data: &mut [u8]) -> Option<RunResult> {
     let mut ctx_md = XdpMd::from_buf(data);
@@ -122,7 +119,11 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
     IN_FLIGHT.store(0, Ordering::Release);
 
     let data = ctx_md.data;
-    let len = (ctx_md.data_end as usize).checked_sub(data as usize)?;
+    let Some(len) = (ctx_md.data_end as usize).checked_sub(data as usize) else {
+        #[cfg(feature = "perf-counter")]
+        crate::ext::perf::counter::inc_bad_md();
+        return None;
+    };
     Some(RunResult {
         action,
         window: PacketWindow { data, len },
@@ -147,7 +148,7 @@ unsafe fn inner_xdp(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
     if sp & 15 != 0 {
         #[cfg(feature = "perf-counter")]
         crate::ext::perf::counter::inc_stack_misalign();
-        return 2; // XDP_PASS
+        return xpost_type::XdpAction::Drop as i32;
     }
 
     let result: i32;

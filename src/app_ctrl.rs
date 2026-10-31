@@ -69,7 +69,11 @@ pub fn lock_map(name: &str) -> Result<(MapRtGuard<'static>, MapIdx), AppMapError
     }
     let lock = MAP_RT.try_get().ok_or(AppMapError::NoRt)?;
     let maps = lock.try_lock().map_err(|_| AppMapError::Busy)?;
-    let idx = maps.find(name).map_err(|_| AppMapError::NameNotFound)?;
+    let idx = maps.find(name).map_err(|e| match e {
+        MapUseError::NotFound => AppMapError::NameNotFound,
+        MapUseError::Busy => AppMapError::Busy,
+        _ => AppMapError::Logic,
+    })?;
     Ok((maps, idx))
 }
 

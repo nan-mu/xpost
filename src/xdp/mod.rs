@@ -284,9 +284,7 @@ impl XdpRt {
             match rt.check(req) {
                 Ok(_) => {}
                 Err(MapCheckError::NotFound) => return Err(ReadyError::MissingMap),
-                Err(MapCheckError::TypeMismatch) => {
-                    return Err(ReadyError::MapCheck(MapCheckError::TypeMismatch));
-                }
+                Err(e) => return Err(ReadyError::MapCheck(e)),
             }
         }
         Ok(())
@@ -429,6 +427,8 @@ impl XdpRt {
 
     /// Enable the datapath: [`Self::pre_lease`], install VMR aliases / map users, publish entry.
     ///
+    /// Closes `MapRt` control-plane access before `ACTIVE` is stored.
+    ///
     /// VMR pairs come only from the primary image's runtime meta (`aot_binds`).
     /// Pass `None` only when the leased image has no `required_maps`.
     pub fn lease(&mut self, maps: Option<&mut MapRtGuard<'_>>) -> Result<(), XdpLeaseError> {
@@ -445,6 +445,7 @@ impl XdpRt {
             slot.slot.base()
         };
         self.map_lease.clear();
+        let caller_holds_maps = maps.is_some();
         if let Some(maps) = maps {
             if let Some(id) = self.slots.get(self.primary).and_then(|s| s.image) {
                 let binds: Vec<(String, usize)> =
@@ -491,6 +492,19 @@ impl XdpRt {
         {
             return Err(XdpLeaseError::MapsRequired);
         }
+        // Close control-plane map access before any flight can observe `ACTIVE`.
+        // Caller holds `MAP_RT` when `maps` is `Some`. Otherwise take it here so
+        // a control-plane critical section cannot overlap this store.
+        if caller_holds_maps {
+            crate::map::close_ctrl();
+        } else if let Some(lock) = crate::map::MAP_RT.try_get() {
+            let _guard = lock
+                .try_lock()
+                .map_err(|_| XdpLeaseError::Map(MapUseError::Busy))?;
+            crate::map::close_ctrl();
+        } else {
+            crate::map::close_ctrl();
+        }
         PRIMARY_ENTRY.store(entry, Ordering::Release);
         ACTIVE.store(true, Ordering::Release);
         self.leased = true;
@@ -526,6 +540,7 @@ impl XdpRt {
             let _ = crate::map::remove_user_sync(id);
         }
         self.map_lease.vmr.clear();
+        crate::map::open_ctrl();
         self.leased = false;
         Ok(())
     }

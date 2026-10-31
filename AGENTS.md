@@ -388,11 +388,17 @@ The XDP firmware starts the runtimes in this order:
 6. The board drops the runtime guards before RX or exec commands start.
 
 Without an active lease, ingress passes packets to the network stack.
+After the lease is active, a flight fault drops the frame and increments a runtime-error counter.
+Faults are a lost `IN_FLIGHT` claim, a zero entry, a bad `xdp_md` window, and a misaligned stack.
 HAL firmware uses application arrays/hash maps and does not initialize `MapRt` or `XdpRt`.
 
 When it leases an image, the runtime installs VMR-to-RMA aliases from `aot_binds` through `set_map_aliases`.
 Map names reside in `MapRt` metadata and XDP ELF descriptors.
 There is no userspace `register_map_name` path.
+`XdpRt::lease` closes the `MapRt` control plane before it publishes `ACTIVE`.
+Reads and writes then return `Busy`, including `get map`.
+BPF helpers still use the maps during a flight.
+`XdpRt::release` opens the control plane only after `IN_FLIGHT` drains and map users drop.
 
 Control-plane errors use the small enums in `crate::error` for each public entry point.
 BPF helper errno values use `map::ops::MapOpError`.
@@ -441,6 +447,7 @@ UDP application logic remains in the firmware crate.
 With `exec-call`, `ext::exec_call::invoke(&mut [u8])` calls the same lease-controlled `xdp::ingress::run` function.
 This interface does not attach another network ingress hook.
 Without an active lease, it returns `XdpAction::Pass` and the full buffer.
+A flight fault returns `XdpAction::Drop`.
 The image uses the caller's stack. There is no dedicated XDP stack switch.
 HAL CAGT values use the same wire layout but measure application-level intervals.
 Compare measurement boundaries before comparing HAL and XDP metrics with the same name.
