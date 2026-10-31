@@ -33,3 +33,8 @@ pub static XDP_RT: OnceLock<RtMutex<XdpRt>> = OnceLock::new();
 pub(crate) static ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(crate) static PRIMARY_ENTRY: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+/// Hot-update swing. Ingress drops a new flight; `ACTIVE` stays true.
+///
+/// `XdpRt::switch` stores this, waits until `IN_FLIGHT` is 0, then publishes
+/// the new `PRIMARY_ENTRY`. The RX callback must not spin on this flag.
+pub(crate) static PAUSE: AtomicBool = AtomicBool::new(false);

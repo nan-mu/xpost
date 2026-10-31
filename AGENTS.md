@@ -373,8 +373,7 @@ Preserve the ABI and linker layout shared with libbpf-mcu through the XPM1 contr
 XDP firmware calls `xpost_build::firmware_codegen()` in `build.rs`.
 It reads `[package.metadata.xpost]` defaults from the root crate, applies board overrides, and derives the cold Flash span from `partitions.csv`.
 The `xpost-build/xpost-link` wrapper embeds the `.xpost.mem` XPM1 contract into the linked Firmware ELF for host tools.
-The current XDP boards each override the layout to one primary slot `a`, with `mount = "rx"`.
-The library defaults also define slot `b`.
+XDP boards register two IRAM slots. Slot `a` (`.xdp.hotload_0`, `mount = "rx"`) is loaded before lease and stays immutable while it is the published entry. Slot `b` (`.xdp.hotload_1`, `mount = "call"`) is not the entry until a hot `switch`. XPM1 still publishes only the primary slot address.
 
 ### Maps and boot
 
@@ -399,6 +398,8 @@ There is no userspace `register_map_name` path.
 Reads and writes then return `Busy`, including `get map`.
 BPF helpers still use the maps during a flight.
 `XdpRt::release` opens the control plane only after `IN_FLIGHT` drains and map users drop.
+
+`XdpRt::switch` while leased writes only a slot that is not the published entry. `ACTIVE` stays true during the copy, so the mounted image keeps running. The swing stores `PAUSE`, waits until `IN_FLIGHT` is 0, stores the idle slot base into `PRIMARY_ENTRY`, then clears `PAUSE`. Packets that arrive in that window do not run either image; ingress drops them. In-flight packets finish on the old entry. Call `switch` from the control plane, not from the RX callback. The incoming image must be linked for the idle slot, and its map binds must already be covered by the lease. This path does not reopen `MapRt` or rebind aliases.
 
 Control-plane errors use the small enums in `crate::error` for each public entry point.
 BPF helper errno values use `map::ops::MapOpError`.

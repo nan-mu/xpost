@@ -33,7 +33,7 @@ use core::sync::atomic::Ordering;
 
 use crate::xdp::{
     ingress::ctx::XdpMd,
-    state::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY},
+    state::{ACTIVE, IN_FLIGHT, PAUSE, PRIMARY_ENTRY},
 };
 
 /// Invoke scratch in `.bss`: `[sp, ra, s0..s11]` (14 × `usize`), byte offsets 0..52.
@@ -59,8 +59,9 @@ struct RunResult {
 ///
 /// Returns Linux-style [`XdpAction`](xpost_type::XdpAction) + window. Driver
 /// maps to Pass/Drop/Tx. A clear [`ACTIVE`] flag passes the frame (feature off).
-/// After [`ACTIVE`] is set, a flight fault counts a runtime error and returns
-/// [`XdpAction::Drop`].
+/// After [`ACTIVE`] is set, a flight fault returns [`XdpAction::Drop`].
+/// A hot-update [`PAUSE`](crate::xdp::state::PAUSE) drops the frame without
+/// entering either image.
 #[esp_hal::ram]
 pub(crate) fn run<'a>(frame: &'a mut [u8]) -> (xpost_type::XdpAction, &'a mut [u8]) {
     use xpost_type::XdpAction;
@@ -100,6 +101,14 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
     {
         #[cfg(feature = "perf-counter")]
         crate::ext::perf::counter::inc_reentry();
+        return None;
+    }
+    // Dekker pair with `XdpRt::switch`: PAUSE store, then wait IN_FLIGHT==0,
+    // then store PRIMARY_ENTRY. A flight that passes this load runs the entry
+    // sampled below; switch will not publish the new entry until it finishes.
+    // A flight that observes PAUSE drops and does not run either image.
+    if PAUSE.load(Ordering::SeqCst) {
+        IN_FLIGHT.store(0, Ordering::Release);
         return None;
     }
     // Dekker pair with `XdpRt::release` (ACTIVE=false → wait IN_FLIGHT==0):

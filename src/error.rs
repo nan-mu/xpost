@@ -104,6 +104,8 @@ pub enum XdpSwitchError {
     SlotAddressAlign,
     MapsRequired,
     MissingMap,
+    /// Leased image's aliases do not cover the incoming image's binds.
+    MapBind,
     MapCheck(MapCheckError),
 }
 
@@ -254,6 +256,7 @@ impl XdpSwitchError {
             Self::SlotAddressAlign => "slot address align",
             Self::MapsRequired => "maps required but none",
             Self::MissingMap => "missing map",
+            Self::MapBind => "map bind mismatch",
             Self::MapCheck(e) => e.as_str(),
         }
     }

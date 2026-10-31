@@ -45,9 +45,15 @@ const KEY_OUT: u8 = 1;
 #[unsafe(link_section = ".bss")]
 static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
+/// Primary RX slot. Loaded before lease; immutable while it is the entry.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".xdp.hotload_0")]
 static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
+
+/// Idle slot. Not the datapath entry until a leased `switch` retargets it.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".xdp.hotload_1")]
+static xdp_slot_idle: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
 static mut INVOKE_BUF: [u8; VALUE_LEN] = [0u8; VALUE_LEN];
 
@@ -75,7 +81,9 @@ async fn main(spawner: Spawner) -> ! {
     // Lease before App serial so unsolicited `OK init` means invoke-ready.
     let map_heap: &'static mut [u8] = unsafe { &mut *addr_of_mut!(MAP_HEAP) };
     let mut maps = MapRt::init(map_heap).await.expect("MapRt::init");
-    let slots = [unsafe { xdp_slot.as_xdp_slot(true) }];
+    let slots = [unsafe { xdp_slot.as_xdp_slot(true) }, unsafe {
+        xdp_slot_idle.as_xdp_slot(false)
+    }];
     let (mut rt, report) = XdpRt::init(
         flash,
         &slots,
@@ -275,12 +283,10 @@ fn run_exec() -> Result<(), AppMapError> {
 
     {
         let (maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
-        let n = maps
-            .hash_lookup(idx, &[KEY_IN], buf)
-            .map_err(|e| match e {
-                xpost::map::MapUseError::NotFound => AppMapError::InvalidKey,
-                other => AppMapError::from(other),
-            })?;
+        let n = maps.hash_lookup(idx, &[KEY_IN], buf).map_err(|e| match e {
+            xpost::map::MapUseError::NotFound => AppMapError::InvalidKey,
+            other => AppMapError::from(other),
+        })?;
         if n > VALUE_LEN {
             return Err(AppMapError::Logic);
         }

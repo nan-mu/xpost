@@ -33,7 +33,7 @@ use crate::{
     xdp::{
         map::MapLease,
         ready::ReadyError,
-        state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PRIMARY_ENTRY},
+        state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PAUSE, PRIMARY_ENTRY},
     },
 };
 pub type XdpId = usize;
@@ -55,6 +55,33 @@ pub(crate) struct SlotState {
 pub(crate) struct ImageRecord {
     pub(crate) meta: XdpMeta,
     pub(crate) table_id: XdpId,
+}
+
+/// Incoming binds must already be installed for the mounted image.
+///
+/// Hot switch does not take `MapRt` and does not rebind. A control-plane
+/// `check` would return `Busy` for the whole lease.
+fn hot_maps_covered(
+    mounted: &XdpMeta,
+    next_maps: &[crate::map::MapMeta],
+    next_binds: &[(String, usize)],
+) -> bool {
+    let req_ok = next_maps.iter().all(|req| {
+        mounted.required_maps.iter().any(|have| {
+            have.name == req.name
+                && have.map_type == req.map_type
+                && have.key_layout == req.key_layout
+                && have.value_layout == req.value_layout
+                && have.len >= req.len
+        })
+    });
+    let bind_ok = next_binds.iter().all(|(name, vma)| {
+        mounted
+            .aot_binds
+            .iter()
+            .any(|(have_name, have_vma)| have_name == name && have_vma == vma)
+    });
+    req_ok && bind_ok
 }
 
 pub struct XdpRt {
@@ -342,18 +369,32 @@ impl XdpRt {
         Ok(())
     }
 
-    /// Copy XDP binary of `id` from cold table into `slot`, set primary to `slot`,
-    /// after validating via [`Self::pre_lease`].
+    /// Copy XDP binary of `id` from the cold table into `slot`.
+    ///
+    /// Before lease, this also selects `slot` as the primary. [`Self::lease`]
+    /// publishes that entry. The mounted slot is then immutable.
+    ///
+    /// While leased, `slot` must be the idle slot (not the published entry).
+    /// The copy runs while `ACTIVE` stays true, so the mounted image keeps
+    /// taking packets. The swing then pauses new flights, waits until the
+    /// in-flight packet finishes on the old entry, and stores the idle slot
+    /// base into `PRIMARY_ENTRY`. Map aliases stay as leased; the incoming
+    /// image's binds must already be covered. Do not call this from the RX
+    /// callback: this core would deadlock on `IN_FLIGHT`.
     pub fn switch(
         &mut self,
         id: XdpId,
         slot: SlotId,
         maps: Option<&MapRtGuard<'_>>,
     ) -> Result<(), XdpSwitchError> {
-        if self.leased {
-            return Err(XdpSwitchError::Leased);
-        }
         let _ = self.slots.get(slot).ok_or(XdpSwitchError::UnknownSlot)?;
+        if self.leased {
+            if self.primary == slot {
+                return Err(XdpSwitchError::Leased);
+            }
+            self.hot_switch(id, slot)?;
+            return Ok(());
+        }
 
         let prev_primary = self.primary;
         self.primary = slot;
@@ -423,6 +464,98 @@ impl XdpRt {
             .meta
             .set_location(XdpLocation::Slot { index: slot });
         Ok(())
+    }
+
+    /// Write `id` into an idle slot, then retarget the published entry.
+    ///
+    /// Caller has rejected `slot == self.primary`. `ACTIVE` stays true.
+    fn hot_switch(&mut self, id: XdpId, slot: SlotId) -> Result<(), XdpSwitchError> {
+        let mounted_id = self
+            .slots
+            .get(self.primary)
+            .and_then(|s| s.image)
+            .ok_or(XdpSwitchError::PrimaryEmpty)?;
+        let (aot_abs, image_len, dst, capacity, occupied, next_maps, next_binds) = {
+            let meta = &self
+                .images
+                .get(id)
+                .ok_or(XdpSwitchError::UnknownImage)?
+                .meta;
+            if meta.image_len == 0 {
+                return Err(XdpSwitchError::ImageEmpty);
+            }
+            meta.check_arch()?;
+            meta.check_helper_address()?;
+            let slot_state = self.slots.get(slot).ok_or(XdpSwitchError::UnknownSlot)?;
+            if meta.image_len > slot_state.slot.len() {
+                return Err(XdpSwitchError::ImageTooLarge);
+            }
+            meta.check_slot_address(&slot_state.slot)?;
+            (
+                meta.aot_abs(),
+                meta.image_len,
+                slot_state.slot.base() as *mut u8,
+                slot_state.slot.len(),
+                slot_state.image,
+                meta.required_maps.clone(),
+                meta.aot_binds.clone(),
+            )
+        };
+        let mounted = &self
+            .images
+            .get(mounted_id)
+            .ok_or(XdpSwitchError::UnknownImage)?
+            .meta;
+        if !hot_maps_covered(mounted, &next_maps, &next_binds) {
+            return Err(XdpSwitchError::MapBind);
+        }
+        let mut buf = [0u8; DEFAULT_IMAGE_CAPACITY];
+        if image_len > buf.len() {
+            return Err(XdpSwitchError::ScratchTooSmall);
+        }
+        self.table.read(aot_abs, &mut buf[..image_len])?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, image_len);
+            core::ptr::write_bytes(dst.add(image_len), 0, capacity - image_len);
+        }
+        Self::fence_instruction_cache();
+        if let Some(prev) = occupied.filter(|prev| *prev != id) {
+            let table_id = self
+                .images
+                .get(prev)
+                .ok_or(XdpSwitchError::UnknownImage)?
+                .table_id;
+            self.images
+                .get_mut(prev)
+                .ok_or(XdpSwitchError::UnknownImage)?
+                .meta
+                .set_location(XdpLocation::Table { index: table_id });
+        }
+        let slot_state = self
+            .slots
+            .get_mut(slot)
+            .ok_or(XdpSwitchError::UnknownSlot)?;
+        slot_state.loaded_len = image_len;
+        slot_state.image = Some(id);
+        self.images
+            .get_mut(id)
+            .ok_or(XdpSwitchError::UnknownImage)?
+            .meta
+            .set_location(XdpLocation::Slot { index: slot });
+        self.retarget(slot);
+        Ok(())
+    }
+
+    /// Pause new flights, let the in-flight packet finish, publish `slot`.
+    fn retarget(&mut self, slot: SlotId) {
+        let entry = self.slots[slot].slot.base();
+        PAUSE.store(true, Ordering::SeqCst);
+        while IN_FLIGHT.load(Ordering::SeqCst) != 0 {
+            core::hint::spin_loop();
+        }
+        PRIMARY_ENTRY.store(entry, Ordering::Release);
+        self.primary = slot;
+        PAUSE.store(false, Ordering::Release);
     }
 
     /// Enable the datapath: [`Self::pre_lease`], install VMR aliases / map users, publish entry.
@@ -505,6 +638,7 @@ impl XdpRt {
         } else {
             crate::map::close_ctrl();
         }
+        PAUSE.store(false, Ordering::Release);
         PRIMARY_ENTRY.store(entry, Ordering::Release);
         ACTIVE.store(true, Ordering::Release);
         self.leased = true;
@@ -534,6 +668,7 @@ impl XdpRt {
         while IN_FLIGHT.load(Ordering::SeqCst) != 0 {
             core::hint::spin_loop();
         }
+        PAUSE.store(false, Ordering::Release);
         PRIMARY_ENTRY.store(0, Ordering::Release);
         crate::map::clear_map_aliases();
         for id in self.map_lease.refs.drain(..) {

@@ -22,6 +22,12 @@ length = 0xE00
 mount = "rx"
 primary = true
 
+[[package.metadata.xpost.slots.entries]]
+name = "b"
+length = 0xE00
+mount = "call"
+primary = false
+
 [package.metadata.xpost.xdp_table]
 partition = "xdp"
 image_capacity = 0x1000

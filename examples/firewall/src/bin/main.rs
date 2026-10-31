@@ -62,9 +62,15 @@ static mut LEGAL_TOKENS: [u16; LEGAL_CAP] = [0; LEGAL_CAP];
 #[unsafe(link_section = ".bss")]
 static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
+/// Primary RX slot. Loaded before lease; immutable while it is the entry.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".xdp.hotload_0")]
 static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
+
+/// Idle slot. Not the datapath entry until a leased `switch` retargets it.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".xdp.hotload_1")]
+static xdp_slot_idle: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
 
@@ -102,7 +108,9 @@ async fn main(spawner: Spawner) -> ! {
 
     let map_heap: &'static mut [u8] = unsafe { &mut *addr_of_mut!(MAP_HEAP) };
     let mut maps = MapRt::init(map_heap).await.expect("MapRt::init");
-    let slots = [unsafe { xdp_slot.as_xdp_slot(true) }];
+    let slots = [unsafe { xdp_slot.as_xdp_slot(true) }, unsafe {
+        xdp_slot_idle.as_xdp_slot(false)
+    }];
     let (mut rt, report) = XdpRt::init(
         flash,
         &slots,
@@ -349,7 +357,11 @@ fn handle_map_crud<'a>(pkt: &[u8], val_buf: &'a mut [u8; 32]) -> (u32, u32, &'a 
         },
         map_crud::KIND_UPDATE => {
             let flags = if op.flags == 0 { BPF_ANY } else { op.flags };
-            let value = if op.value.is_empty() { &[1u8][..] } else { op.value };
+            let value = if op.value.is_empty() {
+                &[1u8][..]
+            } else {
+                op.value
+            };
             match maps.hash_update(idx, op.key, value, flags) {
                 Ok(()) => (STATUS_OK, kind, &[]),
                 Err(MapUseError::Exists) => (STATUS_CONFLICT, kind, &[]),
