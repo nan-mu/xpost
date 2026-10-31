@@ -13,7 +13,7 @@ path = "./src/bin/main.rs"
 [package.metadata.espflash]
 partition_table = "partitions.csv"
 
-# Slot `a` is the leased entry. Slot `b` stays idle until a hot `switch`.
+# Single primary slot. A/B hot swap is examples/hot_xdp.
 [package.metadata.xpost]
 schema_version = 1
 
@@ -22,12 +22,6 @@ name = "a"
 length = 0xE00
 mount = "rx"
 primary = true
-
-[[package.metadata.xpost.slots.entries]]
-name = "b"
-length = 0xE00
-mount = "call"
-primary = false
 
 [package.metadata.xpost.xdp_table]
 partition = "xdp"

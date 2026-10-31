@@ -3,6 +3,7 @@
 use anyhow::Context;
 
 pub mod case;
+pub mod hot_swap;
 pub mod dev;
 pub mod exec_bench;
 pub mod firewall;
@@ -11,6 +12,7 @@ pub mod just_tx;
 pub mod repeat;
 
 pub use case::run_case;
+pub use hot_swap::run_hot_swap;
 pub use dev::run_dev;
 pub use exec_bench::{ExecBenchOpts, run_exec_bench};
 pub use firewall::{FirewallOpts, run_firewall};

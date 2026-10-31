@@ -319,9 +319,9 @@ impl FileConfig {
         for name in &self.run {
             match name.as_str() {
                 "just_tx" | "just_drop" | "firewall" | "exec_bench" | "lookup" | "dev"
-                | "formal-clear" | "case" => {}
+                | "formal-clear" | "case" | "hot_swap" => {}
                 other => bail!(
-                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / firewall / exec_bench / lookup / dev / formal-clear / case"
+                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / firewall / exec_bench / lookup / dev / formal-clear / case / hot_swap"
                 ),
             }
         }

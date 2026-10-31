@@ -40,6 +40,90 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
         | (OkReply::GetPerf { blob: a }, OkReply::GetPerf { blob: b }) => {
             assert_eq!(a, b, "blob");
         }
+        (OkReply::XdpStage { slot: a, generation: ag }, OkReply::XdpStage { slot: b, generation: bg }) => {
+            assert_eq!(a, b);
+            assert_eq!(ag, bg);
+        }
+        (
+            OkReply::XdpActivate {
+                ok: aok,
+                rollback: arb,
+                severe: ase,
+                from_slot: afrom,
+                to_slot: ato,
+                generation: agen,
+                quiesce_drop: adrop,
+                quiesce_pass: apass,
+            },
+            OkReply::XdpActivate {
+                ok: bok,
+                rollback: brb,
+                severe: bse,
+                from_slot: bfrom,
+                to_slot: bto,
+                generation: bgen,
+                quiesce_drop: bdrop,
+                quiesce_pass: bpass,
+            },
+        )
+        | (
+            OkReply::XdpRollback {
+                ok: aok,
+                rollback: arb,
+                severe: ase,
+                from_slot: afrom,
+                to_slot: ato,
+                generation: agen,
+                quiesce_drop: adrop,
+                quiesce_pass: apass,
+            },
+            OkReply::XdpRollback {
+                ok: bok,
+                rollback: brb,
+                severe: bse,
+                from_slot: bfrom,
+                to_slot: bto,
+                generation: bgen,
+                quiesce_drop: bdrop,
+                quiesce_pass: bpass,
+            },
+        ) => {
+            assert_eq!(
+                (aok, arb, ase, afrom, ato, agen, adrop, apass),
+                (bok, brb, bse, bfrom, bto, bgen, bdrop, bpass)
+            );
+        }
+        (
+            OkReply::GetXdpStatus {
+                boot_id: a,
+                active_slot: aa,
+                staged_slot: asl,
+                generation: ag,
+                retained_slot: ar,
+                updating: au,
+                severe: ase,
+                quiesce_drop: ad,
+                quiesce_pass: ap,
+                last_error: ae,
+            },
+            OkReply::GetXdpStatus {
+                boot_id: b,
+                active_slot: ba,
+                staged_slot: bsl,
+                generation: bg,
+                retained_slot: br,
+                updating: bu,
+                severe: bse,
+                quiesce_drop: bd,
+                quiesce_pass: bp,
+                last_error: be,
+            },
+        ) => {
+            assert_eq!(
+                (a, aa, asl, ag, ar, au, ase, ad, ap, ae),
+                (b, ba, bsl, bg, br, bu, bse, bd, bp, be)
+            );
+        }
         _ => panic!("ok reply variant mismatch"),
     }
 }
@@ -153,6 +237,60 @@ fn ok_get_map_blob() {
 #[test]
 fn ok_get_perf_empty_blob() {
     roundtrip_ok(Command::GetPerf, OkReply::GetPerf { blob: b"" });
+}
+
+#[test]
+fn ok_xdp_stage() {
+    roundtrip_ok(
+        Command::XdpStage {
+            name: "hot_mark",
+            slot: 1,
+        },
+        OkReply::XdpStage {
+            slot: 1,
+            generation: 4,
+        },
+    );
+}
+
+#[test]
+fn ok_xdp_activate() {
+    roundtrip_ok(
+        Command::XdpActivate {
+            slot: 1,
+            generation: 4,
+            pass: false,
+        },
+        OkReply::XdpActivate {
+            ok: 1,
+            rollback: 0,
+            severe: 0,
+            from_slot: 0,
+            to_slot: 1,
+            generation: 4,
+            quiesce_drop: 2,
+            quiesce_pass: 0,
+        },
+    );
+}
+
+#[test]
+fn ok_get_xdp_status() {
+    roundtrip_ok(
+        Command::GetXdpStatus,
+        OkReply::GetXdpStatus {
+            boot_id: 9,
+            active_slot: 1,
+            staged_slot: 255,
+            generation: 0,
+            retained_slot: 0,
+            updating: 0,
+            severe: 0,
+            quiesce_drop: 2,
+            quiesce_pass: 0,
+            last_error: 0,
+        },
+    );
 }
 
 #[test]

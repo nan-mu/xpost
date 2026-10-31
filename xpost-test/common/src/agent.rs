@@ -97,6 +97,34 @@ impl AgentClient {
         self.post_json("/v1/disable/xdp", &serde_json::json!({})).await
     }
 
+    /// `POST /v1/xdp/stage` — copy a cold image into an idle slot.
+    pub async fn stage_xdp(&self, name: &str, slot: u8) -> Result<String> {
+        self.post_json(
+            "/v1/xdp/stage",
+            &serde_json::json!({ "name": name, "slot": slot }),
+        )
+        .await
+    }
+
+    /// `POST /v1/xdp/activate`. `policy` is `drop` or `pass`.
+    pub async fn activate_xdp(&self, slot: u8, generation: u32, policy: &str) -> Result<String> {
+        self.post_json(
+            "/v1/xdp/activate",
+            &serde_json::json!({ "slot": slot, "generation": generation, "policy": policy }),
+        )
+        .await
+    }
+
+    /// `POST /v1/xdp/rollback`.
+    pub async fn rollback_xdp(&self, policy: &str) -> Result<String> {
+        self.post_json("/v1/xdp/rollback", &serde_json::json!({ "policy": policy })).await
+    }
+
+    /// `GET /v1/xdp/status`.
+    pub async fn xdp_status(&self) -> Result<String> {
+        self.get_message("/v1/xdp/status").await
+    }
+
     /// `POST /v1/clear/map/{name}`.
     pub async fn clear_map(&self, name: &str) -> Result<String> {
         let path = format!("/v1/clear/map/{name}");

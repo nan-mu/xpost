@@ -50,11 +50,6 @@ static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 #[unsafe(link_section = ".xdp.hotload_0")]
 static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
-/// Idle slot. Not the datapath entry until a leased `switch` retargets it.
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".xdp.hotload_1")]
-static xdp_slot_idle: Slot<0xE00> = Slot::new([0u8; 0xE00]);
-
 static mut INVOKE_BUF: [u8; VALUE_LEN] = [0u8; VALUE_LEN];
 
 #[allow(
@@ -81,9 +76,7 @@ async fn main(spawner: Spawner) -> ! {
     // Lease before App serial so unsolicited `OK init` means invoke-ready.
     let map_heap: &'static mut [u8] = unsafe { &mut *addr_of_mut!(MAP_HEAP) };
     let mut maps = MapRt::init(map_heap).await.expect("MapRt::init");
-    let slots = [unsafe { xdp_slot.as_xdp_slot(true) }, unsafe {
-        xdp_slot_idle.as_xdp_slot(false)
-    }];
+    let slots = [unsafe { xdp_slot.as_xdp_slot(true) }];
     let (mut rt, report) = XdpRt::init(
         flash,
         &slots,

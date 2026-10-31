@@ -13,8 +13,10 @@ use crate::{
             parse_clear_map_reply, parse_clear_perf_reply, parse_disable_exec_reply,
             parse_disable_xdp_reply, parse_enable_exec_reply, parse_enable_xdp_reply,
             parse_err_reply, parse_finish_reply, parse_get_map_reply, parse_get_perf_reply,
-            parse_init_reply, parse_map_err_reply, parse_perf_err_reply, parse_ping_reply,
-            parse_syntax_err_reply, parse_update_map_reply,
+            parse_get_xdp_status_reply, parse_init_reply, parse_map_err_reply,
+            parse_perf_err_reply, parse_ping_reply, parse_syntax_err_reply,
+            parse_update_map_reply, parse_xdp_activate_reply, parse_xdp_rollback_reply,
+            parse_xdp_stage_reply,
         },
     },
     r#type::{
@@ -49,6 +51,20 @@ impl fmt::Display for Command<'_> {
             }
             Self::ClearPerf => f.write_str("clear perf"),
             Self::GetPerf => f.write_str("get perf"),
+            Self::XdpStage { name, slot } => write!(f, "xdp stage {name} {slot}"),
+            Self::XdpActivate {
+                slot,
+                generation,
+                pass,
+            } => {
+                let policy = if *pass { "pass" } else { "drop" };
+                write!(f, "xdp activate {slot} {generation} {policy}")
+            }
+            Self::XdpRollback { pass } => {
+                let policy = if *pass { "pass" } else { "drop" };
+                write!(f, "xdp rollback {policy}")
+            }
+            Self::GetXdpStatus => f.write_str("get xdp"),
             // Host-only: must never be serialized to UART.
             Self::GetInit | Self::GetFinish => Err(fmt::Error),
         }
@@ -70,6 +86,10 @@ impl<'a> TryFrom<(&'a [u8], &Command<'_>)> for OkReply<'a> {
             Command::UpdateMap { .. } => parse_update_map_reply(raw),
             Command::GetPerf => parse_get_perf_reply(raw),
             Command::GetMap { .. } => parse_get_map_reply(raw),
+            Command::XdpStage { .. } => parse_xdp_stage_reply(raw),
+            Command::XdpActivate { .. } => parse_xdp_activate_reply(raw),
+            Command::XdpRollback { .. } => parse_xdp_rollback_reply(raw),
+            Command::GetXdpStatus => parse_get_xdp_status_reply(raw),
             Command::GetInit => parse_init_reply(raw),
             Command::GetFinish => parse_finish_reply(raw),
         }

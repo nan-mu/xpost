@@ -1,9 +1,9 @@
 //! Firmware App-mode control helpers used by board examples' `xpost-serial` server
 //! callbacks. Maps / XDP / perf only — wire framing stays in the example.
 
-use crate::error::{MapUseError, XdpLeaseError, XdpReleaseError};
+use crate::error::{MapUseError, XdpLeaseError, XdpReleaseError, XdpSwapError};
 use crate::map::{BPF_ANY, MAP_RT, MapIdx, MapRtGuard, MapType, dump};
-use crate::xdp::XDP_RT;
+use crate::xdp::{QuiescePolicy, SwitchReport, XdpStatus, XDP_RT};
 
 /// Map-domain failure for App clear/get/update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +50,75 @@ pub fn enable_xdp() -> Result<(), AppXdpError> {
         Err(XdpLeaseError::Leased) => Ok(()),
         Err(_) => Err(AppXdpError::Logic),
     }
+}
+
+fn map_swap(err: XdpSwapError) -> AppXdpError {
+    match err {
+        XdpSwapError::Busy => AppXdpError::Busy,
+        _ => AppXdpError::Logic,
+    }
+}
+
+fn with_xdp<T>(body: impl FnOnce(&mut crate::xdp::XdpRt) -> Result<T, XdpSwapError>) -> Result<T, AppXdpError> {
+    let xdp_lock = XDP_RT.try_get().ok_or(AppXdpError::NoRt)?;
+    let mut xdp = xdp_lock.try_lock().map_err(|_| AppXdpError::Busy)?;
+    body(&mut xdp).map_err(map_swap)
+}
+
+/// A helper may hold `MAP_RT` for one packet. Retry that collision only.
+fn with_xdp_retry<T>(
+    mut body: impl FnMut(&mut crate::xdp::XdpRt) -> Result<T, XdpSwapError>,
+) -> Result<T, AppXdpError> {
+    let mut last = AppXdpError::Busy;
+    for _ in 0..8 {
+        match with_xdp(&mut body) {
+            Err(AppXdpError::Busy) => {
+                last = AppXdpError::Busy;
+                core::hint::spin_loop();
+            }
+            other => return other,
+        }
+    }
+    Err(last)
+}
+
+/// Copy `name` into `slot` while the leased image keeps running.
+pub fn stage_xdp(name: &str, slot: u8) -> Result<u32, AppXdpError> {
+    with_xdp_retry(|xdp| {
+        let id = xdp
+            .images
+            .iter()
+            .position(|img| img.meta.name == name)
+            .ok_or(XdpSwapError::UnknownImage)?;
+        xdp.stage(id, usize::from(slot))
+    })
+}
+
+/// Quiesce and publish a staged slot. `pass` selects the quiesce policy.
+pub fn activate_xdp(slot: u8, generation: u32, pass: bool) -> Result<SwitchReport, AppXdpError> {
+    let policy = if pass {
+        QuiescePolicy::Pass
+    } else {
+        QuiescePolicy::Drop
+    };
+    with_xdp_retry(|xdp| xdp.activate(usize::from(slot), generation, policy))
+}
+
+/// Quiesce and publish the retained slot.
+pub fn rollback_xdp(pass: bool) -> Result<SwitchReport, AppXdpError> {
+    let policy = if pass {
+        QuiescePolicy::Pass
+    } else {
+        QuiescePolicy::Drop
+    };
+    with_xdp_retry(|xdp| xdp.rollback(policy))
+}
+
+/// Boot id, slot roles and quiesce counts.
+pub fn xdp_status() -> Result<XdpStatus, AppXdpError> {
+    let xdp_lock = XDP_RT.try_get().ok_or(AppXdpError::NoRt)?;
+    let xdp = xdp_lock.try_lock().map_err(|_| AppXdpError::Busy)?;
+    Ok(xdp.status())
 }
 
 /// Release the leased XDP image (idempotent if not leased).

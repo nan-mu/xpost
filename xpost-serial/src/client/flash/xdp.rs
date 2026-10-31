@@ -57,7 +57,10 @@ pub fn list_entries(table_bytes: &[u8]) -> io::Result<Vec<XdpEntry>> {
     let mut src = table_bytes;
     while cursor.saturating_add(xpost_elf::FIXED_WIRE_SIZE) <= src.len() {
         match scan_at(&mut src, cursor) {
-            ScanOutcome::HardFail => break,
+            ScanOutcome::HardFail => match xpost_elf::skip_erased_gap(cursor) {
+                Some(next) => cursor = next,
+                None => break,
+            },
             ScanOutcome::SoftSkip { file_len } => {
                 if file_len == 0 {
                     break;
@@ -79,6 +82,11 @@ pub fn list_entries(table_bytes: &[u8]) -> io::Result<Vec<XdpEntry>> {
         }
     }
     Ok(out)
+}
+
+fn align_sector(off: u32) -> u32 {
+    let a = FLASH_SECTOR;
+    off.saturating_add(a - 1) & !(a - 1)
 }
 
 pub fn plan_install(
@@ -105,10 +113,12 @@ pub fn plan_install(
         }
         return Ok(InstallOutcome::Overwritten { offset: e.offset });
     }
-    let free = entries
-        .last()
-        .map(|e| e.offset.saturating_add(e.len))
-        .unwrap_or(0);
+    let free = align_sector(
+        entries
+            .last()
+            .map(|e| e.offset.saturating_add(e.len))
+            .unwrap_or(0),
+    );
     let end = free.saturating_add(new_len);
     if end > table_len {
         return Err(std::io::Error::other(format!(

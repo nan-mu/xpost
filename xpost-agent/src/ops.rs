@@ -420,6 +420,100 @@ pub fn disable_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     })
 }
 
+pub fn stage_xdp(state: &Mutex<AgentState>, name: &str, slot: u8, peer: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("empty xdp name");
+    }
+    with_log(peer, "XdpStage", name, false, state, || {
+        let g = lock(state)?;
+        match req(&g, &Command::XdpStage { name, slot })? {
+            OkReply::XdpStage { slot, generation } => {
+                Ok(format!("OK xdp stage {slot} {generation}"))
+            }
+            _ => bail!("unexpected xdp stage reply"),
+        }
+    })
+}
+
+pub fn activate_xdp(
+    state: &Mutex<AgentState>,
+    slot: u8,
+    generation: u32,
+    pass: bool,
+    peer: &str,
+) -> Result<String> {
+    with_log(peer, "XdpActivate", "", false, state, || {
+        let g = lock(state)?;
+        match req(
+            &g,
+            &Command::XdpActivate {
+                slot,
+                generation,
+                pass,
+            },
+        )? {
+            OkReply::XdpActivate {
+                ok,
+                rollback,
+                severe,
+                from_slot,
+                to_slot,
+                generation,
+                quiesce_drop,
+                quiesce_pass,
+            } => Ok(format!(
+                "OK xdp activate {ok} {rollback} {severe} {from_slot} {to_slot} {generation} {quiesce_drop} {quiesce_pass}"
+            )),
+            _ => bail!("unexpected xdp activate reply"),
+        }
+    })
+}
+
+pub fn rollback_xdp(state: &Mutex<AgentState>, pass: bool, peer: &str) -> Result<String> {
+    with_log(peer, "XdpRollback", "", false, state, || {
+        let g = lock(state)?;
+        match req(&g, &Command::XdpRollback { pass })? {
+            OkReply::XdpRollback {
+                ok,
+                rollback,
+                severe,
+                from_slot,
+                to_slot,
+                generation,
+                quiesce_drop,
+                quiesce_pass,
+            } => Ok(format!(
+                "OK xdp rollback {ok} {rollback} {severe} {from_slot} {to_slot} {generation} {quiesce_drop} {quiesce_pass}"
+            )),
+            _ => bail!("unexpected xdp rollback reply"),
+        }
+    })
+}
+
+pub fn xdp_status(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
+    with_log(peer, "GetXdpStatus", "", false, state, || {
+        let g = lock(state)?;
+        match req(&g, &Command::GetXdpStatus)? {
+            OkReply::GetXdpStatus {
+                boot_id,
+                active_slot,
+                staged_slot,
+                generation,
+                retained_slot,
+                updating,
+                severe,
+                quiesce_drop,
+                quiesce_pass,
+                last_error,
+            } => Ok(format!(
+                "OK get xdp {boot_id} {active_slot} {staged_slot} {generation} {retained_slot} {updating} {severe} {quiesce_drop} {quiesce_pass} {last_error}"
+            )),
+            _ => bail!("unexpected get xdp reply"),
+        }
+    })
+}
+
 pub fn enable_exec(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     with_log(peer, "EnableExec", "", false, state, || {
         let g = lock(state)?;

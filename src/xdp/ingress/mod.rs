@@ -31,9 +31,13 @@ pub(crate) use prog::XdpProg;
 
 use core::sync::atomic::Ordering;
 
+use xpost_type::XdpAction;
+
 use crate::xdp::{
     ingress::ctx::XdpMd,
-    state::{ACTIVE, IN_FLIGHT, PAUSE, PRIMARY_ENTRY},
+    state::{
+        ACTIVE, IN_FLIGHT, PAUSE, PRIMARY_ENTRY, QUIESCE_DROPS, QUIESCE_PASS, QUIESCE_PASSES,
+    },
 };
 
 /// Invoke scratch in `.bss`: `[sp, ra, s0..s11]` (14 × `usize`), byte offsets 0..52.
@@ -60,8 +64,8 @@ struct RunResult {
 /// Returns Linux-style [`XdpAction`](xpost_type::XdpAction) + window. Driver
 /// maps to Pass/Drop/Tx. A clear [`ACTIVE`] flag passes the frame (feature off).
 /// After [`ACTIVE`] is set, a flight fault returns [`XdpAction::Drop`].
-/// A hot-update [`PAUSE`](crate::xdp::state::PAUSE) drops the frame without
-/// entering either image.
+/// A hot-update [`PAUSE`](crate::xdp::state::PAUSE) applies the quiesce policy
+/// without entering either image. Those frames are counted in `get xdp`.
 #[esp_hal::ram]
 pub(crate) fn run<'a>(frame: &'a mut [u8]) -> (xpost_type::XdpAction, &'a mut [u8]) {
     use xpost_type::XdpAction;
@@ -103,12 +107,24 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
         crate::ext::perf::counter::inc_reentry();
         return None;
     }
-    // Dekker pair with `XdpRt::switch`: PAUSE store, then wait IN_FLIGHT==0,
+    // Dekker pair with `XdpRt::activate`: PAUSE store, then wait IN_FLIGHT==0,
     // then store PRIMARY_ENTRY. A flight that passes this load runs the entry
-    // sampled below; switch will not publish the new entry until it finishes.
-    // A flight that observes PAUSE drops and does not run either image.
+    // sampled below; activate will not publish until it finishes.
+    // A flight that observes PAUSE does not run either image. PASS and DROP
+    // are counted apart from feature-off PASS and from a program XDP_DROP.
     if PAUSE.load(Ordering::SeqCst) {
         IN_FLIGHT.store(0, Ordering::Release);
+        if QUIESCE_PASS.load(Ordering::SeqCst) {
+            QUIESCE_PASSES.fetch_add(1, Ordering::Relaxed);
+            return Some(RunResult {
+                action: XdpAction::Pass as i32,
+                window: PacketWindow {
+                    data: data.as_mut_ptr(),
+                    len: data.len(),
+                },
+            });
+        }
+        QUIESCE_DROPS.fetch_add(1, Ordering::Relaxed);
         return None;
     }
     // Dekker pair with `XdpRt::release` (ACTIVE=false → wait IN_FLIGHT==0):

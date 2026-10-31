@@ -81,5 +81,9 @@ pub(crate) fn ok_label(ok: &crate::r#type::reply::OkReply<'_>) -> &'static str {
         OkReply::GetPerf { .. } => "OK get perf",
         OkReply::Init => "OK init",
         OkReply::Finish => "OK finish",
+        OkReply::XdpStage { .. } => "OK xdp stage",
+        OkReply::XdpActivate { .. } => "OK xdp activate",
+        OkReply::XdpRollback { .. } => "OK xdp rollback",
+        OkReply::GetXdpStatus { .. } => "OK get xdp",
     }
 }

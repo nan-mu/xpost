@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
@@ -130,6 +130,10 @@ async fn serve_async(addr: &str, log_dir: &Path) -> Result<()> {
         .route("/get/xdp", get(v1_get_xdp))
         .route("/enable/xdp", post(v1_enable_xdp))
         .route("/disable/xdp", post(v1_disable_xdp))
+        .route("/xdp/stage", post(v1_xdp_stage))
+        .route("/xdp/activate", post(v1_xdp_activate))
+        .route("/xdp/rollback", post(v1_xdp_rollback))
+        .route("/xdp/status", get(v1_xdp_status))
         .route("/enable/exec", post(v1_enable_exec))
         .route("/disable/exec", post(v1_disable_exec))
         .route("/get/finish", post(v1_get_finish))
@@ -253,6 +257,84 @@ async fn v1_clear_xdp(
 async fn v1_get_xdp(State(st): State<AppState>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     run_blocking(move || ops::get_xdp(shared.as_ref(), "http")).await
+}
+
+#[derive(Deserialize)]
+struct StageBody {
+    name: String,
+    slot: u8,
+}
+
+#[derive(Deserialize)]
+struct ActivateBody {
+    slot: u8,
+    generation: u32,
+    policy: String,
+}
+
+#[derive(Deserialize)]
+struct RollbackBody {
+    policy: String,
+}
+
+fn policy_pass(policy: &str) -> Result<bool> {
+    match policy {
+        "pass" => Ok(true),
+        "drop" => Ok(false),
+        _ => bail!("policy must be drop or pass"),
+    }
+}
+
+async fn v1_xdp_stage(
+    State(st): State<AppState>,
+    body: Result<Json<StageBody>, axum::extract::rejection::JsonRejection>,
+) -> Json<ApiResp> {
+    let Json(body) = match body {
+        Ok(j) => j,
+        Err(e) => return Json(ApiResp::err(format!("bad stage body: {e}"))),
+    };
+    let shared = st.shared.clone();
+    run_blocking(move || ops::stage_xdp(shared.as_ref(), &body.name, body.slot, "http")).await
+}
+
+async fn v1_xdp_activate(
+    State(st): State<AppState>,
+    body: Result<Json<ActivateBody>, axum::extract::rejection::JsonRejection>,
+) -> Json<ApiResp> {
+    let Json(body) = match body {
+        Ok(j) => j,
+        Err(e) => return Json(ApiResp::err(format!("bad activate body: {e}"))),
+    };
+    let pass = match policy_pass(&body.policy) {
+        Ok(pass) => pass,
+        Err(e) => return Json(ApiResp::err(e.to_string())),
+    };
+    let shared = st.shared.clone();
+    run_blocking(move || {
+        ops::activate_xdp(shared.as_ref(), body.slot, body.generation, pass, "http")
+    })
+    .await
+}
+
+async fn v1_xdp_rollback(
+    State(st): State<AppState>,
+    body: Result<Json<RollbackBody>, axum::extract::rejection::JsonRejection>,
+) -> Json<ApiResp> {
+    let Json(body) = match body {
+        Ok(j) => j,
+        Err(e) => return Json(ApiResp::err(format!("bad rollback body: {e}"))),
+    };
+    let pass = match policy_pass(&body.policy) {
+        Ok(pass) => pass,
+        Err(e) => return Json(ApiResp::err(e.to_string())),
+    };
+    let shared = st.shared.clone();
+    run_blocking(move || ops::rollback_xdp(shared.as_ref(), pass, "http")).await
+}
+
+async fn v1_xdp_status(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::xdp_status(shared.as_ref(), "http")).await
 }
 
 async fn v1_enable_xdp(State(st): State<AppState>) -> Json<ApiResp> {

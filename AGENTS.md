@@ -373,7 +373,7 @@ Preserve the ABI and linker layout shared with libbpf-mcu through the XPM1 contr
 XDP firmware calls `xpost_build::firmware_codegen()` in `build.rs`.
 It reads `[package.metadata.xpost]` defaults from the root crate, applies board overrides, and derives the cold Flash span from `partitions.csv`.
 The `xpost-build/xpost-link` wrapper embeds the `.xpost.mem` XPM1 contract into the linked Firmware ELF for host tools.
-XDP boards register two IRAM slots. Slot `a` (`.xdp.hotload_0`, `mount = "rx"`) is loaded before lease and stays immutable while it is the published entry. Slot `b` (`.xdp.hotload_1`, `mount = "call"`) is not the entry until a hot `switch`. XPM1 still publishes only the primary slot address.
+`just_xdp`, `case_xdp`, `firewall`, and `exec_bench` register one primary slot. `examples/hot_xdp` registers two. Slot `a` (`.xdp.hotload_0`, `mount = "rx"`) is the leased entry. Slot `b` (`.xdp.hotload_1`, `mount = "call"`) is not executed until `activate` or `rollback` publishes it. XPM1 still carries one slot address. `libbpf-mcu --slot-symbol` selects the other firmware symbol when linking the second image.
 
 ### Maps and boot
 
@@ -382,7 +382,7 @@ The XDP firmware starts the runtimes in this order:
 1. `MapRt::init` claims the talc heap.
 2. `XdpRt::init` registers slots and scans the cold XDP ELF images.
 3. Inside `XdpRt::init`, `create_required_maps` calls `MapRt::create` for missing `required_maps` and checks existing maps.
-4. The board switches the first discovered image into the primary slot.
+4. A single-slot board switches image 0 into the primary slot. `hot_xdp` switches the image whose link address is slot 0.
 5. The board attempts to lease the image.
 6. The board drops the runtime guards before RX or exec commands start.
 
@@ -399,7 +399,7 @@ Reads and writes then return `Busy`, including `get map`.
 BPF helpers still use the maps during a flight.
 `XdpRt::release` opens the control plane only after `IN_FLIGHT` drains and map users drop.
 
-`XdpRt::switch` while leased writes only a slot that is not the published entry. `ACTIVE` stays true during the copy, so the mounted image keeps running. The swing stores `PAUSE`, waits until `IN_FLIGHT` is 0, stores the idle slot base into `PRIMARY_ENTRY`, then clears `PAUSE`. Packets that arrive in that window do not run either image; ingress drops them. In-flight packets finish on the old entry. Call `switch` from the control plane, not from the RX callback. The incoming image must be linked for the idle slot, and its map binds must already be covered by the lease. This path does not reopen `MapRt` or rebind aliases.
+`XdpRt::switch` refuses while leased. A running replacement is `stage`, then `activate`, or `rollback`. `stage` copies a pre-installed image into an idle slot and checks its digest, link address, helper, and maps. It does not change `PRIMARY_ENTRY`, `ACTIVE`, or map aliases. `activate` and `rollback` pause new flights, wait until `IN_FLIGHT` is 0, rebind aliases, and publish the new entry. A failed publish restores the previous aliases and entry. If that restore fails, the runtime stays paused and drops new packets. `IN_FLIGHT == 0` does not drain the driver's async `XDP_TX` queue, so the previous image's map users stay. Call these from the control plane, not from the RX callback. Quiesce `drop` is the default; `pass` is selectable. Those counts are in `get xdp`, not in the 184-byte perf blob. This path does not reopen the `MapRt` control plane. It does not upload a new image while the firmware stays up.
 
 Control-plane errors use the small enums in `crate::error` for each public entry point.
 BPF helper errno values use `map::ops::MapOpError`.

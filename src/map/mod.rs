@@ -174,6 +174,23 @@ impl MapRt {
     ///
     /// Identity = (name, map_type, key_layout, value_layout). Existing `len` must
     /// be ≥ requested `len` (no resize); smaller capacity rejects the binding.
+    /// Same identity check as [`Self::check`], without the lease gate.
+    ///
+    /// Hot-swap preflight runs while the control plane is closed. Callers must
+    /// already hold [`MAP_RT`] and must not use this for host `get`/`update`.
+    pub(crate) fn check_installed(&self, spec: &MapMeta) -> Result<MapIdx, MapCheckError> {
+        let idx = self.find_name(&spec.name).ok_or(MapCheckError::NotFound)?;
+        let meta = &self.meta[idx];
+        if !spec.identity_eq(meta) || meta.len < spec.len || meta.storage.ptr.is_null() {
+            return Err(MapCheckError::TypeMismatch);
+        }
+        Ok(idx)
+    }
+
+    pub(crate) fn index_of(&self, name: &str) -> Option<MapIdx> {
+        self.find_name(name)
+    }
+
     pub fn check(&self, spec: &MapMeta) -> Result<MapIdx, MapCheckError> {
         if require_stopped().is_err() {
             return Err(MapCheckError::Busy);

@@ -24,15 +24,15 @@ use crate::db::{self, CaseObs, PgOpts};
 use crate::pipeline::{self, BudgetEta, READY_BUDGET, RoundUi, status};
 
 const FW: &str = "case-cag";
-const PORT: u16 = 8080;
-const SENT: usize = 4;
+pub(crate) const PORT: u16 = 8080;
+pub(crate) const SENT: usize = 4;
 const IPPROTO_UDP: u32 = 17;
-const STIM_SRC: Ipv4Addr = Ipv4Addr::new(192, 168, 110, 50);
-const MARK_DST: &str = "203.0.113.77";
+pub(crate) const STIM_SRC: Ipv4Addr = Ipv4Addr::new(192, 168, 110, 50);
+pub(crate) const MARK_DST: &str = "203.0.113.77";
 const READY_TRIES: u32 = 40;
 const DUMP_CAP: usize = 64 * 1024;
 const DRAIN: Duration = Duration::from_secs(1);
-const PAYLOAD_LEN: usize = 5;
+pub(crate) const PAYLOAD_LEN: usize = 5;
 
 struct Step {
     seq: i32,
@@ -245,7 +245,12 @@ async fn warmup(cfg: &FileConfig, step: &Step, mac: &str) -> Result<()> {
     bail!("case {} saw no DUT frame during warmup", step.xdp)
 }
 
-async fn sniff(cfg: &FileConfig, mac: &str, payloads: &[&[u8]], after: Duration) -> Result<String> {
+pub(crate) async fn sniff(
+    cfg: &FileConfig,
+    mac: &str,
+    payloads: &[&[u8]],
+    after: Duration,
+) -> Result<String> {
     let mut child = Command::new("tcpdump")
         .args([
             "-e",
@@ -305,14 +310,14 @@ async fn send_payloads(cfg: &FileConfig, payloads: &[&[u8]]) -> Result<()> {
     .context("stimulus thread")?
 }
 
-fn payload(i: usize) -> [u8; PAYLOAD_LEN] {
+pub(crate) fn payload(i: usize) -> [u8; PAYLOAD_LEN] {
     let mut body = *b"CASE0";
     body[4] = b'0' + u8::try_from(i).unwrap_or(0);
     body
 }
 
 /// DUT-sourced frames whose header has the rewrite and whose dump contains `CASEn`.
-fn payload_hits(dump: &str, mac: &str, needle: &str) -> [bool; SENT] {
+pub(crate) fn payload_hits(dump: &str, mac: &str, needle: &str) -> [bool; SENT] {
     let src = format!("{mac} >");
     let mut hits = [false; SENT];
     for pkt in packets(dump) {

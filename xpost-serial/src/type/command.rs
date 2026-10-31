@@ -41,6 +41,23 @@ pub enum Command<'a> {
     },
     ClearPerf,
     GetPerf,
+    /// `xdp stage <name> <slot>` — copy a cold image into an idle slot.
+    XdpStage {
+        name: &'a str,
+        slot: u8,
+    },
+    /// `xdp activate <slot> <generation> <drop|pass>`.
+    XdpActivate {
+        slot: u8,
+        generation: u32,
+        pass: bool,
+    },
+    /// `xdp rollback <drop|pass>`.
+    XdpRollback {
+        pass: bool,
+    },
+    /// `get xdp` — boot id, slot roles, quiesce counts. Not the cold-table list.
+    GetXdpStatus,
     /// Wait for unsolicited `OK init` in the host record. **Not a wire verb** —
     /// must not be sent on UART; server must not parse a request into this.
     GetInit,

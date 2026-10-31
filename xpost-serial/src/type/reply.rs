@@ -22,6 +22,48 @@ pub enum OkReply<'a> {
     GetPerf {
         blob: &'a [u8],
     },
+    /// `OK xdp stage <slot> <generation>`.
+    XdpStage {
+        slot: u8,
+        generation: u32,
+    },
+    /// `OK xdp activate <ok> <rollback> <severe> <from> <to> <gen> <drop> <pass>`.
+    XdpActivate {
+        ok: u8,
+        rollback: u8,
+        severe: u8,
+        from_slot: u8,
+        to_slot: u8,
+        generation: u32,
+        quiesce_drop: u32,
+        quiesce_pass: u32,
+    },
+    /// Same numeric tail as [`Self::XdpActivate`].
+    XdpRollback {
+        ok: u8,
+        rollback: u8,
+        severe: u8,
+        from_slot: u8,
+        to_slot: u8,
+        generation: u32,
+        quiesce_drop: u32,
+        quiesce_pass: u32,
+    },
+    /// `OK get xdp <boot> <active> <staged> <gen> <retained> <updating> <severe> <drop> <pass> <err>`.
+    ///
+    /// Slot `255` means that role is empty.
+    GetXdpStatus {
+        boot_id: u32,
+        active_slot: u8,
+        staged_slot: u8,
+        generation: u32,
+        retained_slot: u8,
+        updating: u8,
+        severe: u8,
+        quiesce_drop: u32,
+        quiesce_pass: u32,
+        last_error: u8,
+    },
     /// Unsolicited `OK init` after App-mode init finishes.
     ///
     /// Host obtains this via [`crate::command::Command::GetInit`] as a

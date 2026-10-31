@@ -68,6 +68,105 @@ fixed_ok! {
 
 // —— variable OK (length-prefixed blob) ——————————————————————————————————————
 
+fn parse_u32_line<'a>(input: &'a [u8], prefix: &[u8], n: usize) -> Result<(&'a [u8], [u32; 10]), ParseError> {
+    let line = input.strip_suffix(b"\n").unwrap_or(input);
+    let rest = line
+        .strip_prefix(prefix)
+        .ok_or(ParseError::InvalidSyntax)?;
+    let mut nums = [0u32; 10];
+    let mut rest = rest;
+    for i in 0..n {
+        if !rest.starts_with(b" ") {
+            return Err(ParseError::InvalidSyntax);
+        }
+        rest = &rest[1..];
+        let (value, next) = take_u32(rest)?;
+        nums[i] = value;
+        rest = next;
+    }
+    if !rest.is_empty() {
+        return Err(ParseError::InvalidSyntax);
+    }
+    Ok((line, nums))
+}
+
+fn take_u32(input: &[u8]) -> Result<(u32, &[u8]), ParseError> {
+    if input.is_empty() || !input[0].is_ascii_digit() {
+        return Err(ParseError::InvalidSyntax);
+    }
+    let mut n: u32 = 0;
+    let mut i = 0;
+    while i < input.len() && input[i].is_ascii_digit() {
+        let d = u32::from(input[i] - b'0');
+        n = n
+            .checked_mul(10)
+            .and_then(|n| n.checked_add(d))
+            .ok_or(ParseError::InvalidSyntax)?;
+        i += 1;
+    }
+    Ok((n, &input[i..]))
+}
+
+fn u8_at(nums: &[u32; 10], i: usize) -> Result<u8, ParseError> {
+    u8::try_from(nums[i]).map_err(|_| ParseError::InvalidSyntax)
+}
+
+/// `OK xdp stage <slot> <generation>`.
+pub fn parse_xdp_stage_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let (_, nums) = parse_u32_line(input, b"OK xdp stage", 2)?;
+    Ok(OkReply::XdpStage {
+        slot: u8_at(&nums, 0)?,
+        generation: nums[1],
+    })
+}
+
+/// `OK xdp activate` plus the eight commit counters.
+pub fn parse_xdp_activate_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let (_, nums) = parse_u32_line(input, b"OK xdp activate", 8)?;
+    Ok(OkReply::XdpActivate {
+        ok: u8_at(&nums, 0)?,
+        rollback: u8_at(&nums, 1)?,
+        severe: u8_at(&nums, 2)?,
+        from_slot: u8_at(&nums, 3)?,
+        to_slot: u8_at(&nums, 4)?,
+        generation: nums[5],
+        quiesce_drop: nums[6],
+        quiesce_pass: nums[7],
+    })
+}
+
+/// `OK xdp rollback` plus the eight commit counters.
+pub fn parse_xdp_rollback_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let (_, nums) = parse_u32_line(input, b"OK xdp rollback", 8)?;
+    Ok(OkReply::XdpRollback {
+        ok: u8_at(&nums, 0)?,
+        rollback: u8_at(&nums, 1)?,
+        severe: u8_at(&nums, 2)?,
+        from_slot: u8_at(&nums, 3)?,
+        to_slot: u8_at(&nums, 4)?,
+        generation: nums[5],
+        quiesce_drop: nums[6],
+        quiesce_pass: nums[7],
+    })
+}
+
+/// `OK get xdp` plus boot id, slot roles and quiesce counts.
+pub fn parse_get_xdp_status_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let (_, nums) = parse_u32_line(input, b"OK get xdp", 10)?;
+    Ok(OkReply::GetXdpStatus {
+        boot_id: nums[0],
+        active_slot: u8_at(&nums, 1)?,
+        staged_slot: u8_at(&nums, 2)?,
+        generation: nums[3],
+        retained_slot: u8_at(&nums, 4)?,
+        updating: u8_at(&nums, 5)?,
+        severe: u8_at(&nums, 6)?,
+        quiesce_drop: nums[7],
+        quiesce_pass: nums[8],
+        last_error: u8_at(&nums, 9)?,
+    })
+}
+
 /// `OK get map <n>\n` + `n` blob bytes.
 ///
 /// Temporary forward to [`super::map`]; will be rewritten in this module.
