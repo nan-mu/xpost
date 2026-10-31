@@ -789,6 +789,7 @@ dependencies = [
  "num-traits",
  "portable-atomic",
  "portable_atomic_enum",
+ "xpost-type",
 ]
 
 [[package]]
@@ -1926,6 +1927,10 @@ dependencies = [
  "embassy-time",
  "winnow",
 ]
+
+[[package]]
+name = "xpost-type"
+version = "0.1.0"
 
 [[package]]
 name = "xtensa-lx"

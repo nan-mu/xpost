@@ -46,6 +46,7 @@ esp-radio = { version = "0.18.0", path = "../../esp-radio", features = [
   "log-04",
   "unstable",
   "wifi",
+  "xdp",
 ] }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
 hal_perf = { path = "../hal_perf" }
