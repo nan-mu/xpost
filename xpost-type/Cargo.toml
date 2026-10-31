@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 publish = false
 description = "Shared XdpProg / EspRadioTrace / XdpAction types (esp-radio ↔ xpost)"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [lib]
 test = false

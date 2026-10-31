@@ -6,7 +6,7 @@ XDP 程序由 libbpf-mcu 从同一份 C 分别编译出 eBPF 对象和 RV32IMC �
 
 论文 coming soon。
 
-许可证是 [MIT](LICENSE)。
+本仓库自己的代码使用 [MIT](LICENSE)。`esp-radio/` 保持上游许可证 MIT OR Apache-2.0。
 
 xpost is an XDP runtime for bare-metal MCU firmware, with board examples and host tools. Firmware uses Rust `core` and the esp-rs bare-metal stack. It does not use ESP-IDF. The implemented target is the ESP32-C3, the ISA is RV32IMC, the ABI is `ilp32`, and there is no FPU.
 
@@ -14,7 +14,7 @@ libbpf-mcu compiles one C source into an eBPF object and an RV32IMC XDP ELF. The
 
 Paper: coming soon.
 
-The license is [MIT](LICENSE).
+Code in this repository uses the [MIT](LICENSE) license. `esp-radio/` keeps the upstream MIT OR Apache-2.0 license.
 
 ## 现状
 
