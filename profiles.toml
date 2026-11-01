@@ -236,28 +236,3 @@ name = "case_mark"
 fw = "case-cag"
 artifact = "../build/case_mark/case_mark.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/case_xdp/target/riscv32imc-unknown-none-elf/release/case_xdp", "-c", "case_mark"] }
-
-# ---------------------------------------------------------------------------
-# hot_xdp — two IRAM slots. The scored A→B→A window does not reboot.
-# Images are installed into the cold table first; that install may reboot.
-# ---------------------------------------------------------------------------
-
-[[fw]]
-name = "hot-cag"
-target = "esp32c3"
-partition_table = "examples/hot_xdp/partitions.csv"
-artifact = "examples/hot_xdp/target/riscv32imc-unknown-none-elf/release/hot_xdp"
-build = { cwd = "examples/hot_xdp", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
-xdp = []
-
-[[xdp]]
-name = "hot_swap"
-fw = "hot-cag"
-artifact = "../build/hot_swap/hot_swap.elf"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/hot_xdp/target/riscv32imc-unknown-none-elf/release/hot_xdp", "-c", "hot_swap"] }
-
-[[xdp]]
-name = "hot_mark"
-fw = "hot-cag"
-artifact = "../build/hot_mark/hot_mark.elf"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/hot_xdp/target/riscv32imc-unknown-none-elf/release/hot_xdp", "--slot-symbol", "xdp_slot_idle", "-c", "hot_mark"] }

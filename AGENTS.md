@@ -373,7 +373,7 @@ Preserve the ABI and linker layout shared with libbpf-mcu through the XPM1 contr
 XDP firmware calls `xpost_build::firmware_codegen()` in `build.rs`.
 It reads `[package.metadata.xpost]` defaults from the root crate, applies board overrides, and derives the cold Flash span from `partitions.csv`.
 The `xpost-build/xpost-link` wrapper embeds the `.xpost.mem` XPM1 contract into the linked Firmware ELF for host tools.
-`just_xdp`, `case_xdp`, `firewall`, and `exec_bench` register one primary slot. `examples/hot_xdp` registers two. Slot `a` (`.xdp.hotload_0`, `mount = "rx"`) is the leased entry. Slot `b` (`.xdp.hotload_1`, `mount = "call"`) is not executed until `activate` publishes it. XPM1 still carries one slot address. `libbpf-mcu --slot-symbol` selects the other firmware symbol when linking the second image.
+`just_xdp`, `case_xdp`, `firewall`, and `exec_bench` each register one primary slot. XPM1 carries that slot address. `libbpf-mcu --slot-symbol` can retarget an image at another firmware symbol when a board registers more than one slot.
 
 ### Maps and boot
 
@@ -382,7 +382,7 @@ The XDP firmware starts the runtimes in this order:
 1. `MapRt::init` claims the talc heap.
 2. `XdpRt::init` registers slots and scans the cold XDP ELF images.
 3. Inside `XdpRt::init`, `create_required_maps` calls `MapRt::create` for missing `required_maps` and checks existing maps.
-4. A single-slot board switches image 0 into the primary slot. `hot_xdp` switches the image whose link address is slot 0.
+4. The board switches image 0 into the primary slot.
 5. The board attempts to lease the image.
 6. The board drops the runtime guards before RX or exec commands start.
 
