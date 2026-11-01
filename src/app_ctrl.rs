@@ -82,8 +82,8 @@ fn with_xdp_retry<T>(
     Err(last)
 }
 
-/// Copy `name` into `slot` while the leased image keeps running.
-pub fn stage_xdp(name: &str, slot: u8) -> Result<u32, AppXdpError> {
+/// Copy `name` from the cold table into `slot`. Does not publish it.
+pub fn flash_xdp_slot(name: &str, slot: u8) -> Result<u32, AppXdpError> {
     with_xdp_retry(|xdp| {
         let id = xdp
             .images
@@ -94,8 +94,8 @@ pub fn stage_xdp(name: &str, slot: u8) -> Result<u32, AppXdpError> {
     })
 }
 
-/// Quiesce and publish a staged slot. `pass` selects the quiesce policy.
-pub fn activate_xdp(slot: u8, generation: u32, pass: bool) -> Result<SwitchReport, AppXdpError> {
+/// Quiesce and publish a filled slot without dropping the lease.
+pub fn switch_xdp(slot: u8, generation: u32, pass: bool) -> Result<SwitchReport, AppXdpError> {
     let policy = if pass {
         QuiescePolicy::Pass
     } else {

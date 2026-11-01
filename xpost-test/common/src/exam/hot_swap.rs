@@ -1,10 +1,10 @@
-//! Quiescent A/B swap on `case_xdp`.
+//! Quiescent A/B publish on `case_xdp`.
 //!
-//! Cold install (`clear` / `flash_xdp`) may reboot. After `OK init`, stage and
-//! activate must keep the same boot id. `case_swap` is linked at slot 0.
-//! `case_mark_idle` is the same `case_mark` program linked at `xdp_slot_idle`.
-//! Returning to the first image is another stage plus activate, chosen by the
-//! host. This exam does not touch `rxcnt`.
+//! Cold install (`clear` / `flash_xdp`) may reboot and is not timed. After both
+//! images are in the cold table, the exam drops the lease, copies each image
+//! into its slot, and leases slot 0. The timed command is `switch` to slot 1.
+//! `t0` is that command. `t1` is the first captured slot-B frame at or after
+//! `t0`. Slot fill is outside the window. This exam does not touch `rxcnt`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -78,9 +78,25 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
         cfg.target.esp_ip, PORT, STIM_SRC, cfg.target.stim_sport
     );
 
+    agent
+        .disable_xdp()
+        .await
+        .context("drop the lease before filling slots")?;
+    let filled_a = agent
+        .flash_xdp_slot(SWAP, 0)
+        .await
+        .context("copy case_swap into slot 0")?;
+    let _slot_a = parse_flash(&filled_a)?;
+    let filled_b = agent
+        .flash_xdp_slot(MARK, 1)
+        .await
+        .context("copy case_mark_idle into slot 1")?;
+    let generation = parse_flash(&filled_b)?;
+    agent.enable_xdp().await.context("lease slot 0")?;
+
     let boot = status_of(&agent).await?;
     if boot.boot_id == 0 || boot.active != 0 {
-        bail!("boot status want active slot 0, got {}", boot.raw);
+        bail!("enable should run slot 0, got {}", boot.raw);
     }
     observe(
         cfg,
@@ -91,76 +107,7 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
         SWAP,
         &mac,
         &swap_needle,
-        &boot.raw,
-    )
-    .await?;
-
-    let bad_addr = agent.flash_xdp_slot(SWAP, 1).await;
-    if bad_addr.is_ok() {
-        bail!("stage case_swap into slot 1 should fail: wrong link address");
-    }
-    let after_bad = status_of(&agent).await?;
-    if after_bad.boot_id != boot.boot_id || after_bad.active != 0 {
-        bail!("bad stage changed the lease: {}", after_bad.raw);
-    }
-    observe(
-        cfg,
-        &agent,
-        &client,
-        exam_id,
-        2,
-        SWAP,
-        &mac,
-        &swap_needle,
-        &after_bad.raw,
-    )
-    .await?;
-
-    let staged = agent
-        .flash_xdp_slot(MARK, 1)
-        .await
-        .context("copy case_mark_idle into slot 1")?;
-    let generation = parse_stage(&staged)?;
-    let staged_status = status_of(&agent).await?;
-    if staged_status.boot_id != boot.boot_id
-        || staged_status.active != 0
-        || staged_status.staged != 1
-    {
-        bail!("stage published or rebooted: {}", staged_status.raw);
-    }
-    observe(
-        cfg,
-        &agent,
-        &client,
-        exam_id,
-        3,
-        SWAP,
-        &mac,
-        &swap_needle,
-        &format!("{staged} {}", staged_status.raw),
-    )
-    .await?;
-
-    let bad_gen = agent
-        .activate_xdp(1, generation.wrapping_add(1), "drop")
-        .await;
-    if bad_gen.is_ok() {
-        bail!("activate with a stale generation should fail");
-    }
-    let still = status_of(&agent).await?;
-    if still.boot_id != boot.boot_id || still.active != 0 {
-        bail!("bad generation changed the lease: {}", still.raw);
-    }
-    observe(
-        cfg,
-        &agent,
-        &client,
-        exam_id,
-        4,
-        SWAP,
-        &mac,
-        &swap_needle,
-        &still.raw,
+        &format!("{filled_a} {filled_b} {}", boot.raw),
     )
     .await?;
 
@@ -176,56 +123,38 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
             tail: std::time::Duration::from_millis(500),
         },
         || async {
-            let activated = agent
-                .activate_xdp(1, generation, "drop")
+            let t0 = case::unix_secs();
+            let switched = agent
+                .switch_xdp(1, generation, "drop")
                 .await
-                .context("activate case_mark_idle")?;
+                .context("switch to slot 1")?;
             let now = status_of(&agent).await?;
             if now.boot_id != boot_id || now.active != 1 || now.severe != 0 {
-                bail!("activate did not publish slot 1: {} {activated}", now.raw);
+                bail!("switch did not publish slot 1: {} {switched}", now.raw);
             }
-            eprintln!("hot_swap activate {activated} {}", now.raw);
-            Ok(())
+            eprintln!("hot_swap switch {switched} {}", now.raw);
+            Ok(t0)
         },
     )
     .await?;
-    eprintln!("hot_swap wire swap->mark {}", published.summary);
-    store_gap(&client, exam_id, 5, MARK, &published).await?;
-
-    let restaged = agent
-        .flash_xdp_slot(SWAP, 0)
-        .await
-        .context("copy previous image into the idle slot")?;
-    let back_gen = parse_stage(&restaged)?;
-    let returned = case::capture_update(
-        cfg,
-        &mac,
-        MARK_DST,
-        &swap_needle,
-        case::CaptureWindow {
-            interval: std::time::Duration::from_millis(2),
-            preamble: std::time::Duration::from_millis(200),
-            tail: std::time::Duration::from_millis(500),
-        },
-        || async {
-            let rolled = agent
-                .activate_xdp(0, back_gen, "drop")
-                .await
-                .context("publish previous image")?;
-            let back = status_of(&agent).await?;
-            if back.boot_id != boot_id || back.active != 0 || back.severe != 0 {
-                bail!("republish did not restore slot 0: {} {rolled}", back.raw);
-            }
-            eprintln!("hot_swap activate {rolled} {}", back.raw);
-            Ok(())
-        },
-    )
-    .await?;
-    eprintln!("hot_swap wire mark->swap {}", returned.summary);
-    store_gap(&client, exam_id, 6, SWAP, &returned).await?;
+    if published.old_before == 0 {
+        bail!(
+            "hot_swap preamble did not see slot A:\n{}",
+            published.report
+        );
+    }
+    eprintln!("hot_swap switch->mark {}", published.summary);
+    store_gap(&client, exam_id, 2, MARK, &published).await?;
 
     db::stop_exam(&client, exam_id).await?;
-    eprintln!("hot_swap ok exam={exam_id} boot={}", boot.boot_id);
+    eprintln!(
+        "hot_swap ok exam={exam_id} boot={} command_ms={}",
+        boot.boot_id,
+        published
+            .command_ms
+            .map(|ms| format!("{ms:.3}"))
+            .unwrap_or_else(|| "none".to_string())
+    );
     Ok(())
 }
 
@@ -244,8 +173,8 @@ async fn store_gap(
     xdp: &str,
     gap: &case::WireGap,
 ) -> Result<()> {
-    if gap.gap_ms.is_none() {
-        bail!("hot_swap seq={seq} capture has no update gap:\n{}", gap.report);
+    if gap.command_ms.is_none() {
+        bail!("hot_swap seq={seq} capture has no frame at or after switch:\n{}", gap.report);
     }
     db::insert_case_obs(
         client,
@@ -255,14 +184,14 @@ async fn store_gap(
             xdp,
             capability: "quiescent hot swap",
             action: "XDP_TX",
-            expect: "tcpdump arrival gap from the last old DUT reply to the first new DUT reply. Host command time is not the latency.",
+            expect: "t0 is the host clock when switch is issued. t1 is the first slot-B DUT frame with tcpdump -tt >= t0. The difference includes HTTP, UART, publish, and one air hop. Slot fill is outside this window.",
             map_name: "",
             map_slot: 0,
             map_before: 0,
             map_after: 0,
             sent: SENT as i32,
             saw_reply: gap.new_replies > 0,
-            ok: gap.gap_ms.is_some() && gap.old_replies > 0 && gap.new_replies > 0,
+            ok: gap.command_ms.is_some() && gap.old_before > 0 && gap.new_replies > 0,
             tcpdump: &gap.report,
         },
     )
@@ -347,17 +276,17 @@ async fn observe(
     Ok(())
 }
 
-fn parse_stage(msg: &str) -> Result<u32> {
+fn parse_flash(msg: &str) -> Result<u32> {
     let rest = msg
         .trim()
-        .strip_prefix("OK xdp stage ")
-        .context("stage reply")?;
+        .strip_prefix("OK xdp flash ")
+        .context("flash reply")?;
     let mut parts = rest.split_whitespace();
     let _slot: u8 = parts
         .next()
-        .context("stage slot")?
+        .context("flash slot")?
         .parse()
-        .context("stage slot")?;
+        .context("flash slot")?;
     let generation = parts
         .next()
         .context("stage generation")?

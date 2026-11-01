@@ -128,11 +128,12 @@ async fn run_step(
             &old_needle,
             MARK_DST,
             CaptureWindow {
-                interval: Duration::from_millis(20),
+                interval: Duration::from_millis(2),
                 preamble: Duration::from_millis(400),
                 tail: Duration::from_secs(30),
             },
             || async {
+                let t0 = unix_secs();
                 agent
                     .disable_xdp()
                     .await
@@ -149,21 +150,22 @@ async fn run_step(
                     .get_init()
                     .await
                     .with_context(|| format!("OK init after {}", step.xdp))?;
-                Ok(())
+                Ok(t0)
             },
         )
         .await?;
         events.push(format!(
-            "cold_wire_gap_ms={} old_replies={} new_replies={}",
-            gap.gap_ms
+            "cold_command_ms={} old_before={} old_after={} new_replies={}",
+            gap.command_ms
                 .map(|ms| format!("{ms:.3}"))
                 .unwrap_or_else(|| "none".to_string()),
-            gap.old_replies,
+            gap.old_before,
+            gap.old_after,
             gap.new_replies
         ));
         eprintln!("case cold update {}", gap.summary);
-        if gap.gap_ms.is_none() {
-            bail!("case cold update has no capture gap:\n{}", gap.report);
+        if gap.command_ms.is_none() {
+            bail!("case cold update has no frame at or after disable:\n{}", gap.report);
         }
     } else {
         agent
@@ -345,10 +347,17 @@ pub(crate) struct CaptureWindow {
     pub tail: Duration,
 }
 
-/// Arrival gap on the probe, from the last old DUT reply to the first new one.
+/// Command-to-capture latency on the probe host.
+///
+/// `command_ms` is the tcpdump `-tt` time of the first new DUT frame at or
+/// after `t0`, minus `t0`. Both clocks are this host. The number includes the
+/// path from the test process to the DUT and one air hop. `gap_ms` is the
+/// last-old to first-new arrival gap and is not the reported latency.
 pub(crate) struct WireGap {
+    pub command_ms: Option<f64>,
     pub gap_ms: Option<f64>,
-    pub old_replies: usize,
+    pub old_before: usize,
+    pub old_after: usize,
     pub new_replies: usize,
     pub summary: String,
     pub report: String,
@@ -356,8 +365,8 @@ pub(crate) struct WireGap {
 
 /// Run tcpdump across `update` while a UDP stimulus keeps flowing.
 ///
-/// The gap is the tcpdump arrival time of the first new DUT reply minus the
-/// last old DUT reply before it. Host command duration is not the result.
+/// `update` returns the unix-second timestamp taken immediately before the
+/// timed command. The result is the first new DUT frame with `ts >= t0`.
 pub(crate) async fn capture_update<F, Fut>(
     cfg: &FileConfig,
     mac: &str,
@@ -368,7 +377,7 @@ pub(crate) async fn capture_update<F, Fut>(
 ) -> Result<WireGap>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<()>>,
+    Fut: Future<Output = Result<f64>>,
 {
     let mut child = Command::new("tcpdump")
         .args([
@@ -437,12 +446,13 @@ where
         text.push_str("\n# stderr\n");
         text.push_str(&err);
     }
-    let gap = wire_gap(&text, mac, old_needle, new_needle);
+    let command_at = updated.as_ref().copied().unwrap_or(0.0);
+    let gap = wire_gap(&text, mac, old_needle, new_needle, command_at);
     updated.with_context(|| gap.summary.clone())?;
     Ok(gap)
 }
 
-fn wire_gap(dump: &str, mac: &str, old_needle: &str, new_needle: &str) -> WireGap {
+fn wire_gap(dump: &str, mac: &str, old_needle: &str, new_needle: &str, command_at: f64) -> WireGap {
     let src = format!("{mac} >");
     let mut old: Vec<(f64, String)> = Vec::new();
     let mut new: Vec<(f64, String)> = Vec::new();
@@ -465,51 +475,75 @@ fn wire_gap(dump: &str, mac: &str, old_needle: &str, new_needle: &str) -> WireGa
             new.push((ts, header.to_string()));
         }
     }
-    let first_new = new.iter().map(|(ts, _)| *ts).reduce(f64::min);
+    let first_new = new
+        .iter()
+        .map(|(ts, _)| *ts)
+        .filter(|ts| *ts >= command_at)
+        .reduce(f64::min);
     let last_old = first_new.and_then(|cut| {
         old.iter()
             .map(|(ts, _)| *ts)
             .filter(|ts| *ts < cut)
             .reduce(f64::max)
     });
+    let old_before = old.iter().filter(|(ts, _)| *ts < command_at).count();
+    let old_after = old.iter().filter(|(ts, _)| *ts >= command_at).count();
     let gap_ms = match (last_old, first_new) {
         (Some(from), Some(to)) => Some((to - from) * 1_000.0),
         _ => None,
     };
+    let command_ms = first_new.map(|ts| (ts - command_at) * 1_000.0);
     let summary = format!(
-        "gap_ms={} old_replies={} new_replies={} last_old={} first_new={}",
+        "command_ms={} gap_ms={} old_before={} old_after={} new_replies={} t0={} first_new={}",
+        command_ms
+            .map(|ms| format!("{ms:.3}"))
+            .unwrap_or_else(|| "none".to_string()),
         gap_ms
             .map(|ms| format!("{ms:.3}"))
             .unwrap_or_else(|| "none".to_string()),
-        old.len(),
-        new.len(),
-        last_old
-            .map(|ts| format!("{ts:.6}"))
-            .unwrap_or_else(|| "none".to_string()),
+        old_before,
+        old_after,
+        new.iter().filter(|(ts, _)| *ts >= command_at).count(),
+        format!("{command_at:.6}"),
         first_new
             .map(|ts| format!("{ts:.6}"))
             .unwrap_or_else(|| "none".to_string()),
     );
     let mut report = format!("# {summary}\n# needle_old {old_needle}\n# needle_new {new_needle}\n");
-    if let (Some(from), Some(to)) = (last_old, first_new) {
-        report.push_str("# boundary old\n");
-        let shown_old: Vec<_> = old.iter().filter(|(ts, _)| *ts <= from).collect();
-        let start = shown_old.len().saturating_sub(3);
-        for (ts, header) in &shown_old[start..] {
+    report.push_str("# boundary old\n");
+    let shown_old: Vec<_> = old.iter().filter(|(ts, _)| *ts < command_at).collect();
+    let start = shown_old.len().saturating_sub(3);
+    for (ts, header) in &shown_old[start..] {
+        report.push_str(&format!("{ts:.6} old {header}\n"));
+    }
+    if old_after > 0 {
+        report.push_str("# old after t0\n");
+        for (ts, header) in old.iter().filter(|(ts, _)| *ts >= command_at).take(3) {
             report.push_str(&format!("{ts:.6} old {header}\n"));
         }
+    }
+    if first_new.is_some() {
         report.push_str("# boundary new\n");
-        for (ts, header) in new.iter().filter(|(ts, _)| *ts >= to).take(3) {
+        for (ts, header) in new.iter().filter(|(ts, _)| *ts >= command_at).take(3) {
             report.push_str(&format!("{ts:.6} new {header}\n"));
         }
     }
     WireGap {
+        command_ms,
         gap_ms,
-        old_replies: old.len(),
-        new_replies: new.len(),
+        old_before,
+        old_after,
+        new_replies: new.iter().filter(|(ts, _)| *ts >= command_at).count(),
         summary,
         report,
     }
+}
+
+pub(crate) fn unix_secs() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 fn frame_ts(header: &str) -> Option<f64> {

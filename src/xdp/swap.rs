@@ -1,7 +1,7 @@
 //! Quiescent hot swap of a pre-installed image.
 //!
-//! `stage` copies into an idle slot while the active image keeps running.
-//! `activate` pauses new flights, waits until `IN_FLIGHT` is 0, then publishes
+//! `flash` into a slot copies a cold image. It does not publish the entry.
+//! `switch` pauses new flights, waits until `IN_FLIGHT` is 0, then publishes
 //! map aliases and the new entry. A failed publish restores the previous
 //! aliases. The host remembers which slot to publish next. `IN_FLIGHT == 0`
 //! does not drain the driver's async `XDP_TX` queue; map users are kept across
@@ -71,14 +71,12 @@ pub struct XdpStatus {
 }
 
 impl XdpRt {
-    /// Copy `id` into `slot` while the leased image keeps running.
+    /// Copy `id` into `slot`. The slot must not be the running entry.
     ///
-    /// Does not change `PRIMARY_ENTRY`, `ACTIVE`, or map aliases. The target
-    /// must not be the active slot. Returns the staged generation.
+    /// Does not change `PRIMARY_ENTRY`, `ACTIVE`, or map aliases. A dropped
+    /// lease can fill every slot, including the primary index. Returns the
+    /// staged generation.
     pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<u32, XdpSwapError> {
-        if !self.leased {
-            return Err(self.fail(XdpSwapError::NotLeased));
-        }
         if self.severe {
             return Err(self.fail(XdpSwapError::RollbackFailed));
         }
@@ -205,11 +203,8 @@ impl XdpRt {
         err
     }
 
-    /// `staging` rejects the active slot. Commit rechecks the image.
+    /// `staging` rejects a slot whose phase is Active. Commit rechecks the image.
     fn preflight(&mut self, id: XdpId, slot: SlotId, staging: bool) -> Result<(), XdpSwapError> {
-        if staging && self.primary == slot {
-            return Err(self.fail(XdpSwapError::ActiveSlot));
-        }
         let meta_ok = {
             let Some(image) = self.images.get(id) else {
                 return Err(self.fail(XdpSwapError::UnknownImage));

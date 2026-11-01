@@ -111,19 +111,19 @@ fn u8_at(nums: &[u32; 10], i: usize) -> Result<u8, ParseError> {
     u8::try_from(nums[i]).map_err(|_| ParseError::InvalidSyntax)
 }
 
-/// `OK xdp stage <slot> <generation>`.
-pub fn parse_xdp_stage_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
-    let (_, nums) = parse_u32_line(input, b"OK xdp stage", 2)?;
-    Ok(OkReply::XdpStage {
+/// `OK xdp flash <slot> <generation>`.
+pub fn parse_xdp_flash_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let (_, nums) = parse_u32_line(input, b"OK xdp flash", 2)?;
+    Ok(OkReply::XdpFlash {
         slot: u8_at(&nums, 0)?,
         generation: nums[1],
     })
 }
 
-/// `OK xdp activate` plus the eight commit counters.
-pub fn parse_xdp_activate_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
-    let (_, nums) = parse_u32_line(input, b"OK xdp activate", 8)?;
-    Ok(OkReply::XdpActivate {
+/// `OK xdp switch` plus the eight commit counters.
+pub fn parse_xdp_switch_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let (_, nums) = parse_u32_line(input, b"OK xdp switch", 8)?;
+    Ok(OkReply::XdpSwitch {
         ok: u8_at(&nums, 0)?,
         rollback: u8_at(&nums, 1)?,
         severe: u8_at(&nums, 2)?,

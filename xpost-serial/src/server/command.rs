@@ -142,19 +142,19 @@ pub fn parse_command(mut line: &[u8]) -> Result<Command<'_>, ParseCommandError> 
     } else if keyword(verb, b"get") && keyword(target, b"xdp") {
         no_args(&mut line)?;
         Ok(Command::GetXdpStatus)
-    } else if keyword(verb, b"xdp") && keyword(target, b"stage") {
+    } else if keyword(verb, b"xdp") && keyword(target, b"flash") {
         let (raw_name, raw_slot, _) = (token, token, eof::<_, EmptyError>)
             .parse_next(&mut line)
             .map_err(|_| ParseCommandError::BadArity)?;
-        Ok(Command::XdpStage {
+        Ok(Command::XdpFlash {
             name: name(raw_name)?,
             slot: parse_u8(raw_slot)?,
         })
-    } else if keyword(verb, b"xdp") && keyword(target, b"activate") {
+    } else if keyword(verb, b"xdp") && keyword(target, b"switch") {
         let (raw_slot, raw_gen, raw_policy, _) = (token, token, token, eof::<_, EmptyError>)
             .parse_next(&mut line)
             .map_err(|_| ParseCommandError::BadArity)?;
-        Ok(Command::XdpActivate {
+        Ok(Command::XdpSwitch {
             slot: parse_u8(raw_slot)?,
             generation: parse_u32(raw_gen)?,
             pass: parse_policy(raw_policy)?,

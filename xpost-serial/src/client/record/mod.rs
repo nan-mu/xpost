@@ -419,11 +419,11 @@ impl Record {
             },
             Found::Init => OkReply::Init,
             Found::Finish => OkReply::Finish,
-            Found::XdpStage { slot, generation } => OkReply::XdpStage {
+            Found::XdpFlash { slot, generation } => OkReply::XdpFlash {
                 slot: *slot,
                 generation: *generation,
             },
-            Found::XdpActivate {
+            Found::XdpSwitch {
                 ok,
                 rollback,
                 severe,
@@ -432,7 +432,7 @@ impl Record {
                 generation,
                 quiesce_drop,
                 quiesce_pass,
-            } => OkReply::XdpActivate {
+            } => OkReply::XdpSwitch {
                 ok: *ok,
                 rollback: *rollback,
                 severe: *severe,

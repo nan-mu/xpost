@@ -66,7 +66,7 @@ impl AgentClient {
     }
 
     /// `POST /v1/flash/xdp` with `slot`. Copies an image already in the cold
-    /// table into that slot. Does not reset. Reply is `OK xdp stage <slot> <gen>`.
+    /// table into that slot. Does not reset. Reply is `OK xdp flash <slot> <gen>`.
     pub async fn flash_xdp_slot(&self, name: &str, slot: u8) -> Result<String> {
         self.post_json(
             "/v1/flash/xdp",
@@ -108,10 +108,10 @@ impl AgentClient {
         self.post_json("/v1/disable/xdp", &serde_json::json!({})).await
     }
 
-    /// `POST /v1/xdp/activate`. `policy` is `drop` or `pass`.
-    pub async fn activate_xdp(&self, slot: u8, generation: u32, policy: &str) -> Result<String> {
+    /// `POST /v1/xdp/switch`. `policy` is `drop` or `pass`.
+    pub async fn switch_xdp(&self, slot: u8, generation: u32, policy: &str) -> Result<String> {
         self.post_json(
-            "/v1/xdp/activate",
+            "/v1/xdp/switch",
             &serde_json::json!({ "slot": slot, "generation": generation, "policy": policy }),
         )
         .await

@@ -24,14 +24,14 @@ pub fn write_ok<E>(
     mut write_all: impl FnMut(&[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
     match reply {
-        OkReply::XdpStage { slot, generation } => {
+        OkReply::XdpFlash { slot, generation } => {
             return write_nums(
-                b"OK xdp stage",
+                b"OK xdp flash",
                 &[u32::from(*slot), *generation],
                 write_all,
             );
         }
-        OkReply::XdpActivate {
+        OkReply::XdpSwitch {
             ok,
             rollback,
             severe,
@@ -42,7 +42,7 @@ pub fn write_ok<E>(
             quiesce_pass,
         } => {
             return write_nums(
-                b"OK xdp activate",
+                b"OK xdp switch",
                 &[
                     u32::from(*ok),
                     u32::from(*rollback),
@@ -99,8 +99,8 @@ pub fn write_ok<E>(
         OkReply::Finish => b"OK finish\n",
         OkReply::GetMap { blob } => return write_blob(b"OK get map ", blob, write_all),
         OkReply::GetPerf { blob } => return write_blob(b"OK get perf ", blob, write_all),
-        OkReply::XdpStage { .. }
-        | OkReply::XdpActivate { .. }
+        OkReply::XdpFlash { .. }
+        | OkReply::XdpSwitch { .. }
         | OkReply::GetXdpStatus { .. } => return Ok(()),
     };
     write_all(line)

@@ -137,7 +137,7 @@ async fn serve_async(addr: &str, log_dir: &Path) -> Result<()> {
         .route("/get/xdp", get(v1_get_xdp))
         .route("/enable/xdp", post(v1_enable_xdp))
         .route("/disable/xdp", post(v1_disable_xdp))
-        .route("/xdp/activate", post(v1_xdp_activate))
+        .route("/xdp/switch", post(v1_xdp_switch))
         .route("/xdp/status", get(v1_xdp_status))
         .route("/enable/exec", post(v1_enable_exec))
         .route("/disable/exec", post(v1_disable_exec))
@@ -280,13 +280,13 @@ fn policy_pass(policy: &str) -> Result<bool> {
     }
 }
 
-async fn v1_xdp_activate(
+async fn v1_xdp_switch(
     State(st): State<AppState>,
     body: Result<Json<ActivateBody>, axum::extract::rejection::JsonRejection>,
 ) -> Json<ApiResp> {
     let Json(body) = match body {
         Ok(j) => j,
-        Err(e) => return Json(ApiResp::err(format!("bad activate body: {e}"))),
+        Err(e) => return Json(ApiResp::err(format!("bad switch body: {e}"))),
     };
     let pass = match policy_pass(&body.policy) {
         Ok(pass) => pass,
@@ -294,7 +294,7 @@ async fn v1_xdp_activate(
     };
     let shared = st.shared.clone();
     run_blocking(move || {
-        ops::activate_xdp(shared.as_ref(), body.slot, body.generation, pass, "http")
+        ops::switch_xdp(shared.as_ref(), body.slot, body.generation, pass, "http")
     })
     .await
 }

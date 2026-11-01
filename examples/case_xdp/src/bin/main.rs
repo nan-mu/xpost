@@ -52,7 +52,7 @@ static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 #[unsafe(link_section = ".xdp.hotload_0")]
 static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
-/// Idle slot. Staged while slot `a` is the entry; published only by `xdp activate`.
+/// Idle slot. Filled by `xdp flash`; published only by `xdp switch`.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".xdp.hotload_1")]
 static xdp_slot_idle: Slot<0xE00> = Slot::new([0u8; 0xE00]);
@@ -345,15 +345,15 @@ serial_task! {
                 reply.error(&PerfError::Unavailable);
             }
         })
-        .on_xdp_stage(|name: &str, slot: u8, reply: ReplyWriter<'_>| {
-            match app_ctrl::stage_xdp(name, slot) {
-                Ok(generation) => reply.ok(OkReply::XdpStage { slot, generation }),
+        .on_xdp_flash(|name: &str, slot: u8, reply: ReplyWriter<'_>| {
+            match app_ctrl::flash_xdp_slot(name, slot) {
+                Ok(generation) => reply.ok(OkReply::XdpFlash { slot, generation }),
                 Err(e) => reply_xdp_err(reply, e),
             }
         })
-        .on_xdp_activate(|slot: u8, generation: u32, pass: bool, reply: ReplyWriter<'_>| {
-            match app_ctrl::activate_xdp(slot, generation, pass) {
-                Ok(report) => reply.ok(activate_reply(&report)),
+        .on_xdp_switch(|slot: u8, generation: u32, pass: bool, reply: ReplyWriter<'_>| {
+            match app_ctrl::switch_xdp(slot, generation, pass) {
+                Ok(report) => reply.ok(switch_reply(&report)),
                 Err(e) => reply_xdp_err(reply, e),
             }
         })
@@ -374,8 +374,8 @@ fn slot_byte(slot: Option<usize>) -> u8 {
     slot.and_then(|s| u8::try_from(s).ok()).unwrap_or(255)
 }
 
-fn activate_reply(report: &xpost::xdp::SwitchReport) -> OkReply<'static> {
-    OkReply::XdpActivate {
+fn switch_reply(report: &xpost::xdp::SwitchReport) -> OkReply<'static> {
+    OkReply::XdpSwitch {
         ok: u8::from(report.ok),
         rollback: u8::from(report.rolled_back),
         severe: u8::from(report.severe),

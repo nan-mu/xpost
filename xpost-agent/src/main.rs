@@ -43,7 +43,7 @@
 //! | GET | `/v1/get/xdp` | — | list installed XDP images |
 //! | POST | `/v1/enable/xdp` | `{}` | App `EnableXdp` |
 //! | POST | `/v1/disable/xdp` | `{}` | App `DisableXdp` |
-//! | POST | `/v1/xdp/activate` | `{"slot","generation","policy"}` | App `xdp activate`; policy `drop` or `pass` |
+//! | POST | `/v1/xdp/switch` | `{"slot","generation","policy"}` | App `xdp switch`; policy `drop` or `pass` |
 //! | GET | `/v1/xdp/status` | — | App `get xdp` boot id and slot roles |
 //! | POST | `/v1/enable/exec` | `{}` | App `EnableExec` |
 //! | POST | `/v1/disable/exec` | `{}` | App `DisableExec` |

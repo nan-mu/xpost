@@ -219,7 +219,7 @@ pub fn flash_xdp(
     peer: &str,
 ) -> Result<String> {
     if let Some(slot) = slot {
-        return stage_xdp(state, name, slot, peer);
+        return flash_xdp_slot(state, name, slot, peer);
     }
     with_log(
         peer,
@@ -428,40 +428,40 @@ pub fn disable_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     })
 }
 
-pub fn stage_xdp(state: &Mutex<AgentState>, name: &str, slot: u8, peer: &str) -> Result<String> {
+pub fn flash_xdp_slot(state: &Mutex<AgentState>, name: &str, slot: u8, peer: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
         bail!("empty xdp name");
     }
-    with_log(peer, "XdpStage", name, false, state, || {
+    with_log(peer, "XdpFlash", name, false, state, || {
         let g = lock(state)?;
-        match req(&g, &Command::XdpStage { name, slot })? {
-            OkReply::XdpStage { slot, generation } => {
-                Ok(format!("OK xdp stage {slot} {generation}"))
+        match req(&g, &Command::XdpFlash { name, slot })? {
+            OkReply::XdpFlash { slot, generation } => {
+                Ok(format!("OK xdp flash {slot} {generation}"))
             }
-            _ => bail!("unexpected xdp stage reply"),
+            _ => bail!("unexpected xdp flash reply"),
         }
     })
 }
 
-pub fn activate_xdp(
+pub fn switch_xdp(
     state: &Mutex<AgentState>,
     slot: u8,
     generation: u32,
     pass: bool,
     peer: &str,
 ) -> Result<String> {
-    with_log(peer, "XdpActivate", "", false, state, || {
+    with_log(peer, "XdpSwitch", "", false, state, || {
         let g = lock(state)?;
         match req(
             &g,
-            &Command::XdpActivate {
+            &Command::XdpSwitch {
                 slot,
                 generation,
                 pass,
             },
         )? {
-            OkReply::XdpActivate {
+            OkReply::XdpSwitch {
                 ok,
                 rollback,
                 severe,
@@ -471,9 +471,9 @@ pub fn activate_xdp(
                 quiesce_drop,
                 quiesce_pass,
             } => Ok(format!(
-                "OK xdp activate {ok} {rollback} {severe} {from_slot} {to_slot} {generation} {quiesce_drop} {quiesce_pass}"
+                "OK xdp switch {ok} {rollback} {severe} {from_slot} {to_slot} {generation} {quiesce_drop} {quiesce_pass}"
             )),
-            _ => bail!("unexpected xdp activate reply"),
+            _ => bail!("unexpected xdp switch reply"),
         }
     })
 }

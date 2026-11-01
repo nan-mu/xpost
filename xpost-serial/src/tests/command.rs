@@ -41,11 +41,11 @@ fn assert_cmd_eq(got: &Command<'_>, expect: &Command<'_>) {
             assert_eq!(av, bv, "map value");
         }
         (
-            Command::XdpStage {
+            Command::XdpFlash {
                 name: a,
                 slot: aslot,
             },
-            Command::XdpStage {
+            Command::XdpFlash {
                 name: b,
                 slot: bslot,
             },
@@ -54,12 +54,12 @@ fn assert_cmd_eq(got: &Command<'_>, expect: &Command<'_>) {
             assert_eq!(aslot, bslot);
         }
         (
-            Command::XdpActivate {
+            Command::XdpSwitch {
                 slot: aslot,
                 generation: agen,
                 pass: apass,
             },
-            Command::XdpActivate {
+            Command::XdpSwitch {
                 slot: bslot,
                 generation: bgen,
                 pass: bpass,
@@ -162,7 +162,7 @@ fn get_init_is_not_wire() {
 
 #[test]
 fn xdp_stage() {
-    roundtrip(Command::XdpStage {
+    roundtrip(Command::XdpFlash {
         name: "hot_mark",
         slot: 1,
     });
@@ -170,7 +170,7 @@ fn xdp_stage() {
 
 #[test]
 fn xdp_activate() {
-    roundtrip(Command::XdpActivate {
+    roundtrip(Command::XdpSwitch {
         slot: 1,
         generation: 3,
         pass: false,

@@ -41,13 +41,13 @@ pub enum Command<'a> {
     },
     ClearPerf,
     GetPerf,
-    /// `xdp stage <name> <slot>` — copy a cold image into an idle slot.
-    XdpStage {
+    /// `xdp flash <name> <slot>` — copy a cold image into a slot. Does not publish it.
+    XdpFlash {
         name: &'a str,
         slot: u8,
     },
-    /// `xdp activate <slot> <generation> <drop|pass>`.
-    XdpActivate {
+    /// `xdp switch <slot> <generation> <drop|pass>`.
+    XdpSwitch {
         slot: u8,
         generation: u32,
         pass: bool,

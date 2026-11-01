@@ -357,8 +357,8 @@ impl XdpRt {
 
     /// Copy XDP binary of `id` from the cold table into `slot` and select it.
     ///
-    /// Refuses while leased. Runtime replacement of a running image is
-    /// [`Self::stage`] then [`Self::activate`]. [`Self::lease`] publishes the
+    /// Refuses while leased. UART `xdp flash` fills a slot, and UART `xdp switch`
+    /// publishes one while the lease stays up. [`Self::lease`] publishes the
     /// entry selected here.
     pub fn switch(
         &mut self,

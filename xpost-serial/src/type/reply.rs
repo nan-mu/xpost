@@ -22,13 +22,13 @@ pub enum OkReply<'a> {
     GetPerf {
         blob: &'a [u8],
     },
-    /// `OK xdp stage <slot> <generation>`.
-    XdpStage {
+    /// `OK xdp flash <slot> <generation>`.
+    XdpFlash {
         slot: u8,
         generation: u32,
     },
-    /// `OK xdp activate <ok> <rollback> <severe> <from> <to> <gen> <drop> <pass>`.
-    XdpActivate {
+    /// `OK xdp switch <ok> <rollback> <severe> <from> <to> <gen> <drop> <pass>`.
+    XdpSwitch {
         ok: u8,
         rollback: u8,
         severe: u8,

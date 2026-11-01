@@ -26,11 +26,11 @@ pub(crate) enum Found {
     },
     Init,
     Finish,
-    XdpStage {
+    XdpFlash {
         slot: u8,
         generation: u32,
     },
-    XdpActivate {
+    XdpSwitch {
         ok: u8,
         rollback: u8,
         severe: u8,
@@ -210,8 +210,8 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
         OkReply::UpdateMap => Some(Found::UpdateMap),
         OkReply::Init => Some(Found::Init),
         OkReply::Finish => Some(Found::Finish),
-        OkReply::XdpStage { slot, generation } => Some(Found::XdpStage { slot, generation }),
-        OkReply::XdpActivate {
+        OkReply::XdpFlash { slot, generation } => Some(Found::XdpFlash { slot, generation }),
+        OkReply::XdpSwitch {
             ok,
             rollback,
             severe,
@@ -220,7 +220,7 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
             generation,
             quiesce_drop,
             quiesce_pass,
-        } => Some(Found::XdpActivate {
+        } => Some(Found::XdpSwitch {
             ok,
             rollback,
             severe,

@@ -40,12 +40,12 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
         | (OkReply::GetPerf { blob: a }, OkReply::GetPerf { blob: b }) => {
             assert_eq!(a, b, "blob");
         }
-        (OkReply::XdpStage { slot: a, generation: ag }, OkReply::XdpStage { slot: b, generation: bg }) => {
+        (OkReply::XdpFlash { slot: a, generation: ag }, OkReply::XdpFlash { slot: b, generation: bg }) => {
             assert_eq!(a, b);
             assert_eq!(ag, bg);
         }
         (
-            OkReply::XdpActivate {
+            OkReply::XdpSwitch {
                 ok: aok,
                 rollback: arb,
                 severe: ase,
@@ -55,7 +55,7 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
                 quiesce_drop: adrop,
                 quiesce_pass: apass,
             },
-            OkReply::XdpActivate {
+            OkReply::XdpSwitch {
                 ok: bok,
                 rollback: brb,
                 severe: bse,
@@ -218,11 +218,11 @@ fn ok_get_perf_empty_blob() {
 #[test]
 fn ok_xdp_stage() {
     roundtrip_ok(
-        Command::XdpStage {
+        Command::XdpFlash {
             name: "hot_mark",
             slot: 1,
         },
-        OkReply::XdpStage {
+        OkReply::XdpFlash {
             slot: 1,
             generation: 4,
         },
@@ -232,12 +232,12 @@ fn ok_xdp_stage() {
 #[test]
 fn ok_xdp_activate() {
     roundtrip_ok(
-        Command::XdpActivate {
+        Command::XdpSwitch {
             slot: 1,
             generation: 4,
             pass: false,
         },
-        OkReply::XdpActivate {
+        OkReply::XdpSwitch {
             ok: 1,
             rollback: 0,
             severe: 0,

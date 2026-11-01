@@ -19,5 +19,5 @@ pub use ok::{
     parse_disable_xdp_reply, parse_enable_exec_reply, parse_enable_xdp_reply, parse_finish_reply,
     parse_get_map_len, parse_get_map_reply, parse_get_perf_len, parse_get_perf_reply,
     parse_get_xdp_status_reply, parse_init_reply, parse_ping_reply, parse_update_map_reply,
-    parse_xdp_activate_reply, parse_xdp_stage_reply,
+    parse_xdp_switch_reply, parse_xdp_flash_reply,
 };
