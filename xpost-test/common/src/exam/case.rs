@@ -35,6 +35,7 @@ pub(crate) const MARK_DST: &str = "203.0.113.77";
 const READY_TRIES: u32 = 40;
 const DUMP_CAP: usize = 64 * 1024;
 const DRAIN: Duration = Duration::from_secs(1);
+const REPEATS: usize = 8;
 pub(crate) const PAYLOAD_LEN: usize = 5;
 
 struct Step {
@@ -118,54 +119,85 @@ async fn run_step(
             "{}.{} > {}.{}",
             cfg.target.esp_ip, PORT, STIM_SRC, cfg.target.stim_sport
         );
-        agent
-            .enable_xdp()
-            .await
-            .with_context(|| format!("lease previous image before {}", step.xdp))?;
-        let gap = capture_update(
-            cfg,
-            &mac,
-            &old_needle,
-            MARK_DST,
-            CaptureWindow {
-                interval: Duration::from_millis(2),
-                preamble: Duration::from_millis(400),
-                tail: Duration::from_secs(30),
-            },
-            || async {
-                let t0 = unix_secs();
-                agent
-                    .disable_xdp()
-                    .await
-                    .with_context(|| format!("disable xdp before {}", step.xdp))?;
+        for rep in 1..=REPEATS {
+            if rep > 1 {
                 agent
                     .clear_xdp("*")
                     .await
-                    .with_context(|| format!("clear xdp before {}", step.xdp))?;
+                    .with_context(|| format!("restore case_swap before rep {rep}"))?;
                 agent
-                    .flash_xdp(step.xdp)
+                    .flash_xdp("case_swap")
                     .await
-                    .with_context(|| format!("flash xdp {}", step.xdp))?;
+                    .with_context(|| format!("restore case_swap before rep {rep}"))?;
                 agent
                     .get_init()
                     .await
-                    .with_context(|| format!("OK init after {}", step.xdp))?;
-                Ok(t0)
-            },
-        )
-        .await?;
-        events.push(format!(
-            "cold_command_ms={} old_before={} old_after={} new_replies={}",
-            gap.command_ms
-                .map(|ms| format!("{ms:.3}"))
-                .unwrap_or_else(|| "none".to_string()),
-            gap.old_before,
-            gap.old_after,
-            gap.new_replies
-        ));
-        eprintln!("case cold update {}", gap.summary);
-        if gap.command_ms.is_none() {
-            bail!("case cold update has no frame at or after disable:\n{}", gap.report);
+                    .with_context(|| format!("OK init case_swap before rep {rep}"))?;
+            }
+            agent
+                .enable_xdp()
+                .await
+                .with_context(|| format!("lease previous image before {} rep {rep}", step.xdp))?;
+            let gap = capture_update(
+                cfg,
+                &mac,
+                &old_needle,
+                MARK_DST,
+                CaptureWindow {
+                    interval: Duration::from_millis(2),
+                    preamble: Duration::from_millis(400),
+                    tail: Duration::from_secs(30),
+                },
+                || async {
+                    let t0 = unix_secs();
+                    agent
+                        .disable_xdp()
+                        .await
+                        .with_context(|| format!("disable xdp before {} rep {rep}", step.xdp))?;
+                    agent
+                        .clear_xdp("*")
+                        .await
+                        .with_context(|| format!("clear xdp before {} rep {rep}", step.xdp))?;
+                    agent
+                        .flash_xdp(step.xdp)
+                        .await
+                        .with_context(|| format!("flash xdp {} rep {rep}", step.xdp))?;
+                    agent
+                        .get_init()
+                        .await
+                        .with_context(|| format!("OK init after {} rep {rep}", step.xdp))?;
+                    Ok(t0)
+                },
+            )
+            .await?;
+            let Some(ms) = gap.command_ms else {
+                bail!("case cold rep {rep} has no frame at or after disable:\n{}", gap.report);
+            };
+            events.push(format!(
+                "cold_rep={rep} command_ms={ms:.3} old_before={} old_after={} new_replies={}",
+                gap.old_before, gap.old_after, gap.new_replies
+            ));
+            eprintln!("latency cold rep={rep}/{REPEATS} command_ms={ms:.3}");
+            db::insert_case_obs(
+                client,
+                exam_id,
+                &CaseObs {
+                    seq: 10 + rep as i32 - 1,
+                    xdp: step.xdp,
+                    capability: "cold replace",
+                    action: "XDP_TX",
+                    expect: "t0 is disable. t1 is the first new DUT frame at or after t0. The interval includes clear, cold flash, and reboot. Restoring case_swap between repeats is outside the interval.",
+                    map_name: "",
+                    map_slot: 0,
+                    map_before: 0,
+                    map_after: 0,
+                    sent: SENT as i32,
+                    saw_reply: gap.new_replies > 0,
+                    ok: gap.new_replies > 0,
+                    tcpdump: &gap.report,
+                },
+            )
+            .await?;
         }
     } else {
         agent

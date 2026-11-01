@@ -19,6 +19,7 @@ use crate::pipeline::{BudgetEta, READY_BUDGET, RoundUi, status};
 const FW: &str = "case-cag";
 const SWAP: &str = "case_swap";
 const MARK: &str = "case_mark_idle";
+const REPEATS: usize = 8;
 
 #[allow(dead_code)]
 struct Wire {
@@ -112,49 +113,76 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
     .await?;
 
     let boot_id = boot.boot_id;
-    let published = case::capture_update(
-        cfg,
-        &mac,
-        &swap_needle,
-        MARK_DST,
-        case::CaptureWindow {
-            interval: std::time::Duration::from_millis(2),
-            preamble: std::time::Duration::from_millis(200),
-            tail: std::time::Duration::from_millis(500),
-        },
-        || async {
-            let t0 = case::unix_secs();
-            let switched = agent
-                .switch_xdp(1, generation, "drop")
+    let mut generation = generation;
+    for rep in 1..=REPEATS {
+        if rep > 1 {
+            agent
+                .disable_xdp()
                 .await
-                .context("switch to slot 1")?;
-            let now = status_of(&agent).await?;
-            if now.boot_id != boot_id || now.active != 1 || now.severe != 0 {
-                bail!("switch did not publish slot 1: {} {switched}", now.raw);
+                .with_context(|| format!("drop lease before hot rep {rep}"))?;
+            let filled_a = agent
+                .flash_xdp_slot(SWAP, 0)
+                .await
+                .with_context(|| format!("refill slot 0 before hot rep {rep}"))?;
+            let _ = parse_flash(&filled_a)?;
+            let filled_b = agent
+                .flash_xdp_slot(MARK, 1)
+                .await
+                .with_context(|| format!("refill slot 1 before hot rep {rep}"))?;
+            generation = parse_flash(&filled_b)?;
+            agent
+                .enable_xdp()
+                .await
+                .with_context(|| format!("lease slot 0 before hot rep {rep}"))?;
+            let again = status_of(&agent).await?;
+            if again.boot_id != boot_id || again.active != 0 || again.severe != 0 {
+                bail!("hot rep {rep} did not return to slot 0: {}", again.raw);
             }
-            eprintln!("hot_swap switch {switched} {}", now.raw);
-            Ok(t0)
-        },
-    )
-    .await?;
-    if published.old_before == 0 {
-        bail!(
-            "hot_swap preamble did not see slot A:\n{}",
-            published.report
-        );
+        }
+        let published = case::capture_update(
+            cfg,
+            &mac,
+            &swap_needle,
+            MARK_DST,
+            case::CaptureWindow {
+                interval: std::time::Duration::from_millis(2),
+                preamble: std::time::Duration::from_millis(200),
+                tail: std::time::Duration::from_millis(500),
+            },
+            || async {
+                let t0 = case::unix_secs();
+                let switched = agent
+                    .switch_xdp(1, generation, "drop")
+                    .await
+                    .context("switch to slot 1")?;
+                let now = status_of(&agent).await?;
+                if now.boot_id != boot_id || now.active != 1 || now.severe != 0 {
+                    bail!("switch did not publish slot 1: {} {switched}", now.raw);
+                }
+                eprintln!("hot_swap rep={rep} switch {switched} {}", now.raw);
+                Ok(t0)
+            },
+        )
+        .await?;
+        if published.old_before == 0 {
+            bail!(
+                "hot_swap rep {rep} preamble did not see slot A:\n{}",
+                published.report
+            );
+        }
+        let Some(ms) = published.command_ms else {
+            bail!(
+                "hot_swap rep {rep} has no frame at or after switch:\n{}",
+                published.report
+            );
+        };
+        eprintln!("latency hot rep={rep}/{REPEATS} command_ms={ms:.3}");
+        eprintln!("hot_swap switch->mark {}", published.summary);
+        store_gap(&client, exam_id, 10 + rep as i32 - 1, MARK, &published).await?;
     }
-    eprintln!("hot_swap switch->mark {}", published.summary);
-    store_gap(&client, exam_id, 2, MARK, &published).await?;
 
     db::stop_exam(&client, exam_id).await?;
-    eprintln!(
-        "hot_swap ok exam={exam_id} boot={} command_ms={}",
-        boot.boot_id,
-        published
-            .command_ms
-            .map(|ms| format!("{ms:.3}"))
-            .unwrap_or_else(|| "none".to_string())
-    );
+    eprintln!("hot_swap ok exam={exam_id} boot={boot_id} repeats={REPEATS}");
     Ok(())
 }
 
