@@ -82,8 +82,12 @@ fn with_xdp_retry<T>(
     Err(last)
 }
 
-/// Copy `name` from the cold table into `slot`. Does not publish it.
-pub fn flash_xdp_slot(name: &str, slot: u8) -> Result<u32, AppXdpError> {
+/// Copy `name` from the cold table into `slot`.
+///
+/// A slot that is not running stays staged. The active primary slot is
+/// replaced in place: flights pause, the bytes change, and the same entry
+/// resumes. That path's `mcu_us` is the resume time.
+pub fn flash_xdp_slot(name: &str, slot: u8) -> Result<crate::xdp::StageReport, AppXdpError> {
     with_xdp_retry(|xdp| {
         let id = xdp
             .images

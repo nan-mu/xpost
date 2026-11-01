@@ -22,12 +22,16 @@ pub enum OkReply<'a> {
     GetPerf {
         blob: &'a [u8],
     },
-    /// `OK xdp flash <slot> <generation>`.
+    /// `OK xdp flash <slot> <generation> <mcu_us>`.
+    ///
+    /// `mcu_us` is the device microsecond counter at publish. It is 0 when the
+    /// copy does not publish.
     XdpFlash {
         slot: u8,
         generation: u32,
+        mcu_us: u32,
     },
-    /// `OK xdp switch <ok> <rollback> <severe> <from> <to> <gen> <drop> <pass>`.
+    /// `OK xdp switch <ok> <rollback> <severe> <from> <to> <gen> <drop> <pass> <mcu_us>`.
     XdpSwitch {
         ok: u8,
         rollback: u8,
@@ -37,6 +41,7 @@ pub enum OkReply<'a> {
         generation: u32,
         quiesce_drop: u32,
         quiesce_pass: u32,
+        mcu_us: u32,
     },
     /// `OK get xdp <boot> <active> <staged> <gen> <updating> <severe> <drop> <pass> <err>`.
     ///

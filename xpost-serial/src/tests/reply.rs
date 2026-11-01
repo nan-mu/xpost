@@ -40,9 +40,19 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
         | (OkReply::GetPerf { blob: a }, OkReply::GetPerf { blob: b }) => {
             assert_eq!(a, b, "blob");
         }
-        (OkReply::XdpFlash { slot: a, generation: ag }, OkReply::XdpFlash { slot: b, generation: bg }) => {
-            assert_eq!(a, b);
-            assert_eq!(ag, bg);
+        (
+            OkReply::XdpFlash {
+                slot: a,
+                generation: ag,
+                mcu_us: am,
+            },
+            OkReply::XdpFlash {
+                slot: b,
+                generation: bg,
+                mcu_us: bm,
+            },
+        ) => {
+            assert_eq!((a, ag, am), (b, bg, bm));
         }
         (
             OkReply::XdpSwitch {
@@ -54,6 +64,7 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
                 generation: agen,
                 quiesce_drop: adrop,
                 quiesce_pass: apass,
+                mcu_us: am,
             },
             OkReply::XdpSwitch {
                 ok: bok,
@@ -64,11 +75,12 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
                 generation: bgen,
                 quiesce_drop: bdrop,
                 quiesce_pass: bpass,
+                mcu_us: bm,
             },
         ) => {
             assert_eq!(
-                (aok, arb, ase, afrom, ato, agen, adrop, apass),
-                (bok, brb, bse, bfrom, bto, bgen, bdrop, bpass)
+                (aok, arb, ase, afrom, ato, agen, adrop, apass, am),
+                (bok, brb, bse, bfrom, bto, bgen, bdrop, bpass, bm)
             );
         }
         (
@@ -225,6 +237,7 @@ fn ok_xdp_stage() {
         OkReply::XdpFlash {
             slot: 1,
             generation: 4,
+            mcu_us: 50,
         },
     );
 }
@@ -246,6 +259,7 @@ fn ok_xdp_activate() {
             generation: 4,
             quiesce_drop: 2,
             quiesce_pass: 0,
+            mcu_us: 80,
         },
     );
 }

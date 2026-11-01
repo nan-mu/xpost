@@ -24,10 +24,14 @@ pub fn write_ok<E>(
     mut write_all: impl FnMut(&[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
     match reply {
-        OkReply::XdpFlash { slot, generation } => {
+        OkReply::XdpFlash {
+            slot,
+            generation,
+            mcu_us,
+        } => {
             return write_nums(
                 b"OK xdp flash",
-                &[u32::from(*slot), *generation],
+                &[u32::from(*slot), *generation, *mcu_us],
                 write_all,
             );
         }
@@ -40,6 +44,7 @@ pub fn write_ok<E>(
             generation,
             quiesce_drop,
             quiesce_pass,
+            mcu_us,
         } => {
             return write_nums(
                 b"OK xdp switch",
@@ -52,6 +57,7 @@ pub fn write_ok<E>(
                     *generation,
                     *quiesce_drop,
                     *quiesce_pass,
+                    *mcu_us,
                 ],
                 write_all,
             );

@@ -41,7 +41,10 @@ pub enum Command<'a> {
     },
     ClearPerf,
     GetPerf,
-    /// `xdp flash <name> <slot>` — copy a cold image into a slot. Does not publish it.
+    /// `xdp flash <name> <slot>` — copy a cold image into a slot.
+    ///
+    /// A non-running slot stays staged. The active primary slot is replaced
+    /// in place and resumes at the same entry.
     XdpFlash {
         name: &'a str,
         slot: u8,

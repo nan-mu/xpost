@@ -1,6 +1,6 @@
 //! One firmware, two cold images, tcpdump text in Postgres.
 //!
-//! `case_swap` swaps the IPv4 addresses and UDP ports, then returns `XDP_TX`.
+//! `case_swap` writes destination `203.0.113.10` and returns `XDP_TX`.
 //! `case_mark` writes destination `203.0.113.77` and returns `XDP_TX`.
 //! Both increment `rxcnt[17]` and leave the UDP payload unchanged.
 //!
@@ -10,7 +10,6 @@
 //! result. Those payloads are five bytes, so a firmware `ACK\n` cannot satisfy
 //! the check. The firmware ELF is flashed once. tcpdump writes no pcap.
 
-use std::future::Future;
 use std::net::Ipv4Addr;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +30,7 @@ pub(crate) const PORT: u16 = 8080;
 pub(crate) const SENT: usize = 4;
 const IPPROTO_UDP: u32 = 17;
 pub(crate) const STIM_SRC: Ipv4Addr = Ipv4Addr::new(192, 168, 110, 50);
+pub(crate) const DST_A: &str = "203.0.113.10";
 pub(crate) const MARK_DST: &str = "203.0.113.77";
 const READY_TRIES: u32 = 40;
 const DUMP_CAP: usize = 64 * 1024;
@@ -44,10 +44,9 @@ struct Step {
     map: &'static str,
     slot: u32,
     action: &'static str,
-    mark: bool,
+    dst: &'static str,
     capability: &'static str,
     expect: &'static str,
-    replace: bool,
 }
 
 const STEPS: &[Step] = &[
@@ -57,10 +56,9 @@ const STEPS: &[Step] = &[
         map: "rxcnt",
         slot: IPPROTO_UDP,
         action: "XDP_TX",
-        mark: false,
+        dst: DST_A,
         capability: "count, rewrite",
-        expect: "While XDP is disabled, rxcnt[17] is cleared and read. The scored window then sends CASE0..CASE3 and returns XDP_TX with Ethernet MACs, IPv4 addresses, and UDP ports swapped. Each token appears in a DUT-sourced frame of UDP length 5. rxcnt[17] increases by at least 4; a larger delta is not one-count-per-packet. Firmware ACK\\n is UDP length 4 and does not carry these tokens.",
-        replace: false,
+        expect: "While XDP is disabled, rxcnt[17] is cleared and read. The scored window then sends CASE0..CASE3 and returns XDP_TX with Ethernet MACs swapped and IPv4 destination 203.0.113.10. Each token appears in a DUT-sourced frame of UDP length 5. rxcnt[17] increases by at least 4; a larger delta is not one-count-per-packet. Router forwards of that destination are not DUT replies.",
     },
     Step {
         seq: 2,
@@ -68,10 +66,9 @@ const STEPS: &[Step] = &[
         map: "rxcnt",
         slot: IPPROTO_UDP,
         action: "XDP_TX",
-        mark: true,
+        dst: MARK_DST,
         capability: "count, rewrite",
         expect: "While XDP is disabled, rxcnt[17] is cleared and read. The scored window then sends CASE0..CASE3 and returns XDP_TX with Ethernet MACs swapped and IPv4 destination 203.0.113.77. Each token appears in a DUT-sourced frame of UDP length 5. rxcnt[17] increases by at least 4; a larger delta is not one-count-per-packet. Router forwards of that destination are not DUT replies.",
-        replace: true,
     },
 ];
 
@@ -99,6 +96,7 @@ pub async fn run_case(cfg: &FileConfig) -> Result<()> {
     for step in STEPS {
         run_step(cfg, &agent, &client, exam_id, step).await?;
     }
+    run_cold_latency(cfg, &agent, &client, exam_id).await?;
     db::stop_exam(&client, exam_id).await?;
     eprintln!("case ok exam={exam_id}");
     Ok(())
@@ -113,119 +111,21 @@ async fn run_step(
 ) -> Result<()> {
     let mut events = Vec::new();
     events.push(format!("fw={FW} xdp={} host_ms={}", step.xdp, host_ms()));
-    if step.replace {
-        let mac = format_mac(&cfg.esp_mac_bytes()?);
-        let old_needle = format!(
-            "{}.{} > {}.{}",
-            cfg.target.esp_ip, PORT, STIM_SRC, cfg.target.stim_sport
-        );
-        for rep in 1..=REPEATS {
-            if rep > 1 {
-                agent
-                    .clear_xdp("*")
-                    .await
-                    .with_context(|| format!("restore case_swap before rep {rep}"))?;
-                agent
-                    .flash_xdp("case_swap")
-                    .await
-                    .with_context(|| format!("restore case_swap before rep {rep}"))?;
-                agent
-                    .get_init()
-                    .await
-                    .with_context(|| format!("OK init case_swap before rep {rep}"))?;
-            }
-            agent
-                .enable_xdp()
-                .await
-                .with_context(|| format!("lease previous image before {} rep {rep}", step.xdp))?;
-            let marks = Mutex::new([0.0_f64; 4]);
-            let gap = capture_update(
-                cfg,
-                &mac,
-                &old_needle,
-                MARK_DST,
-                CaptureWindow {
-                    interval: Duration::from_millis(2),
-                    preamble: Duration::from_millis(200),
-                    tail: Duration::from_secs(2),
-                },
-                || async {
-                    let t0 = unix_secs();
-                    let stamp = |origin: f64| (unix_secs() - origin) * 1_000.0;
-                    agent
-                        .disable_xdp()
-                        .await
-                        .with_context(|| format!("disable xdp before {} rep {rep}", step.xdp))?;
-                    let disable_ms = stamp(t0);
-                    agent
-                        .clear_xdp("*")
-                        .await
-                        .with_context(|| format!("clear xdp before {} rep {rep}", step.xdp))?;
-                    let clear_ms = stamp(t0);
-                    agent
-                        .flash_xdp(step.xdp)
-                        .await
-                        .with_context(|| format!("flash xdp {} rep {rep}", step.xdp))?;
-                    let flash_ms = stamp(t0);
-                    agent
-                        .get_init()
-                        .await
-                        .with_context(|| format!("OK init after {} rep {rep}", step.xdp))?;
-                    let init_ms = stamp(t0);
-                    *marks.lock().unwrap() = [disable_ms, clear_ms, flash_ms, init_ms];
-                    Ok(t0)
-                },
-            )
-            .await?;
-            let Some(frame_ms) = gap.command_ms else {
-                bail!("case cold rep {rep} has no frame at or after disable:\n{}", gap.report);
-            };
-            let [disable_ms, clear_ms, flash_ms, init_ms] = *marks.lock().unwrap();
-            events.push(format!(
-                "cold_rep={rep} disable_ms={disable_ms:.3} clear_ms={clear_ms:.3} frame_ms={frame_ms:.3} flash_ms={flash_ms:.3} init_ms={init_ms:.3} old_after={}",
-                gap.old_after
-            ));
-            eprintln!(
-                "STAGE cold rep={rep}/{REPEATS} disable_ms={disable_ms:.3} clear_ms={clear_ms:.3} frame_ms={frame_ms:.3} flash_ms={flash_ms:.3} init_ms={init_ms:.3}"
-            );
-            db::insert_case_obs(
-                client,
-                exam_id,
-                &CaseObs {
-                    seq: 10 + rep as i32 - 1,
-                    xdp: step.xdp,
-                    capability: "cold replace",
-                    action: "XDP_TX",
-                    expect: "t0 is disable. t1 is the first new DUT frame at or after t0. The interval includes clear, cold flash, and reboot. Restoring case_swap between repeats is outside the interval.",
-                    map_name: "",
-                    map_slot: 0,
-                    map_before: 0,
-                    map_after: 0,
-                    sent: SENT as i32,
-                    saw_reply: gap.new_replies > 0,
-                    ok: gap.new_replies > 0,
-                    tcpdump: &gap.report,
-                },
-            )
-            .await?;
-        }
-    } else {
-        agent
-            .clear_xdp("*")
-            .await
-            .with_context(|| format!("clear xdp before {}", step.xdp))?;
-        events.push(format!("clear_cold {}", host_ms()));
-        agent
-            .flash_xdp(step.xdp)
-            .await
-            .with_context(|| format!("flash xdp {}", step.xdp))?;
-        events.push(format!("install {} {}", step.xdp, host_ms()));
-        agent
-            .get_init()
-            .await
-            .with_context(|| format!("OK init after {}", step.xdp))?;
-        events.push(format!("init {}", host_ms()));
-    }
+    agent
+        .clear_xdp("*")
+        .await
+        .with_context(|| format!("clear xdp before {}", step.xdp))?;
+    events.push(format!("clear_cold {}", host_ms()));
+    agent
+        .flash_xdp(step.xdp)
+        .await
+        .with_context(|| format!("flash xdp {}", step.xdp))?;
+    events.push(format!("install {} {}", step.xdp, host_ms()));
+    agent
+        .get_init()
+        .await
+        .with_context(|| format!("OK init after {}", step.xdp))?;
+    events.push(format!("init {}", host_ms()));
 
     // Boot leases the image. Stay out of rxcnt until that lease is released.
     agent
@@ -273,14 +173,7 @@ async fn run_step(
     let after = agent.map_slot(step.map, step.slot).await?;
     events.push(format!("map_after {after} {}", host_ms()));
 
-    let needle = if step.mark {
-        MARK_DST.to_string()
-    } else {
-        format!(
-            "{}.{} > {}.{}",
-            cfg.target.esp_ip, PORT, STIM_SRC, cfg.target.stim_sport
-        )
-    };
+    let needle = step.dst.to_string();
     let hits = payload_hits(&dump, &mac, &needle);
     let matched = hits.iter().filter(|hit| **hit).count();
     let saw_reply = matched == SENT;
@@ -382,121 +275,148 @@ pub(crate) async fn sniff(
     Ok(text)
 }
 
-/// How long to sample the old behavior, and how long to keep sampling after the update returns.
-pub(crate) struct CaptureWindow {
-    pub interval: Duration,
-    pub preamble: Duration,
-    pub tail: Duration,
+pub(crate) fn unix_secs() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
-/// Command-to-capture latency on the probe host.
-///
-/// `command_ms` is the tcpdump `-tt` time of the first new DUT frame at or
-/// after `t0`, minus `t0`. Both clocks are this host. The number includes the
-/// path from the test process to the DUT and one air hop. `gap_ms` is the
-/// last-old to first-new arrival gap and is not the reported latency.
-pub(crate) struct WireGap {
-    pub command_ms: Option<f64>,
-    pub old_before: usize,
-    pub old_after: usize,
-    pub new_replies: usize,
-    pub summary: String,
-    pub report: String,
+/// `mcu_us` is the device clock in the reply. `agent_rx` is the agent host
+/// clock when that reply was read, appended as `agent_rx=<unix seconds>`.
+pub(crate) fn reply_stamps(msg: &str) -> Result<(u32, f64)> {
+    let (head, tail) = msg
+        .trim()
+        .split_once(" agent_rx=")
+        .with_context(|| format!("agent_rx missing: {msg}"))?;
+    let mcu_us = head
+        .split_whitespace()
+        .last()
+        .context("mcu_us")?
+        .parse()
+        .with_context(|| format!("mcu_us in {msg}"))?;
+    let agent_rx = tail
+        .trim()
+        .parse()
+        .with_context(|| format!("agent_rx in {msg}"))?;
+    Ok((mcu_us, agent_rx))
 }
 
-/// Run tcpdump across `update` while a UDP stimulus keeps flowing.
-///
-/// `update` returns the unix-second timestamp taken immediately before the
-/// timed command. The result is the first new DUT frame with `ts >= t0`.
-pub(crate) async fn capture_update<F, Fut>(
-    cfg: &FileConfig,
-    mac: &str,
-    old_needle: &str,
-    new_needle: &str,
-    window: CaptureWindow,
-    update: F,
-) -> Result<WireGap>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<f64>>,
-{
-    let mut child = Command::new("tcpdump")
-        .args([
-            "-e",
-            "-n",
-            "-l",
-            "-tt",
-            "-X",
-            "-i",
-            &cfg.probe.iface,
-            "udp",
-            "and",
-            "port",
-            "8080",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawn tcpdump")?;
-    let mut stdout = child.stdout.take().context("tcpdump stdout")?;
-    let mut stderr = child.stderr.take().context("tcpdump stderr")?;
-    let reader = tokio::spawn(async move {
-        let mut out = String::new();
-        let mut err = String::new();
-        let _ = tokio::join!(stdout.read_to_string(&mut out), stderr.read_to_string(&mut err));
-        (out, err)
-    });
+/// One tcpdump and one 2 ms CASE0 sender for a whole repeat loop.
+pub(crate) struct LiveTap {
+    stop: Arc<AtomicBool>,
+    text: Arc<Mutex<String>>,
+    child: tokio::process::Child,
+    sender: tokio::task::JoinHandle<Result<()>>,
+    reader: tokio::task::JoinHandle<()>,
+}
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let sender_stop = Arc::clone(&stop);
-    let iface = cfg.probe.iface.clone();
-    let src_mac = match cfg.src_mac_override()? {
-        Some(m) => m,
-        None => pipeline::iface_mac(&iface)?,
-    };
-    let dst_mac = cfg.esp_mac_bytes()?;
-    let esp = cfg.target.esp_ip;
-    let sport = cfg.target.stim_sport;
-    let interval = window.interval;
-    let sender = tokio::task::spawn_blocking(move || {
-        let raw = pipeline::RawTx::open(&iface, src_mac, dst_mac, esp, PORT, sport)?;
-        raw.announce_neighbor(STIM_SRC)?;
-        let mut next_arp = std::time::Instant::now();
-        while !sender_stop.load(Ordering::Relaxed) {
-            if next_arp.elapsed() >= Duration::from_secs(1) {
-                raw.announce_neighbor(STIM_SRC)?;
-                next_arp = std::time::Instant::now();
+impl LiveTap {
+    pub(crate) async fn open(cfg: &FileConfig) -> Result<Self> {
+        let mut child = tokio::process::Command::new("tcpdump")
+            .args([
+                "-e",
+                "-n",
+                "-l",
+                "-tt",
+                "-X",
+                "-i",
+                &cfg.probe.iface,
+                "udp",
+                "and",
+                "port",
+                "8080",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawn tcpdump")?;
+        let mut stdout = child.stdout.take().context("tcpdump stdout")?;
+        let text = Arc::new(Mutex::new(String::new()));
+        let sink = Arc::clone(&text);
+        let reader = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                match stdout.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]);
+                        sink.lock().unwrap().push_str(&chunk);
+                    }
+                }
             }
-            raw.send_udp(STIM_SRC, esp, PORT, b"CASE0")?;
-            std::thread::sleep(interval);
-        }
-        Ok::<(), anyhow::Error>(())
-    });
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    tokio::time::sleep(window.preamble).await;
-    let updated = update().await;
-    tokio::time::sleep(window.tail).await;
-    stop.store(true, Ordering::Relaxed);
-    let _ = sender.await;
-    child.start_kill().ok();
-    let _ = child.wait().await;
-    let (out, err) = reader.await.context("tcpdump reader")?;
-    let mut text = format!("# dut_mac {mac}\n{out}");
-    if !err.is_empty() {
-        text.push_str("\n# stderr\n");
-        text.push_str(&err);
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let sender_stop = Arc::clone(&stop);
+        let iface = cfg.probe.iface.clone();
+        let src_mac = match cfg.src_mac_override()? {
+            Some(m) => m,
+            None => pipeline::iface_mac(&iface)?,
+        };
+        let dst_mac = cfg.esp_mac_bytes()?;
+        let esp = cfg.target.esp_ip;
+        let sport = cfg.target.stim_sport;
+        let sender = tokio::task::spawn_blocking(move || {
+            let raw = pipeline::RawTx::open(&iface, src_mac, dst_mac, esp, PORT, sport)?;
+            raw.announce_neighbor(STIM_SRC)?;
+            let mut next_arp = std::time::Instant::now();
+            while !sender_stop.load(Ordering::Relaxed) {
+                if next_arp.elapsed() >= Duration::from_secs(1) {
+                    raw.announce_neighbor(STIM_SRC)?;
+                    next_arp = std::time::Instant::now();
+                }
+                raw.send_udp(STIM_SRC, esp, PORT, b"CASE0")?;
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(())
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        Ok(Self {
+            stop,
+            text,
+            child,
+            sender,
+            reader,
+        })
     }
-    let command_at = updated.as_ref().copied().unwrap_or(0.0);
-    let gap = wire_gap(&text, mac, old_needle, new_needle, command_at);
-    updated.with_context(|| gap.summary.clone())?;
-    Ok(gap)
+
+    pub(crate) fn count_before(&self, mac: &str, needle: &str, before: f64) -> usize {
+        frame_times(&self.text.lock().unwrap(), mac, needle)
+            .into_iter()
+            .filter(|ts| *ts < before)
+            .count()
+    }
+
+    pub(crate) async fn wait_frame(&self, mac: &str, needle: &str, after: f64) -> Result<f64> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(ts) = frame_times(&self.text.lock().unwrap(), mac, needle)
+                .into_iter()
+                .filter(|ts| *ts >= after)
+                .reduce(f64::min)
+            {
+                return Ok(ts);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("no DUT frame {needle} at or after {after:.6}");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    pub(crate) async fn close(mut self) -> Result<()> {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.sender.await;
+        self.child.start_kill().ok();
+        let _ = self.child.wait().await;
+        let _ = self.reader.await;
+        Ok(())
+    }
 }
 
-fn wire_gap(dump: &str, mac: &str, old_needle: &str, new_needle: &str, command_at: f64) -> WireGap {
+fn frame_times(dump: &str, mac: &str, needle: &str) -> Vec<f64> {
     let src = format!("{mac} >");
-    let mut old: Vec<(f64, String)> = Vec::new();
-    let mut new: Vec<(f64, String)> = Vec::new();
+    let mut out = Vec::new();
     for pkt in packets(dump) {
         let Some(header) = pkt.lines().next() else {
             continue;
@@ -504,86 +424,86 @@ fn wire_gap(dump: &str, mac: &str, old_needle: &str, new_needle: &str, command_a
         if !header.to_ascii_lowercase().contains(&src.to_ascii_lowercase()) {
             continue;
         }
-        if !header.contains(&format!("UDP, length {PAYLOAD_LEN}")) {
+        if !header.contains(needle) || !header.contains(&format!("UDP, length {PAYLOAD_LEN}")) {
             continue;
         }
-        let Some(ts) = frame_ts(header) else {
-            continue;
-        };
-        if header.contains(old_needle) {
-            old.push((ts, header.to_string()));
-        } else if header.contains(new_needle) {
-            new.push((ts, header.to_string()));
+        if let Some(ts) = frame_ts(header) {
+            out.push(ts);
         }
     }
-    let first_new = new
-        .iter()
-        .map(|(ts, _)| *ts)
-        .filter(|ts| *ts >= command_at)
-        .reduce(f64::min);
-    let last_old = first_new.and_then(|cut| {
-        old.iter()
-            .map(|(ts, _)| *ts)
-            .filter(|ts| *ts < cut)
-            .reduce(f64::max)
-    });
-    let old_before = old.iter().filter(|(ts, _)| *ts < command_at).count();
-    let old_after = old.iter().filter(|(ts, _)| *ts >= command_at).count();
-    let gap_ms = match (last_old, first_new) {
-        (Some(from), Some(to)) => Some((to - from) * 1_000.0),
-        _ => None,
-    };
-    let command_ms = first_new.map(|ts| (ts - command_at) * 1_000.0);
-    let summary = format!(
-        "command_ms={} gap_ms={} old_before={} old_after={} new_replies={} t0={} first_new={}",
-        command_ms
-            .map(|ms| format!("{ms:.3}"))
-            .unwrap_or_else(|| "none".to_string()),
-        gap_ms
-            .map(|ms| format!("{ms:.3}"))
-            .unwrap_or_else(|| "none".to_string()),
-        old_before,
-        old_after,
-        new.iter().filter(|(ts, _)| *ts >= command_at).count(),
-        format!("{command_at:.6}"),
-        first_new
-            .map(|ts| format!("{ts:.6}"))
-            .unwrap_or_else(|| "none".to_string()),
-    );
-    let mut report = format!("# {summary}\n# needle_old {old_needle}\n# needle_new {new_needle}\n");
-    report.push_str("# boundary old\n");
-    let shown_old: Vec<_> = old.iter().filter(|(ts, _)| *ts < command_at).collect();
-    let start = shown_old.len().saturating_sub(3);
-    for (ts, header) in &shown_old[start..] {
-        report.push_str(&format!("{ts:.6} old {header}\n"));
-    }
-    if old_after > 0 {
-        report.push_str("# old after t0\n");
-        for (ts, header) in old.iter().filter(|(ts, _)| *ts >= command_at).take(3) {
-            report.push_str(&format!("{ts:.6} old {header}\n"));
-        }
-    }
-    if first_new.is_some() {
-        report.push_str("# boundary new\n");
-        for (ts, header) in new.iter().filter(|(ts, _)| *ts >= command_at).take(3) {
-            report.push_str(&format!("{ts:.6} new {header}\n"));
-        }
-    }
-    WireGap {
-        command_ms,
-        old_before,
-        old_after,
-        new_replies: new.iter().filter(|(ts, _)| *ts >= command_at).count(),
-        summary,
-        report,
-    }
+    out
 }
 
-pub(crate) fn unix_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+async fn run_cold_latency(
+    cfg: &FileConfig,
+    agent: &AgentClient,
+    client: &tokio_postgres::Client,
+    exam_id: db::ExamId,
+) -> Result<()> {
+    agent.clear_xdp("*").await.context("clear cold table")?;
+    agent.flash_xdp("case_swap").await.context("install case_swap")?;
+    agent.flash_xdp("case_mark").await.context("install case_mark")?;
+    agent.get_init().await.context("OK init after both images")?;
+    agent.disable_xdp().await.context("drop the lease before the first fill")?;
+    let _ = agent
+        .flash_xdp_slot("case_swap", 0)
+        .await
+        .context("copy case_swap into slot 0")?;
+    agent.enable_xdp().await.context("lease slot 0")?;
+    let mac = format_mac(&cfg.esp_mac_bytes()?);
+    let tap = LiveTap::open(cfg).await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let armed = unix_secs();
+    if tap.count_before(&mac, DST_A, armed + 1.0) == 0 {
+        let _ = tap.close().await;
+        bail!("cold latency did not see destination {DST_A} before the first copy");
+    }
+    for rep in 1..=REPEATS {
+        let (name, dst) = if rep % 2 == 1 {
+            ("case_mark", MARK_DST)
+        } else {
+            ("case_swap", DST_A)
+        };
+        let start = unix_secs();
+        let reply = agent
+            .flash_xdp_slot(name, 0)
+            .await
+            .with_context(|| format!("cold rep {rep} flash {name}"))?;
+        let (mcu_us, agent_rx) = reply_stamps(&reply)?;
+        let frame = tap.wait_frame(&mac, dst, start).await.with_context(|| {
+            format!("cold rep {rep} frame {dst}\n{reply}")
+        })?;
+        let agent_ms = (agent_rx - start) * 1_000.0;
+        let frame_ms = (frame - start) * 1_000.0;
+        eprintln!(
+            "STAGE cold rep={rep}/{REPEATS} image={name} mcu_us={mcu_us} agent_rx_ms={agent_ms:.3} frame_ms={frame_ms:.3}"
+        );
+        let report = format!(
+            "# start={start:.6} mcu_us={mcu_us} agent_rx={agent_rx:.6} frame={frame:.6}\n{reply}\n"
+        );
+        db::insert_case_obs(
+            client,
+            exam_id,
+            &CaseObs {
+                seq: 10 + rep as i32 - 1,
+                xdp: name,
+                capability: "cold slot copy",
+                action: "XDP_TX",
+                expect: "start is the test clock when flash-to-slot is issued. mcu_us is the device clock when the slot resumes. agent_rx is the agent clock when the MCU reply is read. frame is the first DUT frame with the new destination at or after start. The cold table is not erased inside the loop.",
+                map_name: "",
+                map_slot: 0,
+                map_before: 0,
+                map_after: 0,
+                sent: SENT as i32,
+                saw_reply: true,
+                ok: true,
+                tcpdump: &report,
+            },
+        )
+        .await?;
+    }
+    tap.close().await?;
+    Ok(())
 }
 
 fn frame_ts(header: &str) -> Option<f64> {

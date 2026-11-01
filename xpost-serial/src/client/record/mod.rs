@@ -419,9 +419,14 @@ impl Record {
             },
             Found::Init => OkReply::Init,
             Found::Finish => OkReply::Finish,
-            Found::XdpFlash { slot, generation } => OkReply::XdpFlash {
+            Found::XdpFlash {
+                slot,
+                generation,
+                mcu_us,
+            } => OkReply::XdpFlash {
                 slot: *slot,
                 generation: *generation,
+                mcu_us: *mcu_us,
             },
             Found::XdpSwitch {
                 ok,
@@ -432,6 +437,7 @@ impl Record {
                 generation,
                 quiesce_drop,
                 quiesce_pass,
+                mcu_us,
             } => OkReply::XdpSwitch {
                 ok: *ok,
                 rollback: *rollback,
@@ -441,6 +447,7 @@ impl Record {
                 generation: *generation,
                 quiesce_drop: *quiesce_drop,
                 quiesce_pass: *quiesce_pass,
+                mcu_us: *mcu_us,
             },
             Found::GetXdpStatus {
                 boot_id,

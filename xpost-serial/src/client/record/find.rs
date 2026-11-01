@@ -29,6 +29,7 @@ pub(crate) enum Found {
     XdpFlash {
         slot: u8,
         generation: u32,
+        mcu_us: u32,
     },
     XdpSwitch {
         ok: u8,
@@ -39,6 +40,7 @@ pub(crate) enum Found {
         generation: u32,
         quiesce_drop: u32,
         quiesce_pass: u32,
+        mcu_us: u32,
     },
     GetXdpStatus {
         boot_id: u32,
@@ -210,7 +212,15 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
         OkReply::UpdateMap => Some(Found::UpdateMap),
         OkReply::Init => Some(Found::Init),
         OkReply::Finish => Some(Found::Finish),
-        OkReply::XdpFlash { slot, generation } => Some(Found::XdpFlash { slot, generation }),
+        OkReply::XdpFlash {
+            slot,
+            generation,
+            mcu_us,
+        } => Some(Found::XdpFlash {
+            slot,
+            generation,
+            mcu_us,
+        }),
         OkReply::XdpSwitch {
             ok,
             rollback,
@@ -220,6 +230,7 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
             generation,
             quiesce_drop,
             quiesce_pass,
+            mcu_us,
         } => Some(Found::XdpSwitch {
             ok,
             rollback,
@@ -229,6 +240,7 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
             generation,
             quiesce_drop,
             quiesce_pass,
+            mcu_us,
         }),
         OkReply::GetXdpStatus {
             boot_id,

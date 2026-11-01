@@ -2,11 +2,10 @@
 //!
 //! Cold install (`clear` / `flash_xdp`) may reboot and is not timed. After both
 //! images are in the cold table, the exam drops the lease, copies each image
-//! into its slot, and leases slot 0. The timed command is `switch` to slot 1.
-//! `t0` is that command. `t1` is the first captured slot-B frame at or after
-//! `t0`. Slot fill is outside the window. This exam does not touch `rxcnt`.
+//! into its slot, and leases slot 0. The timed command alternates `switch`
+//! between the two slots. The previous slot stays staged, so neither direction
+//! copies again. Stimulus runs for the whole loop. This exam does not touch `rxcnt`.
 
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -14,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use crate::agent::AgentClient;
 use crate::config::{FileConfig, format_mac};
 use crate::db::{self, CaseObs, PgOpts};
-use crate::exam::case::{self, MARK_DST, PAYLOAD_LEN, PORT, SENT, STIM_SRC};
+use crate::exam::case::{self, MARK_DST, PAYLOAD_LEN, SENT};
 use crate::pipeline::{BudgetEta, READY_BUDGET, RoundUi, status};
 
 const FW: &str = "case-cag";
@@ -75,10 +74,6 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
 
     let mac = format_mac(&cfg.esp_mac_bytes()?);
     wait_dut(cfg, &mac).await?;
-    let swap_needle = format!(
-        "{}.{} > {}.{}",
-        cfg.target.esp_ip, PORT, STIM_SRC, cfg.target.stim_sport
-    );
 
     agent
         .disable_xdp()
@@ -88,12 +83,12 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
         .flash_xdp_slot(SWAP, 0)
         .await
         .context("copy case_swap into slot 0")?;
-    let _slot_a = parse_flash(&filled_a)?;
+    let gen_a = parse_flash(&filled_a)?;
     let filled_b = agent
         .flash_xdp_slot(MARK, 1)
         .await
         .context("copy case_mark_idle into slot 1")?;
-    let generation = parse_flash(&filled_b)?;
+    let gen_b = parse_flash(&filled_b)?;
     agent.enable_xdp().await.context("lease slot 0")?;
 
     let boot = status_of(&agent).await?;
@@ -108,79 +103,71 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
         1,
         SWAP,
         &mac,
-        &swap_needle,
+        case::DST_A,
         &format!("{filled_a} {filled_b} {}", boot.raw),
     )
     .await?;
 
     let boot_id = boot.boot_id;
-    let mut generation = generation;
+    let slot_gen = [gen_a, gen_b];
+    let tap = case::LiveTap::open(cfg).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    if tap.count_before(&mac, case::DST_A, case::unix_secs() + 1.0) == 0 {
+        let _ = tap.close().await;
+        bail!("hot_swap did not see destination {} before the first switch", case::DST_A);
+    }
+    let mut active = 0u8;
     for rep in 1..=REPEATS {
-        if rep > 1 {
-            // `enable` leases `primary`, which stays on the slot just published.
-            // Switch back while the lease is up, then refill slot 1. Neither step is timed.
-            let back = agent
-                .flash_xdp_slot(SWAP, 0)
-                .await
-                .with_context(|| format!("refill slot 0 before hot rep {rep}"))?;
-            let back_gen = parse_flash(&back)?;
-            let returned = agent
-                .switch_xdp(0, back_gen, "drop")
-                .await
-                .with_context(|| format!("return to slot 0 before hot rep {rep}"))?;
-            let again = status_of(&agent).await?;
-            if again.boot_id != boot_id || again.active != 0 || again.severe != 0 {
-                bail!("hot rep {rep} did not return to slot 0: {returned} {}", again.raw);
-            }
-            let filled_b = agent
-                .flash_xdp_slot(MARK, 1)
-                .await
-                .with_context(|| format!("refill slot 1 before hot rep {rep}"))?;
-            generation = parse_flash(&filled_b)?;
+        let next = 1 - active;
+        let dst = if next == 0 { case::DST_A } else { MARK_DST };
+        let name = if next == 0 { SWAP } else { MARK };
+        let start = case::unix_secs();
+        let reply = agent
+            .switch_xdp(next, slot_gen[usize::from(next)], "drop")
+            .await
+            .with_context(|| format!("hot rep {rep} switch to slot {next}"))?;
+        let (mcu_us, agent_rx) = case::reply_stamps(&reply)?;
+        let frame = tap
+            .wait_frame(&mac, dst, start)
+            .await
+            .with_context(|| format!("hot rep {rep} frame {dst}\n{reply}"))?;
+        let now = status_of(&agent).await?;
+        if now.boot_id != boot_id || now.active != next || now.severe != 0 {
+            let _ = tap.close().await;
+            bail!("hot rep {rep} did not publish slot {next}: {reply} {}", now.raw);
         }
-        let switch_ms = Mutex::new(0.0_f64);
-        let published = case::capture_update(
-            cfg,
-            &mac,
-            &swap_needle,
-            MARK_DST,
-            case::CaptureWindow {
-                interval: std::time::Duration::from_millis(2),
-                preamble: std::time::Duration::from_millis(200),
-                tail: std::time::Duration::from_millis(500),
-            },
-            || async {
-                let t0 = case::unix_secs();
-                let switched = agent
-                    .switch_xdp(1, generation, "drop")
-                    .await
-                    .context("switch to slot 1")?;
-                *switch_ms.lock().unwrap() = (case::unix_secs() - t0) * 1_000.0;
-                let now = status_of(&agent).await?;
-                if now.boot_id != boot_id || now.active != 1 || now.severe != 0 {
-                    bail!("switch did not publish slot 1: {} {switched}", now.raw);
-                }
-                Ok(t0)
+        let agent_ms = (agent_rx - start) * 1_000.0;
+        let frame_ms = (frame - start) * 1_000.0;
+        eprintln!(
+            "STAGE hot rep={rep}/{REPEATS} slot={next} mcu_us={mcu_us} agent_rx_ms={agent_ms:.3} frame_ms={frame_ms:.3}"
+        );
+        let report = format!(
+            "# start={start:.6} mcu_us={mcu_us} agent_rx={agent_rx:.6} frame={frame:.6}\n{reply}\n{}",
+            now.raw
+        );
+        db::insert_case_obs(
+            &client,
+            exam_id,
+            &CaseObs {
+                seq: 10 + rep as i32 - 1,
+                xdp: name,
+                capability: "quiescent hot swap",
+                action: "XDP_TX",
+                expect: "start is the test clock when switch is issued. mcu_us is the device clock when the new entry is admitted. agent_rx is the agent clock when the MCU reply is read. frame is the first DUT frame with the new destination at or after start. The other direction uses the slot left staged by the previous switch.",
+                map_name: "",
+                map_slot: 0,
+                map_before: 0,
+                map_after: 0,
+                sent: SENT as i32,
+                saw_reply: true,
+                ok: true,
+                tcpdump: &report,
             },
         )
         .await?;
-        if published.old_before == 0 {
-            bail!(
-                "hot_swap rep {rep} preamble did not see slot A:\n{}",
-                published.report
-            );
-        }
-        let Some(ms) = published.command_ms else {
-            bail!(
-                "hot_swap rep {rep} has no frame at or after switch:\n{}",
-                published.report
-            );
-        };
-        let switch_ms = *switch_ms.lock().unwrap();
-        eprintln!("STAGE hot rep={rep}/{REPEATS} switch_ms={switch_ms:.3} frame_ms={ms:.3}");
-        eprintln!("hot_swap switch->mark {}", published.summary);
-        store_gap(&client, exam_id, 10 + rep as i32 - 1, MARK, &published).await?;
+        active = next;
     }
+    tap.close().await?;
 
     db::stop_exam(&client, exam_id).await?;
     eprintln!("hot_swap ok exam={exam_id} boot={boot_id} repeats={REPEATS}");
@@ -192,39 +179,6 @@ struct Status {
     active: u8,
     severe: u8,
     raw: String,
-}
-
-async fn store_gap(
-    client: &tokio_postgres::Client,
-    exam_id: db::ExamId,
-    seq: i32,
-    xdp: &str,
-    gap: &case::WireGap,
-) -> Result<()> {
-    if gap.command_ms.is_none() {
-        bail!("hot_swap seq={seq} capture has no frame at or after switch:\n{}", gap.report);
-    }
-    db::insert_case_obs(
-        client,
-        exam_id,
-        &CaseObs {
-            seq,
-            xdp,
-            capability: "quiescent hot swap",
-            action: "XDP_TX",
-            expect: "t0 is the host clock when switch is issued. t1 is the first slot-B DUT frame with tcpdump -tt >= t0. The difference includes HTTP, UART, publish, and one air hop. Slot fill is outside this window.",
-            map_name: "",
-            map_slot: 0,
-            map_before: 0,
-            map_after: 0,
-            sent: SENT as i32,
-            saw_reply: gap.new_replies > 0,
-            ok: gap.command_ms.is_some() && gap.old_before > 0 && gap.new_replies > 0,
-            tcpdump: &gap.report,
-        },
-    )
-    .await?;
-    Ok(())
 }
 
 async fn wait_dut(cfg: &FileConfig, mac: &str) -> Result<()> {

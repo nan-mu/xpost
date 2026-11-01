@@ -343,7 +343,11 @@ serial_task! {
         })
         .on_xdp_flash(|name: &str, slot: u8, reply: ReplyWriter<'_>| {
             match app_ctrl::flash_xdp_slot(name, slot) {
-                Ok(generation) => reply.ok(OkReply::XdpFlash { slot, generation }),
+                Ok(report) => reply.ok(OkReply::XdpFlash {
+                    slot,
+                    generation: report.generation,
+                    mcu_us: report.mcu_us,
+                }),
                 Err(e) => reply_xdp_err(reply, e),
             }
         })
@@ -380,6 +384,7 @@ fn switch_reply(report: &xpost::xdp::SwitchReport) -> OkReply<'static> {
         generation: report.generation,
         quiesce_drop: report.quiesce_drop,
         quiesce_pass: report.quiesce_pass,
+        mcu_us: report.mcu_us,
     }
 }
 

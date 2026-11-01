@@ -16,7 +16,7 @@ pub use crate::error::{
     XdpInitError, XdpLeaseError, XdpReleaseError, XdpSlotError, XdpSwapError, XdpSwitchError,
 };
 pub use state::set_boot_id;
-pub use swap::{QuiescePolicy, SwitchReport, XdpStatus};
+pub use swap::{QuiescePolicy, StageReport, SwitchReport, XdpStatus};
 pub use crate::{RtMutex, RtMutexGuard};
 pub(crate) use image::XdpMeta;
 pub use image::{Complete, Incomplete, XdpBuilder, XdpLocation, XdpMaps};
@@ -541,7 +541,13 @@ impl XdpRt {
         PRIMARY_ENTRY.store(entry, Ordering::Release);
         ACTIVE.store(true, Ordering::Release);
         if let Some(slot) = self.slots.get_mut(self.primary) {
-            slot.phase = swap::SlotPhase::Active;
+            let generation = match slot.phase {
+                swap::SlotPhase::Staged { generation } | swap::SlotPhase::Active { generation } => {
+                    generation
+                }
+                swap::SlotPhase::Empty => 0,
+            };
+            slot.phase = swap::SlotPhase::Active { generation };
         }
         self.leased = true;
         Ok(())

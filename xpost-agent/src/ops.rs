@@ -30,6 +30,16 @@ fn maybe_log_noisy(state: &Mutex<AgentState>, noisy: bool) -> bool {
     due
 }
 
+/// Unix seconds when this function runs. Call it immediately after `req`
+/// returns so the value is the agent clock at the MCU reply, not the later
+/// HTTP write to xpost-test.
+fn agent_rx_unix() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 fn with_log(
     peer: &str,
     name: &str,
@@ -436,8 +446,15 @@ pub fn flash_xdp_slot(state: &Mutex<AgentState>, name: &str, slot: u8, peer: &st
     with_log(peer, "XdpFlash", name, false, state, || {
         let g = lock(state)?;
         match req(&g, &Command::XdpFlash { name, slot })? {
-            OkReply::XdpFlash { slot, generation } => {
-                Ok(format!("OK xdp flash {slot} {generation}"))
+            OkReply::XdpFlash {
+                slot,
+                generation,
+                mcu_us,
+            } => {
+                let agent_rx = agent_rx_unix();
+                Ok(format!(
+                    "OK xdp flash {slot} {generation} {mcu_us} agent_rx={agent_rx:.6}"
+                ))
             }
             _ => bail!("unexpected xdp flash reply"),
         }
@@ -470,9 +487,13 @@ pub fn switch_xdp(
                 generation,
                 quiesce_drop,
                 quiesce_pass,
-            } => Ok(format!(
-                "OK xdp switch {ok} {rollback} {severe} {from_slot} {to_slot} {generation} {quiesce_drop} {quiesce_pass}"
-            )),
+                mcu_us,
+            } => {
+                let agent_rx = agent_rx_unix();
+                Ok(format!(
+                    "OK xdp switch {ok} {rollback} {severe} {from_slot} {to_slot} {generation} {quiesce_drop} {quiesce_pass} {mcu_us} agent_rx={agent_rx:.6}"
+                ))
+            }
             _ => bail!("unexpected xdp switch reply"),
         }
     })
