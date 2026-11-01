@@ -591,15 +591,19 @@ async fn run_cold_latency(
             .disable_xdp()
             .await
             .context("stop XDP before overwriting slot 0")?;
+        // Test-clock ack for each command, so every stage sits on one clock.
+        let stopped_ms = (unix_secs() - start) * 1_000.0;
         let disable_rx = rx_stamp(&stopped)?;
         let copied = agent
             .flash_xdp_slot(name, 0)
             .await
             .with_context(|| format!("cold rep {rep} copy {name} into slot 0"))?;
+        let copied_ms = (unix_secs() - start) * 1_000.0;
         let started = agent
             .enable_xdp()
             .await
             .with_context(|| format!("cold rep {rep} start slot 0"))?;
+        let started_ms = (unix_secs() - start) * 1_000.0;
         let (mcu_us, agent_rx) = reply_stamps(&started)?;
         let status = agent.xdp_status().await.context("get xdp after start")?;
         let f = xdp_fields(&status)?;
@@ -610,16 +614,16 @@ async fn run_cold_latency(
         let end = tap.wait_frame(&mac, dst, start).await.with_context(|| {
             format!("cold rep {rep} end {dst}\n{stopped}\n{copied}\n{started}")
         })?;
-        // start and end are the test process clock. The two agent receive times
-        // are the agent host clock and are stored absolute, not subtracted.
+        // Every stage below is the test process clock. The two agent receive
+        // times are the agent host clock and are stored absolute, not subtracted.
         let end_ms = (end - start) * 1_000.0;
         eprintln!(
-            "STAGE cold rep={rep}/{REPEATS} image={name} mcu_us={mcu_us} start={start:.6} disable_rx={disable_rx:.6} agent_rx={agent_rx:.6} end_ms={end_ms:.3}"
+            "STAGE cold rep={rep}/{REPEATS} image={name} mcu_us={mcu_us} start={start:.6} stopped_ms={stopped_ms:.3} copied_ms={copied_ms:.3} started_ms={started_ms:.3} disable_rx={disable_rx:.6} agent_rx={agent_rx:.6} end_ms={end_ms:.3}"
         );
         let window = tap.capture(mark);
         tap.trim(mark);
         let mut report = format!(
-            "# dut_mac {mac}\n# image {name} slot 0\n# start={start:.6} mcu_us={mcu_us} disable_rx={disable_rx:.6} agent_rx={agent_rx:.6} end={end:.6}\n{stopped}\n{copied}\n{started}\n{window}"
+            "# dut_mac {mac}\n# image {name} slot 0\n# start={start:.6} stopped_ms={stopped_ms:.3} copied_ms={copied_ms:.3} started_ms={started_ms:.3} end_ms={end_ms:.3} mcu_us={mcu_us} disable_rx={disable_rx:.6} agent_rx={agent_rx:.6} end={end:.6}\n{stopped}\n{copied}\n{started}\n{window}"
         );
         let err = tap.stderr_text();
         if !err.is_empty() {
@@ -635,7 +639,7 @@ async fn run_cold_latency(
                 xdp: name,
                 capability: "cold replace, one slot",
                 action: "XDP_TX",
-                expect: "start is the test clock when disable is issued, so the interval contains stopping the program, overwriting slot 0's bytes, and starting it again. Only slot 0 is used; slot 1 stays empty and the cold table is not erased inside the loop. mcu_us is the device clock when enable published the entry. disable_rx and agent_rx are agent host clock instants, stored absolute. end is the first DUT frame with the new destination at or after start, on the test clock.",
+                expect: "start is the test clock when disable is issued. stopped_ms, copied_ms and started_ms are the test clock offsets when the disable, copy and enable commands returned, so the stages are: issue, stopped, copied, started, last old frame, end. Only slot 0 is used; slot 1 stays empty and the cold table is not erased inside the loop. mcu_us is the device clock when enable published the entry. disable_rx and agent_rx are agent host clock instants, stored absolute. end is the first DUT frame with the new destination at or after start.",
                 map_name: "",
                 map_slot: 0,
                 map_before: 0,
