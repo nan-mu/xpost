@@ -216,6 +216,7 @@ build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build", "--relea
 # Cold `case` clears and reflashes one image, then reboots.
 # `hot_swap` installs case_swap and case_mark_idle, then publishes without reboot.
 # xdp is empty so flash/fw does not pin an image.
+# No perf-cag: packet counters, histograms, and gauges stay out of this build.
 # ---------------------------------------------------------------------------
 
 [[fw]]
@@ -223,7 +224,7 @@ name = "case-cag"
 target = "esp32c3"
 partition_table = "examples/case_xdp/partitions.csv"
 artifact = "examples/case_xdp/target/riscv32imc-unknown-none-elf/release/case_xdp"
-build = { cwd = "examples/case_xdp", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
+build = { cwd = "examples/case_xdp", command = ["cargo", "build", "--release"] }
 xdp = []
 
 [[xdp]]

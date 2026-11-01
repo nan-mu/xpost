@@ -273,7 +273,7 @@ The `profiles.toml` registry contains fifteen `[[fw]]` names:
 - Lookup side runs: `just-tx-cag-lookup`, `just-drop-cag-lookup`, and `firewall-cag-lookup`.
 - HAL: `just-tx-hal`, `just-drop-hal`, and `firewall-hal`.
 - Exec: `exec-bench-ebpf` and `exec-bench-hal`.
-- Case: `case-cag` (`examples/case_xdp`). Its `xdp` list is empty. The exam installs images itself.
+- Case: `case-cag` (`examples/case_xdp`). Its `xdp` list is empty. The exam installs images itself. This build does not enable `perf-cag` or `perf-t`. Packet counters, histograms, gauges, and trace rings are absent. `get perf` returns unavailable. Release builds compile out `info`, `debug`, and `trace` logs.
 
 Its network `[[xdp]]` names are `just_tx`, `just_drop`, and `firewall`.
 Its case `[[xdp]]` names are `case_swap` and `case_mark`. `case_swap.c` swaps the IPv4 addresses and UDP ports. `case_mark.c` writes destination `203.0.113.77`. Both are linked against the `case_xdp` firmware ELF.

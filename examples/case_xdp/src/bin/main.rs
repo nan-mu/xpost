@@ -166,11 +166,7 @@ async fn main(spawner: Spawner) -> ! {
         .with_ampdu_tx_enable(false);
     let (mut controller, interfaces) = xpost::esp_radio::new(peripherals.WIFI, wifi_cfg)
         .expect("Failed to initialize Wi-Fi controller");
-    info!(
-        "wifi+xdp attached drop={} failed_tx={} tx_dyn=128 rx_dyn=1024",
-        xpost::ext::perf::counter().drop_count(),
-        xpost::ext::perf::counter().failed_tx_count(),
-    );
+    info!("wifi+xdp attached tx_dyn=128 rx_dyn=1024");
 
     // XDP only enqueues from the Wi-Fi RX callback; this task owns tx_by_ref.
     spawner.spawn(xdp_tx_task().unwrap());
