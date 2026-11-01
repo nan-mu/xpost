@@ -164,52 +164,65 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
     )
     .await?;
 
-    let activated = agent
-        .activate_xdp(1, generation, "drop")
-        .await
-        .context("activate case_mark_idle")?;
-    let now = status_of(&agent).await?;
-    if now.boot_id != boot.boot_id || now.active != 1 || now.severe != 0 {
-        bail!("activate did not publish slot 1: {} {activated}", now.raw);
-    }
-    observe(
+    let boot_id = boot.boot_id;
+    let published = case::capture_update(
         cfg,
-        &agent,
-        &client,
-        exam_id,
-        5,
-        MARK,
         &mac,
+        &swap_needle,
         MARK_DST,
-        &format!("{activated} {}", now.raw),
+        case::CaptureWindow {
+            interval: std::time::Duration::from_millis(2),
+            preamble: std::time::Duration::from_millis(200),
+            tail: std::time::Duration::from_millis(500),
+        },
+        || async {
+            let activated = agent
+                .activate_xdp(1, generation, "drop")
+                .await
+                .context("activate case_mark_idle")?;
+            let now = status_of(&agent).await?;
+            if now.boot_id != boot_id || now.active != 1 || now.severe != 0 {
+                bail!("activate did not publish slot 1: {} {activated}", now.raw);
+            }
+            eprintln!("hot_swap activate {activated} {}", now.raw);
+            Ok(())
+        },
     )
     .await?;
+    eprintln!("hot_swap wire swap->mark {}", published.summary);
+    store_gap(&client, exam_id, 5, MARK, &published).await?;
 
     let restaged = agent
         .flash_xdp_slot(SWAP, 0)
         .await
         .context("copy previous image into the idle slot")?;
     let back_gen = parse_stage(&restaged)?;
-    let rolled = agent
-        .activate_xdp(0, back_gen, "drop")
-        .await
-        .context("publish previous image")?;
-    let back = status_of(&agent).await?;
-    if back.boot_id != boot.boot_id || back.active != 0 || back.severe != 0 {
-        bail!("republish did not restore slot 0: {} {rolled}", back.raw);
-    }
-    observe(
+    let returned = case::capture_update(
         cfg,
-        &agent,
-        &client,
-        exam_id,
-        6,
-        SWAP,
         &mac,
+        MARK_DST,
         &swap_needle,
-        &format!("{rolled} {}", back.raw),
+        case::CaptureWindow {
+            interval: std::time::Duration::from_millis(2),
+            preamble: std::time::Duration::from_millis(200),
+            tail: std::time::Duration::from_millis(500),
+        },
+        || async {
+            let rolled = agent
+                .activate_xdp(0, back_gen, "drop")
+                .await
+                .context("publish previous image")?;
+            let back = status_of(&agent).await?;
+            if back.boot_id != boot_id || back.active != 0 || back.severe != 0 {
+                bail!("republish did not restore slot 0: {} {rolled}", back.raw);
+            }
+            eprintln!("hot_swap activate {rolled} {}", back.raw);
+            Ok(())
+        },
     )
     .await?;
+    eprintln!("hot_swap wire mark->swap {}", returned.summary);
+    store_gap(&client, exam_id, 6, SWAP, &returned).await?;
 
     db::stop_exam(&client, exam_id).await?;
     eprintln!("hot_swap ok exam={exam_id} boot={}", boot.boot_id);
@@ -222,6 +235,39 @@ struct Status {
     staged: u8,
     severe: u8,
     raw: String,
+}
+
+async fn store_gap(
+    client: &tokio_postgres::Client,
+    exam_id: db::ExamId,
+    seq: i32,
+    xdp: &str,
+    gap: &case::WireGap,
+) -> Result<()> {
+    if gap.gap_ms.is_none() {
+        bail!("hot_swap seq={seq} capture has no update gap:\n{}", gap.report);
+    }
+    db::insert_case_obs(
+        client,
+        exam_id,
+        &CaseObs {
+            seq,
+            xdp,
+            capability: "quiescent hot swap",
+            action: "XDP_TX",
+            expect: "tcpdump arrival gap from the last old DUT reply to the first new DUT reply. Host command time is not the latency.",
+            map_name: "",
+            map_slot: 0,
+            map_before: 0,
+            map_after: 0,
+            sent: SENT as i32,
+            saw_reply: gap.new_replies > 0,
+            ok: gap.gap_ms.is_some() && gap.old_replies > 0 && gap.new_replies > 0,
+            tcpdump: &gap.report,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 async fn wait_dut(cfg: &FileConfig, mac: &str) -> Result<()> {

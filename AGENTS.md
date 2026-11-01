@@ -192,13 +192,14 @@ Continue to read its terminal output.
 ### Experiment settings
 
 The `run` list in `config/default.toml` selects the experiments and their order.
-The supported entries are `just_tx`, `just_drop`, `firewall`, `exec_bench`, `lookup`, `dev`, `formal-clear`, and `case`.
+The supported entries are `just_tx`, `just_drop`, `firewall`, `exec_bench`, `lookup`, `dev`, `formal-clear`, `case`, and `hot_swap`.
 The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` settings.
 
 - Only `just_tx`: `run = ["just_tx"]`.
 - Only `firewall`: `run = ["firewall"]`.
-- Current selection: `run = ["case"]`.
-- `case` flashes `examples/case_xdp` once. It installs `case_swap`, then disables XDP and installs `case_mark`. `rxcnt` is cleared and read only while XDP is disabled. Scored frames carry `CASE0` through `CASE3`; tcpdump stdout is stored in `case_obs.tcpdump`. No capture file is written on TR3000.
+- Current selection: `run = ["case", "hot_swap"]`.
+- `case` flashes `examples/case_xdp` once. It installs `case_swap`, then reflashes `case_mark`. The reflash capture stays up while stimulus flows. Its latency is the tcpdump arrival gap from the last `case_swap` reply to the first `case_mark` reply. `rxcnt` is cleared and read only while XDP is disabled. Scored frames carry `CASE0` through `CASE3`; tcpdump stdout is stored in `case_obs.tcpdump`. No capture file is written on TR3000.
+- `hot_swap` uses the same firmware. Cold install of `case_swap` and `case_mark_idle` may reboot. Each `activate` is captured the same way. The latency is the arrival gap between the two reply shapes, not the host command duration.
 - All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
 - All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
 

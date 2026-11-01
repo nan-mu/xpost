@@ -10,8 +10,11 @@
 //! result. Those payloads are five bytes, so a firmware `ACK\n` cannot satisfy
 //! the check. The firmware ELF is flashed once. tcpdump writes no pcap.
 
+use std::future::Future;
 use std::net::Ipv4Addr;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -110,28 +113,75 @@ async fn run_step(
     let mut events = Vec::new();
     events.push(format!("fw={FW} xdp={} host_ms={}", step.xdp, host_ms()));
     if step.replace {
+        let mac = format_mac(&cfg.esp_mac_bytes()?);
+        let old_needle = format!(
+            "{}.{} > {}.{}",
+            cfg.target.esp_ip, PORT, STIM_SRC, cfg.target.stim_sport
+        );
         agent
-            .disable_xdp()
+            .enable_xdp()
             .await
-            .with_context(|| format!("disable xdp before {}", step.xdp))?;
-        events.push(format!("disable_prev {}", host_ms()));
-        eprintln!("case seq={} disabled previous image", step.seq);
+            .with_context(|| format!("lease previous image before {}", step.xdp))?;
+        let gap = capture_update(
+            cfg,
+            &mac,
+            &old_needle,
+            MARK_DST,
+            CaptureWindow {
+                interval: Duration::from_millis(20),
+                preamble: Duration::from_millis(400),
+                tail: Duration::from_secs(30),
+            },
+            || async {
+                agent
+                    .disable_xdp()
+                    .await
+                    .with_context(|| format!("disable xdp before {}", step.xdp))?;
+                agent
+                    .clear_xdp("*")
+                    .await
+                    .with_context(|| format!("clear xdp before {}", step.xdp))?;
+                agent
+                    .flash_xdp(step.xdp)
+                    .await
+                    .with_context(|| format!("flash xdp {}", step.xdp))?;
+                agent
+                    .get_init()
+                    .await
+                    .with_context(|| format!("OK init after {}", step.xdp))?;
+                Ok(())
+            },
+        )
+        .await?;
+        events.push(format!(
+            "cold_wire_gap_ms={} old_replies={} new_replies={}",
+            gap.gap_ms
+                .map(|ms| format!("{ms:.3}"))
+                .unwrap_or_else(|| "none".to_string()),
+            gap.old_replies,
+            gap.new_replies
+        ));
+        eprintln!("case cold update {}", gap.summary);
+        if gap.gap_ms.is_none() {
+            bail!("case cold update has no capture gap:\n{}", gap.report);
+        }
+    } else {
+        agent
+            .clear_xdp("*")
+            .await
+            .with_context(|| format!("clear xdp before {}", step.xdp))?;
+        events.push(format!("clear_cold {}", host_ms()));
+        agent
+            .flash_xdp(step.xdp)
+            .await
+            .with_context(|| format!("flash xdp {}", step.xdp))?;
+        events.push(format!("install {} {}", step.xdp, host_ms()));
+        agent
+            .get_init()
+            .await
+            .with_context(|| format!("OK init after {}", step.xdp))?;
+        events.push(format!("init {}", host_ms()));
     }
-    agent
-        .clear_xdp("*")
-        .await
-        .with_context(|| format!("clear xdp before {}", step.xdp))?;
-    events.push(format!("clear_cold {}", host_ms()));
-    agent
-        .flash_xdp(step.xdp)
-        .await
-        .with_context(|| format!("flash xdp {}", step.xdp))?;
-    events.push(format!("install {} {}", step.xdp, host_ms()));
-    agent
-        .get_init()
-        .await
-        .with_context(|| format!("OK init after {}", step.xdp))?;
-    events.push(format!("init {}", host_ms()));
 
     // Boot leases the image. Stay out of rxcnt until that lease is released.
     agent
@@ -286,6 +336,185 @@ pub(crate) async fn sniff(
         text.push_str(&err);
     }
     Ok(text)
+}
+
+/// How long to sample the old behavior, and how long to keep sampling after the update returns.
+pub(crate) struct CaptureWindow {
+    pub interval: Duration,
+    pub preamble: Duration,
+    pub tail: Duration,
+}
+
+/// Arrival gap on the probe, from the last old DUT reply to the first new one.
+pub(crate) struct WireGap {
+    pub gap_ms: Option<f64>,
+    pub old_replies: usize,
+    pub new_replies: usize,
+    pub summary: String,
+    pub report: String,
+}
+
+/// Run tcpdump across `update` while a UDP stimulus keeps flowing.
+///
+/// The gap is the tcpdump arrival time of the first new DUT reply minus the
+/// last old DUT reply before it. Host command duration is not the result.
+pub(crate) async fn capture_update<F, Fut>(
+    cfg: &FileConfig,
+    mac: &str,
+    old_needle: &str,
+    new_needle: &str,
+    window: CaptureWindow,
+    update: F,
+) -> Result<WireGap>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let mut child = Command::new("tcpdump")
+        .args([
+            "-e",
+            "-n",
+            "-l",
+            "-tt",
+            "-X",
+            "-i",
+            &cfg.probe.iface,
+            "udp",
+            "and",
+            "port",
+            "8080",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn tcpdump")?;
+    let mut stdout = child.stdout.take().context("tcpdump stdout")?;
+    let mut stderr = child.stderr.take().context("tcpdump stderr")?;
+    let reader = tokio::spawn(async move {
+        let mut out = String::new();
+        let mut err = String::new();
+        let _ = tokio::join!(stdout.read_to_string(&mut out), stderr.read_to_string(&mut err));
+        (out, err)
+    });
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let sender_stop = Arc::clone(&stop);
+    let iface = cfg.probe.iface.clone();
+    let src_mac = match cfg.src_mac_override()? {
+        Some(m) => m,
+        None => pipeline::iface_mac(&iface)?,
+    };
+    let dst_mac = cfg.esp_mac_bytes()?;
+    let esp = cfg.target.esp_ip;
+    let sport = cfg.target.stim_sport;
+    let interval = window.interval;
+    let sender = tokio::task::spawn_blocking(move || {
+        let raw = pipeline::RawTx::open(&iface, src_mac, dst_mac, esp, PORT, sport)?;
+        raw.announce_neighbor(STIM_SRC)?;
+        let mut next_arp = std::time::Instant::now();
+        while !sender_stop.load(Ordering::Relaxed) {
+            if next_arp.elapsed() >= Duration::from_secs(1) {
+                raw.announce_neighbor(STIM_SRC)?;
+                next_arp = std::time::Instant::now();
+            }
+            raw.send_udp(STIM_SRC, esp, PORT, b"CASE0")?;
+            std::thread::sleep(interval);
+        }
+        Ok::<(), anyhow::Error>(())
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(window.preamble).await;
+    let updated = update().await;
+    tokio::time::sleep(window.tail).await;
+    stop.store(true, Ordering::Relaxed);
+    let _ = sender.await;
+    child.start_kill().ok();
+    let _ = child.wait().await;
+    let (out, err) = reader.await.context("tcpdump reader")?;
+    let mut text = format!("# dut_mac {mac}\n{out}");
+    if !err.is_empty() {
+        text.push_str("\n# stderr\n");
+        text.push_str(&err);
+    }
+    let gap = wire_gap(&text, mac, old_needle, new_needle);
+    updated.with_context(|| gap.summary.clone())?;
+    Ok(gap)
+}
+
+fn wire_gap(dump: &str, mac: &str, old_needle: &str, new_needle: &str) -> WireGap {
+    let src = format!("{mac} >");
+    let mut old: Vec<(f64, String)> = Vec::new();
+    let mut new: Vec<(f64, String)> = Vec::new();
+    for pkt in packets(dump) {
+        let Some(header) = pkt.lines().next() else {
+            continue;
+        };
+        if !header.to_ascii_lowercase().contains(&src.to_ascii_lowercase()) {
+            continue;
+        }
+        if !header.contains(&format!("UDP, length {PAYLOAD_LEN}")) {
+            continue;
+        }
+        let Some(ts) = frame_ts(header) else {
+            continue;
+        };
+        if header.contains(old_needle) {
+            old.push((ts, header.to_string()));
+        } else if header.contains(new_needle) {
+            new.push((ts, header.to_string()));
+        }
+    }
+    let first_new = new.iter().map(|(ts, _)| *ts).reduce(f64::min);
+    let last_old = first_new.and_then(|cut| {
+        old.iter()
+            .map(|(ts, _)| *ts)
+            .filter(|ts| *ts < cut)
+            .reduce(f64::max)
+    });
+    let gap_ms = match (last_old, first_new) {
+        (Some(from), Some(to)) => Some((to - from) * 1_000.0),
+        _ => None,
+    };
+    let summary = format!(
+        "gap_ms={} old_replies={} new_replies={} last_old={} first_new={}",
+        gap_ms
+            .map(|ms| format!("{ms:.3}"))
+            .unwrap_or_else(|| "none".to_string()),
+        old.len(),
+        new.len(),
+        last_old
+            .map(|ts| format!("{ts:.6}"))
+            .unwrap_or_else(|| "none".to_string()),
+        first_new
+            .map(|ts| format!("{ts:.6}"))
+            .unwrap_or_else(|| "none".to_string()),
+    );
+    let mut report = format!("# {summary}\n# needle_old {old_needle}\n# needle_new {new_needle}\n");
+    if let (Some(from), Some(to)) = (last_old, first_new) {
+        report.push_str("# boundary old\n");
+        let shown_old: Vec<_> = old.iter().filter(|(ts, _)| *ts <= from).collect();
+        let start = shown_old.len().saturating_sub(3);
+        for (ts, header) in &shown_old[start..] {
+            report.push_str(&format!("{ts:.6} old {header}\n"));
+        }
+        report.push_str("# boundary new\n");
+        for (ts, header) in new.iter().filter(|(ts, _)| *ts >= to).take(3) {
+            report.push_str(&format!("{ts:.6} new {header}\n"));
+        }
+    }
+    WireGap {
+        gap_ms,
+        old_replies: old.len(),
+        new_replies: new.len(),
+        summary,
+        report,
+    }
+}
+
+fn frame_ts(header: &str) -> Option<f64> {
+    let (stamp, _) = header.split_once(' ')?;
+    stamp.parse().ok()
 }
 
 async fn send_payloads(cfg: &FileConfig, payloads: &[&[u8]]) -> Result<()> {

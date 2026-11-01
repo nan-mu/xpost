@@ -17,7 +17,7 @@ version = "1"
 # `case` flashes examples/case_xdp once, then reflashes case_swap and case_mark.
 # `hot_swap` uses that same firmware. Both images stay installed, and activate publishes the idle slot.
 # Capture is tcpdump stdout stored in formal.case_obs. No pcap file.
-run = ["case"]
+run = ["case", "hot_swap"]
 
 [postgres]
 host = "192.168.110.96"
