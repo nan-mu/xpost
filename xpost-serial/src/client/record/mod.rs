@@ -109,11 +109,15 @@ impl SharedRecordInner {
     }
 
     /// Wait for a matching reply after `after` (caller races timeout / interrupt).
+    ///
+    /// Also returns the timestamp of the UART line that carried the reply, taken
+    /// by the reader thread when it read that line. That is the instant the host
+    /// received the MCU reply, which a later `now()` in the caller is not.
     pub(crate) async fn wait_reply<E>(
         &self,
         cmd: &Command<'_>,
         after: SystemTime,
-    ) -> core::result::Result<Found, E>
+    ) -> core::result::Result<(Found, SystemTime), E>
     where
         E: crate::client::error::RequestError,
     {

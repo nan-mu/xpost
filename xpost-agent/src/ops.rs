@@ -30,12 +30,11 @@ fn maybe_log_noisy(state: &Mutex<AgentState>, noisy: bool) -> bool {
     due
 }
 
-/// Unix seconds when this function runs. Call it immediately after `req`
-/// returns so the value is the agent clock at the MCU reply, not the later
-/// HTTP write to xpost-test.
-fn agent_rx_unix() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+/// Unix seconds for a timestamp the UART reader took when it read the reply
+/// line. Passing that instant keeps `agent_rx` at the moment the MCU reply
+/// arrived instead of the later moment this process formats it.
+fn agent_rx_unix(at: std::time::SystemTime) -> f64 {
+    at.duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
 }
@@ -84,6 +83,13 @@ fn lock(state: &Mutex<AgentState>) -> Result<std::sync::MutexGuard<'_, AgentStat
 fn req<'a>(g: &'a AgentState, cmd: &Command<'_>) -> Result<OkReply<'a>> {
     g.handler
         .request::<AgentError>(cmd)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// [`req`] plus the instant the UART reader read the reply line.
+fn req_at<'a>(g: &'a AgentState, cmd: &Command<'_>) -> Result<(OkReply<'a>, std::time::SystemTime)> {
+    g.handler
+        .request_at::<AgentError>(cmd)
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -449,13 +455,16 @@ pub fn flash_xdp_slot(state: &Mutex<AgentState>, name: &str, slot: u8, peer: &st
     }
     with_log(peer, "XdpFlash", name, false, state, || {
         let g = lock(state)?;
-        match req(&g, &Command::XdpFlash { name, slot })? {
-            OkReply::XdpFlash {
-                slot,
-                generation,
-                mcu_us,
-            } => {
-                let agent_rx = agent_rx_unix();
+        match req_at(&g, &Command::XdpFlash { name, slot })? {
+            (
+                OkReply::XdpFlash {
+                    slot,
+                    generation,
+                    mcu_us,
+                },
+                at,
+            ) => {
+                let agent_rx = agent_rx_unix(at);
                 Ok(format!(
                     "OK xdp flash {slot} {generation} {mcu_us} agent_rx={agent_rx:.6}"
                 ))
@@ -474,7 +483,7 @@ pub fn switch_xdp(
 ) -> Result<String> {
     with_log(peer, "XdpSwitch", "", false, state, || {
         let g = lock(state)?;
-        match req(
+        match req_at(
             &g,
             &Command::XdpSwitch {
                 slot,
@@ -482,18 +491,21 @@ pub fn switch_xdp(
                 pass,
             },
         )? {
-            OkReply::XdpSwitch {
-                ok,
-                rollback,
-                severe,
-                from_slot,
-                to_slot,
-                generation,
-                quiesce_drop,
-                quiesce_pass,
-                mcu_us,
-            } => {
-                let agent_rx = agent_rx_unix();
+            (
+                OkReply::XdpSwitch {
+                    ok,
+                    rollback,
+                    severe,
+                    from_slot,
+                    to_slot,
+                    generation,
+                    quiesce_drop,
+                    quiesce_pass,
+                    mcu_us,
+                },
+                at,
+            ) => {
+                let agent_rx = agent_rx_unix(at);
                 Ok(format!(
                     "OK xdp switch {ok} {rollback} {severe} {from_slot} {to_slot} {generation} {quiesce_drop} {quiesce_pass} {mcu_us} agent_rx={agent_rx:.6}"
                 ))

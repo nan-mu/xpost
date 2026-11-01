@@ -57,11 +57,13 @@ pub(crate) enum Found {
 
 /// Wait until a matching reply appears after `after` (no internal deadline —
 /// caller races this against timeout / interrupt).
+///
+/// Returns the reply index and the time the reader thread read that line.
 pub(crate) async fn wait_reply<E>(
     record: &SharedRecordInner,
     cmd: &Command<'_>,
     after: SystemTime,
-) -> core::result::Result<Found, E>
+) -> core::result::Result<(Found, SystemTime), E>
 where
     E: RequestError,
 {
@@ -77,7 +79,7 @@ fn scan_once<E>(
     record: &SharedRecordInner,
     cmd: &Command<'_>,
     after: SystemTime,
-) -> core::result::Result<Option<Found>, E>
+) -> core::result::Result<Option<(Found, SystemTime)>, E>
 where
     E: RequestError,
 {
@@ -105,14 +107,18 @@ fn scan_simple<E>(
     guard: &std::sync::MutexGuard<'_, crate::client::record::Record>,
     cmd: &Command<'_>,
     after: SystemTime,
-) -> core::result::Result<Option<Found>, E>
+) -> core::result::Result<Option<(Found, SystemTime)>, E>
 where
     E: RequestError,
 {
     for idx in guard.indices_after(after) {
-        let Some(Entry::Uart { payload, .. }) = guard.entry(idx) else {
+        let Some(entry) = guard.entry(idx) else {
             continue;
         };
+        let Entry::Uart { payload, .. } = entry else {
+            continue;
+        };
+        let at = entry.at();
         let Some(line) = guard.payload(*payload) else {
             continue;
         };
@@ -120,7 +126,7 @@ where
             return Err(err);
         }
         if let Some(found) = match_simple(cmd, line) {
-            return Ok(Some(found));
+            return Ok(Some((found, at)));
         }
     }
     Ok(None)
@@ -133,14 +139,15 @@ fn scan_blob_framed<E>(
     after: SystemTime,
     header_len: impl Fn(&[u8]) -> Option<usize>,
     found: impl Fn(usize) -> Found,
-) -> core::result::Result<Option<Found>, E>
+) -> core::result::Result<Option<(Found, SystemTime)>, E>
 where
     E: RequestError,
 {
-    let mut saw_header = false;
+    let mut header_at = None;
     for idx in guard.indices_after(after) {
         match guard.entry(idx) {
-            Some(Entry::Uart { payload, .. }) => {
+            Some(entry @ Entry::Uart { payload, .. }) => {
+                let at = entry.at();
                 let Some(line) = guard.payload(*payload) else {
                     continue;
                 };
@@ -148,12 +155,12 @@ where
                     return Err(err);
                 }
                 if header_len(line).is_some() {
-                    saw_header = true;
+                    header_at = Some(at);
                 }
             }
             Some(Entry::Blob { .. }) => {
-                if saw_header {
-                    return Ok(Some(found(idx)));
+                if let Some(at) = header_at {
+                    return Ok(Some((found(idx), at)));
                 }
             }
             None => {}

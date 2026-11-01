@@ -118,8 +118,18 @@ impl SerialHandler {
     where
         E: RequestError,
     {
-        let found = block_fut(serial::run_op::<E>(&self.link, &self.record, cmd))?;
-        self.record.materialize_ok::<E>(&found)
+        self.request_at(cmd).map(|(reply, _)| reply)
+    }
+
+    /// Like [`Self::request`], plus the time the reader thread read the reply
+    /// line. That is the instant the host received the MCU reply, not the later
+    /// moment the caller formats it.
+    pub fn request_at<'a, E>(&'a self, cmd: &Command<'_>) -> core::result::Result<(OkReply<'a>, SystemTime), E>
+    where
+        E: RequestError,
+    {
+        let (found, at) = block_fut(serial::run_op::<E>(&self.link, &self.record, cmd))?;
+        Ok((self.record.materialize_ok::<E>(&found)?, at))
     }
 
     /// Run a download-mode [`FlashOp`] (not an App-mode wire reply).
