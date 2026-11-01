@@ -135,35 +135,19 @@ pub fn parse_xdp_activate_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError>
     })
 }
 
-/// `OK xdp rollback` plus the eight commit counters.
-pub fn parse_xdp_rollback_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
-    let (_, nums) = parse_u32_line(input, b"OK xdp rollback", 8)?;
-    Ok(OkReply::XdpRollback {
-        ok: u8_at(&nums, 0)?,
-        rollback: u8_at(&nums, 1)?,
-        severe: u8_at(&nums, 2)?,
-        from_slot: u8_at(&nums, 3)?,
-        to_slot: u8_at(&nums, 4)?,
-        generation: nums[5],
-        quiesce_drop: nums[6],
-        quiesce_pass: nums[7],
-    })
-}
-
 /// `OK get xdp` plus boot id, slot roles and quiesce counts.
 pub fn parse_get_xdp_status_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
-    let (_, nums) = parse_u32_line(input, b"OK get xdp", 10)?;
+    let (_, nums) = parse_u32_line(input, b"OK get xdp", 9)?;
     Ok(OkReply::GetXdpStatus {
         boot_id: nums[0],
         active_slot: u8_at(&nums, 1)?,
         staged_slot: u8_at(&nums, 2)?,
         generation: nums[3],
-        retained_slot: u8_at(&nums, 4)?,
-        updating: u8_at(&nums, 5)?,
-        severe: u8_at(&nums, 6)?,
-        quiesce_drop: nums[7],
-        quiesce_pass: nums[8],
-        last_error: u8_at(&nums, 9)?,
+        updating: u8_at(&nums, 4)?,
+        severe: u8_at(&nums, 5)?,
+        quiesce_drop: nums[6],
+        quiesce_pass: nums[7],
+        last_error: u8_at(&nums, 8)?,
     })
 }
 

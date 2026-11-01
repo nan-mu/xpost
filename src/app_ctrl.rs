@@ -104,16 +104,6 @@ pub fn activate_xdp(slot: u8, generation: u32, pass: bool) -> Result<SwitchRepor
     with_xdp_retry(|xdp| xdp.activate(usize::from(slot), generation, policy))
 }
 
-/// Quiesce and publish the retained slot.
-pub fn rollback_xdp(pass: bool) -> Result<SwitchReport, AppXdpError> {
-    let policy = if pass {
-        QuiescePolicy::Pass
-    } else {
-        QuiescePolicy::Drop
-    };
-    with_xdp_retry(|xdp| xdp.rollback(policy))
-}
-
 /// Boot id, slot roles and quiesce counts.
 pub fn xdp_status() -> Result<XdpStatus, AppXdpError> {
     let xdp_lock = XDP_RT.try_get().ok_or(AppXdpError::NoRt)?;

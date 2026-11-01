@@ -38,18 +38,7 @@ pub enum OkReply<'a> {
         quiesce_drop: u32,
         quiesce_pass: u32,
     },
-    /// Same numeric tail as [`Self::XdpActivate`].
-    XdpRollback {
-        ok: u8,
-        rollback: u8,
-        severe: u8,
-        from_slot: u8,
-        to_slot: u8,
-        generation: u32,
-        quiesce_drop: u32,
-        quiesce_pass: u32,
-    },
-    /// `OK get xdp <boot> <active> <staged> <gen> <retained> <updating> <severe> <drop> <pass> <err>`.
+    /// `OK get xdp <boot> <active> <staged> <gen> <updating> <severe> <drop> <pass> <err>`.
     ///
     /// Slot `255` means that role is empty.
     GetXdpStatus {
@@ -57,7 +46,6 @@ pub enum OkReply<'a> {
         active_slot: u8,
         staged_slot: u8,
         generation: u32,
-        retained_slot: u8,
         updating: u8,
         severe: u8,
         quiesce_drop: u32,

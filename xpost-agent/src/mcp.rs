@@ -99,7 +99,7 @@ impl XpostMcp {
     ) -> Result<CallToolResult, McpError> {
         let shared = self.shared.clone();
         let name = args.name;
-        self.run_op(move || ops::flash_xdp(shared.as_ref(), &name, "mcp"))
+        self.run_op(move || ops::flash_xdp(shared.as_ref(), &name, None, "mcp"))
             .await
     }
 

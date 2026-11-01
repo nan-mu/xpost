@@ -358,12 +358,6 @@ serial_task! {
                 Err(e) => reply_xdp_err(reply, e),
             }
         })
-        .on_xdp_rollback(|pass: bool, reply: ReplyWriter<'_>| {
-            match app_ctrl::rollback_xdp(pass) {
-                Ok(report) => reply.ok(rollback_reply(&report)),
-                Err(e) => reply_xdp_err(reply, e),
-            }
-        })
         .on_get_xdp_status(|reply: ReplyWriter<'_>| match app_ctrl::xdp_status() {
             Ok(status) => reply.ok(status_reply(&status)),
             Err(e) => reply_xdp_err(reply, e),
@@ -394,26 +388,12 @@ fn activate_reply(report: &xpost::xdp::SwitchReport) -> OkReply<'static> {
     }
 }
 
-fn rollback_reply(report: &xpost::xdp::SwitchReport) -> OkReply<'static> {
-    OkReply::XdpRollback {
-        ok: u8::from(report.ok),
-        rollback: u8::from(report.rolled_back),
-        severe: u8::from(report.severe),
-        from_slot: report.from_slot as u8,
-        to_slot: report.to_slot as u8,
-        generation: report.generation,
-        quiesce_drop: report.quiesce_drop,
-        quiesce_pass: report.quiesce_pass,
-    }
-}
-
 fn status_reply(status: &xpost::xdp::XdpStatus) -> OkReply<'static> {
     OkReply::GetXdpStatus {
         boot_id: status.boot_id,
         active_slot: slot_byte(status.active_slot),
         staged_slot: slot_byte(status.staged_slot),
         generation: status.staged_generation,
-        retained_slot: slot_byte(status.retained_slot),
         updating: u8::from(status.updating),
         severe: u8::from(status.severe),
         quiesce_drop: status.quiesce_drop,

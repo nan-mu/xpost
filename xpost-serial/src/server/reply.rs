@@ -40,24 +40,9 @@ pub fn write_ok<E>(
             generation,
             quiesce_drop,
             quiesce_pass,
-        }
-        | OkReply::XdpRollback {
-            ok,
-            rollback,
-            severe,
-            from_slot,
-            to_slot,
-            generation,
-            quiesce_drop,
-            quiesce_pass,
         } => {
-            let prefix = if matches!(reply, OkReply::XdpActivate { .. }) {
-                b"OK xdp activate".as_slice()
-            } else {
-                b"OK xdp rollback".as_slice()
-            };
             return write_nums(
-                prefix,
+                b"OK xdp activate",
                 &[
                     u32::from(*ok),
                     u32::from(*rollback),
@@ -76,7 +61,6 @@ pub fn write_ok<E>(
             active_slot,
             staged_slot,
             generation,
-            retained_slot,
             updating,
             severe,
             quiesce_drop,
@@ -90,7 +74,6 @@ pub fn write_ok<E>(
                     u32::from(*active_slot),
                     u32::from(*staged_slot),
                     *generation,
-                    u32::from(*retained_slot),
                     u32::from(*updating),
                     u32::from(*severe),
                     *quiesce_drop,
@@ -118,7 +101,6 @@ pub fn write_ok<E>(
         OkReply::GetPerf { blob } => return write_blob(b"OK get perf ", blob, write_all),
         OkReply::XdpStage { .. }
         | OkReply::XdpActivate { .. }
-        | OkReply::XdpRollback { .. }
         | OkReply::GetXdpStatus { .. } => return Ok(()),
     };
     write_all(line)

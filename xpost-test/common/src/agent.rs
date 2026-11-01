@@ -56,12 +56,23 @@ impl AgentClient {
         Ok(())
     }
 
-    /// `POST /v1/flash/xdp` — build+write named XDP image into cold table.
+    /// `POST /v1/flash/xdp` — build and write the named image into the cold table.
+    /// The device resets.
     pub async fn flash_xdp(&self, name: &str) -> Result<()> {
         let body = serde_json::json!({ "name": name });
         let msg = self.post_json("/v1/flash/xdp", &body).await?;
         log::info!("flash_xdp: {msg}");
         Ok(())
+    }
+
+    /// `POST /v1/flash/xdp` with `slot`. Copies an image already in the cold
+    /// table into that slot. Does not reset. Reply is `OK xdp stage <slot> <gen>`.
+    pub async fn flash_xdp_slot(&self, name: &str, slot: u8) -> Result<String> {
+        self.post_json(
+            "/v1/flash/xdp",
+            &serde_json::json!({ "name": name, "slot": slot }),
+        )
+        .await
     }
 
     /// `POST /v1/clear/xdp` — `name` `"*"` clears the whole cold table.
@@ -97,15 +108,6 @@ impl AgentClient {
         self.post_json("/v1/disable/xdp", &serde_json::json!({})).await
     }
 
-    /// `POST /v1/xdp/stage` — copy a cold image into an idle slot.
-    pub async fn stage_xdp(&self, name: &str, slot: u8) -> Result<String> {
-        self.post_json(
-            "/v1/xdp/stage",
-            &serde_json::json!({ "name": name, "slot": slot }),
-        )
-        .await
-    }
-
     /// `POST /v1/xdp/activate`. `policy` is `drop` or `pass`.
     pub async fn activate_xdp(&self, slot: u8, generation: u32, policy: &str) -> Result<String> {
         self.post_json(
@@ -113,11 +115,6 @@ impl AgentClient {
             &serde_json::json!({ "slot": slot, "generation": generation, "policy": policy }),
         )
         .await
-    }
-
-    /// `POST /v1/xdp/rollback`.
-    pub async fn rollback_xdp(&self, policy: &str) -> Result<String> {
-        self.post_json("/v1/xdp/rollback", &serde_json::json!({ "policy": policy })).await
     }
 
     /// `GET /v1/xdp/status`.

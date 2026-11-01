@@ -52,10 +52,6 @@ pub enum Command<'a> {
         generation: u32,
         pass: bool,
     },
-    /// `xdp rollback <drop|pass>`.
-    XdpRollback {
-        pass: bool,
-    },
     /// `get xdp` — boot id, slot roles, quiesce counts. Not the cold-table list.
     GetXdpStatus,
     /// Wait for unsolicited `OK init` in the host record. **Not a wire verb** —

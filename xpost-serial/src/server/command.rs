@@ -159,11 +159,6 @@ pub fn parse_command(mut line: &[u8]) -> Result<Command<'_>, ParseCommandError> 
             generation: parse_u32(raw_gen)?,
             pass: parse_policy(raw_policy)?,
         })
-    } else if keyword(verb, b"xdp") && keyword(target, b"rollback") {
-        let raw = map_name(&mut line)?;
-        Ok(Command::XdpRollback {
-            pass: parse_policy(raw.as_bytes())?,
-        })
     } else if keyword(verb, b"update") && keyword(target, b"map") {
         let (raw_name, key, value, _) = (token, token, token, eof::<_, EmptyError>)
             .parse_next(&mut line)

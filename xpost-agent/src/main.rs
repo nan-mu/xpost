@@ -38,14 +38,12 @@
 //! | GET | `/v1/dut_status` | — | UART `ready` / `booting` (uses `ping`) |
 //! | GET | `/v1/get/init` | — | host wait for unsolicited `OK init` |
 //! | POST | `/v1/flash/fw` | `{"name"}` | build+flash firmware, then co-flash `fw.xdp[]` |
-//! | POST | `/v1/flash/xdp` | `{"name"}` | build+write named XDP image into cold table |
+//! | POST | `/v1/flash/xdp` | `{"name","slot"?}` | no slot: write the cold table and reset. `slot`: copy that installed image into the slot, no reset |
 //! | POST | `/v1/clear/xdp` | `{"name": "*"\|"prog"\|["a","b"]}` | remove image(s); `*`=all; missing name → err |
 //! | GET | `/v1/get/xdp` | — | list installed XDP images |
 //! | POST | `/v1/enable/xdp` | `{}` | App `EnableXdp` |
 //! | POST | `/v1/disable/xdp` | `{}` | App `DisableXdp` |
-//! | POST | `/v1/xdp/stage` | `{"name","slot"}` | App `xdp stage` |
 //! | POST | `/v1/xdp/activate` | `{"slot","generation","policy"}` | App `xdp activate`; policy `drop` or `pass` |
-//! | POST | `/v1/xdp/rollback` | `{"policy"}` | App `xdp rollback` |
 //! | GET | `/v1/xdp/status` | — | App `get xdp` boot id and slot roles |
 //! | POST | `/v1/enable/exec` | `{}` | App `EnableExec` |
 //! | POST | `/v1/disable/exec` | `{}` | App `DisableExec` |

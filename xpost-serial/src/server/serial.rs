@@ -107,8 +107,6 @@ impl<R, W, H: RequestHandler, const N: usize> SerialHandlerBuilder<R, W, H, N> {
         on_xdp_stage(name: &str, slot: u8) => Command::XdpStage { name, slot });
     register!(/// Quiesce and publish a staged slot.
         on_xdp_activate(slot: u8, generation: u32, pass: bool) => Command::XdpActivate { slot, generation, pass });
-    register!(/// Quiesce and publish the retained slot.
-        on_xdp_rollback(pass: bool) => Command::XdpRollback { pass });
     register!(/// Report boot id, slot roles and quiesce counts.
         on_get_xdp_status() => Command::GetXdpStatus);
 

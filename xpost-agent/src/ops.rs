@@ -212,7 +212,15 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
     Ok(msg)
 }
 
-pub fn flash_xdp(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
+pub fn flash_xdp(
+    state: &Mutex<AgentState>,
+    name: &str,
+    slot: Option<u8>,
+    peer: &str,
+) -> Result<String> {
+    if let Some(slot) = slot {
+        return stage_xdp(state, name, slot, peer);
+    }
     with_log(
         peer,
         "FlashXdp",
@@ -470,27 +478,6 @@ pub fn activate_xdp(
     })
 }
 
-pub fn rollback_xdp(state: &Mutex<AgentState>, pass: bool, peer: &str) -> Result<String> {
-    with_log(peer, "XdpRollback", "", false, state, || {
-        let g = lock(state)?;
-        match req(&g, &Command::XdpRollback { pass })? {
-            OkReply::XdpRollback {
-                ok,
-                rollback,
-                severe,
-                from_slot,
-                to_slot,
-                generation,
-                quiesce_drop,
-                quiesce_pass,
-            } => Ok(format!(
-                "OK xdp rollback {ok} {rollback} {severe} {from_slot} {to_slot} {generation} {quiesce_drop} {quiesce_pass}"
-            )),
-            _ => bail!("unexpected xdp rollback reply"),
-        }
-    })
-}
-
 pub fn xdp_status(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     with_log(peer, "GetXdpStatus", "", false, state, || {
         let g = lock(state)?;
@@ -500,14 +487,13 @@ pub fn xdp_status(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
                 active_slot,
                 staged_slot,
                 generation,
-                retained_slot,
                 updating,
                 severe,
                 quiesce_drop,
                 quiesce_pass,
                 last_error,
             } => Ok(format!(
-                "OK get xdp {boot_id} {active_slot} {staged_slot} {generation} {retained_slot} {updating} {severe} {quiesce_drop} {quiesce_pass} {last_error}"
+                "OK get xdp {boot_id} {active_slot} {staged_slot} {generation} {updating} {severe} {quiesce_drop} {quiesce_pass} {last_error}"
             )),
             _ => bail!("unexpected get xdp reply"),
         }

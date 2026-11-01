@@ -55,6 +55,13 @@ struct FlashByNameBody {
 }
 
 #[derive(Deserialize)]
+struct FlashXdpBody {
+    name: String,
+    #[serde(default)]
+    slot: Option<u8>,
+}
+
+#[derive(Deserialize)]
 struct ClearXdpBody {
     /// Required: `"*"` | `"prog"` | `["a","b"]`.
     name: ClearXdpName,
@@ -130,9 +137,7 @@ async fn serve_async(addr: &str, log_dir: &Path) -> Result<()> {
         .route("/get/xdp", get(v1_get_xdp))
         .route("/enable/xdp", post(v1_enable_xdp))
         .route("/disable/xdp", post(v1_disable_xdp))
-        .route("/xdp/stage", post(v1_xdp_stage))
         .route("/xdp/activate", post(v1_xdp_activate))
-        .route("/xdp/rollback", post(v1_xdp_rollback))
         .route("/xdp/status", get(v1_xdp_status))
         .route("/enable/exec", post(v1_enable_exec))
         .route("/disable/exec", post(v1_disable_exec))
@@ -206,11 +211,12 @@ async fn v1_flash_fw(
 
 async fn v1_flash_xdp(
     State(st): State<AppState>,
-    Json(body): Json<FlashByNameBody>,
+    Json(body): Json<FlashXdpBody>,
 ) -> Json<ApiResp> {
     let shared = st.shared.clone();
     let name = body.name;
-    run_blocking(move || ops::flash_xdp(shared.as_ref(), &name, "http")).await
+    let slot = body.slot;
+    run_blocking(move || ops::flash_xdp(shared.as_ref(), &name, slot, "http")).await
 }
 
 fn clear_xdp_names(name: ClearXdpName) -> Result<Vec<String>, String> {
@@ -260,20 +266,9 @@ async fn v1_get_xdp(State(st): State<AppState>) -> Json<ApiResp> {
 }
 
 #[derive(Deserialize)]
-struct StageBody {
-    name: String,
-    slot: u8,
-}
-
-#[derive(Deserialize)]
 struct ActivateBody {
     slot: u8,
     generation: u32,
-    policy: String,
-}
-
-#[derive(Deserialize)]
-struct RollbackBody {
     policy: String,
 }
 
@@ -283,18 +278,6 @@ fn policy_pass(policy: &str) -> Result<bool> {
         "drop" => Ok(false),
         _ => bail!("policy must be drop or pass"),
     }
-}
-
-async fn v1_xdp_stage(
-    State(st): State<AppState>,
-    body: Result<Json<StageBody>, axum::extract::rejection::JsonRejection>,
-) -> Json<ApiResp> {
-    let Json(body) = match body {
-        Ok(j) => j,
-        Err(e) => return Json(ApiResp::err(format!("bad stage body: {e}"))),
-    };
-    let shared = st.shared.clone();
-    run_blocking(move || ops::stage_xdp(shared.as_ref(), &body.name, body.slot, "http")).await
 }
 
 async fn v1_xdp_activate(
@@ -314,22 +297,6 @@ async fn v1_xdp_activate(
         ops::activate_xdp(shared.as_ref(), body.slot, body.generation, pass, "http")
     })
     .await
-}
-
-async fn v1_xdp_rollback(
-    State(st): State<AppState>,
-    body: Result<Json<RollbackBody>, axum::extract::rejection::JsonRejection>,
-) -> Json<ApiResp> {
-    let Json(body) = match body {
-        Ok(j) => j,
-        Err(e) => return Json(ApiResp::err(format!("bad rollback body: {e}"))),
-    };
-    let pass = match policy_pass(&body.policy) {
-        Ok(pass) => pass,
-        Err(e) => return Json(ApiResp::err(e.to_string())),
-    };
-    let shared = st.shared.clone();
-    run_blocking(move || ops::rollback_xdp(shared.as_ref(), pass, "http")).await
 }
 
 async fn v1_xdp_status(State(st): State<AppState>) -> Json<ApiResp> {

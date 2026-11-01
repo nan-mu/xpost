@@ -65,28 +65,6 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
                 quiesce_drop: bdrop,
                 quiesce_pass: bpass,
             },
-        )
-        | (
-            OkReply::XdpRollback {
-                ok: aok,
-                rollback: arb,
-                severe: ase,
-                from_slot: afrom,
-                to_slot: ato,
-                generation: agen,
-                quiesce_drop: adrop,
-                quiesce_pass: apass,
-            },
-            OkReply::XdpRollback {
-                ok: bok,
-                rollback: brb,
-                severe: bse,
-                from_slot: bfrom,
-                to_slot: bto,
-                generation: bgen,
-                quiesce_drop: bdrop,
-                quiesce_pass: bpass,
-            },
         ) => {
             assert_eq!(
                 (aok, arb, ase, afrom, ato, agen, adrop, apass),
@@ -99,7 +77,6 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
                 active_slot: aa,
                 staged_slot: asl,
                 generation: ag,
-                retained_slot: ar,
                 updating: au,
                 severe: ase,
                 quiesce_drop: ad,
@@ -111,7 +88,6 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
                 active_slot: ba,
                 staged_slot: bsl,
                 generation: bg,
-                retained_slot: br,
                 updating: bu,
                 severe: bse,
                 quiesce_drop: bd,
@@ -120,8 +96,8 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
             },
         ) => {
             assert_eq!(
-                (a, aa, asl, ag, ar, au, ase, ad, ap, ae),
-                (b, ba, bsl, bg, br, bu, bse, bd, bp, be)
+                (a, aa, asl, ag, au, ase, ad, ap, ae),
+                (b, ba, bsl, bg, bu, bse, bd, bp, be)
             );
         }
         _ => panic!("ok reply variant mismatch"),
@@ -283,7 +259,6 @@ fn ok_get_xdp_status() {
             active_slot: 1,
             staged_slot: 255,
             generation: 0,
-            retained_slot: 0,
             updating: 0,
             severe: 0,
             quiesce_drop: 2,

@@ -1,7 +1,8 @@
 //! Quiescent A/B swap of two images that were installed before the scored window.
 //!
-//! Cold install (`clear` / `flash_xdp`) may reboot. After `OK init`, stage,
-//! activate, and rollback must keep the same boot id. Wire behavior is the
+//! Cold install (`clear` / `flash_xdp`) may reboot. After `OK init`, stage and
+//! activate must keep the same boot id. Returning to the first image is another
+//! stage plus activate, chosen by the host. Wire behavior is the
 //! evidence: `hot_swap` returns the stimulus address, `hot_mark` writes
 //! `203.0.113.77`. Map reads stay closed for the lease, so this exam does not
 //! touch `rxcnt`.
@@ -24,7 +25,6 @@ struct Wire {
     active: u8,
     staged: u8,
     generation: u32,
-    retained: u8,
     updating: u8,
     severe: u8,
     drop: u32,
@@ -70,7 +70,7 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
     }
     observe(cfg, &agent, &client, exam_id, 1, "hot_swap", &mac, &swap_needle, &boot.raw).await?;
 
-    let bad_addr = agent.stage_xdp("hot_swap", 1).await;
+    let bad_addr = agent.flash_xdp_slot("hot_swap", 1).await;
     if bad_addr.is_ok() {
         bail!("stage hot_swap into slot 1 should fail: wrong link address");
     }
@@ -81,7 +81,10 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
     observe(cfg, &agent, &client, exam_id, 2, "hot_swap", &mac, &swap_needle, &after_bad.raw)
         .await?;
 
-    let staged = agent.stage_xdp("hot_mark", 1).await.context("stage hot_mark")?;
+    let staged = agent
+        .flash_xdp_slot("hot_mark", 1)
+        .await
+        .context("copy hot_mark into slot 1")?;
     let generation = parse_stage(&staged)?;
     let staged_status = status_of(&agent).await?;
     if staged_status.boot_id != boot.boot_id || staged_status.active != 0 || staged_status.staged != 1
@@ -124,10 +127,18 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
     observe(cfg, &agent, &client, exam_id, 5, "hot_mark", &mac, MARK_DST, &format!("{activated} {}", now.raw))
         .await?;
 
-    let rolled = agent.rollback_xdp("drop").await.context("rollback")?;
+    let restaged = agent
+        .flash_xdp_slot("hot_swap", 0)
+        .await
+        .context("copy previous image into the idle slot")?;
+    let back_gen = parse_stage(&restaged)?;
+    let rolled = agent
+        .activate_xdp(0, back_gen, "drop")
+        .await
+        .context("publish previous image")?;
     let back = status_of(&agent).await?;
     if back.boot_id != boot.boot_id || back.active != 0 || back.severe != 0 {
-        bail!("rollback did not restore slot 0: {} {rolled}", back.raw);
+        bail!("republish did not restore slot 0: {} {rolled}", back.raw);
     }
     observe(cfg, &agent, &client, exam_id, 6, "hot_swap", &mac, &swap_needle, &format!("{rolled} {}", back.raw))
         .await?;
@@ -238,20 +249,19 @@ fn parse_status(msg: &str) -> Result<Wire> {
         .split_whitespace()
         .map(|s| s.parse().with_context(|| format!("status number {s}")))
         .collect::<Result<_>>()?;
-    if nums.len() != 10 {
-        bail!("status wants 10 numbers, got {msg}");
+    if nums.len() != 9 {
+        bail!("status wants 9 numbers, got {msg}");
     }
     Ok(Wire {
         boot_id: nums[0],
         active: nums[1] as u8,
         staged: nums[2] as u8,
         generation: nums[3],
-        retained: nums[4] as u8,
-        updating: nums[5] as u8,
-        severe: nums[6] as u8,
-        drop: nums[7],
-        pass: nums[8],
-        err: nums[9] as u8,
+        updating: nums[4] as u8,
+        severe: nums[5] as u8,
+        drop: nums[6],
+        pass: nums[7],
+        err: nums[8] as u8,
     })
 }
 

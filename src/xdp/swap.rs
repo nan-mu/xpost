@@ -1,10 +1,11 @@
 //! Quiescent hot swap of a pre-installed image.
 //!
 //! `stage` copies into an idle slot while the active image keeps running.
-//! `activate` / `rollback` pause new flights, wait until `IN_FLIGHT` is 0,
-//! then publish map aliases and the new entry. A failed publish restores the
-//! previous aliases and entry. `IN_FLIGHT == 0` does not drain the driver's
-//! async `XDP_TX` queue; map users are kept across the swap for that reason.
+//! `activate` pauses new flights, waits until `IN_FLIGHT` is 0, then publishes
+//! map aliases and the new entry. A failed publish restores the previous
+//! aliases. The host remembers which slot to publish next. `IN_FLIGHT == 0`
+//! does not drain the driver's async `XDP_TX` queue; map users are kept across
+//! the swap for that reason.
 
 use core::sync::atomic::Ordering;
 
@@ -40,7 +41,6 @@ pub(crate) enum SlotPhase {
     Empty,
     Staged { generation: u32 },
     Active,
-    Retained,
 }
 
 /// Result of a successful or rolled-back commit. A hard restore failure is `Err`.
@@ -63,7 +63,6 @@ pub struct XdpStatus {
     pub active_slot: Option<usize>,
     pub staged_slot: Option<usize>,
     pub staged_generation: u32,
-    pub retained_slot: Option<usize>,
     pub updating: bool,
     pub severe: bool,
     pub quiesce_drop: u32,
@@ -75,7 +74,7 @@ impl XdpRt {
     /// Copy `id` into `slot` while the leased image keeps running.
     ///
     /// Does not change `PRIMARY_ENTRY`, `ACTIVE`, or map aliases. The target
-    /// must not be the active or retained slot. Returns the staged generation.
+    /// must not be the active slot. Returns the staged generation.
     pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<u32, XdpSwapError> {
         if !self.leased {
             return Err(self.fail(XdpSwapError::NotLeased));
@@ -168,29 +167,10 @@ impl XdpRt {
         self.commit(slot, id, generation, policy)
     }
 
-    /// Publish the retained slot with the same quiesce and rollback rules.
-    pub fn rollback(&mut self, policy: QuiescePolicy) -> Result<SwitchReport, XdpSwapError> {
-        if !self.leased {
-            return Err(self.fail(XdpSwapError::NotLeased));
-        }
-        if self.severe {
-            return Err(self.fail(XdpSwapError::RollbackFailed));
-        }
-        let slot = self
-            .slots
-            .iter()
-            .position(|s| matches!(s.phase, SlotPhase::Retained))
-            .ok_or(XdpSwapError::NoRetained)?;
-        let id = self.slots[slot].image.ok_or(XdpSwapError::NoRetained)?;
-        self.preflight(id, slot, false)?;
-        self.commit(slot, id, 0, policy)
-    }
-
     pub fn status(&self) -> XdpStatus {
         let mut active_slot = None;
         let mut staged_slot = None;
         let mut staged_generation = 0;
-        let mut retained_slot = None;
         for (i, slot) in self.slots.iter().enumerate() {
             match slot.phase {
                 SlotPhase::Active => active_slot = Some(i),
@@ -198,7 +178,6 @@ impl XdpRt {
                     staged_slot = Some(i);
                     staged_generation = generation;
                 }
-                SlotPhase::Retained => retained_slot = Some(i),
                 SlotPhase::Empty => {}
             }
         }
@@ -207,7 +186,6 @@ impl XdpRt {
             active_slot,
             staged_slot,
             staged_generation,
-            retained_slot,
             updating: self.updating,
             severe: self.severe,
             quiesce_drop: QUIESCE_DROPS.load(Ordering::Relaxed) as u32,
@@ -227,7 +205,7 @@ impl XdpRt {
         err
     }
 
-    /// `staging` rejects active and retained targets. Commit rechecks the image.
+    /// `staging` rejects the active slot. Commit rechecks the image.
     fn preflight(&mut self, id: XdpId, slot: SlotId, staging: bool) -> Result<(), XdpSwapError> {
         if staging && self.primary == slot {
             return Err(self.fail(XdpSwapError::ActiveSlot));
@@ -255,7 +233,6 @@ impl XdpRt {
             if staging {
                 match slot_state.phase {
                     SlotPhase::Active => return Err(self.fail(XdpSwapError::ActiveSlot)),
-                    SlotPhase::Retained => return Err(self.fail(XdpSwapError::RetainedSlot)),
                     SlotPhase::Staged { .. } if slot_state.image != Some(id) => {
                         return Err(self.fail(XdpSwapError::SlotOccupied));
                     }
@@ -366,7 +343,7 @@ impl XdpRt {
             && let Some(prev) = self.slots.get_mut(from_slot)
             && matches!(prev.phase, SlotPhase::Active)
         {
-            prev.phase = SlotPhase::Retained;
+            prev.phase = SlotPhase::Empty;
         }
         if let Some(next) = self.slots.get_mut(slot) {
             next.phase = SlotPhase::Active;

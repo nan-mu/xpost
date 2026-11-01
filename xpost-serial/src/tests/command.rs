@@ -69,9 +69,6 @@ fn assert_cmd_eq(got: &Command<'_>, expect: &Command<'_>) {
             assert_eq!(agen, bgen);
             assert_eq!(apass, bpass);
         }
-        (Command::XdpRollback { pass: a }, Command::XdpRollback { pass: b }) => {
-            assert_eq!(a, b);
-        }
         (Command::GetXdpStatus, Command::GetXdpStatus) => {}
         _ => panic!("command variant mismatch"),
     }
@@ -178,11 +175,6 @@ fn xdp_activate() {
         generation: 3,
         pass: false,
     });
-}
-
-#[test]
-fn xdp_rollback() {
-    roundtrip(Command::XdpRollback { pass: true });
 }
 
 #[test]

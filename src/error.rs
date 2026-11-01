@@ -357,18 +357,16 @@ impl From<allocator_api2::alloc::AllocError> for MapCreateError {
     }
 }
 
-/// [`crate::xdp::XdpRt::stage`], [`crate::xdp::XdpRt::activate`], [`crate::xdp::XdpRt::rollback`].
+/// [`crate::xdp::XdpRt::stage`] and [`crate::xdp::XdpRt::activate`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum XdpSwapError {
     NotLeased,
     ActiveSlot,
-    RetainedSlot,
     SlotOccupied,
     UnknownSlot,
     UnknownImage,
     BadGeneration,
     NoStaged,
-    NoRetained,
     ImageEmpty,
     ImageTooLarge,
     ScratchTooSmall,
@@ -394,13 +392,11 @@ impl XdpSwapError {
         match self {
             Self::NotLeased => "not leased",
             Self::ActiveSlot => "active slot",
-            Self::RetainedSlot => "retained slot",
             Self::SlotOccupied => "slot occupied",
             Self::UnknownSlot => "unknown slot",
             Self::UnknownImage => "unknown image",
             Self::BadGeneration => "bad generation",
             Self::NoStaged => "nothing staged",
-            Self::NoRetained => "nothing retained",
             Self::ImageEmpty => "image empty",
             Self::ImageTooLarge => "image exceeds slot",
             Self::ScratchTooSmall => "scratch too small",
@@ -425,14 +421,12 @@ impl XdpSwapError {
         match self {
             Self::NotLeased => 11,
             Self::ActiveSlot => 1,
-            Self::RetainedSlot => 2,
             Self::SlotOccupied => 3,
             Self::BadGeneration => 4,
             Self::SlotAddress | Self::SlotAddressAlign => 5,
             Self::Digest => 6,
             Self::MissingMap | Self::MapsRequired | Self::MapCheck(_) | Self::Map(_) => 7,
             Self::NoStaged => 8,
-            Self::NoRetained => 9,
             Self::RollbackFailed => 10,
             _ => 12,
         }
