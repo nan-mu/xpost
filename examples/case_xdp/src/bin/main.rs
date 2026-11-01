@@ -46,11 +46,16 @@ const STIM_PORT: u16 = 8080;
 #[unsafe(link_section = ".bss")]
 static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
-/// Single RX slot (firmware-owned). Must live in IRAM (executable), not `.bss`.
+/// Primary RX slot. Loaded before lease; immutable while it is the entry.
 /// Symbol name matches xpost-build `SLOT_SYMBOL`.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".xdp.hotload_0")]
 static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
+
+/// Idle slot. Filled by `xdp flash`; published only by `xdp switch`.
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".xdp.hotload_1")]
+static xdp_slot_idle: Slot<0xE00> = Slot::new([0u8; 0xE00]);
 
 /// Packets that reached the netstack (XDP Pass). Drop XDP does not increment this.
 static NET_RX: AtomicUsize = AtomicUsize::new(0);
@@ -95,7 +100,10 @@ async fn main(spawner: Spawner) -> ! {
     let map_heap: &'static mut [u8] = unsafe { &mut *addr_of_mut!(MAP_HEAP) };
     let mut maps = MapRt::init(map_heap).await.expect("MapRt::init");
 
-    let slots = [unsafe { xdp_slot.as_xdp_slot(true) }];
+    xpost::xdp::set_boot_id(boot_entropy());
+    let slots = [unsafe { xdp_slot.as_xdp_slot(true) }, unsafe {
+        xdp_slot_idle.as_xdp_slot(false)
+    }];
 
     let (mut rt, report) = XdpRt::init(
         flash,
@@ -124,16 +132,17 @@ async fn main(spawner: Spawner) -> ! {
     // Cold image stays Pass until switched into the primary IRAM slot and leased.
     // Soft-fail: a stale cold ELF (wrong link_addr after BSS shift) must not panic
     // the board — leave Prog on Pass until `agent program` writes a matching image.
-    if n_images > 0 {
-        let id = 0;
-        let primary = 0;
-        match rt.switch(id, primary, Some(&maps)) {
+    let slot0 = &xdp_slot as *const Slot<0xE00> as usize;
+    if let Some(id) = rt.image_linked_at(slot0) {
+        match rt.switch(id, 0, Some(&maps)) {
             Ok(()) => match rt.lease(Some(&mut maps)) {
-                Ok(()) => info!("xdp leased primary image_id={id}"),
+                Ok(()) => info!("xdp leased image_id={id} linked at slot 0"),
                 Err(e) => error!("xdp lease failed: {e:?}"),
             },
             Err(e) => error!("xdp switch primary failed: {e:?} (cold image link_addr mismatch?)"),
         }
+    } else if n_images > 0 {
+        error!("no image linked at slot 0; Prog stays Pass");
     } else {
         info!("xdp cold empty; Prog Pass until program+reboot");
     }
@@ -157,11 +166,7 @@ async fn main(spawner: Spawner) -> ! {
         .with_ampdu_tx_enable(false);
     let (mut controller, interfaces) = xpost::esp_radio::new(peripherals.WIFI, wifi_cfg)
         .expect("Failed to initialize Wi-Fi controller");
-    info!(
-        "wifi+xdp attached drop={} failed_tx={} tx_dyn=128 rx_dyn=1024",
-        xpost::ext::perf::counter().drop_count(),
-        xpost::ext::perf::counter().failed_tx_count(),
-    );
+    info!("wifi+xdp attached tx_dyn=128 rx_dyn=1024");
 
     // XDP only enqueues from the Wi-Fi RX callback; this task owns tx_by_ref.
     spawner.spawn(xdp_tx_task().unwrap());
@@ -281,8 +286,8 @@ serial_task! {
             [0u8; 128],
         )
         .on_ping(|reply: ReplyWriter<'_>| reply.ok(OkReply::Ping))
-        .on_enable_xdp(|reply: ReplyWriter<'_>| match app_ctrl::enable_xdp() {
-            Ok(()) => reply.ok(OkReply::EnableXdp),
+        .on_enable_xdp(|reply: ReplyWriter<'_>| match app_ctrl::enable_xdp_stamped() {
+            Ok(mcu_us) => reply.ok(OkReply::EnableXdpStamped { mcu_us }),
             Err(e) => reply_xdp_err(reply, e),
         })
         .on_disable_xdp(|reply: ReplyWriter<'_>| match app_ctrl::disable_xdp() {
@@ -336,7 +341,64 @@ serial_task! {
                 reply.error(&PerfError::Unavailable);
             }
         })
+        .on_xdp_flash(|name: &str, slot: u8, reply: ReplyWriter<'_>| {
+            match app_ctrl::flash_xdp_slot(name, slot) {
+                Ok(report) => reply.ok(OkReply::XdpFlash {
+                    slot,
+                    generation: report.generation,
+                    mcu_us: report.mcu_us,
+                }),
+                Err(e) => reply_xdp_err(reply, e),
+            }
+        })
+        .on_xdp_switch(|slot: u8, generation: u32, pass: bool, reply: ReplyWriter<'_>| {
+            match app_ctrl::switch_xdp(slot, generation, pass) {
+                Ok(report) => reply.ok(switch_reply(&report)),
+                Err(e) => reply_xdp_err(reply, e),
+            }
+        })
+        .on_get_xdp_status(|reply: ReplyWriter<'_>| match app_ctrl::xdp_status() {
+            Ok(status) => reply.ok(status_reply(&status)),
+            Err(e) => reply_xdp_err(reply, e),
+        })
         .build()
+    }
+}
+
+fn boot_entropy() -> u32 {
+    let id = esp_hal::rng::Rng::new().random();
+    if id == 0 { 1 } else { id }
+}
+
+fn slot_byte(slot: Option<usize>) -> u8 {
+    slot.and_then(|s| u8::try_from(s).ok()).unwrap_or(255)
+}
+
+fn switch_reply(report: &xpost::xdp::SwitchReport) -> OkReply<'static> {
+    OkReply::XdpSwitch {
+        ok: u8::from(report.ok),
+        rollback: u8::from(report.rolled_back),
+        severe: u8::from(report.severe),
+        from_slot: report.from_slot as u8,
+        to_slot: report.to_slot as u8,
+        generation: report.generation,
+        quiesce_drop: report.quiesce_drop,
+        quiesce_pass: report.quiesce_pass,
+        mcu_us: report.mcu_us,
+    }
+}
+
+fn status_reply(status: &xpost::xdp::XdpStatus) -> OkReply<'static> {
+    OkReply::GetXdpStatus {
+        boot_id: status.boot_id,
+        active_slot: slot_byte(status.active_slot),
+        staged_slot: slot_byte(status.staged_slot),
+        generation: status.staged_generation,
+        updating: u8::from(status.updating),
+        severe: u8::from(status.severe),
+        quiesce_drop: status.quiesce_drop,
+        quiesce_pass: status.quiesce_pass,
+        last_error: status.last_error,
     }
 }
 

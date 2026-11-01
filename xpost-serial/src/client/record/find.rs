@@ -12,6 +12,9 @@ use crate::r#type::reply::{MapError, OkReply, PerfError, ServerError, SyntaxErro
 pub(crate) enum Found {
     Ping,
     EnableXdp,
+    EnableXdpStamped {
+        mcu_us: u32,
+    },
     DisableXdp,
     EnableExec,
     DisableExec,
@@ -26,15 +29,44 @@ pub(crate) enum Found {
     },
     Init,
     Finish,
+    XdpFlash {
+        slot: u8,
+        generation: u32,
+        mcu_us: u32,
+    },
+    XdpSwitch {
+        ok: u8,
+        rollback: u8,
+        severe: u8,
+        from_slot: u8,
+        to_slot: u8,
+        generation: u32,
+        quiesce_drop: u32,
+        quiesce_pass: u32,
+        mcu_us: u32,
+    },
+    GetXdpStatus {
+        boot_id: u32,
+        active_slot: u8,
+        staged_slot: u8,
+        generation: u32,
+        updating: u8,
+        severe: u8,
+        quiesce_drop: u32,
+        quiesce_pass: u32,
+        last_error: u8,
+    },
 }
 
 /// Wait until a matching reply appears after `after` (no internal deadline —
 /// caller races this against timeout / interrupt).
+///
+/// Returns the reply index and the time the reader thread read that line.
 pub(crate) async fn wait_reply<E>(
     record: &SharedRecordInner,
     cmd: &Command<'_>,
     after: SystemTime,
-) -> core::result::Result<Found, E>
+) -> core::result::Result<(Found, SystemTime), E>
 where
     E: RequestError,
 {
@@ -50,7 +82,7 @@ fn scan_once<E>(
     record: &SharedRecordInner,
     cmd: &Command<'_>,
     after: SystemTime,
-) -> core::result::Result<Option<Found>, E>
+) -> core::result::Result<Option<(Found, SystemTime)>, E>
 where
     E: RequestError,
 {
@@ -78,14 +110,18 @@ fn scan_simple<E>(
     guard: &std::sync::MutexGuard<'_, crate::client::record::Record>,
     cmd: &Command<'_>,
     after: SystemTime,
-) -> core::result::Result<Option<Found>, E>
+) -> core::result::Result<Option<(Found, SystemTime)>, E>
 where
     E: RequestError,
 {
     for idx in guard.indices_after(after) {
-        let Some(Entry::Uart { payload, .. }) = guard.entry(idx) else {
+        let Some(entry) = guard.entry(idx) else {
             continue;
         };
+        let Entry::Uart { payload, .. } = entry else {
+            continue;
+        };
+        let at = entry.at();
         let Some(line) = guard.payload(*payload) else {
             continue;
         };
@@ -93,7 +129,7 @@ where
             return Err(err);
         }
         if let Some(found) = match_simple(cmd, line) {
-            return Ok(Some(found));
+            return Ok(Some((found, at)));
         }
     }
     Ok(None)
@@ -106,14 +142,15 @@ fn scan_blob_framed<E>(
     after: SystemTime,
     header_len: impl Fn(&[u8]) -> Option<usize>,
     found: impl Fn(usize) -> Found,
-) -> core::result::Result<Option<Found>, E>
+) -> core::result::Result<Option<(Found, SystemTime)>, E>
 where
     E: RequestError,
 {
-    let mut saw_header = false;
+    let mut header_at = None;
     for idx in guard.indices_after(after) {
         match guard.entry(idx) {
-            Some(Entry::Uart { payload, .. }) => {
+            Some(entry @ Entry::Uart { payload, .. }) => {
+                let at = entry.at();
                 let Some(line) = guard.payload(*payload) else {
                     continue;
                 };
@@ -121,12 +158,12 @@ where
                     return Err(err);
                 }
                 if header_len(line).is_some() {
-                    saw_header = true;
+                    header_at = Some(at);
                 }
             }
             Some(Entry::Blob { .. }) => {
-                if saw_header {
-                    return Ok(Some(found(idx)));
+                if let Some(at) = header_at {
+                    return Ok(Some((found(idx), at)));
                 }
             }
             None => {}
@@ -177,6 +214,7 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
     match OkReply::try_from((line, cmd)).ok()? {
         OkReply::Ping => Some(Found::Ping),
         OkReply::EnableXdp => Some(Found::EnableXdp),
+        OkReply::EnableXdpStamped { mcu_us } => Some(Found::EnableXdpStamped { mcu_us }),
         OkReply::DisableXdp => Some(Found::DisableXdp),
         OkReply::EnableExec => Some(Found::EnableExec),
         OkReply::DisableExec => Some(Found::DisableExec),
@@ -185,6 +223,57 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
         OkReply::UpdateMap => Some(Found::UpdateMap),
         OkReply::Init => Some(Found::Init),
         OkReply::Finish => Some(Found::Finish),
+        OkReply::XdpFlash {
+            slot,
+            generation,
+            mcu_us,
+        } => Some(Found::XdpFlash {
+            slot,
+            generation,
+            mcu_us,
+        }),
+        OkReply::XdpSwitch {
+            ok,
+            rollback,
+            severe,
+            from_slot,
+            to_slot,
+            generation,
+            quiesce_drop,
+            quiesce_pass,
+            mcu_us,
+        } => Some(Found::XdpSwitch {
+            ok,
+            rollback,
+            severe,
+            from_slot,
+            to_slot,
+            generation,
+            quiesce_drop,
+            quiesce_pass,
+            mcu_us,
+        }),
+        OkReply::GetXdpStatus {
+            boot_id,
+            active_slot,
+            staged_slot,
+            generation,
+            updating,
+            severe,
+            quiesce_drop,
+            quiesce_pass,
+            last_error,
+        } => Some(Found::GetXdpStatus {
+            boot_id,
+            active_slot,
+            staged_slot,
+            generation,
+            updating,
+            severe,
+            quiesce_drop,
+            quiesce_pass,
+            last_error,
+        }),
         OkReply::GetMap { .. } | OkReply::GetPerf { .. } => None,
     }
 }

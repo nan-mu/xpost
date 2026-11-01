@@ -19,11 +19,13 @@ use crate::client::{DEFAULT_REQUEST_TIMEOUT, GET_MAP_TIMEOUT};
 use crate::r#type::command::{Command, GET_FINISH_TIMEOUT, GET_INIT_TIMEOUT};
 
 /// Occupy App UART, exchange one command (or host-only wait), release fd on return.
+///
+/// Returns the reply index and the time the reader thread read that line.
 pub(crate) async fn run_op<E>(
     link: &AppLink,
     record: &SharedRecord,
     cmd: &Command<'_>,
-) -> core::result::Result<Found, E>
+) -> core::result::Result<(Found, SystemTime), E>
 where
     E: RequestError,
 {
@@ -50,7 +52,7 @@ where
         _ => uart.write_command(cmd.to_string().as_str())?,
     };
 
-    let found = tokio::select! {
+    let (found, at) = tokio::select! {
         biased;
         _ = link.interrupt().wait().fuse() => Err(Interrupted.into()),
         _ = tokio::time::sleep(req_timeout).fuse() => {
@@ -63,7 +65,7 @@ where
         let ok = record.materialize_ok::<E>(&found)?;
         record.lock().cmd_rx(ok_label(&ok));
     }
-    Ok(found)
+    Ok((found, at))
 }
 
 pub(crate) fn ok_label(ok: &crate::r#type::reply::OkReply<'_>) -> &'static str {
@@ -71,6 +73,7 @@ pub(crate) fn ok_label(ok: &crate::r#type::reply::OkReply<'_>) -> &'static str {
     match ok {
         OkReply::Ping => "OK ping",
         OkReply::EnableXdp => "OK enable xdp",
+        OkReply::EnableXdpStamped { .. } => "OK enable xdp",
         OkReply::DisableXdp => "OK disable xdp",
         OkReply::EnableExec => "OK enable exec",
         OkReply::DisableExec => "OK disable exec",
@@ -81,5 +84,8 @@ pub(crate) fn ok_label(ok: &crate::r#type::reply::OkReply<'_>) -> &'static str {
         OkReply::GetPerf { .. } => "OK get perf",
         OkReply::Init => "OK init",
         OkReply::Finish => "OK finish",
+        OkReply::XdpFlash { .. } => "OK xdp flash",
+        OkReply::XdpSwitch { .. } => "OK xdp switch",
+        OkReply::GetXdpStatus { .. } => "OK get xdp",
     }
 }

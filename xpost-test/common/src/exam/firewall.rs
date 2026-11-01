@@ -209,6 +209,8 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
         let miss = miss_ip(esp, &rules, &avoid);
 
         for &pps in &plan.rates {
+            // Boot leases the image. Blacklist and result maps are touched first.
+            agent.disable_xdp().await.context("disable before map")?;
             ui.check_start(&format!("insert blacklist n={size}"));
             seed_blacklist(&agent, &rules).await?;
             ui.check_ok(&format!("{} entries", rules.len()));
@@ -324,6 +326,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
         let profile = profile_for(fw, false);
         flash_ready(cfg, &agent, &ui, &mut eta, profile).await?;
         let rules = blacklist_ips(esp, 8, &[esp, host_ip]);
+        agent.disable_xdp().await.context("disable before trace map")?;
         seed_blacklist(&agent, &rules).await?;
         agent.clear_perf().await.context("clear/perf")?;
         agent.enable_xdp().await.context("enable/xdp")?;

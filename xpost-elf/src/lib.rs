@@ -285,6 +285,28 @@ fn owned_layout(bytes: Option<&[u8]>) -> Option<Option<heapless::Vec<u8, MAX_LAY
     }
 }
 
+/// Flash install alignment. A second image starts on the next sector.
+pub const INSTALL_ALIGN: usize = 0x1000;
+
+/// SHA-256 of raw image bytes, the Compact ELF trailer digest.
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
+    let dig = Sha256::digest(bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&dig);
+    out
+}
+
+/// After [`ScanOutcome::HardFail`], skip erased padding to the next sector.
+///
+/// `None` when `cursor` is already aligned: that is the end of the table, not a gap.
+pub fn skip_erased_gap(cursor: usize) -> Option<usize> {
+    if cursor.is_multiple_of(INSTALL_ALIGN) {
+        None
+    } else {
+        Some(cursor.div_ceil(INSTALL_ALIGN) * INSTALL_ALIGN)
+    }
+}
+
 /// 从偏移 `at` 尝试解析一个 Compact ELF 容器。
 pub fn scan_at(src: &mut dyn ByteSource, at: usize) -> ScanOutcome {
     let mut buf = [0u8; WIRE_BUF];

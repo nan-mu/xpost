@@ -13,14 +13,14 @@ use alloc::string::ToString;
 use portable_atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use embassy_executor::Spawner;
-use embassy_net::StackResources;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
+use embassy_net::{Ipv4Address, Ipv4Cidr, StackResources, StaticConfigV4};
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use just_tx_hal::{cag, wire};
-use log::error;
+use log::{error, info};
 use static_cell::StaticCell;
 use xpost_serial::reply::{MapError, OkReply, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
@@ -85,7 +85,9 @@ async fn main(spawner: Spawner) -> ! {
         .with_ampdu_tx_enable(false)
         .with_rx_queue_size(32)
         .with_tx_queue_size(16);
-    let (mut controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, wifi_cfg)
+    // Same RX path as the XDP boards. NoopProg only Passes, so the count stays in the socket.
+    static PASS: esp_radio::wifi::NoopProg = esp_radio::wifi::NoopProg;
+    let (mut controller, interfaces) = esp_radio::wifi::new(peripherals.WIFI, wifi_cfg, &PASS)
         .expect("Failed to initialize Wi-Fi controller");
 
     match (option_env!("WIFI_SSID"), option_env!("WIFI_PASS")) {
@@ -98,7 +100,7 @@ async fn main(spawner: Spawner) -> ! {
             controller.set_config(&station).expect("wifi set_config");
             let seed = 0xC3C3_5A5A;
             let resources = NET_RESOURCES.init(StackResources::new());
-            let net_config = embassy_net::Config::dhcpv4(Default::default());
+            let net_config = static_ipv4_config();
             let (stack, runner) = embassy_net::new(interfaces.station, net_config, resources, seed);
             spawner.spawn(net_task(runner).unwrap());
             spawner.spawn(udp_task(stack, usb_rx, spawner).unwrap());
@@ -302,4 +304,65 @@ fn ack_endpoint(src: embassy_net::IpAddress, src_port: u16) -> (embassy_net::IpA
     } else {
         (src, src_port)
     }
+}
+
+fn static_ipv4_config() -> embassy_net::Config {
+    let ip = option_env!("STA_IP").unwrap_or("192.168.110.106");
+    let gw = option_env!("STA_GW").unwrap_or("192.168.110.1");
+    let prefix: u8 = option_env!("STA_PREFIX")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(24);
+    let address = parse_v4(ip).unwrap_or_else(|| panic!("STA_IP invalid: {ip}"));
+    let gateway = parse_v4(gw).unwrap_or_else(|| panic!("STA_GW invalid: {gw}"));
+    let addr = Ipv4Address::new(
+        (address >> 24) as u8,
+        (address >> 16) as u8,
+        (address >> 8) as u8,
+        address as u8,
+    );
+    let gw_addr = Ipv4Address::new(
+        (gateway >> 24) as u8,
+        (gateway >> 16) as u8,
+        (gateway >> 8) as u8,
+        gateway as u8,
+    );
+    info!("sta static {ip}/{prefix} gw={gw}");
+    embassy_net::Config::ipv4_static(StaticConfigV4 {
+        address: Ipv4Cidr::new(addr, prefix),
+        gateway: Some(gw_addr),
+        dns_servers: Default::default(),
+    })
+}
+
+fn parse_v4(s: &str) -> Option<u32> {
+    let mut out = 0u32;
+    let mut parts = 0u8;
+    let mut acc = 0u32;
+    let mut digits = 0u8;
+    for b in s.bytes() {
+        if b == b'.' {
+            if digits == 0 || parts >= 3 {
+                return None;
+            }
+            out = (out << 8) | acc;
+            acc = 0;
+            digits = 0;
+            parts += 1;
+        } else if b.is_ascii_digit() {
+            digits += 1;
+            if digits > 3 {
+                return None;
+            }
+            acc = acc * 10 + u32::from(b - b'0');
+            if acc > 255 {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+    if parts != 3 || digits == 0 {
+        return None;
+    }
+    Some((out << 8) | acc)
 }

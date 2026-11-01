@@ -30,6 +30,15 @@ fn maybe_log_noisy(state: &Mutex<AgentState>, noisy: bool) -> bool {
     due
 }
 
+/// Unix seconds for a timestamp the UART reader took when it read the reply
+/// line. Passing that instant keeps `agent_rx` at the moment the MCU reply
+/// arrived instead of the later moment this process formats it.
+fn agent_rx_unix(at: std::time::SystemTime) -> f64 {
+    at.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 fn with_log(
     peer: &str,
     name: &str,
@@ -74,6 +83,13 @@ fn lock(state: &Mutex<AgentState>) -> Result<std::sync::MutexGuard<'_, AgentStat
 fn req<'a>(g: &'a AgentState, cmd: &Command<'_>) -> Result<OkReply<'a>> {
     g.handler
         .request::<AgentError>(cmd)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// [`req`] plus the instant the UART reader read the reply line.
+fn req_at<'a>(g: &'a AgentState, cmd: &Command<'_>) -> Result<(OkReply<'a>, std::time::SystemTime)> {
+    g.handler
+        .request_at::<AgentError>(cmd)
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -212,7 +228,15 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
     Ok(msg)
 }
 
-pub fn flash_xdp(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
+pub fn flash_xdp(
+    state: &Mutex<AgentState>,
+    name: &str,
+    slot: Option<u8>,
+    peer: &str,
+) -> Result<String> {
+    if let Some(slot) = slot {
+        return flash_xdp_slot(state, name, slot, peer);
+    }
     with_log(
         peer,
         "FlashXdp",
@@ -345,9 +369,13 @@ fn run_build(root: &Path, build: &BuildSpec, label: &str, peer: &str) -> Result<
         ),
     );
     let t0 = Instant::now();
+    // Artifact paths in profiles.toml sit under the build cwd's own target/.
+    // An inherited CARGO_TARGET_DIR compiles somewhere else and the flash
+    // then sends the stale file at the profile path.
     let status = ProcCommand::new(prog)
         .args(args)
         .current_dir(&cwd)
+        .env_remove("CARGO_TARGET_DIR")
         .status()
         .with_context(|| format!("spawn build for {label}"))?;
     let elapsed = t0.elapsed();
@@ -407,16 +435,111 @@ pub fn get_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
 pub fn enable_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     with_log(peer, "EnableXdp", "", false, state, || {
         let g = lock(state)?;
-        req(&g, &Command::EnableXdp)?;
-        Ok("OK enable xdp".into())
+        let (reply, at) = req_at(&g, &Command::EnableXdp)?;
+        let mcu_us = match reply {
+            OkReply::EnableXdpStamped { mcu_us } => mcu_us,
+            _ => 0,
+        };
+        let agent_rx = agent_rx_unix(at);
+        Ok(format!("OK enable xdp {mcu_us} agent_rx={agent_rx:.6}"))
     })
 }
 
 pub fn disable_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     with_log(peer, "DisableXdp", "", false, state, || {
         let g = lock(state)?;
-        req(&g, &Command::DisableXdp)?;
-        Ok("OK disable xdp".into())
+        let (_, at) = req_at(&g, &Command::DisableXdp)?;
+        let agent_rx = agent_rx_unix(at);
+        Ok(format!("OK disable xdp agent_rx={agent_rx:.6}"))
+    })
+}
+
+pub fn flash_xdp_slot(state: &Mutex<AgentState>, name: &str, slot: u8, peer: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("empty xdp name");
+    }
+    with_log(peer, "XdpFlash", name, false, state, || {
+        let g = lock(state)?;
+        match req_at(&g, &Command::XdpFlash { name, slot })? {
+            (
+                OkReply::XdpFlash {
+                    slot,
+                    generation,
+                    mcu_us,
+                },
+                at,
+            ) => {
+                let agent_rx = agent_rx_unix(at);
+                Ok(format!(
+                    "OK xdp flash {slot} {generation} {mcu_us} agent_rx={agent_rx:.6}"
+                ))
+            }
+            _ => bail!("unexpected xdp flash reply"),
+        }
+    })
+}
+
+pub fn switch_xdp(
+    state: &Mutex<AgentState>,
+    slot: u8,
+    generation: u32,
+    pass: bool,
+    peer: &str,
+) -> Result<String> {
+    with_log(peer, "XdpSwitch", "", false, state, || {
+        let g = lock(state)?;
+        match req_at(
+            &g,
+            &Command::XdpSwitch {
+                slot,
+                generation,
+                pass,
+            },
+        )? {
+            (
+                OkReply::XdpSwitch {
+                    ok,
+                    rollback,
+                    severe,
+                    from_slot,
+                    to_slot,
+                    generation,
+                    quiesce_drop,
+                    quiesce_pass,
+                    mcu_us,
+                },
+                at,
+            ) => {
+                let agent_rx = agent_rx_unix(at);
+                Ok(format!(
+                    "OK xdp switch {ok} {rollback} {severe} {from_slot} {to_slot} {generation} {quiesce_drop} {quiesce_pass} {mcu_us} agent_rx={agent_rx:.6}"
+                ))
+            }
+            _ => bail!("unexpected xdp switch reply"),
+        }
+    })
+}
+
+pub fn xdp_status(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
+    with_log(peer, "GetXdpStatus", "", false, state, || {
+        let g = lock(state)?;
+        match req(&g, &Command::GetXdpStatus)? {
+            OkReply::GetXdpStatus {
+                boot_id,
+                active_slot,
+                staged_slot,
+                generation,
+                updating,
+                severe,
+                quiesce_drop,
+                quiesce_pass,
+                last_error,
+            } => Ok(format!(
+                "OK get xdp {boot_id} {active_slot} {staged_slot} {generation} {updating} {severe} {quiesce_drop} {quiesce_pass} {last_error}"
+            )),
+            _ => bail!("unexpected get xdp reply"),
+        }
     })
 }
 

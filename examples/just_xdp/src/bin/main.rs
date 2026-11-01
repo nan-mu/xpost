@@ -46,7 +46,7 @@ const STIM_PORT: u16 = 8080;
 #[unsafe(link_section = ".bss")]
 static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
-/// Single RX slot (firmware-owned). Must live in IRAM (executable), not `.bss`.
+/// Primary RX slot. Loaded before lease; immutable while it is the entry.
 /// Symbol name matches xpost-build `SLOT_SYMBOL`.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".xdp.hotload_0")]

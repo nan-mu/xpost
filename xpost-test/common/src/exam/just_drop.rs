@@ -222,6 +222,8 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
         flash_and_arm(cfg, &agent, &ui, &mut eta, path, profile).await?;
 
         for &pps in &plan.rates {
+            // Boot leases the image. Map reads and writes stay outside that lease.
+            agent.disable_xdp().await.context("disable before map")?;
             agent.clear_perf().await.context("clear/perf")?;
             agent
                 .clear_map(MAP_NAME)

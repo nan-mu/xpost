@@ -192,13 +192,14 @@ Continue to read its terminal output.
 ### Experiment settings
 
 The `run` list in `config/default.toml` selects the experiments and their order.
-The supported entries are `just_tx`, `just_drop`, `firewall`, `exec_bench`, `lookup`, `dev`, `formal-clear`, and `case`.
+The supported entries are `just_tx`, `just_drop`, `firewall`, `exec_bench`, `lookup`, `dev`, `formal-clear`, `case`, and `hot_swap`.
 The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` settings.
 
 - Only `just_tx`: `run = ["just_tx"]`.
 - Only `firewall`: `run = ["firewall"]`.
-- Current selection: `run = ["case"]`.
-- `case` flashes `examples/case_xdp` once. It installs `case_swap`, then disables XDP and installs `case_mark`. `rxcnt` is cleared and read only while XDP is disabled. Scored frames carry `CASE0` through `CASE3`; tcpdump stdout is stored in `case_obs.tcpdump`. No capture file is written on TR3000.
+- Current selection: `run = ["case", "hot_swap"]`.
+- `case` flashes `examples/case_xdp` once and checks both images. `case_swap` rewrites the IPv4 destination to `203.0.113.10`. `case_mark` rewrites it to `203.0.113.77`. Both return `XDP_TX` for the same UDP payload. The latency loop then installs both images into the cold table once. That install may reboot and is not timed. The timed loop uses one slot only: each repeat stops XDP, copies the next image from the cold table over slot 0, and starts XDP again, while a 2 ms `CASE0` stream stays up for 100 repeats. Odd repeats copy `case_mark`, even repeats copy `case_swap`. Slot 1 is never touched and the cold table is not erased inside the loop. Stages, all offsets from the test clock at the `disable` command: `stopped_ms` when disable returned, `copied_ms` when the copy returned, `started_ms` when enable returned, `last old frame`, and `end` for the first DUT frame with the new destination. `mcu_us` is the device clock when `enable` published the new entry. `disable_rx` and `agent_rx` are agent clock instants when the two UART replies were read. `rxcnt` is cleared and read only while XDP is disabled, during the functional checks. Scored frames carry `CASE0` through `CASE3`. No capture file is written on TR3000.
+- `hot_swap` uses the same firmware. Cold install of `case_swap` and `case_mark_idle` may reboot and is not timed. The exam drops the lease, copies each image into its slot, and leases slot 0. A 2 ms `CASE0` stream stays up for 100 switches, alternating slot 1 and slot 0. The slot a switch leaves stays `Staged` with its original generation, so the return does not copy. Stages are `start`, `last old frame`, `end`, and `switched_ms` when the switch returned. `mcu_us` is taken when the new entry is admitted.
 - All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
 - All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
 
@@ -272,10 +273,10 @@ The `profiles.toml` registry contains fifteen `[[fw]]` names:
 - Lookup side runs: `just-tx-cag-lookup`, `just-drop-cag-lookup`, and `firewall-cag-lookup`.
 - HAL: `just-tx-hal`, `just-drop-hal`, and `firewall-hal`.
 - Exec: `exec-bench-ebpf` and `exec-bench-hal`.
-- Case: `case-cag` (`examples/case_xdp`). Its `xdp` list is empty. The exam installs images itself.
+- Case: `case-cag` (`examples/case_xdp`). Its `xdp` list is empty. The exam installs images itself. This build does not enable `perf-cag` or `perf-t`. Packet counters, histograms, gauges, and trace rings are absent. `get perf` returns unavailable. Release builds compile out `info`, `debug`, and `trace` logs.
 
 Its network `[[xdp]]` names are `just_tx`, `just_drop`, and `firewall`.
-Its case `[[xdp]]` names are `case_swap` and `case_mark`. `case_swap.c` swaps the IPv4 addresses and UDP ports. `case_mark.c` writes destination `203.0.113.77`. Both are linked against the `case_xdp` firmware ELF.
+Its case `[[xdp]]` names are `case_swap` and `case_mark`. `case_swap.c` writes destination `203.0.113.10`. `case_mark.c` writes destination `203.0.113.77`. Both return `XDP_TX` and are linked against the `case_xdp` firmware ELF.
 Its exec `[[xdp]]` names are `incr`, `square`, `bitswap`, `fib`, `buf`, `memcpy`, `fletcher32`, and `bsort`.
 The `exec-bench-ebpf` firmware profile installs `incr` by default.
 The `exec-bench-hal` profile omits `xdp`, which defaults to an empty list.
@@ -373,8 +374,7 @@ Preserve the ABI and linker layout shared with libbpf-mcu through the XPM1 contr
 XDP firmware calls `xpost_build::firmware_codegen()` in `build.rs`.
 It reads `[package.metadata.xpost]` defaults from the root crate, applies board overrides, and derives the cold Flash span from `partitions.csv`.
 The `xpost-build/xpost-link` wrapper embeds the `.xpost.mem` XPM1 contract into the linked Firmware ELF for host tools.
-The current XDP boards each override the layout to one primary slot `a`, with `mount = "rx"`.
-The library defaults also define slot `b`.
+`just_xdp`, `firewall`, and `exec_bench` each register one primary slot. `case_xdp` registers slot `a` (`.xdp.hotload_0`, `mount = "rx"`) as the leased entry and slot `b` (`.xdp.hotload_1`, `mount = "call"`). Slot `b` runs only after `xdp switch`. XPM1 carries slot `a`. `case_swap` and `case_mark` stay linked there. `libbpf-mcu --slot-symbol xdp_slot_idle --image-name case_mark_idle` links the same `case_mark` source at slot `b`.
 
 ### Maps and boot
 
@@ -383,16 +383,24 @@ The XDP firmware starts the runtimes in this order:
 1. `MapRt::init` claims the talc heap.
 2. `XdpRt::init` registers slots and scans the cold XDP ELF images.
 3. Inside `XdpRt::init`, `create_required_maps` calls `MapRt::create` for missing `required_maps` and checks existing maps.
-4. The board switches the first discovered image into the primary slot.
+4. A single-slot board switches image 0 into the primary slot. `case_xdp` switches the image whose link address is slot 0.
 5. The board attempts to lease the image.
 6. The board drops the runtime guards before RX or exec commands start.
 
 Without an active lease, ingress passes packets to the network stack.
+After the lease is active, a flight fault drops the frame and increments a runtime-error counter.
+Faults are a lost `IN_FLIGHT` claim, a zero entry, a bad `xdp_md` window, and a misaligned stack.
 HAL firmware uses application arrays/hash maps and does not initialize `MapRt` or `XdpRt`.
 
 When it leases an image, the runtime installs VMR-to-RMA aliases from `aot_binds` through `set_map_aliases`.
 Map names reside in `MapRt` metadata and XDP ELF descriptors.
 There is no userspace `register_map_name` path.
+`XdpRt::lease` closes the `MapRt` control plane before it publishes `ACTIVE`.
+Reads and writes then return `Busy`, including `get map`.
+BPF helpers still use the maps during a flight.
+`XdpRt::release` opens the control plane only after `IN_FLIGHT` drains and map users drop.
+
+`XdpRt::switch` is the boot-only copy. It refuses while leased. UART `xdp flash <name> <slot>` copies a cold image into a slot and does not reset. A dropped lease can fill every slot, including the primary index. A running slot is refused with `ActiveSlot`: the only way to replace a leased primary image is to stop XDP, copy, then start it again. A copied slot stays `Staged` and does not change `PRIMARY_ENTRY` or `ACTIVE`; the reply's `mcu_us` is 0. `POST /v1/flash/xdp` with `slot` sends that command. The HTTP message appends `agent_rx=<unix seconds>`, the agent clock when the MCU reply was read. A flash without `slot` still writes the cold table and resets. UART `xdp switch <slot> <generation> <drop|pass>` is the leased publish: it pauses new flights, waits until `IN_FLIGHT` is 0, rebinds aliases, stores `PRIMARY_ENTRY`, and keeps the lease. The slot it leaves stays `Staged` with the generation it was published under, so the host can publish it again without copying. `POST /v1/xdp/switch` sends it and appends the same `mcu_us` and `agent_rx`. `enable` and `disable` only open and close the lease. They do not copy cold bytes and do not move the entry between slots. `enable` replies `OK enable xdp <mcu_us>` with the device clock after `ACTIVE` becomes true; `disable` appends only `agent_rx`. `disable` sets every slot phase to Empty. The host chooses which slot to publish next. There is no retained role and no `rollback` command. The slot copy checks the digest, link address, helper, and maps. A failed publish restores the previous aliases; if that restore fails the runtime stays paused and drops new packets. `IN_FLIGHT == 0` does not drain the driver's async `XDP_TX` queue, so the previous image's map users stay. Call these from the control plane, not from the RX callback. Quiesce `drop` is the default; `pass` is selectable. Those counts are in `get xdp`, not in the 184-byte perf blob. `get xdp` is boot, active, staged, generation, updating, severe, quiesce drop, quiesce pass, and last error. This path does not reopen the `MapRt` control plane. It does not upload a new image while the firmware stays up.
 
 Control-plane errors use the small enums in `crate::error` for each public entry point.
 BPF helper errno values use `map::ops::MapOpError`.
@@ -441,6 +449,7 @@ UDP application logic remains in the firmware crate.
 With `exec-call`, `ext::exec_call::invoke(&mut [u8])` calls the same lease-controlled `xdp::ingress::run` function.
 This interface does not attach another network ingress hook.
 Without an active lease, it returns `XdpAction::Pass` and the full buffer.
+A flight fault returns `XdpAction::Drop`.
 The image uses the caller's stack. There is no dedicated XDP stack switch.
 HAL CAGT values use the same wire layout but measure application-level intervals.
 Compare measurement boundaries before comparing HAL and XDP metrics with the same name.

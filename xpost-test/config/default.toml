@@ -14,9 +14,10 @@ version = "1"
 
 # Ordered experiments for bare `./xpost-test`.
 # HAL smoke: `dev`. Formal: just_tx / just_drop / firewall / exec_bench. Wipe: formal-clear.
-# `case` flashes examples/case_xdp once, then swaps case_swap and case_mark.
+# `case` flashes examples/case_xdp once, then reflashes case_swap and case_mark.
+# `hot_swap` uses that same firmware. Both images stay installed, and activate publishes the idle slot.
 # Capture is tcpdump stdout stored in formal.case_obs. No pcap file.
-run = ["case"]
+run = ["case", "hot_swap"]
 
 [postgres]
 host = "192.168.110.96"

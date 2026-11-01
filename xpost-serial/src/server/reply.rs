@@ -23,9 +23,80 @@ pub fn write_ok<E>(
     reply: &OkReply<'_>,
     mut write_all: impl FnMut(&[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
+    match reply {
+        OkReply::XdpFlash {
+            slot,
+            generation,
+            mcu_us,
+        } => {
+            return write_nums(
+                b"OK xdp flash",
+                &[u32::from(*slot), *generation, *mcu_us],
+                write_all,
+            );
+        }
+        OkReply::XdpSwitch {
+            ok,
+            rollback,
+            severe,
+            from_slot,
+            to_slot,
+            generation,
+            quiesce_drop,
+            quiesce_pass,
+            mcu_us,
+        } => {
+            return write_nums(
+                b"OK xdp switch",
+                &[
+                    u32::from(*ok),
+                    u32::from(*rollback),
+                    u32::from(*severe),
+                    u32::from(*from_slot),
+                    u32::from(*to_slot),
+                    *generation,
+                    *quiesce_drop,
+                    *quiesce_pass,
+                    *mcu_us,
+                ],
+                write_all,
+            );
+        }
+        OkReply::GetXdpStatus {
+            boot_id,
+            active_slot,
+            staged_slot,
+            generation,
+            updating,
+            severe,
+            quiesce_drop,
+            quiesce_pass,
+            last_error,
+        } => {
+            return write_nums(
+                b"OK get xdp",
+                &[
+                    *boot_id,
+                    u32::from(*active_slot),
+                    u32::from(*staged_slot),
+                    *generation,
+                    u32::from(*updating),
+                    u32::from(*severe),
+                    *quiesce_drop,
+                    *quiesce_pass,
+                    u32::from(*last_error),
+                ],
+                write_all,
+            );
+        }
+        _ => {}
+    }
     let line: &[u8] = match reply {
         OkReply::Ping => b"OK ping\n",
         OkReply::EnableXdp => b"OK enable xdp\n",
+        OkReply::EnableXdpStamped { mcu_us } => {
+            return write_nums(b"OK enable xdp", &[*mcu_us], write_all);
+        }
         OkReply::DisableXdp => b"OK disable xdp\n",
         OkReply::EnableExec => b"OK enable exec\n",
         OkReply::DisableExec => b"OK disable exec\n",
@@ -37,8 +108,46 @@ pub fn write_ok<E>(
         OkReply::Finish => b"OK finish\n",
         OkReply::GetMap { blob } => return write_blob(b"OK get map ", blob, write_all),
         OkReply::GetPerf { blob } => return write_blob(b"OK get perf ", blob, write_all),
+        OkReply::XdpFlash { .. }
+        | OkReply::XdpSwitch { .. }
+        | OkReply::GetXdpStatus { .. } => return Ok(()),
     };
     write_all(line)
+}
+
+fn write_nums<E>(
+    prefix: &[u8],
+    nums: &[u32],
+    mut write_all: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut buf = [0u8; 128];
+    let mut n = 0;
+    buf[..prefix.len()].copy_from_slice(prefix);
+    n += prefix.len();
+    for num in nums {
+        buf[n] = b' ';
+        n += 1;
+        n += write_u32(&mut buf[n..], *num);
+    }
+    buf[n] = b'\n';
+    n += 1;
+    write_all(&buf[..n])
+}
+
+fn write_u32(dst: &mut [u8], mut num: u32) -> usize {
+    let mut tmp = [0u8; 10];
+    let mut i = tmp.len();
+    loop {
+        i -= 1;
+        tmp[i] = b'0' + (num % 10) as u8;
+        num /= 10;
+        if num == 0 {
+            break;
+        }
+    }
+    let digits = &tmp[i..];
+    dst[..digits.len()].copy_from_slice(digits);
+    digits.len()
 }
 
 fn write_blob<E>(

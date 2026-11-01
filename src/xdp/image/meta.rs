@@ -23,8 +23,9 @@ pub enum XdpLocation {
 
 /// Runtime image record — only what lease/move/bind need after load validation.
 ///
-/// Wire-only fields (ELF header constants, xpost_version, machine, shoff, digest, …)
+/// Wire-only fields (ELF header constants, xpost_version, machine, shoff, …)
 /// are checked during Compact ELF scan and **not** retained here.
+/// `digest` is the image SHA-256 checked again at stage.
 #[derive(Clone)]
 pub(crate) struct XdpMeta {
     pub(crate) name: String,
@@ -38,6 +39,8 @@ pub(crate) struct XdpMeta {
     /// Absolute cold-region offset of the IMAGE payload.
     pub(crate) image_abs: usize,
     pub(crate) image_len: usize,
+    /// SHA-256 of the image payload, from the Compact ELF trailer.
+    pub(crate) digest: [u8; 32],
     /// Compact ELF container length (for cold-region scan cursor).
     pub(crate) container_len: usize,
     pub(crate) location: XdpLocation,

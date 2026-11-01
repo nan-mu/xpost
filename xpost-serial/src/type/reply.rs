@@ -8,6 +8,13 @@
 pub enum OkReply<'a> {
     Ping,
     EnableXdp,
+    /// `OK enable xdp <mcu_us>` — the firmware published the leased entry.
+    ///
+    /// `mcu_us` is the device microsecond counter read after `ACTIVE` becomes
+    /// true. A firmware that does not stamp the lease replies `OK enable xdp`.
+    EnableXdpStamped {
+        mcu_us: u32,
+    },
     DisableXdp,
     EnableExec,
     DisableExec,
@@ -21,6 +28,41 @@ pub enum OkReply<'a> {
     /// `OK get perf <n>` + `n` blob bytes.
     GetPerf {
         blob: &'a [u8],
+    },
+    /// `OK xdp flash <slot> <generation> <mcu_us>`.
+    ///
+    /// `mcu_us` is the device microsecond counter at publish. It is 0 when the
+    /// copy does not publish.
+    XdpFlash {
+        slot: u8,
+        generation: u32,
+        mcu_us: u32,
+    },
+    /// `OK xdp switch <ok> <rollback> <severe> <from> <to> <gen> <drop> <pass> <mcu_us>`.
+    XdpSwitch {
+        ok: u8,
+        rollback: u8,
+        severe: u8,
+        from_slot: u8,
+        to_slot: u8,
+        generation: u32,
+        quiesce_drop: u32,
+        quiesce_pass: u32,
+        mcu_us: u32,
+    },
+    /// `OK get xdp <boot> <active> <staged> <gen> <updating> <severe> <drop> <pass> <err>`.
+    ///
+    /// Slot `255` means that role is empty.
+    GetXdpStatus {
+        boot_id: u32,
+        active_slot: u8,
+        staged_slot: u8,
+        generation: u32,
+        updating: u8,
+        severe: u8,
+        quiesce_drop: u32,
+        quiesce_pass: u32,
+        last_error: u8,
     },
     /// Unsolicited `OK init` after App-mode init finishes.
     ///

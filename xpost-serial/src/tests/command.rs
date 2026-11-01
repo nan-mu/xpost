@@ -40,6 +40,36 @@ fn assert_cmd_eq(got: &Command<'_>, expect: &Command<'_>) {
             assert_eq!(ak, bk, "map key");
             assert_eq!(av, bv, "map value");
         }
+        (
+            Command::XdpFlash {
+                name: a,
+                slot: aslot,
+            },
+            Command::XdpFlash {
+                name: b,
+                slot: bslot,
+            },
+        ) => {
+            assert_eq!(a, b);
+            assert_eq!(aslot, bslot);
+        }
+        (
+            Command::XdpSwitch {
+                slot: aslot,
+                generation: agen,
+                pass: apass,
+            },
+            Command::XdpSwitch {
+                slot: bslot,
+                generation: bgen,
+                pass: bpass,
+            },
+        ) => {
+            assert_eq!(aslot, bslot);
+            assert_eq!(agen, bgen);
+            assert_eq!(apass, bpass);
+        }
+        (Command::GetXdpStatus, Command::GetXdpStatus) => {}
         _ => panic!("command variant mismatch"),
     }
 }
@@ -128,6 +158,28 @@ fn get_init_is_not_wire() {
         Err(_) => panic!("expected Unknown for `get init`"),
         Ok(_) => panic!("`get init` must not parse as a wire command"),
     }
+}
+
+#[test]
+fn xdp_stage() {
+    roundtrip(Command::XdpFlash {
+        name: "hot_mark",
+        slot: 1,
+    });
+}
+
+#[test]
+fn xdp_activate() {
+    roundtrip(Command::XdpSwitch {
+        slot: 1,
+        generation: 3,
+        pass: false,
+    });
+}
+
+#[test]
+fn get_xdp_status() {
+    roundtrip(Command::GetXdpStatus);
 }
 
 #[test]

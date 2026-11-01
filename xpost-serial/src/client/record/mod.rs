@@ -109,11 +109,15 @@ impl SharedRecordInner {
     }
 
     /// Wait for a matching reply after `after` (caller races timeout / interrupt).
+    ///
+    /// Also returns the timestamp of the UART line that carried the reply, taken
+    /// by the reader thread when it read that line. That is the instant the host
+    /// received the MCU reply, which a later `now()` in the caller is not.
     pub(crate) async fn wait_reply<E>(
         &self,
         cmd: &Command<'_>,
         after: SystemTime,
-    ) -> core::result::Result<Found, E>
+    ) -> core::result::Result<(Found, SystemTime), E>
     where
         E: crate::client::error::RequestError,
     {
@@ -405,6 +409,7 @@ impl Record {
         Ok(match found {
             Found::Ping => OkReply::Ping,
             Found::EnableXdp => OkReply::EnableXdp,
+            Found::EnableXdpStamped { mcu_us } => OkReply::EnableXdpStamped { mcu_us: *mcu_us },
             Found::DisableXdp => OkReply::DisableXdp,
             Found::EnableExec => OkReply::EnableExec,
             Found::DisableExec => OkReply::DisableExec,
@@ -419,6 +424,57 @@ impl Record {
             },
             Found::Init => OkReply::Init,
             Found::Finish => OkReply::Finish,
+            Found::XdpFlash {
+                slot,
+                generation,
+                mcu_us,
+            } => OkReply::XdpFlash {
+                slot: *slot,
+                generation: *generation,
+                mcu_us: *mcu_us,
+            },
+            Found::XdpSwitch {
+                ok,
+                rollback,
+                severe,
+                from_slot,
+                to_slot,
+                generation,
+                quiesce_drop,
+                quiesce_pass,
+                mcu_us,
+            } => OkReply::XdpSwitch {
+                ok: *ok,
+                rollback: *rollback,
+                severe: *severe,
+                from_slot: *from_slot,
+                to_slot: *to_slot,
+                generation: *generation,
+                quiesce_drop: *quiesce_drop,
+                quiesce_pass: *quiesce_pass,
+                mcu_us: *mcu_us,
+            },
+            Found::GetXdpStatus {
+                boot_id,
+                active_slot,
+                staged_slot,
+                generation,
+                updating,
+                severe,
+                quiesce_drop,
+                quiesce_pass,
+                last_error,
+            } => OkReply::GetXdpStatus {
+                boot_id: *boot_id,
+                active_slot: *active_slot,
+                staged_slot: *staged_slot,
+                generation: *generation,
+                updating: *updating,
+                severe: *severe,
+                quiesce_drop: *quiesce_drop,
+                quiesce_pass: *quiesce_pass,
+                last_error: *last_error,
+            },
         })
     }
 

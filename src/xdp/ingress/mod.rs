@@ -13,8 +13,8 @@
 //! This crate targets RV32 only; typecheck with `cargo check` / `cargo check-c3`
 //! (root `.cargo/config.toml` sets `--target riscv32imc-unknown-none-elf`).
 
-mod stack;
 mod prog;
+mod stack;
 
 pub(crate) mod ctx;
 #[cfg(feature = "esp-radio")]
@@ -31,9 +31,13 @@ pub(crate) use prog::XdpProg;
 
 use core::sync::atomic::Ordering;
 
+use xpost_type::XdpAction;
+
 use crate::xdp::{
     ingress::ctx::XdpMd,
-    state::{ACTIVE, IN_FLIGHT, PRIMARY_ENTRY},
+    state::{
+        ACTIVE, IN_FLIGHT, PAUSE, PRIMARY_ENTRY, QUIESCE_DROPS, QUIESCE_PASS, QUIESCE_PASSES,
+    },
 };
 
 /// Invoke scratch in `.bss`: `[sp, ra, s0..s11]` (14 × `usize`), byte offsets 0..52.
@@ -58,7 +62,10 @@ struct RunResult {
 /// Lease flight for the crate-mounted [`XdpProg`](prog::XdpProg).
 ///
 /// Returns Linux-style [`XdpAction`](xpost_type::XdpAction) + window. Driver
-/// maps to Pass/Drop/Tx. Invalid md windows bump soft-fail and fail closed.
+/// maps to Pass/Drop/Tx. A clear [`ACTIVE`] flag passes the frame (feature off).
+/// After [`ACTIVE`] is set, a flight fault returns [`XdpAction::Drop`].
+/// A hot-update [`PAUSE`](crate::xdp::state::PAUSE) applies the quiesce policy
+/// without entering either image. Those frames are counted in `get xdp`.
 #[esp_hal::ram]
 pub(crate) fn run<'a>(frame: &'a mut [u8]) -> (xpost_type::XdpAction, &'a mut [u8]) {
     use xpost_type::XdpAction;
@@ -67,28 +74,23 @@ pub(crate) fn run<'a>(frame: &'a mut [u8]) -> (xpost_type::XdpAction, &'a mut [u
         return (XdpAction::Pass, frame);
     }
     let Some(result) = xdp(frame) else {
-        return (XdpAction::Pass, frame);
+        return (XdpAction::Drop, frame);
     };
     let act = XdpAction::from(result.action);
     let window = result.window;
-    let valid =
-        (window.data.cast_const() == frame.as_ptr()) & (window.len <= frame.len());
+    let valid = (window.data.cast_const() == frame.as_ptr()) & (window.len <= frame.len());
     if !valid {
         #[cfg(feature = "perf-counter")]
         crate::ext::perf::counter::inc_bad_md();
-        let bad = match act {
-            XdpAction::Tx => XdpAction::Drop,
-            other => other,
-        };
-        return (bad, frame);
+        return (XdpAction::Drop, frame);
     }
     (act, &mut frame[..window.len])
 }
 
 /// Claim `IN_FLIGHT`, validate lease/entry, [`inner_xdp`] the image, return md window.
 ///
-/// Returns `None` when not leased, raced with release, or reentrancy is
-/// detected. Caller treats as PASS.
+/// Returns `None` when the flight cannot start or the md length is corrupt.
+/// Each path bumps a runtime-error counter. Caller drops the frame.
 #[esp_hal::ram]
 fn xdp(data: &mut [u8]) -> Option<RunResult> {
     let mut ctx_md = XdpMd::from_buf(data);
@@ -103,6 +105,26 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
     {
         #[cfg(feature = "perf-counter")]
         crate::ext::perf::counter::inc_reentry();
+        return None;
+    }
+    // Dekker pair with `XdpRt::activate`: PAUSE store, then wait IN_FLIGHT==0,
+    // then store PRIMARY_ENTRY. A flight that passes this load runs the entry
+    // sampled below; activate will not publish until it finishes.
+    // A flight that observes PAUSE does not run either image. PASS and DROP
+    // are counted apart from feature-off PASS and from a program XDP_DROP.
+    if PAUSE.load(Ordering::SeqCst) {
+        IN_FLIGHT.store(0, Ordering::Release);
+        if QUIESCE_PASS.load(Ordering::SeqCst) {
+            QUIESCE_PASSES.fetch_add(1, Ordering::Relaxed);
+            return Some(RunResult {
+                action: XdpAction::Pass as i32,
+                window: PacketWindow {
+                    data: data.as_mut_ptr(),
+                    len: data.len(),
+                },
+            });
+        }
+        QUIESCE_DROPS.fetch_add(1, Ordering::Relaxed);
         return None;
     }
     // Dekker pair with `XdpRt::release` (ACTIVE=false → wait IN_FLIGHT==0):
@@ -122,7 +144,11 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
     IN_FLIGHT.store(0, Ordering::Release);
 
     let data = ctx_md.data;
-    let len = (ctx_md.data_end as usize).checked_sub(data as usize)?;
+    let Some(len) = (ctx_md.data_end as usize).checked_sub(data as usize) else {
+        #[cfg(feature = "perf-counter")]
+        crate::ext::perf::counter::inc_bad_md();
+        return None;
+    };
     Some(RunResult {
         action,
         window: PacketWindow { data, len },
@@ -147,7 +173,7 @@ unsafe fn inner_xdp(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
     if sp & 15 != 0 {
         #[cfg(feature = "perf-counter")]
         crate::ext::perf::counter::inc_stack_misalign();
-        return 2; // XDP_PASS
+        return xpost_type::XdpAction::Drop as i32;
     }
 
     let result: i32;

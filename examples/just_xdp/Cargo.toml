@@ -13,7 +13,7 @@ path = "./src/bin/main.rs"
 [package.metadata.espflash]
 partition_table = "partitions.csv"
 
-# Single-slot board override (xpost library metadata still lists optional slot b).
+# Single primary slot.
 [package.metadata.xpost]
 schema_version = 1
 

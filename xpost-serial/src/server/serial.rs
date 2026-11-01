@@ -103,6 +103,12 @@ impl<R, W, H: RequestHandler, const N: usize> SerialHandlerBuilder<R, W, H, N> {
         on_clear_perf() => Command::ClearPerf);
     register!(/// Register performance reporting, e.g. a closure calling `report_perf`.
         on_get_perf() => Command::GetPerf);
+    register!(/// Copy a cold image into a slot. Does not publish it.
+        on_xdp_flash(name: &str, slot: u8) => Command::XdpFlash { name, slot });
+    register!(/// Quiesce and publish a filled slot without dropping the lease.
+        on_xdp_switch(slot: u8, generation: u32, pass: bool) => Command::XdpSwitch { slot, generation, pass });
+    register!(/// Report boot id, slot roles and quiesce counts.
+        on_get_xdp_status() => Command::GetXdpStatus);
 
     /// Freeze registration, moving adapters, buffer and all captures into the handler.
     pub fn build(self) -> SerialHandler<R, W, H, N> {

@@ -20,6 +20,8 @@ pub enum MapCreateError {
     AlreadyExists,
     TypeMismatch,
     Oom,
+    /// Datapath is leased or a flight still owns the maps.
+    Busy,
 }
 
 /// [`crate::map::MapRt::check`].
@@ -27,6 +29,8 @@ pub enum MapCreateError {
 pub enum MapCheckError {
     NotFound,
     TypeMismatch,
+    /// Datapath is leased or a flight still owns the maps.
+    Busy,
 }
 
 /// [`crate::map::MapRt::find`] / [`crate::map::MapGuard`] accessors.
@@ -100,6 +104,8 @@ pub enum XdpSwitchError {
     SlotAddressAlign,
     MapsRequired,
     MissingMap,
+    /// Leased image's aliases do not cover the incoming image's binds.
+    MapBind,
     MapCheck(MapCheckError),
 }
 
@@ -167,12 +173,14 @@ impl_error_display! {
     Self::AlreadyExists => "already exists",
     Self::TypeMismatch => "map type/layout mismatch",
     Self::Oom => "out of memory",
+    Self::Busy => "busy",
 }
 
 impl_error_display! {
     MapCheckError,
     Self::NotFound => "not found",
     Self::TypeMismatch => "map type/layout mismatch",
+    Self::Busy => "busy",
 }
 
 impl_error_display! {
@@ -248,6 +256,7 @@ impl XdpSwitchError {
             Self::SlotAddressAlign => "slot address align",
             Self::MapsRequired => "maps required but none",
             Self::MissingMap => "missing map",
+            Self::MapBind => "map bind mismatch",
             Self::MapCheck(e) => e.as_str(),
         }
     }
@@ -345,5 +354,93 @@ impl From<FlashError> for XdpSwitchError {
 impl From<allocator_api2::alloc::AllocError> for MapCreateError {
     fn from(_: allocator_api2::alloc::AllocError) -> Self {
         Self::Oom
+    }
+}
+
+/// [`crate::xdp::XdpRt::stage`] and [`crate::xdp::XdpRt::activate`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XdpSwapError {
+    NotLeased,
+    ActiveSlot,
+    SlotOccupied,
+    UnknownSlot,
+    UnknownImage,
+    BadGeneration,
+    NoStaged,
+    ImageEmpty,
+    ImageTooLarge,
+    ScratchTooSmall,
+    Arch,
+    HelperAddress,
+    HelperAddressMismatch,
+    SlotAddress,
+    SlotAddressAlign,
+    Digest,
+    MissingMap,
+    MapsRequired,
+    AliasFull,
+    Busy,
+    Storage,
+    /// Alias restore failed. The datapath stays in the quiesce drop policy.
+    RollbackFailed,
+    Map(MapUseError),
+    MapCheck(MapCheckError),
+}
+
+impl XdpSwapError {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotLeased => "not leased",
+            Self::ActiveSlot => "active slot",
+            Self::SlotOccupied => "slot occupied",
+            Self::UnknownSlot => "unknown slot",
+            Self::UnknownImage => "unknown image",
+            Self::BadGeneration => "bad generation",
+            Self::NoStaged => "nothing staged",
+            Self::ImageEmpty => "image empty",
+            Self::ImageTooLarge => "image exceeds slot",
+            Self::ScratchTooSmall => "scratch too small",
+            Self::Arch => "arch mismatch",
+            Self::HelperAddress => "helper address",
+            Self::HelperAddressMismatch => "helper address mismatch",
+            Self::SlotAddress => "slot address",
+            Self::SlotAddressAlign => "slot address align",
+            Self::Digest => "digest mismatch",
+            Self::MissingMap => "missing map",
+            Self::MapsRequired => "maps required but none",
+            Self::AliasFull => "alias table full",
+            Self::Busy => "busy",
+            Self::Storage => "storage error",
+            Self::RollbackFailed => "rollback failed",
+            Self::Map(e) => e.as_str(),
+            Self::MapCheck(e) => e.as_str(),
+        }
+    }
+
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::NotLeased => 11,
+            Self::ActiveSlot => 1,
+            Self::SlotOccupied => 3,
+            Self::BadGeneration => 4,
+            Self::SlotAddress | Self::SlotAddressAlign => 5,
+            Self::Digest => 6,
+            Self::MissingMap | Self::MapsRequired | Self::MapCheck(_) | Self::Map(_) => 7,
+            Self::NoStaged => 8,
+            Self::RollbackFailed => 10,
+            _ => 12,
+        }
+    }
+}
+
+impl fmt::Display for XdpSwapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<FlashError> for XdpSwapError {
+    fn from(_: FlashError) -> Self {
+        Self::Storage
     }
 }

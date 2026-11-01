@@ -50,6 +50,38 @@ fn name(token: &[u8]) -> Result<&str, ParseCommandError> {
     core::str::from_utf8(token).map_err(|_| ParseCommandError::InvalidUtf8)
 }
 
+fn parse_u32(token: &[u8]) -> Result<u32, ParseCommandError> {
+    if token.is_empty() || token.len() > 10 {
+        return Err(ParseCommandError::BadArity);
+    }
+    let mut n: u32 = 0;
+    for b in token {
+        let d = b.wrapping_sub(b'0');
+        if d > 9 {
+            return Err(ParseCommandError::BadArity);
+        }
+        n = n
+            .checked_mul(10)
+            .and_then(|n| n.checked_add(u32::from(d)))
+            .ok_or(ParseCommandError::BadArity)?;
+    }
+    Ok(n)
+}
+
+fn parse_u8(token: &[u8]) -> Result<u8, ParseCommandError> {
+    u8::try_from(parse_u32(token)?).map_err(|_| ParseCommandError::BadArity)
+}
+
+fn parse_policy(token: &[u8]) -> Result<bool, ParseCommandError> {
+    if keyword(token, b"pass") {
+        Ok(true)
+    } else if keyword(token, b"drop") {
+        Ok(false)
+    } else {
+        Err(ParseCommandError::BadArity)
+    }
+}
+
 fn no_args(input: &mut &[u8]) -> Result<(), ParseCommandError> {
     eof::<_, EmptyError>
         .void()
@@ -106,6 +138,26 @@ pub fn parse_command(mut line: &[u8]) -> Result<Command<'_>, ParseCommandError> 
     } else if keyword(verb, b"get") && keyword(target, b"map") {
         Ok(Command::GetMap {
             name: map_name(&mut line)?,
+        })
+    } else if keyword(verb, b"get") && keyword(target, b"xdp") {
+        no_args(&mut line)?;
+        Ok(Command::GetXdpStatus)
+    } else if keyword(verb, b"xdp") && keyword(target, b"flash") {
+        let (raw_name, raw_slot, _) = (token, token, eof::<_, EmptyError>)
+            .parse_next(&mut line)
+            .map_err(|_| ParseCommandError::BadArity)?;
+        Ok(Command::XdpFlash {
+            name: name(raw_name)?,
+            slot: parse_u8(raw_slot)?,
+        })
+    } else if keyword(verb, b"xdp") && keyword(target, b"switch") {
+        let (raw_slot, raw_gen, raw_policy, _) = (token, token, token, eof::<_, EmptyError>)
+            .parse_next(&mut line)
+            .map_err(|_| ParseCommandError::BadArity)?;
+        Ok(Command::XdpSwitch {
+            slot: parse_u8(raw_slot)?,
+            generation: parse_u32(raw_gen)?,
+            pass: parse_policy(raw_policy)?,
         })
     } else if keyword(verb, b"update") && keyword(target, b"map") {
         let (raw_name, key, value, _) = (token, token, token, eof::<_, EmptyError>)

@@ -7,13 +7,16 @@ pub(crate) mod map;
 mod ready;
 pub(crate) mod slot;
 mod state;
+mod swap;
 pub(crate) mod table;
 // TODO: `pub(crate) mod faults` — sibling error counters for ELF collect / ingress / table
 // (see plan XDP ELF faults-module; not implemented this phase).
 
 pub use crate::error::{
-    XdpInitError, XdpLeaseError, XdpReleaseError, XdpSlotError, XdpSwitchError,
+    XdpInitError, XdpLeaseError, XdpReleaseError, XdpSlotError, XdpSwapError, XdpSwitchError,
 };
+pub use state::set_boot_id;
+pub use swap::{QuiescePolicy, StageReport, SwitchReport, XdpStatus};
 pub use crate::{RtMutex, RtMutexGuard};
 pub(crate) use image::XdpMeta;
 pub use image::{Complete, Incomplete, XdpBuilder, XdpLocation, XdpMaps};
@@ -33,7 +36,7 @@ use crate::{
     xdp::{
         map::MapLease,
         ready::ReadyError,
-        state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PRIMARY_ENTRY},
+        state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PAUSE, PRIMARY_ENTRY},
     },
 };
 pub type XdpId = usize;
@@ -50,6 +53,7 @@ pub(crate) struct SlotState {
     pub(crate) slot: XdpSlot,
     pub(crate) loaded_len: usize,
     pub(crate) image: Option<XdpId>,
+    pub(crate) phase: swap::SlotPhase,
 }
 
 pub(crate) struct ImageRecord {
@@ -63,6 +67,10 @@ pub struct XdpRt {
     pub(crate) images: heapless::Vec<ImageRecord, MAX_IMAGES>,
     pub(crate) primary: usize,
     pub(crate) leased: bool,
+    pub(crate) next_generation: u32,
+    pub(crate) updating: bool,
+    pub(crate) severe: bool,
+    pub(crate) last_error: u8,
     /// Lease-time VMR bindings + MapRt user refs (see [`map`]).
     pub(crate) map_lease: MapLease,
 }
@@ -107,6 +115,10 @@ impl XdpRt {
             images: heapless::Vec::new(),
             primary: usize::MAX,
             leased: false,
+            next_generation: 1,
+            updating: false,
+            severe: false,
+            last_error: 0,
             map_lease: MapLease::new(),
         };
         for slot in slots {
@@ -205,6 +217,7 @@ impl XdpRt {
                 slot,
                 loaded_len: 0,
                 image: None,
+                phase: swap::SlotPhase::Empty,
             })
             .map_err(|_| XdpInitError::TooManySlots)?;
         Ok(())
@@ -284,9 +297,7 @@ impl XdpRt {
             match rt.check(req) {
                 Ok(_) => {}
                 Err(MapCheckError::NotFound) => return Err(ReadyError::MissingMap),
-                Err(MapCheckError::TypeMismatch) => {
-                    return Err(ReadyError::MapCheck(MapCheckError::TypeMismatch));
-                }
+                Err(e) => return Err(ReadyError::MapCheck(e)),
             }
         }
         Ok(())
@@ -344,8 +355,11 @@ impl XdpRt {
         Ok(())
     }
 
-    /// Copy XDP binary of `id` from cold table into `slot`, set primary to `slot`,
-    /// after validating via [`Self::pre_lease`].
+    /// Copy XDP binary of `id` from the cold table into `slot` and select it.
+    ///
+    /// Refuses while leased. UART `xdp flash` fills a slot, and UART `xdp switch`
+    /// publishes one while the lease stays up. [`Self::lease`] publishes the
+    /// entry selected here.
     pub fn switch(
         &mut self,
         id: XdpId,
@@ -424,14 +438,43 @@ impl XdpRt {
             .ok_or(XdpSwitchError::UnknownImage)?
             .meta
             .set_location(XdpLocation::Slot { index: slot });
+        if let Some(slot_state) = self.slots.get_mut(slot) {
+            slot_state.phase = swap::SlotPhase::Empty;
+        }
         Ok(())
     }
 
+    /// Image whose link address is `addr`.
+    pub fn image_linked_at(&self, addr: usize) -> Option<XdpId> {
+        self.images
+            .iter()
+            .position(|img| img.meta.link_addr == addr)
+    }
+
+    /// Program name for a scanned image id.
+    pub fn image_name(&self, id: XdpId) -> Option<&str> {
+        self.images.get(id).map(|img| img.meta.name.as_str())
+    }
+
+
     /// Enable the datapath: [`Self::pre_lease`], install VMR aliases / map users, publish entry.
+    ///
+    /// Closes `MapRt` control-plane access before `ACTIVE` is stored.
     ///
     /// VMR pairs come only from the primary image's runtime meta (`aot_binds`).
     /// Pass `None` only when the leased image has no `required_maps`.
     pub fn lease(&mut self, maps: Option<&mut MapRtGuard<'_>>) -> Result<(), XdpLeaseError> {
+        self.lease_stamped(maps).map(|_| ())
+    }
+
+    /// [`Self::lease`] plus the device microsecond counter at the publish store.
+    ///
+    /// The stamp is read after `ACTIVE` becomes true, so it is the instant a
+    /// flight can first run the leased entry.
+    pub fn lease_stamped(
+        &mut self,
+        maps: Option<&mut MapRtGuard<'_>>,
+    ) -> Result<u32, XdpLeaseError> {
         if self.leased {
             return Err(XdpLeaseError::Leased);
         }
@@ -445,6 +488,7 @@ impl XdpRt {
             slot.slot.base()
         };
         self.map_lease.clear();
+        let caller_holds_maps = maps.is_some();
         if let Some(maps) = maps {
             if let Some(id) = self.slots.get(self.primary).and_then(|s| s.image) {
                 let binds: Vec<(String, usize)> =
@@ -491,10 +535,34 @@ impl XdpRt {
         {
             return Err(XdpLeaseError::MapsRequired);
         }
+        // Close control-plane map access before any flight can observe `ACTIVE`.
+        // Caller holds `MAP_RT` when `maps` is `Some`. Otherwise take it here so
+        // a control-plane critical section cannot overlap this store.
+        if caller_holds_maps {
+            crate::map::close_ctrl();
+        } else if let Some(lock) = crate::map::MAP_RT.try_get() {
+            let _guard = lock
+                .try_lock()
+                .map_err(|_| XdpLeaseError::Map(MapUseError::Busy))?;
+            crate::map::close_ctrl();
+        } else {
+            crate::map::close_ctrl();
+        }
+        PAUSE.store(false, Ordering::Release);
         PRIMARY_ENTRY.store(entry, Ordering::Release);
         ACTIVE.store(true, Ordering::Release);
+        let mcu_us = swap::mcu_now();
+        if let Some(slot) = self.slots.get_mut(self.primary) {
+            let generation = match slot.phase {
+                swap::SlotPhase::Staged { generation } | swap::SlotPhase::Active { generation } => {
+                    generation
+                }
+                swap::SlotPhase::Empty => 0,
+            };
+            slot.phase = swap::SlotPhase::Active { generation };
+        }
         self.leased = true;
-        Ok(())
+        Ok(mcu_us)
     }
 
     /// Async wrapper around [`Self::lease`].
@@ -520,12 +588,19 @@ impl XdpRt {
         while IN_FLIGHT.load(Ordering::SeqCst) != 0 {
             core::hint::spin_loop();
         }
+        PAUSE.store(false, Ordering::Release);
         PRIMARY_ENTRY.store(0, Ordering::Release);
         crate::map::clear_map_aliases();
         for id in self.map_lease.refs.drain(..) {
             let _ = crate::map::remove_user_sync(id);
         }
         self.map_lease.vmr.clear();
+        crate::map::open_ctrl();
+        for slot in &mut self.slots {
+            slot.phase = swap::SlotPhase::Empty;
+        }
+        self.updating = false;
+        self.severe = false;
         self.leased = false;
         Ok(())
     }

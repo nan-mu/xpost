@@ -121,6 +121,7 @@ async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
             .await
         }
         "case" => exam::run_case(cfg).await,
+        "hot_swap" => exam::run_hot_swap(cfg).await,
         "exec_bench" => {
             exam::run_exec_bench(
                 cfg,

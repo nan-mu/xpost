@@ -45,6 +45,7 @@ const KEY_OUT: u8 = 1;
 #[unsafe(link_section = ".bss")]
 static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
+/// Primary RX slot. Loaded before lease; immutable while it is the entry.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".xdp.hotload_0")]
 static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
@@ -98,11 +99,10 @@ async fn main(spawner: Spawner) -> ! {
         }
     }
     if n_images > 0 {
+        // Leave the control plane open so the host can write the carrier map.
+        // `run_exec` leases only around `invoke`.
         match rt.switch(0, 0, Some(&maps)) {
-            Ok(()) => match rt.lease(Some(&mut maps)) {
-                Ok(()) => info!("xdp leased"),
-                Err(e) => error!("xdp lease failed: {e:?}"),
-            },
+            Ok(()) => info!("xdp switched, not leased"),
             Err(e) => error!("xdp switch failed: {e:?}"),
         }
     } else {
@@ -260,34 +260,30 @@ fn update_bytes(name: &str, key: &[u8], value: &[u8]) -> Result<(), AppMapError>
         .map_err(AppMapError::from)
 }
 
-/// Carrier path: lease → copy map[0] bytes → invoke → copy bytes to map[1].
+/// Carrier path: copy map[0] while the control plane is open, lease only for
+/// `invoke`, then release and copy the buffer to map[1].
 /// No opcode / layout interpretation. `OK finish` comes from the XDP image
 /// (`bpf_printk`), not from this App.
 fn run_exec() -> Result<(), AppMapError> {
-    app_ctrl::enable_xdp().map_err(|e| match e {
-        AppXdpError::Busy => AppMapError::Busy,
-        AppXdpError::NoRt => AppMapError::NoRt,
-        AppXdpError::Logic => AppMapError::Logic,
-    })?;
-
     let buf: &mut [u8; VALUE_LEN] = unsafe { &mut *addr_of_mut!(INVOKE_BUF) };
     buf.fill(0);
 
     {
         let (maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
-        let n = maps
-            .hash_lookup(idx, &[KEY_IN], buf)
-            .map_err(|e| match e {
-                xpost::map::MapUseError::NotFound => AppMapError::InvalidKey,
-                other => AppMapError::from(other),
-            })?;
+        let n = maps.hash_lookup(idx, &[KEY_IN], buf).map_err(|e| match e {
+            xpost::map::MapUseError::NotFound => AppMapError::InvalidKey,
+            other => AppMapError::from(other),
+        })?;
         if n > VALUE_LEN {
             return Err(AppMapError::Logic);
         }
     }
 
+    app_ctrl::enable_xdp().map_err(map_xdp_err)?;
     let (act, _) = xpost::ext::exec_call::invoke(buf);
-    if act == xpost_type::XdpAction::Aborted {
+    let aborted = act == xpost_type::XdpAction::Aborted;
+    app_ctrl::disable_xdp().map_err(map_xdp_err)?;
+    if aborted {
         return Err(AppMapError::Logic);
     }
 
@@ -297,4 +293,12 @@ fn run_exec() -> Result<(), AppMapError> {
             .map_err(AppMapError::from)?;
     }
     Ok(())
+}
+
+fn map_xdp_err(err: AppXdpError) -> AppMapError {
+    match err {
+        AppXdpError::Busy => AppMapError::Busy,
+        AppXdpError::NoRt => AppMapError::NoRt,
+        AppXdpError::Logic => AppMapError::Logic,
+    }
 }

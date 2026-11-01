@@ -1,9 +1,9 @@
 //! Firmware App-mode control helpers used by board examples' `xpost-serial` server
 //! callbacks. Maps / XDP / perf only — wire framing stays in the example.
 
-use crate::error::{MapUseError, XdpLeaseError, XdpReleaseError};
+use crate::error::{MapUseError, XdpLeaseError, XdpReleaseError, XdpSwapError};
 use crate::map::{BPF_ANY, MAP_RT, MapIdx, MapRtGuard, MapType, dump};
-use crate::xdp::XDP_RT;
+use crate::xdp::{QuiescePolicy, SwitchReport, XdpStatus, XDP_RT};
 
 /// Map-domain failure for App clear/get/update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,15 +41,86 @@ impl From<MapUseError> for AppMapError {
 
 /// Lease the primary XDP image (idempotent if already leased).
 pub fn enable_xdp() -> Result<(), AppXdpError> {
+    enable_xdp_stamped().map(|_| ())
+}
+
+/// [`enable_xdp`] plus the device microsecond counter at the publish store.
+///
+/// A repeat that called enable while already leased publishes nothing and
+/// reports 0.
+pub fn enable_xdp_stamped() -> Result<u32, AppXdpError> {
     let xdp_lock = XDP_RT.try_get().ok_or(AppXdpError::NoRt)?;
     let mut xdp = xdp_lock.try_lock().map_err(|_| AppXdpError::Busy)?;
     let map_lock = MAP_RT.try_get().ok_or(AppXdpError::NoRt)?;
     let mut maps = map_lock.try_lock().map_err(|_| AppXdpError::Busy)?;
-    match xdp.lease(Some(&mut maps)) {
-        Ok(()) => Ok(()),
-        Err(XdpLeaseError::Leased) => Ok(()),
+    match xdp.lease_stamped(Some(&mut maps)) {
+        Ok(mcu_us) => Ok(mcu_us),
+        Err(XdpLeaseError::Leased) => Ok(0),
         Err(_) => Err(AppXdpError::Logic),
     }
+}
+
+fn map_swap(err: XdpSwapError) -> AppXdpError {
+    match err {
+        XdpSwapError::Busy => AppXdpError::Busy,
+        _ => AppXdpError::Logic,
+    }
+}
+
+fn with_xdp<T>(body: impl FnOnce(&mut crate::xdp::XdpRt) -> Result<T, XdpSwapError>) -> Result<T, AppXdpError> {
+    let xdp_lock = XDP_RT.try_get().ok_or(AppXdpError::NoRt)?;
+    let mut xdp = xdp_lock.try_lock().map_err(|_| AppXdpError::Busy)?;
+    body(&mut xdp).map_err(map_swap)
+}
+
+/// A helper may hold `MAP_RT` for one packet. Retry that collision only.
+fn with_xdp_retry<T>(
+    mut body: impl FnMut(&mut crate::xdp::XdpRt) -> Result<T, XdpSwapError>,
+) -> Result<T, AppXdpError> {
+    let mut last = AppXdpError::Busy;
+    for _ in 0..8 {
+        match with_xdp(&mut body) {
+            Err(AppXdpError::Busy) => {
+                last = AppXdpError::Busy;
+                core::hint::spin_loop();
+            }
+            other => return other,
+        }
+    }
+    Err(last)
+}
+
+/// Copy `name` from the cold table into `slot`.
+///
+/// A slot that is not running stays staged. The active primary slot is
+/// replaced in place: flights pause, the bytes change, and the same entry
+/// resumes. That path's `mcu_us` is the resume time.
+pub fn flash_xdp_slot(name: &str, slot: u8) -> Result<crate::xdp::StageReport, AppXdpError> {
+    with_xdp_retry(|xdp| {
+        let id = xdp
+            .images
+            .iter()
+            .position(|img| img.meta.name == name)
+            .ok_or(XdpSwapError::UnknownImage)?;
+        xdp.stage(id, usize::from(slot))
+    })
+}
+
+/// Quiesce and publish a filled slot without dropping the lease.
+pub fn switch_xdp(slot: u8, generation: u32, pass: bool) -> Result<SwitchReport, AppXdpError> {
+    let policy = if pass {
+        QuiescePolicy::Pass
+    } else {
+        QuiescePolicy::Drop
+    };
+    with_xdp_retry(|xdp| xdp.activate(usize::from(slot), generation, policy))
+}
+
+/// Boot id, slot roles and quiesce counts.
+pub fn xdp_status() -> Result<XdpStatus, AppXdpError> {
+    let xdp_lock = XDP_RT.try_get().ok_or(AppXdpError::NoRt)?;
+    let xdp = xdp_lock.try_lock().map_err(|_| AppXdpError::Busy)?;
+    Ok(xdp.status())
 }
 
 /// Release the leased XDP image (idempotent if not leased).
@@ -69,7 +140,11 @@ pub fn lock_map(name: &str) -> Result<(MapRtGuard<'static>, MapIdx), AppMapError
     }
     let lock = MAP_RT.try_get().ok_or(AppMapError::NoRt)?;
     let maps = lock.try_lock().map_err(|_| AppMapError::Busy)?;
-    let idx = maps.find(name).map_err(|_| AppMapError::NameNotFound)?;
+    let idx = maps.find(name).map_err(|e| match e {
+        MapUseError::NotFound => AppMapError::NameNotFound,
+        MapUseError::Busy => AppMapError::Busy,
+        _ => AppMapError::Logic,
+    })?;
     Ok((maps, idx))
 }
 

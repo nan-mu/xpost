@@ -41,6 +41,22 @@ pub enum Command<'a> {
     },
     ClearPerf,
     GetPerf,
+    /// `xdp flash <name> <slot>` — copy a cold image into a slot.
+    ///
+    /// A non-running slot stays staged. The active primary slot is replaced
+    /// in place and resumes at the same entry.
+    XdpFlash {
+        name: &'a str,
+        slot: u8,
+    },
+    /// `xdp switch <slot> <generation> <drop|pass>`.
+    XdpSwitch {
+        slot: u8,
+        generation: u32,
+        pass: bool,
+    },
+    /// `get xdp` — boot id, slot roles, quiesce counts. Not the cold-table list.
+    GetXdpStatus,
     /// Wait for unsolicited `OK init` in the host record. **Not a wire verb** —
     /// must not be sent on UART; server must not parse a request into this.
     GetInit,

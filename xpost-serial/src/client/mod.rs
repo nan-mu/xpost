@@ -46,6 +46,10 @@ pub(crate) const RESET_TO_APP_SETTLE: Duration = Duration::from_millis(50);
 pub(crate) const POST_FLASH_INIT_CAPTURE: Duration = Duration::from_secs(3);
 /// Reader-thread wake only — never the business request deadline.
 pub(crate) const PORT_IO_TIMEOUT: Duration = Duration::from_millis(200);
+/// Poll interval for the App UART reader thread. `Uart::drop` joins that
+/// thread, so this bounds the dead time after every command. It must stay
+/// short: a command sequence of three verbs would otherwise pay it three times.
+pub(crate) const APP_READ_POLL: Duration = Duration::from_millis(2);
 
 /// Host open options. Transcript goes under [`Self::log_dir`] as rotating
 /// `serial.log` / `serial.log.N` (see [`crate::client::record`]).
@@ -118,8 +122,18 @@ impl SerialHandler {
     where
         E: RequestError,
     {
-        let found = block_fut(serial::run_op::<E>(&self.link, &self.record, cmd))?;
-        self.record.materialize_ok::<E>(&found)
+        self.request_at(cmd).map(|(reply, _)| reply)
+    }
+
+    /// Like [`Self::request`], plus the time the reader thread read the reply
+    /// line. That is the instant the host received the MCU reply, not the later
+    /// moment the caller formats it.
+    pub fn request_at<'a, E>(&'a self, cmd: &Command<'_>) -> core::result::Result<(OkReply<'a>, SystemTime), E>
+    where
+        E: RequestError,
+    {
+        let (found, at) = block_fut(serial::run_op::<E>(&self.link, &self.record, cmd))?;
+        Ok((self.record.materialize_ok::<E>(&found)?, at))
     }
 
     /// Run a download-mode [`FlashOp`] (not an App-mode wire reply).

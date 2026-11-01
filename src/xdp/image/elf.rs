@@ -65,7 +65,10 @@ pub(crate) fn collect_metas(table: &mut dyn XdpTableStorage) -> CollectedMetas {
             break;
         }
         match scan_at(&mut src, cursor) {
-            ScanOutcome::HardFail => break, // 无法对齐下一容器
+            ScanOutcome::HardFail => match xpost_elf::skip_erased_gap(cursor) {
+                Some(next) => cursor = next,
+                None => break,
+            },
             ScanOutcome::SoftSkip { file_len } => {
                 cursor = cursor.saturating_add(file_len);
             }

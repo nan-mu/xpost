@@ -62,6 +62,7 @@ static mut LEGAL_TOKENS: [u16; LEGAL_CAP] = [0; LEGAL_CAP];
 #[unsafe(link_section = ".bss")]
 static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
+/// Primary RX slot. Loaded before lease; immutable while it is the entry.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".xdp.hotload_0")]
 static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
@@ -349,7 +350,11 @@ fn handle_map_crud<'a>(pkt: &[u8], val_buf: &'a mut [u8; 32]) -> (u32, u32, &'a 
         },
         map_crud::KIND_UPDATE => {
             let flags = if op.flags == 0 { BPF_ANY } else { op.flags };
-            let value = if op.value.is_empty() { &[1u8][..] } else { op.value };
+            let value = if op.value.is_empty() {
+                &[1u8][..]
+            } else {
+                op.value
+            };
             match maps.hash_update(idx, op.key, value, flags) {
                 Ok(()) => (STATUS_OK, kind, &[]),
                 Err(MapUseError::Exists) => (STATUS_CONFLICT, kind, &[]),

@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
@@ -52,6 +52,13 @@ impl ApiResp {
 #[derive(Deserialize)]
 struct FlashByNameBody {
     name: String,
+}
+
+#[derive(Deserialize)]
+struct FlashXdpBody {
+    name: String,
+    #[serde(default)]
+    slot: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -130,6 +137,8 @@ async fn serve_async(addr: &str, log_dir: &Path) -> Result<()> {
         .route("/get/xdp", get(v1_get_xdp))
         .route("/enable/xdp", post(v1_enable_xdp))
         .route("/disable/xdp", post(v1_disable_xdp))
+        .route("/xdp/switch", post(v1_xdp_switch))
+        .route("/xdp/status", get(v1_xdp_status))
         .route("/enable/exec", post(v1_enable_exec))
         .route("/disable/exec", post(v1_disable_exec))
         .route("/get/finish", post(v1_get_finish))
@@ -202,11 +211,12 @@ async fn v1_flash_fw(
 
 async fn v1_flash_xdp(
     State(st): State<AppState>,
-    Json(body): Json<FlashByNameBody>,
+    Json(body): Json<FlashXdpBody>,
 ) -> Json<ApiResp> {
     let shared = st.shared.clone();
     let name = body.name;
-    run_blocking(move || ops::flash_xdp(shared.as_ref(), &name, "http")).await
+    let slot = body.slot;
+    run_blocking(move || ops::flash_xdp(shared.as_ref(), &name, slot, "http")).await
 }
 
 fn clear_xdp_names(name: ClearXdpName) -> Result<Vec<String>, String> {
@@ -253,6 +263,45 @@ async fn v1_clear_xdp(
 async fn v1_get_xdp(State(st): State<AppState>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     run_blocking(move || ops::get_xdp(shared.as_ref(), "http")).await
+}
+
+#[derive(Deserialize)]
+struct ActivateBody {
+    slot: u8,
+    generation: u32,
+    policy: String,
+}
+
+fn policy_pass(policy: &str) -> Result<bool> {
+    match policy {
+        "pass" => Ok(true),
+        "drop" => Ok(false),
+        _ => bail!("policy must be drop or pass"),
+    }
+}
+
+async fn v1_xdp_switch(
+    State(st): State<AppState>,
+    body: Result<Json<ActivateBody>, axum::extract::rejection::JsonRejection>,
+) -> Json<ApiResp> {
+    let Json(body) = match body {
+        Ok(j) => j,
+        Err(e) => return Json(ApiResp::err(format!("bad switch body: {e}"))),
+    };
+    let pass = match policy_pass(&body.policy) {
+        Ok(pass) => pass,
+        Err(e) => return Json(ApiResp::err(e.to_string())),
+    };
+    let shared = st.shared.clone();
+    run_blocking(move || {
+        ops::switch_xdp(shared.as_ref(), body.slot, body.generation, pass, "http")
+    })
+    .await
+}
+
+async fn v1_xdp_status(State(st): State<AppState>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::xdp_status(shared.as_ref(), "http")).await
 }
 
 async fn v1_enable_xdp(State(st): State<AppState>) -> Json<ApiResp> {

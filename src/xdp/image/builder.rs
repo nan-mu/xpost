@@ -168,6 +168,7 @@ impl XdpBuilder<Incomplete> {
             aot_binds: self.aot_binds,
             image_abs: self.image_abs,
             image_len: self.image_len,
+            digest: self.image_digest,
             container_len: self.container_len,
             location: XdpLocation::Table {
                 index: self.table_index,
@@ -245,6 +246,7 @@ impl XdpBuilder<Complete> {
             aot_binds: self.aot_binds,
             image_abs,
             image_len: self.image_len,
+            digest: self.image_digest,
             container_len,
             location: XdpLocation::Table { index: table_id },
         };

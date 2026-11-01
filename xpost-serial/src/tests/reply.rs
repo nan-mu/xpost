@@ -40,6 +40,84 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
         | (OkReply::GetPerf { blob: a }, OkReply::GetPerf { blob: b }) => {
             assert_eq!(a, b, "blob");
         }
+        (
+            OkReply::EnableXdpStamped { mcu_us: a },
+            OkReply::EnableXdpStamped { mcu_us: b },
+        ) => {
+            assert_eq!(a, b, "mcu_us");
+        }
+        (
+            OkReply::XdpFlash {
+                slot: a,
+                generation: ag,
+                mcu_us: am,
+            },
+            OkReply::XdpFlash {
+                slot: b,
+                generation: bg,
+                mcu_us: bm,
+            },
+        ) => {
+            assert_eq!((a, ag, am), (b, bg, bm));
+        }
+        (
+            OkReply::XdpSwitch {
+                ok: aok,
+                rollback: arb,
+                severe: ase,
+                from_slot: afrom,
+                to_slot: ato,
+                generation: agen,
+                quiesce_drop: adrop,
+                quiesce_pass: apass,
+                mcu_us: am,
+            },
+            OkReply::XdpSwitch {
+                ok: bok,
+                rollback: brb,
+                severe: bse,
+                from_slot: bfrom,
+                to_slot: bto,
+                generation: bgen,
+                quiesce_drop: bdrop,
+                quiesce_pass: bpass,
+                mcu_us: bm,
+            },
+        ) => {
+            assert_eq!(
+                (aok, arb, ase, afrom, ato, agen, adrop, apass, am),
+                (bok, brb, bse, bfrom, bto, bgen, bdrop, bpass, bm)
+            );
+        }
+        (
+            OkReply::GetXdpStatus {
+                boot_id: a,
+                active_slot: aa,
+                staged_slot: asl,
+                generation: ag,
+                updating: au,
+                severe: ase,
+                quiesce_drop: ad,
+                quiesce_pass: ap,
+                last_error: ae,
+            },
+            OkReply::GetXdpStatus {
+                boot_id: b,
+                active_slot: ba,
+                staged_slot: bsl,
+                generation: bg,
+                updating: bu,
+                severe: bse,
+                quiesce_drop: bd,
+                quiesce_pass: bp,
+                last_error: be,
+            },
+        ) => {
+            assert_eq!(
+                (a, aa, asl, ag, au, ase, ad, ap, ae),
+                (b, ba, bsl, bg, bu, bse, bd, bp, be)
+            );
+        }
         _ => panic!("ok reply variant mismatch"),
     }
 }
@@ -82,6 +160,14 @@ fn ok_ping() {
 #[test]
 fn ok_enable_xdp() {
     roundtrip_ok(Command::EnableXdp, OkReply::EnableXdp);
+}
+
+#[test]
+fn ok_enable_xdp_stamped() {
+    roundtrip_ok(
+        Command::EnableXdp,
+        OkReply::EnableXdpStamped { mcu_us: 4_711_233 },
+    );
 }
 
 #[test]
@@ -153,6 +239,61 @@ fn ok_get_map_blob() {
 #[test]
 fn ok_get_perf_empty_blob() {
     roundtrip_ok(Command::GetPerf, OkReply::GetPerf { blob: b"" });
+}
+
+#[test]
+fn ok_xdp_stage() {
+    roundtrip_ok(
+        Command::XdpFlash {
+            name: "hot_mark",
+            slot: 1,
+        },
+        OkReply::XdpFlash {
+            slot: 1,
+            generation: 4,
+            mcu_us: 50,
+        },
+    );
+}
+
+#[test]
+fn ok_xdp_activate() {
+    roundtrip_ok(
+        Command::XdpSwitch {
+            slot: 1,
+            generation: 4,
+            pass: false,
+        },
+        OkReply::XdpSwitch {
+            ok: 1,
+            rollback: 0,
+            severe: 0,
+            from_slot: 0,
+            to_slot: 1,
+            generation: 4,
+            quiesce_drop: 2,
+            quiesce_pass: 0,
+            mcu_us: 80,
+        },
+    );
+}
+
+#[test]
+fn ok_get_xdp_status() {
+    roundtrip_ok(
+        Command::GetXdpStatus,
+        OkReply::GetXdpStatus {
+            boot_id: 9,
+            active_slot: 1,
+            staged_slot: 255,
+            generation: 0,
+            updating: 0,
+            severe: 0,
+            quiesce_drop: 2,
+            quiesce_pass: 0,
+            last_error: 0,
+        },
+    );
 }
 
 #[test]

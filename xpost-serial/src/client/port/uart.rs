@@ -10,6 +10,7 @@ use tokio::sync::Notify;
 
 use super::byte_port::{AppBytePort, open_usb};
 use crate::client::PORT_IO_TIMEOUT;
+use crate::client::APP_READ_POLL;
 use crate::client::record::SharedRecord;
 
 /// Bytes that can be written as one App UART command (no trailing newline).
@@ -125,7 +126,9 @@ impl Uart {
         mut port: Box<dyn AppBytePort>,
         record: SharedRecord,
     ) -> io::Result<Self> {
-        port.set_timeout(PORT_IO_TIMEOUT)?;
+        // Reader polls briefly: `Uart::drop` joins it, so a long read timeout
+        // would add that wait to every command round trip.
+        port.set_timeout(APP_READ_POLL)?;
         let mut writer = port.try_clone_box()?;
         writer.set_timeout(PORT_IO_TIMEOUT)?;
         let stop = Arc::new(AtomicBool::new(false));
