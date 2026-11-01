@@ -6,6 +6,7 @@
 //! `t0` is that command. `t1` is the first captured slot-B frame at or after
 //! `t0`. Slot fill is outside the window. This exam does not touch `rxcnt`.
 
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -19,7 +20,7 @@ use crate::pipeline::{BudgetEta, READY_BUDGET, RoundUi, status};
 const FW: &str = "case-cag";
 const SWAP: &str = "case_swap";
 const MARK: &str = "case_mark_idle";
-const REPEATS: usize = 8;
+const REPEATS: usize = 100;
 
 #[allow(dead_code)]
 struct Wire {
@@ -137,6 +138,7 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
                 .with_context(|| format!("refill slot 1 before hot rep {rep}"))?;
             generation = parse_flash(&filled_b)?;
         }
+        let switch_ms = Mutex::new(0.0_f64);
         let published = case::capture_update(
             cfg,
             &mac,
@@ -153,11 +155,11 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
                     .switch_xdp(1, generation, "drop")
                     .await
                     .context("switch to slot 1")?;
+                *switch_ms.lock().unwrap() = (case::unix_secs() - t0) * 1_000.0;
                 let now = status_of(&agent).await?;
                 if now.boot_id != boot_id || now.active != 1 || now.severe != 0 {
                     bail!("switch did not publish slot 1: {} {switched}", now.raw);
                 }
-                eprintln!("hot_swap rep={rep} switch {switched} {}", now.raw);
                 Ok(t0)
             },
         )
@@ -174,7 +176,8 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
                 published.report
             );
         };
-        eprintln!("latency hot rep={rep}/{REPEATS} command_ms={ms:.3}");
+        let switch_ms = *switch_ms.lock().unwrap();
+        eprintln!("STAGE hot rep={rep}/{REPEATS} switch_ms={switch_ms:.3} frame_ms={ms:.3}");
         eprintln!("hot_swap switch->mark {}", published.summary);
         store_gap(&client, exam_id, 10 + rep as i32 - 1, MARK, &published).await?;
     }

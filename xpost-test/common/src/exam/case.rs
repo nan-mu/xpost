@@ -14,7 +14,7 @@ use std::future::Future;
 use std::net::Ipv4Addr;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -35,7 +35,7 @@ pub(crate) const MARK_DST: &str = "203.0.113.77";
 const READY_TRIES: u32 = 40;
 const DUMP_CAP: usize = 64 * 1024;
 const DRAIN: Duration = Duration::from_secs(1);
-const REPEATS: usize = 8;
+const REPEATS: usize = 100;
 pub(crate) const PAYLOAD_LEN: usize = 5;
 
 struct Step {
@@ -138,6 +138,7 @@ async fn run_step(
                 .enable_xdp()
                 .await
                 .with_context(|| format!("lease previous image before {} rep {rep}", step.xdp))?;
+            let marks = Mutex::new([0.0_f64; 4]);
             let gap = capture_update(
                 cfg,
                 &mac,
@@ -145,39 +146,47 @@ async fn run_step(
                 MARK_DST,
                 CaptureWindow {
                     interval: Duration::from_millis(2),
-                    preamble: Duration::from_millis(400),
-                    tail: Duration::from_secs(30),
+                    preamble: Duration::from_millis(200),
+                    tail: Duration::from_secs(2),
                 },
                 || async {
                     let t0 = unix_secs();
+                    let stamp = |origin: f64| (unix_secs() - origin) * 1_000.0;
                     agent
                         .disable_xdp()
                         .await
                         .with_context(|| format!("disable xdp before {} rep {rep}", step.xdp))?;
+                    let disable_ms = stamp(t0);
                     agent
                         .clear_xdp("*")
                         .await
                         .with_context(|| format!("clear xdp before {} rep {rep}", step.xdp))?;
+                    let clear_ms = stamp(t0);
                     agent
                         .flash_xdp(step.xdp)
                         .await
                         .with_context(|| format!("flash xdp {} rep {rep}", step.xdp))?;
+                    let flash_ms = stamp(t0);
                     agent
                         .get_init()
                         .await
                         .with_context(|| format!("OK init after {} rep {rep}", step.xdp))?;
+                    let init_ms = stamp(t0);
+                    *marks.lock().unwrap() = [disable_ms, clear_ms, flash_ms, init_ms];
                     Ok(t0)
                 },
             )
             .await?;
-            let Some(ms) = gap.command_ms else {
+            let Some(frame_ms) = gap.command_ms else {
                 bail!("case cold rep {rep} has no frame at or after disable:\n{}", gap.report);
             };
+            let [disable_ms, clear_ms, flash_ms, init_ms] = *marks.lock().unwrap();
             events.push(format!(
-                "cold_rep={rep} command_ms={ms:.3} old_before={} old_after={} new_replies={}",
-                gap.old_before, gap.old_after, gap.new_replies
+                "cold_rep={rep} disable_ms={disable_ms:.3} clear_ms={clear_ms:.3} frame_ms={frame_ms:.3} flash_ms={flash_ms:.3} init_ms={init_ms:.3}"
             ));
-            eprintln!("latency cold rep={rep}/{REPEATS} command_ms={ms:.3}");
+            eprintln!(
+                "STAGE cold rep={rep}/{REPEATS} disable_ms={disable_ms:.3} clear_ms={clear_ms:.3} frame_ms={frame_ms:.3} flash_ms={flash_ms:.3} init_ms={init_ms:.3}"
+            );
             db::insert_case_obs(
                 client,
                 exam_id,
