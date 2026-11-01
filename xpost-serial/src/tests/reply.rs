@@ -41,6 +41,12 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
             assert_eq!(a, b, "blob");
         }
         (
+            OkReply::EnableXdpStamped { mcu_us: a },
+            OkReply::EnableXdpStamped { mcu_us: b },
+        ) => {
+            assert_eq!(a, b, "mcu_us");
+        }
+        (
             OkReply::XdpFlash {
                 slot: a,
                 generation: ag,
@@ -154,6 +160,14 @@ fn ok_ping() {
 #[test]
 fn ok_enable_xdp() {
     roundtrip_ok(Command::EnableXdp, OkReply::EnableXdp);
+}
+
+#[test]
+fn ok_enable_xdp_stamped() {
+    roundtrip_ok(
+        Command::EnableXdp,
+        OkReply::EnableXdpStamped { mcu_us: 4_711_233 },
+    );
 }
 
 #[test]

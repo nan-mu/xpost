@@ -8,6 +8,13 @@
 pub enum OkReply<'a> {
     Ping,
     EnableXdp,
+    /// `OK enable xdp <mcu_us>` — the firmware published the leased entry.
+    ///
+    /// `mcu_us` is the device microsecond counter read after `ACTIVE` becomes
+    /// true. A firmware that does not stamp the lease replies `OK enable xdp`.
+    EnableXdpStamped {
+        mcu_us: u32,
+    },
     DisableXdp,
     EnableExec,
     DisableExec,

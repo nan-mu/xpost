@@ -1,6 +1,7 @@
 //! Quiescent hot swap of a pre-installed image.
 //!
-//! `flash` into a slot copies a cold image. It does not publish the entry.
+//! `flash` into a slot copies a cold image. It stages bytes and does not
+//! publish the entry, and it refuses a slot that is running.
 //! `switch` pauses new flights, waits until `IN_FLIGHT` is 0, then publishes
 //! map aliases and the new entry. The slot it leaves stays `Staged` with the
 //! generation it was published under. A failed publish restores the previous
@@ -48,8 +49,8 @@ pub(crate) enum SlotPhase {
     Active { generation: u32 },
 }
 
-/// Cold copy into a slot. `mcu_us` is nonzero only when the copy published the
-/// active primary slot.
+/// Cold copy into a slot. `mcu_us` is 0: a copy stages bytes and publishes
+/// nothing. The field stays on the wire for the reply format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StageReport {
     pub generation: u32,
@@ -89,14 +90,11 @@ pub struct XdpStatus {
 impl XdpRt {
 /// Copy `id` into `slot`.
 ///
-/// A slot that is not the running entry is filled and left `Staged`. That
-/// path does not change `PRIMARY_ENTRY`, `ACTIVE`, or map aliases. A dropped
-/// lease can fill every slot, including the primary index.
-///
-/// Copying into the active primary slot pauses new flights, waits until
-/// `IN_FLIGHT` is 0, replaces the bytes, fences the instruction cache, and
-/// resumes the same entry. IRQs stay enabled. The returned `mcu_us` is that
-/// resume point. A failed check after the bytes change stays paused.
+/// The slot is filled and left `Staged`. This does not change `PRIMARY_ENTRY`,
+/// `ACTIVE`, or map aliases, and the returned `mcu_us` is 0 because nothing is
+/// published. A dropped lease can fill every slot, including the primary
+/// index. A slot that is `Active` is refused: replacing a running image means
+/// `disable`, copy, `enable`.
 pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapError> {
         if self.severe {
             return Err(self.fail(XdpSwapError::RollbackFailed));
@@ -134,18 +132,6 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
             return Err(self.fail(XdpSwapError::Digest));
         }
         let generation = self.alloc_generation();
-        let live = matches!(
-            self.slots.get(slot).map(|s| s.phase),
-            Some(SlotPhase::Active { .. })
-        );
-        if live {
-            self.updating = true;
-            QUIESCE_PASS.store(false, Ordering::SeqCst);
-            PAUSE.store(true, Ordering::SeqCst);
-            while IN_FLIGHT.load(Ordering::SeqCst) != 0 {
-                core::hint::spin_loop();
-            }
-        }
         unsafe {
             core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, image_len);
             core::ptr::write_bytes(dst.add(image_len), 0, capacity - image_len);
@@ -153,48 +139,7 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
         Self::fence_instruction_cache();
         let copied = unsafe { core::slice::from_raw_parts(dst, image_len) };
         if copied != &buf[..image_len] {
-            if live {
-                self.severe = true;
-            }
             return Err(self.fail(XdpSwapError::Digest));
-        }
-        if live {
-            let pairs = {
-                let Some(lock) = crate::map::MAP_RT.try_get() else {
-                    self.severe = true;
-                    return Err(self.fail(XdpSwapError::MapsRequired));
-                };
-                let mut maps = match lock.try_lock() {
-                    Ok(maps) => maps,
-                    Err(_) => {
-                        self.severe = true;
-                        return Err(self.fail(XdpSwapError::Busy));
-                    }
-                };
-                match self.ensure_binds(&mut maps, id) {
-                    Ok(pairs) => pairs,
-                    Err(e) => {
-                        self.severe = true;
-                        return Err(e);
-                    }
-                }
-            };
-            let Some(lock) = crate::map::MAP_RT.try_get() else {
-                self.severe = true;
-                return Err(self.fail(XdpSwapError::MapsRequired));
-            };
-            let mut maps = match lock.try_lock() {
-                Ok(maps) => maps,
-                Err(_) => {
-                    self.severe = true;
-                    return Err(self.fail(XdpSwapError::Busy));
-                }
-            };
-            if let Err(e) = self.publish_binds(&mut maps, &pairs) {
-                self.severe = true;
-                self.last_error = e.code();
-                return Err(e);
-            }
         }
         let slot_state = self
             .slots
@@ -202,20 +147,14 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
             .ok_or(XdpSwapError::UnknownSlot)?;
         slot_state.loaded_len = image_len;
         slot_state.image = Some(id);
-        let mcu_us = if live {
-            slot_state.phase = SlotPhase::Active { generation };
-            if let Some(image) = self.images.get_mut(id) {
-                image.meta.set_location(XdpLocation::Slot { index: slot });
-            }
-            let stamped = mcu_now();
-            self.leave_quiesce();
-            stamped
-        } else {
-            slot_state.phase = SlotPhase::Staged { generation };
-            0
-        };
+        slot_state.phase = SlotPhase::Staged { generation };
+        if let Some(image) = self.images.get_mut(id) {
+            // The bytes now live in this slot, and `lease` will check that the
+            // image it publishes is the one this slot holds.
+            image.meta.set_location(XdpLocation::Slot { index: slot });
+        }
         self.last_error = 0;
-        Ok(StageReport { generation, mcu_us })
+        Ok(StageReport { generation, mcu_us: 0 })
     }
 
     /// Quiesce, publish `slot`'s staged image, or restore the previous entry.
@@ -312,10 +251,9 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
             };
             if staging {
                 match slot_state.phase {
-                    SlotPhase::Active { .. } if !(self.leased && slot == self.primary) => {
+                    SlotPhase::Active { .. } => {
                         return Err(self.fail(XdpSwapError::ActiveSlot));
                     }
-                    SlotPhase::Active { .. } => {}
                     SlotPhase::Staged { .. } if slot_state.image != Some(id) => {
                         return Err(self.fail(XdpSwapError::SlotOccupied));
                     }
@@ -569,10 +507,9 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
     }
 }
 
-fn mcu_now() -> u32 {
+pub(crate) fn mcu_now() -> u32 {
     esp_hal::time::Instant::now().duration_since_epoch().as_micros() as u32
 }
-
 fn map_ready(result: Result<(), ReadyError>) -> Result<(), XdpSwapError> {
     result.map_err(|e| match e {
         ReadyError::Arch => XdpSwapError::Arch,

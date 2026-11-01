@@ -435,16 +435,22 @@ pub fn get_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
 pub fn enable_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     with_log(peer, "EnableXdp", "", false, state, || {
         let g = lock(state)?;
-        req(&g, &Command::EnableXdp)?;
-        Ok("OK enable xdp".into())
+        let (reply, at) = req_at(&g, &Command::EnableXdp)?;
+        let mcu_us = match reply {
+            OkReply::EnableXdpStamped { mcu_us } => mcu_us,
+            _ => 0,
+        };
+        let agent_rx = agent_rx_unix(at);
+        Ok(format!("OK enable xdp {mcu_us} agent_rx={agent_rx:.6}"))
     })
 }
 
 pub fn disable_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     with_log(peer, "DisableXdp", "", false, state, || {
         let g = lock(state)?;
-        req(&g, &Command::DisableXdp)?;
-        Ok("OK disable xdp".into())
+        let (_, at) = req_at(&g, &Command::DisableXdp)?;
+        let agent_rx = agent_rx_unix(at);
+        Ok(format!("OK disable xdp agent_rx={agent_rx:.6}"))
     })
 }
 

@@ -12,6 +12,9 @@ use crate::r#type::reply::{MapError, OkReply, PerfError, ServerError, SyntaxErro
 pub(crate) enum Found {
     Ping,
     EnableXdp,
+    EnableXdpStamped {
+        mcu_us: u32,
+    },
     DisableXdp,
     EnableExec,
     DisableExec,
@@ -211,6 +214,7 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
     match OkReply::try_from((line, cmd)).ok()? {
         OkReply::Ping => Some(Found::Ping),
         OkReply::EnableXdp => Some(Found::EnableXdp),
+        OkReply::EnableXdpStamped { mcu_us } => Some(Found::EnableXdpStamped { mcu_us }),
         OkReply::DisableXdp => Some(Found::DisableXdp),
         OkReply::EnableExec => Some(Found::EnableExec),
         OkReply::DisableExec => Some(Found::DisableExec),

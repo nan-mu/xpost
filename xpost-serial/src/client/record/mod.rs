@@ -409,6 +409,7 @@ impl Record {
         Ok(match found {
             Found::Ping => OkReply::Ping,
             Found::EnableXdp => OkReply::EnableXdp,
+            Found::EnableXdpStamped { mcu_us } => OkReply::EnableXdpStamped { mcu_us: *mcu_us },
             Found::DisableXdp => OkReply::DisableXdp,
             Found::EnableExec => OkReply::EnableExec,
             Found::DisableExec => OkReply::DisableExec,

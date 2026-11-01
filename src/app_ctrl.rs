@@ -41,13 +41,21 @@ impl From<MapUseError> for AppMapError {
 
 /// Lease the primary XDP image (idempotent if already leased).
 pub fn enable_xdp() -> Result<(), AppXdpError> {
+    enable_xdp_stamped().map(|_| ())
+}
+
+/// [`enable_xdp`] plus the device microsecond counter at the publish store.
+///
+/// A repeat that called enable while already leased publishes nothing and
+/// reports 0.
+pub fn enable_xdp_stamped() -> Result<u32, AppXdpError> {
     let xdp_lock = XDP_RT.try_get().ok_or(AppXdpError::NoRt)?;
     let mut xdp = xdp_lock.try_lock().map_err(|_| AppXdpError::Busy)?;
     let map_lock = MAP_RT.try_get().ok_or(AppXdpError::NoRt)?;
     let mut maps = map_lock.try_lock().map_err(|_| AppXdpError::Busy)?;
-    match xdp.lease(Some(&mut maps)) {
-        Ok(()) => Ok(()),
-        Err(XdpLeaseError::Leased) => Ok(()),
+    match xdp.lease_stamped(Some(&mut maps)) {
+        Ok(mcu_us) => Ok(mcu_us),
+        Err(XdpLeaseError::Leased) => Ok(0),
         Err(_) => Err(AppXdpError::Logic),
     }
 }

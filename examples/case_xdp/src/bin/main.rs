@@ -286,8 +286,8 @@ serial_task! {
             [0u8; 128],
         )
         .on_ping(|reply: ReplyWriter<'_>| reply.ok(OkReply::Ping))
-        .on_enable_xdp(|reply: ReplyWriter<'_>| match app_ctrl::enable_xdp() {
-            Ok(()) => reply.ok(OkReply::EnableXdp),
+        .on_enable_xdp(|reply: ReplyWriter<'_>| match app_ctrl::enable_xdp_stamped() {
+            Ok(mcu_us) => reply.ok(OkReply::EnableXdpStamped { mcu_us }),
             Err(e) => reply_xdp_err(reply, e),
         })
         .on_disable_xdp(|reply: ReplyWriter<'_>| match app_ctrl::disable_xdp() {

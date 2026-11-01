@@ -94,6 +94,9 @@ pub fn write_ok<E>(
     let line: &[u8] = match reply {
         OkReply::Ping => b"OK ping\n",
         OkReply::EnableXdp => b"OK enable xdp\n",
+        OkReply::EnableXdpStamped { mcu_us } => {
+            return write_nums(b"OK enable xdp", &[*mcu_us], write_all);
+        }
         OkReply::DisableXdp => b"OK disable xdp\n",
         OkReply::EnableExec => b"OK enable exec\n",
         OkReply::DisableExec => b"OK disable exec\n",

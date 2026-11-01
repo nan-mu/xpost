@@ -282,6 +282,37 @@ pub(crate) fn unix_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// `agent_rx` alone, for a reply that carries no device stamp.
+pub(crate) fn rx_stamp(msg: &str) -> Result<f64> {
+    let (_, tail) = msg
+        .trim()
+        .split_once(" agent_rx=")
+        .with_context(|| format!("agent_rx missing: {msg}"))?;
+    tail.trim()
+        .parse()
+        .with_context(|| format!("agent_rx in {msg}"))
+}
+
+/// `get xdp` fields: boot, active, staged, generation, updating, severe, drop,
+/// pass, last_error. A slot role of 255 is empty.
+pub(crate) fn xdp_fields(msg: &str) -> Result<[u32; 9]> {
+    let mut out = [0u32; 9];
+    let mut words = msg.split_whitespace();
+    for want in ["OK", "get", "xdp"] {
+        if words.next() != Some(want) {
+            bail!("not a get xdp reply: {msg}");
+        }
+    }
+    for slot in out.iter_mut() {
+        *slot = words
+            .next()
+            .with_context(|| format!("short get xdp: {msg}"))?
+            .parse()
+            .with_context(|| format!("get xdp field in {msg}"))?;
+    }
+    Ok(out)
+}
+
 /// `mcu_us` is the device clock in the reply. `agent_rx` is the agent host
 /// clock when that reply was read, appended as `agent_rx=<unix seconds>`.
 pub(crate) fn reply_stamps(msg: &str) -> Result<(u32, f64)> {
@@ -527,15 +558,17 @@ async fn run_cold_latency(
     client: &tokio_postgres::Client,
     exam_id: db::ExamId,
 ) -> Result<()> {
+    // Both cold images are linked at slot 0, so the timed loop reuses one slot.
+    // The cold table is not erased and the DUT does not reboot inside the loop.
     agent.clear_xdp("*").await.context("clear cold table")?;
     agent.flash_xdp("case_swap").await.context("install case_swap")?;
     agent.flash_xdp("case_mark").await.context("install case_mark")?;
     agent.get_init().await.context("OK init after both images")?;
-    agent.disable_xdp().await.context("drop the lease before the first fill")?;
+    agent.disable_xdp().await.context("drop the lease before warmup")?;
     let _ = agent
         .flash_xdp_slot("case_swap", 0)
         .await
-        .context("copy case_swap into slot 0")?;
+        .context("warm up slot 0 with case_swap")?;
     agent.enable_xdp().await.context("lease slot 0")?;
     let mac = format_mac(&cfg.esp_mac_bytes()?);
     let tap = LiveTap::open(cfg).await?;
@@ -543,7 +576,7 @@ async fn run_cold_latency(
     let armed = unix_secs();
     if tap.count_before(&mac, DST_A, armed + 1.0) == 0 {
         let _ = tap.close().await;
-        bail!("cold latency did not see destination {DST_A} before the first copy");
+        bail!("cold latency did not see destination {DST_A} before the first replace");
     }
     for rep in 1..=REPEATS {
         let (name, dst) = if rep % 2 == 1 {
@@ -551,26 +584,42 @@ async fn run_cold_latency(
         } else {
             ("case_swap", DST_A)
         };
+        // One slot: stop the program, overwrite that slot's bytes, start it.
         let start = unix_secs();
         let mark = tap.mark();
-        let reply = agent
+        let stopped = agent
+            .disable_xdp()
+            .await
+            .context("stop XDP before overwriting slot 0")?;
+        let disable_rx = rx_stamp(&stopped)?;
+        let copied = agent
             .flash_xdp_slot(name, 0)
             .await
-            .with_context(|| format!("cold rep {rep} flash {name}"))?;
-        let (mcu_us, agent_rx) = reply_stamps(&reply)?;
+            .with_context(|| format!("cold rep {rep} copy {name} into slot 0"))?;
+        let started = agent
+            .enable_xdp()
+            .await
+            .with_context(|| format!("cold rep {rep} start slot 0"))?;
+        let (mcu_us, agent_rx) = reply_stamps(&started)?;
+        let status = agent.xdp_status().await.context("get xdp after start")?;
+        let f = xdp_fields(&status)?;
+        if f[1] != 0 || f[2] != 255 {
+            let _ = tap.close().await;
+            bail!("cold rep {rep} touched more than slot 0: {status}");
+        }
         let end = tap.wait_frame(&mac, dst, start).await.with_context(|| {
-            format!("cold rep {rep} end {dst}\n{reply}")
+            format!("cold rep {rep} end {dst}\n{stopped}\n{copied}\n{started}")
         })?;
-        // start and end are the test process clock. agent_rx is the agent host
-        // clock and is stored as an absolute value, not subtracted from start.
+        // start and end are the test process clock. The two agent receive times
+        // are the agent host clock and are stored absolute, not subtracted.
         let end_ms = (end - start) * 1_000.0;
         eprintln!(
-            "STAGE cold rep={rep}/{REPEATS} image={name} mcu_us={mcu_us} start={start:.6} agent_rx={agent_rx:.6} end_ms={end_ms:.3}"
+            "STAGE cold rep={rep}/{REPEATS} image={name} mcu_us={mcu_us} start={start:.6} disable_rx={disable_rx:.6} agent_rx={agent_rx:.6} end_ms={end_ms:.3}"
         );
         let window = tap.capture(mark);
         tap.trim(mark);
         let mut report = format!(
-            "# dut_mac {mac}\n# image {name}\n# start={start:.6} mcu_us={mcu_us} agent_rx={agent_rx:.6} end={end:.6}\n{reply}\n{window}"
+            "# dut_mac {mac}\n# image {name} slot 0\n# start={start:.6} mcu_us={mcu_us} disable_rx={disable_rx:.6} agent_rx={agent_rx:.6} end={end:.6}\n{stopped}\n{copied}\n{started}\n{window}"
         );
         let err = tap.stderr_text();
         if !err.is_empty() {
@@ -584,9 +633,9 @@ async fn run_cold_latency(
             &CaseObs {
                 seq: 10 + rep as i32 - 1,
                 xdp: name,
-                capability: "cold slot copy",
+                capability: "cold replace, one slot",
                 action: "XDP_TX",
-                expect: "start is the test clock when flash-to-slot is issued. mcu_us is the device clock when the new bytes are published; the quiesce is cleared immediately after that store. agent_rx is the agent host clock when the MCU reply is read, stored absolute and not subtracted from start. end is the first DUT frame with the new destination at or after start, on the test clock. The cold table is not erased and the DUT does not reboot inside the loop.",
+                expect: "start is the test clock when disable is issued, so the interval contains stopping the program, overwriting slot 0's bytes, and starting it again. Only slot 0 is used; slot 1 stays empty and the cold table is not erased inside the loop. mcu_us is the device clock when enable published the entry. disable_rx and agent_rx are agent host clock instants, stored absolute. end is the first DUT frame with the new destination at or after start, on the test clock.",
                 map_name: "",
                 map_slot: 0,
                 map_before: 0,

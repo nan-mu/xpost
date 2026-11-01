@@ -464,6 +464,17 @@ impl XdpRt {
     /// VMR pairs come only from the primary image's runtime meta (`aot_binds`).
     /// Pass `None` only when the leased image has no `required_maps`.
     pub fn lease(&mut self, maps: Option<&mut MapRtGuard<'_>>) -> Result<(), XdpLeaseError> {
+        self.lease_stamped(maps).map(|_| ())
+    }
+
+    /// [`Self::lease`] plus the device microsecond counter at the publish store.
+    ///
+    /// The stamp is read after `ACTIVE` becomes true, so it is the instant a
+    /// flight can first run the leased entry.
+    pub fn lease_stamped(
+        &mut self,
+        maps: Option<&mut MapRtGuard<'_>>,
+    ) -> Result<u32, XdpLeaseError> {
         if self.leased {
             return Err(XdpLeaseError::Leased);
         }
@@ -540,6 +551,7 @@ impl XdpRt {
         PAUSE.store(false, Ordering::Release);
         PRIMARY_ENTRY.store(entry, Ordering::Release);
         ACTIVE.store(true, Ordering::Release);
+        let mcu_us = swap::mcu_now();
         if let Some(slot) = self.slots.get_mut(self.primary) {
             let generation = match slot.phase {
                 swap::SlotPhase::Staged { generation } | swap::SlotPhase::Active { generation } => {
@@ -550,7 +562,7 @@ impl XdpRt {
             slot.phase = swap::SlotPhase::Active { generation };
         }
         self.leased = true;
-        Ok(())
+        Ok(mcu_us)
     }
 
     /// Async wrapper around [`Self::lease`].

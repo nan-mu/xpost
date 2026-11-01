@@ -46,6 +46,10 @@ pub(crate) const RESET_TO_APP_SETTLE: Duration = Duration::from_millis(50);
 pub(crate) const POST_FLASH_INIT_CAPTURE: Duration = Duration::from_secs(3);
 /// Reader-thread wake only — never the business request deadline.
 pub(crate) const PORT_IO_TIMEOUT: Duration = Duration::from_millis(200);
+/// Poll interval for the App UART reader thread. `Uart::drop` joins that
+/// thread, so this bounds the dead time after every command. It must stay
+/// short: a command sequence of three verbs would otherwise pay it three times.
+pub(crate) const APP_READ_POLL: Duration = Duration::from_millis(2);
 
 /// Host open options. Transcript goes under [`Self::log_dir`] as rotating
 /// `serial.log` / `serial.log.N` (see [`crate::client::record`]).

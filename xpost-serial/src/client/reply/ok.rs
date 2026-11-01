@@ -46,8 +46,6 @@ macro_rules! fixed_ok {
 fixed_ok! {
     /// `OK ping`
     parse_ping_reply => Ping: [b"ping"];
-    /// `OK enable xdp`
-    parse_enable_xdp_reply => EnableXdp: [b"enable", b"xdp"];
     /// `OK disable xdp`
     parse_disable_xdp_reply => DisableXdp: [b"disable", b"xdp"];
     /// `OK enable exec`
@@ -109,6 +107,26 @@ fn take_u32(input: &[u8]) -> Result<(u32, &[u8]), ParseError> {
 
 fn u8_at(nums: &[u32; 10], i: usize) -> Result<u8, ParseError> {
     u8::try_from(nums[i]).map_err(|_| ParseError::InvalidSyntax)
+}
+
+/// `OK enable xdp`, or `OK enable xdp <mcu_us>` when the firmware stamps the
+/// publish instant.
+pub fn parse_enable_xdp_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let line = input.strip_suffix(b"\n").unwrap_or(input);
+    let rest = line
+        .strip_prefix(b"OK enable xdp")
+        .ok_or(ParseError::InvalidSyntax)?;
+    if rest.is_empty() {
+        return Ok(OkReply::EnableXdp);
+    }
+    let rest = rest
+        .strip_prefix(b" ")
+        .ok_or(ParseError::InvalidSyntax)?;
+    let (value, tail) = take_u32(rest)?;
+    if !tail.is_empty() {
+        return Err(ParseError::InvalidSyntax);
+    }
+    Ok(OkReply::EnableXdpStamped { mcu_us: value })
 }
 
 /// `OK xdp flash <slot> <generation> <mcu_us>`.

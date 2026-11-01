@@ -73,6 +73,7 @@ pub(crate) fn ok_label(ok: &crate::r#type::reply::OkReply<'_>) -> &'static str {
     match ok {
         OkReply::Ping => "OK ping",
         OkReply::EnableXdp => "OK enable xdp",
+        OkReply::EnableXdpStamped { .. } => "OK enable xdp",
         OkReply::DisableXdp => "OK disable xdp",
         OkReply::EnableExec => "OK enable exec",
         OkReply::DisableExec => "OK disable exec",
