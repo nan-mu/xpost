@@ -355,7 +355,6 @@ pub(crate) struct CaptureWindow {
 /// last-old to first-new arrival gap and is not the reported latency.
 pub(crate) struct WireGap {
     pub command_ms: Option<f64>,
-    pub gap_ms: Option<f64>,
     pub old_before: usize,
     pub old_after: usize,
     pub new_replies: usize,
@@ -530,7 +529,6 @@ fn wire_gap(dump: &str, mac: &str, old_needle: &str, new_needle: &str, command_a
     }
     WireGap {
         command_ms,
-        gap_ms,
         old_before,
         old_after,
         new_replies: new.iter().filter(|(ts, _)| *ts >= command_at).count(),

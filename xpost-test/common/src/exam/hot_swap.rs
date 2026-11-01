@@ -161,7 +161,6 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
 struct Status {
     boot_id: u32,
     active: u8,
-    staged: u8,
     severe: u8,
     raw: String,
 }
@@ -224,7 +223,6 @@ async fn status_of(agent: &AgentClient) -> Result<Status> {
     Ok(Status {
         boot_id: wire.boot_id,
         active: wire.active,
-        staged: wire.staged,
         severe: wire.severe,
         raw,
     })
