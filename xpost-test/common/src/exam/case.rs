@@ -306,9 +306,11 @@ pub(crate) fn reply_stamps(msg: &str) -> Result<(u32, f64)> {
 pub(crate) struct LiveTap {
     stop: Arc<AtomicBool>,
     text: Arc<Mutex<String>>,
+    err: Arc<Mutex<String>>,
     child: tokio::process::Child,
     sender: Option<tokio::task::JoinHandle<Result<()>>>,
     reader: Option<tokio::task::JoinHandle<()>>,
+    err_reader: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl LiveTap {
@@ -328,10 +330,11 @@ impl LiveTap {
                 "8080",
             ])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .context("spawn tcpdump")?;
         let mut stdout = child.stdout.take().context("tcpdump stdout")?;
+        let mut stderr = child.stderr.take().context("tcpdump stderr")?;
         let text = Arc::new(Mutex::new(String::new()));
         let sink = Arc::clone(&text);
         let reader = tokio::spawn(async move {
@@ -342,6 +345,20 @@ impl LiveTap {
                     Ok(n) => {
                         let chunk = String::from_utf8_lossy(&buf[..n]);
                         sink.lock().unwrap().push_str(&chunk);
+                    }
+                }
+            }
+        });
+        let err = Arc::new(Mutex::new(String::new()));
+        let err_sink = Arc::clone(&err);
+        let err_reader = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                match stderr.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]);
+                        err_sink.lock().unwrap().push_str(&chunk);
                     }
                 }
             }
@@ -374,9 +391,11 @@ impl LiveTap {
         Ok(Self {
             stop,
             text,
+            err,
             child,
             sender: Some(sender),
             reader: Some(reader),
+            err_reader: Some(err_reader),
         })
     }
 
@@ -385,6 +404,58 @@ impl LiveTap {
             .into_iter()
             .filter(|ts| *ts < before)
             .count()
+    }
+
+    /// Byte offset into the capture buffer. Take it before the command so the
+    /// rows stored for this repeat include the frames that came before the
+    /// switch as well as the one that proves it.
+    pub(crate) fn mark(&self) -> usize {
+        self.text.lock().unwrap().len()
+    }
+
+    /// Captured stdout from `mark` on, starting at a whole line. Frames whose
+    /// header began before the mark are dropped, so every block is complete.
+    pub(crate) fn capture(&self, mark: usize) -> String {
+        let text = self.text.lock().unwrap();
+        let mut start = mark.min(text.len());
+        if start > 0 && !text.is_char_boundary(start) {
+            return String::new();
+        }
+        if start > 0 && !text[..start].ends_with('\n') {
+            match text[start..].find('\n') {
+                Some(nl) => start += nl + 1,
+                None => return String::new(),
+            }
+        }
+        let mut out = text[start..].to_string();
+        // The reader may be mid-packet at snapshot time. Keep whole lines only.
+        if !out.ends_with('\n')
+            && let Some(nl) = out.rfind('\n')
+        {
+            out.truncate(nl + 1);
+        }
+        out
+    }
+
+    /// Drop everything before `mark` so polling stays bounded over 100 repeats.
+    pub(crate) fn trim(&self, mark: usize) {
+        let mut text = self.text.lock().unwrap();
+        let mut cut = mark.min(text.len());
+        if cut > 0 && !text.is_char_boundary(cut) {
+            return;
+        }
+        if cut > 0 && !text[..cut].ends_with('\n') {
+            match text[cut..].find('\n') {
+                Some(nl) => cut += nl + 1,
+                None => return,
+            }
+        }
+        text.drain(..cut);
+    }
+
+    /// tcpdump diagnostics, if it wrote any. Errors here explain a missing frame.
+    pub(crate) fn stderr_text(&self) -> String {
+        self.err.lock().unwrap().clone()
     }
 
     pub(crate) async fn wait_frame(&self, mac: &str, needle: &str, after: f64) -> Result<f64> {
@@ -413,6 +484,9 @@ impl LiveTap {
         let _ = self.child.wait().await;
         if let Some(reader) = self.reader.take() {
             let _ = reader.await;
+        }
+        if let Some(err_reader) = self.err_reader.take() {
+            let _ = err_reader.await;
         }
         Ok(())
     }
@@ -478,6 +552,7 @@ async fn run_cold_latency(
             ("case_swap", DST_A)
         };
         let start = unix_secs();
+        let mark = tap.mark();
         let reply = agent
             .flash_xdp_slot(name, 0)
             .await
@@ -492,9 +567,17 @@ async fn run_cold_latency(
         eprintln!(
             "STAGE cold rep={rep}/{REPEATS} image={name} mcu_us={mcu_us} start={start:.6} agent_rx={agent_rx:.6} end_ms={end_ms:.3}"
         );
-        let report = format!(
-            "# start={start:.6} mcu_us={mcu_us} agent_rx={agent_rx:.6} end={end:.6}\n{reply}\n"
+        let window = tap.capture(mark);
+        tap.trim(mark);
+        let mut report = format!(
+            "# dut_mac {mac}\n# image {name}\n# start={start:.6} mcu_us={mcu_us} agent_rx={agent_rx:.6} end={end:.6}\n{reply}\n{window}"
         );
+        let err = tap.stderr_text();
+        if !err.is_empty() {
+            report.push_str("\n# tcpdump stderr\n");
+            report.push_str(&err);
+        }
+        let report = report;
         db::insert_case_obs(
             client,
             exam_id,

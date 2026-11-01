@@ -122,6 +122,7 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
         let dst = if next == 0 { case::DST_A } else { MARK_DST };
         let name = if next == 0 { SWAP } else { MARK };
         let start = case::unix_secs();
+        let mark = tap.mark();
         let reply = agent
             .switch_xdp(next, slot_gen[usize::from(next)], "drop")
             .await
@@ -142,10 +143,18 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
         eprintln!(
             "STAGE hot rep={rep}/{REPEATS} slot={next} mcu_us={mcu_us} start={start:.6} agent_rx={agent_rx:.6} end_ms={end_ms:.3}"
         );
-        let report = format!(
-            "# start={start:.6} mcu_us={mcu_us} agent_rx={agent_rx:.6} end={end:.6}\n{reply}\n{}",
+        let window = tap.capture(mark);
+        tap.trim(mark);
+        let mut report = format!(
+            "# dut_mac {mac}\n# image {name} slot {next}\n# start={start:.6} mcu_us={mcu_us} agent_rx={agent_rx:.6} end={end:.6}\n{reply}\n{}\n{window}",
             now.raw
         );
+        let err = tap.stderr_text();
+        if !err.is_empty() {
+            report.push_str("\n# tcpdump stderr\n");
+            report.push_str(&err);
+        }
+        let report = report;
         db::insert_case_obs(
             &client,
             exam_id,
