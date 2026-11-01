@@ -116,28 +116,26 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
     let mut generation = generation;
     for rep in 1..=REPEATS {
         if rep > 1 {
-            agent
-                .disable_xdp()
-                .await
-                .with_context(|| format!("drop lease before hot rep {rep}"))?;
-            let filled_a = agent
+            // `enable` leases `primary`, which stays on the slot just published.
+            // Switch back while the lease is up, then refill slot 1. Neither step is timed.
+            let back = agent
                 .flash_xdp_slot(SWAP, 0)
                 .await
                 .with_context(|| format!("refill slot 0 before hot rep {rep}"))?;
-            let _ = parse_flash(&filled_a)?;
+            let back_gen = parse_flash(&back)?;
+            let returned = agent
+                .switch_xdp(0, back_gen, "drop")
+                .await
+                .with_context(|| format!("return to slot 0 before hot rep {rep}"))?;
+            let again = status_of(&agent).await?;
+            if again.boot_id != boot_id || again.active != 0 || again.severe != 0 {
+                bail!("hot rep {rep} did not return to slot 0: {returned} {}", again.raw);
+            }
             let filled_b = agent
                 .flash_xdp_slot(MARK, 1)
                 .await
                 .with_context(|| format!("refill slot 1 before hot rep {rep}"))?;
             generation = parse_flash(&filled_b)?;
-            agent
-                .enable_xdp()
-                .await
-                .with_context(|| format!("lease slot 0 before hot rep {rep}"))?;
-            let again = status_of(&agent).await?;
-            if again.boot_id != boot_id || again.active != 0 || again.severe != 0 {
-                bail!("hot rep {rep} did not return to slot 0: {}", again.raw);
-            }
         }
         let published = case::capture_update(
             cfg,
