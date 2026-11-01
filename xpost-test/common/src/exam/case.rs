@@ -182,7 +182,8 @@ async fn run_step(
             };
             let [disable_ms, clear_ms, flash_ms, init_ms] = *marks.lock().unwrap();
             events.push(format!(
-                "cold_rep={rep} disable_ms={disable_ms:.3} clear_ms={clear_ms:.3} frame_ms={frame_ms:.3} flash_ms={flash_ms:.3} init_ms={init_ms:.3}"
+                "cold_rep={rep} disable_ms={disable_ms:.3} clear_ms={clear_ms:.3} frame_ms={frame_ms:.3} flash_ms={flash_ms:.3} init_ms={init_ms:.3} old_after={}",
+                gap.old_after
             ));
             eprintln!(
                 "STAGE cold rep={rep}/{REPEATS} disable_ms={disable_ms:.3} clear_ms={clear_ms:.3} frame_ms={frame_ms:.3} flash_ms={flash_ms:.3} init_ms={init_ms:.3}"
