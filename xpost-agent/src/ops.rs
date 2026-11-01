@@ -363,9 +363,13 @@ fn run_build(root: &Path, build: &BuildSpec, label: &str, peer: &str) -> Result<
         ),
     );
     let t0 = Instant::now();
+    // Artifact paths in profiles.toml sit under the build cwd's own target/.
+    // An inherited CARGO_TARGET_DIR compiles somewhere else and the flash
+    // then sends the stale file at the profile path.
     let status = ProcCommand::new(prog)
         .args(args)
         .current_dir(&cwd)
+        .env_remove("CARGO_TARGET_DIR")
         .status()
         .with_context(|| format!("spawn build for {label}"))?;
     let elapsed = t0.elapsed();
