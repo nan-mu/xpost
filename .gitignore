@@ -32,3 +32,6 @@ target/
 /config.toml
 examples/*/config.toml
 !**/.cargo/config.toml
+
+# Local measurement scratch (e.g. flash/switch timelines)
+/.audit/
