@@ -307,8 +307,8 @@ pub(crate) struct LiveTap {
     stop: Arc<AtomicBool>,
     text: Arc<Mutex<String>>,
     child: tokio::process::Child,
-    sender: tokio::task::JoinHandle<Result<()>>,
-    reader: tokio::task::JoinHandle<()>,
+    sender: Option<tokio::task::JoinHandle<Result<()>>>,
+    reader: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl LiveTap {
@@ -375,8 +375,8 @@ impl LiveTap {
             stop,
             text,
             child,
-            sender,
-            reader,
+            sender: Some(sender),
+            reader: Some(reader),
         })
     }
 
@@ -406,11 +406,24 @@ impl LiveTap {
 
     pub(crate) async fn close(mut self) -> Result<()> {
         self.stop.store(true, Ordering::Relaxed);
-        let _ = self.sender.await;
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.await;
+        }
         self.child.start_kill().ok();
         let _ = self.child.wait().await;
-        let _ = self.reader.await;
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.await;
+        }
         Ok(())
+    }
+}
+
+/// An early `?` must not leave the 2 ms sender and tcpdump running into the
+/// next exam of the same process. `close` is still the orderly path.
+impl Drop for LiveTap {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.child.start_kill().ok();
     }
 }
 
@@ -470,16 +483,17 @@ async fn run_cold_latency(
             .await
             .with_context(|| format!("cold rep {rep} flash {name}"))?;
         let (mcu_us, agent_rx) = reply_stamps(&reply)?;
-        let frame = tap.wait_frame(&mac, dst, start).await.with_context(|| {
-            format!("cold rep {rep} frame {dst}\n{reply}")
+        let end = tap.wait_frame(&mac, dst, start).await.with_context(|| {
+            format!("cold rep {rep} end {dst}\n{reply}")
         })?;
-        let agent_ms = (agent_rx - start) * 1_000.0;
-        let frame_ms = (frame - start) * 1_000.0;
+        // start and end are the test process clock. agent_rx is the agent host
+        // clock and is stored as an absolute value, not subtracted from start.
+        let end_ms = (end - start) * 1_000.0;
         eprintln!(
-            "STAGE cold rep={rep}/{REPEATS} image={name} mcu_us={mcu_us} agent_rx_ms={agent_ms:.3} frame_ms={frame_ms:.3}"
+            "STAGE cold rep={rep}/{REPEATS} image={name} mcu_us={mcu_us} start={start:.6} agent_rx={agent_rx:.6} end_ms={end_ms:.3}"
         );
         let report = format!(
-            "# start={start:.6} mcu_us={mcu_us} agent_rx={agent_rx:.6} frame={frame:.6}\n{reply}\n"
+            "# start={start:.6} mcu_us={mcu_us} agent_rx={agent_rx:.6} end={end:.6}\n{reply}\n"
         );
         db::insert_case_obs(
             client,
@@ -489,7 +503,7 @@ async fn run_cold_latency(
                 xdp: name,
                 capability: "cold slot copy",
                 action: "XDP_TX",
-                expect: "start is the test clock when flash-to-slot is issued. mcu_us is the device clock when the slot resumes. agent_rx is the agent clock when the MCU reply is read. frame is the first DUT frame with the new destination at or after start. The cold table is not erased inside the loop.",
+                expect: "start is the test clock when flash-to-slot is issued. mcu_us is the device clock when the new bytes are published; the quiesce is cleared immediately after that store. agent_rx is the agent host clock when the MCU reply is read, stored absolute and not subtracted from start. end is the first DUT frame with the new destination at or after start, on the test clock. The cold table is not erased and the DUT does not reboot inside the loop.",
                 map_name: "",
                 map_slot: 0,
                 map_before: 0,

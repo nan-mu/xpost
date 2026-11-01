@@ -127,22 +127,23 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
             .await
             .with_context(|| format!("hot rep {rep} switch to slot {next}"))?;
         let (mcu_us, agent_rx) = case::reply_stamps(&reply)?;
-        let frame = tap
+        let end = tap
             .wait_frame(&mac, dst, start)
             .await
-            .with_context(|| format!("hot rep {rep} frame {dst}\n{reply}"))?;
+            .with_context(|| format!("hot rep {rep} end {dst}\n{reply}"))?;
         let now = status_of(&agent).await?;
         if now.boot_id != boot_id || now.active != next || now.severe != 0 {
             let _ = tap.close().await;
             bail!("hot rep {rep} did not publish slot {next}: {reply} {}", now.raw);
         }
-        let agent_ms = (agent_rx - start) * 1_000.0;
-        let frame_ms = (frame - start) * 1_000.0;
+        // start and end are the test process clock. agent_rx is the agent host
+        // clock and is stored as an absolute value, not subtracted from start.
+        let end_ms = (end - start) * 1_000.0;
         eprintln!(
-            "STAGE hot rep={rep}/{REPEATS} slot={next} mcu_us={mcu_us} agent_rx_ms={agent_ms:.3} frame_ms={frame_ms:.3}"
+            "STAGE hot rep={rep}/{REPEATS} slot={next} mcu_us={mcu_us} start={start:.6} agent_rx={agent_rx:.6} end_ms={end_ms:.3}"
         );
         let report = format!(
-            "# start={start:.6} mcu_us={mcu_us} agent_rx={agent_rx:.6} frame={frame:.6}\n{reply}\n{}",
+            "# start={start:.6} mcu_us={mcu_us} agent_rx={agent_rx:.6} end={end:.6}\n{reply}\n{}",
             now.raw
         );
         db::insert_case_obs(
@@ -153,7 +154,7 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
                 xdp: name,
                 capability: "quiescent hot swap",
                 action: "XDP_TX",
-                expect: "start is the test clock when switch is issued. mcu_us is the device clock when the new entry is admitted. agent_rx is the agent clock when the MCU reply is read. frame is the first DUT frame with the new destination at or after start. The other direction uses the slot left staged by the previous switch.",
+                expect: "start is the test clock when switch is issued. mcu_us is the device clock when the new entry is admitted; the quiesce is cleared immediately after that store. agent_rx is the agent host clock when the MCU reply is read, stored absolute and not subtracted from start. end is the first DUT frame with the new destination at or after start, on the test clock. The other direction uses the slot left staged by the previous switch.",
                 map_name: "",
                 map_slot: 0,
                 map_before: 0,
