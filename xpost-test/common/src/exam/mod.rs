@@ -6,6 +6,7 @@ pub mod case;
 pub mod dev;
 pub mod exec_bench;
 pub mod firewall;
+pub mod hot_swap;
 pub mod just_drop;
 pub mod just_tx;
 pub mod repeat;
@@ -14,6 +15,7 @@ pub use case::run_case;
 pub use dev::run_dev;
 pub use exec_bench::{ExecBenchOpts, run_exec_bench};
 pub use firewall::{FirewallOpts, run_firewall};
+pub use hot_swap::run_hot_swap;
 pub use just_drop::{JustDropPpsOpts, run_just_drop_pps};
 pub use just_tx::{JustTxOpts, run_just_tx};
 

@@ -212,9 +212,10 @@ artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/e
 build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build", "--release"] }
 
 # ---------------------------------------------------------------------------
-# case_xdp — one firmware, cold images swapped by the case exam.
-# xdp is empty so flash/fw does not pin an image. The exam installs case_swap
-# then case_mark into the same cold partition.
+# case_xdp — one firmware for both exams.
+# Cold `case` clears and reflashes one image, then reboots.
+# `hot_swap` installs case_swap and case_mark_idle, then publishes without reboot.
+# xdp is empty so flash/fw does not pin an image.
 # ---------------------------------------------------------------------------
 
 [[fw]]
@@ -236,3 +237,9 @@ name = "case_mark"
 fw = "case-cag"
 artifact = "../build/case_mark/case_mark.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/case_xdp/target/riscv32imc-unknown-none-elf/release/case_xdp", "-c", "case_mark"] }
+
+[[xdp]]
+name = "case_mark_idle"
+fw = "case-cag"
+artifact = "../build/case_mark/case_mark_idle.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/case_xdp/target/riscv32imc-unknown-none-elf/release/case_xdp", "--slot-symbol", "xdp_slot_idle", "--image-name", "case_mark_idle", "-c", "case_mark"] }
