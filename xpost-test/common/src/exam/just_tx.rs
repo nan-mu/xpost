@@ -529,7 +529,7 @@ async fn probe_window(
         harness.reset_state().await;
     }
 
-    let before = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
+    let before = sample_rxcnt(agent, path).await?;
     let _ = agent.clear_perf().await;
     harness.reset_state().await;
     harness.reserve_pending((pps * window.as_secs_f64()).round() as usize);
@@ -649,7 +649,7 @@ async fn probe_window(
     }
     ui.check_ok(&format!("{ok_n}/{sent_n} ok"));
 
-    let after = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
+    let after = sample_rxcnt(agent, path).await?;
     let sent = seqs.len() as u64;
     let loss = if sent == 0 {
         1.0
@@ -687,6 +687,19 @@ async fn probe_window(
 }
 
 
+/// Read `rxcnt` outside an XDP lease. HAL has no lease and rejects enable/disable.
+/// The XDP arm is leased again before returning, so the following window still runs the image.
+async fn sample_rxcnt(agent: &AgentClient, path: PpsPath) -> Result<u64> {
+    if path == PpsPath::Xdp {
+        agent.disable_xdp().await.context("disable before rxcnt")?;
+    }
+    let n = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
+    if path == PpsPath::Xdp {
+        agent.enable_xdp().await.context("enable after rxcnt")?;
+    }
+    Ok(n)
+}
+
 async fn wait_rx_ready(
     cfg: &FileConfig,
     agent: &AgentClient,
@@ -709,7 +722,7 @@ async fn wait_rx_ready(
         cfg.target.stim_sport,
     )?);
     for i in 0..RX_READY_TRIES {
-        let before = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
+        let before = sample_rxcnt(agent, path).await?;
         let n = RX_READY_BURST;
         let raw_c = raw.clone();
         tokio::task::spawn_blocking(move || {
@@ -720,7 +733,7 @@ async fn wait_rx_ready(
         .await
         .context("RX ready burst")?;
         tokio::time::sleep(Duration::from_millis(400)).await;
-        let after = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
+        let after = sample_rxcnt(agent, path).await?;
         if after > before {
             ui.check_note(&format!("rxcnt {before}→{after}"));
             tokio::time::sleep(Duration::from_secs(2)).await;
