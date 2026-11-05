@@ -3,7 +3,7 @@ resolver = "2"
 # MCU packages only under the default RV32 target. Host tools live under
 # `exclude` so they are not typechecked as riscv32 (thousands of false RA
 # errors from std crates). Invoke via `--manifest-path` or their own cwd.
-members = [".", "esp-radio", "xpost-macros", "xpost-elf", "xpost-type", "rbpf"]
+members = [".", "esp-radio", "xpost-macros", "xpost-elf", "xpost-perf", "xpost-type", "rbpf"]
 default-members = ["."]
 exclude = ["xpost-build", "xpost-agent", "xpost-serial", "xpost-test", "examples"]
 
