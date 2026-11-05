@@ -78,17 +78,55 @@ pub(crate) fn clear_ranges() {
     RANGE_COUNT.store(0, Ordering::Release);
 }
 
-/// Run one program over one frame.
+/// `struct xdp_md` as eBPF bytecode sees it.
+///
+/// Six 32-bit fields. `data`/`data_end` hold **real addresses**, not offsets:
+/// the C sources read them as `(long)ctx->data` and cast the result to a
+/// pointer, and on a 32-bit target a pointer is exactly four bytes. The field
+/// type is `__u32` only because `vmlinux.h` is architecture independent.
+///
+/// This matches [`super::ingress::ctx::XdpMd`] field for field on RV32. It is a
+/// distinct type because the AOT path stores `*mut u8` and this one must not
+/// carry a pointer type the interpreter would then have to launder.
+#[repr(C)]
+struct EbpfXdpMd {
+    data: u32,
+    data_end: u32,
+    data_meta: u32,
+    ingress_ifindex: u32,
+    rx_queue_index: u32,
+    egress_ifindex: u32,
+}
+
+impl EbpfXdpMd {
+    /// Context over the frame the flight handed us.
+    fn for_frame(data: *mut u8, data_end: *mut u8) -> Self {
+        Self {
+            data: data as usize as u32,
+            data_end: data_end as usize as u32,
+            data_meta: data as usize as u32,
+            ingress_ifindex: super::ingress::ctx::IFINDEX_WIFI,
+            rx_queue_index: 0,
+            egress_ifindex: 0,
+        }
+    }
+}
 ///
 /// Returns the program's `r0` as an `xdp_action`. Every failure path returns
 /// `XDP_ABORTED`, which the caller maps to `Drop`: a refused run must not look
 /// like a legitimate verdict.
 ///
+/// The packet range comes from the AOT-path context, which holds real pointers.
+/// The program itself sees [`EbpfXdpMd`], the offset-based form its compiler
+/// emitted against. Translating once here keeps both engines fed from the same
+/// flight state.
+///
 /// # Safety
 ///
 /// `base..base + len` must be the published bytecode of the current lease and
-/// stay readable for the call. `ctx` must point to a live [`XdpMd`] built from
-/// the caller's frame, and the caller must own `IN_FLIGHT`.
+/// stay readable for the call. `ctx` must point to a live [`XdpMd`] whose
+/// `data..data_end` lies inside the caller's frame, and the caller must own
+/// `IN_FLIGHT`.
 #[inline]
 pub(crate) unsafe fn run(base: usize, len: usize, ctx: *mut XdpMd) -> i32 {
     const ABORTED: i32 = xpost_type::XdpAction::Aborted as i32;
@@ -98,15 +136,8 @@ pub(crate) unsafe fn run(base: usize, len: usize, ctx: *mut XdpMd) -> i32 {
     }
     let prog = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
 
-    // The md is the VM's R1. `rbpf` checks accesses against this slice's bounds,
-    // so the size must be the real struct, not a hand-counted constant.
-    let md_bytes =
-        unsafe { core::slice::from_raw_parts(ctx as *const u8, core::mem::size_of::<XdpMd>()) };
-
-    // Packet bytes, reached through the pointers stored in the md. Validate the
-    // window before forming the slice: a program cannot write the md (the lease
-    // refuses bytecode that stores through r1), but a malformed md from the
-    // caller must still not produce a slice that runs off the frame.
+    // Packet window, validated before it becomes a slice. A malformed md must
+    // not produce a slice that runs off the frame.
     let (data, data_end) = unsafe { ((*ctx).data as usize, (*ctx).data_end as usize) };
     let Some(pkt_len) = data_end.checked_sub(data) else {
         return ABORTED;
@@ -115,6 +146,14 @@ pub(crate) unsafe fn run(base: usize, len: usize, ctx: *mut XdpMd) -> i32 {
         return ABORTED;
     }
     let pkt = unsafe { core::slice::from_raw_parts(data as *const u8, pkt_len) };
+
+    // The program's R1. Offsets, not pointers: the compiler emitted against the
+    // six-`u32` form, so a pointer here makes the program's first bound check
+    // fail and it exits without touching the frame.
+    let md = EbpfXdpMd::for_frame(data as *mut u8, data_end as *mut u8);
+    let md_bytes = unsafe {
+        core::slice::from_raw_parts(&md as *const EbpfXdpMd as *const u8, core::mem::size_of::<EbpfXdpMd>())
+    };
 
     let stack = unsafe { &mut *addr_of_mut!(EBPF_STACK) };
     for b in stack.iter_mut() {
@@ -212,4 +251,21 @@ fn step() -> Step {
     }
     BUDGET.fetch_sub(1, Ordering::Relaxed);
     Step::Go
+}
+
+/// Run one program outside a lease, for a firmware self-check.
+///
+/// Builds the `xdp_md` over `frame` internally, so a board example needs no
+/// context type. The lease path reaches the same [`run`] through
+/// [`super::engine::flight`]; this wrapper proves the interpreter works before
+/// any image is installed. It installs no map windows, so a program that touches
+/// a map value is refused.
+///
+/// Returns the program's `r0`. After the call `frame` holds whatever the
+/// program wrote, which is what makes this a useful check: the caller can
+/// compare the mutated bytes.
+pub fn selftest_run(prog: &[u8], frame: &mut [u8]) -> i32 {
+    clear_ranges();
+    let mut ctx = XdpMd::from_buf(frame);
+    unsafe { run(prog.as_ptr() as usize, prog.len(), &mut ctx as *mut XdpMd) }
 }

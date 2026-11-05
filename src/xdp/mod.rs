@@ -18,7 +18,18 @@ pub(crate) mod table;
 pub use crate::error::{
     XdpInitError, XdpLeaseError, XdpReleaseError, XdpSlotError, XdpSwapError, XdpSwitchError,
 };
+// `xdp_md` layout for the interpreter self-check.
+//
+// Not re-exported: `selftest_run` takes a frame slice and builds the context
+// internally, so no context type leaves the crate.
+
 pub use state::set_boot_id;
+/// Run one eBPF program outside a lease, for a firmware self-check.
+///
+/// Only available with the `interp` feature. The leased datapath reaches the
+/// same entry through the engine seam; this wrapper installs no map windows.
+#[cfg(feature = "interp")]
+pub use interp::selftest_run;
 pub use swap::{QuiescePolicy, StageReport, SwitchReport, XdpStatus};
 pub use crate::{RtMutex, RtMutexGuard};
 pub(crate) use image::XdpMeta;
@@ -351,10 +362,42 @@ impl XdpRt {
         };
 
         self.check_image_size(meta, primary)?;
-        meta.check_arch()?;
-        meta.check_helper_address()?;
-        meta.check_slot_address(&slot_state.slot)?;
+        // An eBPF image is architecture independent: it carries no AOT
+        // machine-code tag, no linked helper address and no slot link address,
+        // because the interpreter resolves all three at run time. Checking them
+        // would reject every bytecode image.
+        #[cfg(not(feature = "interp"))]
+        {
+            meta.check_arch()?;
+            meta.check_helper_address()?;
+            meta.check_slot_address(&slot_state.slot)?;
+        }
+        #[cfg(feature = "interp")]
+        self.check_interp_slot(primary)?;
         self.check_required_maps(meta, maps)?;
+        Ok(())
+    }
+
+    /// Reject a bytecode image whose program writes through `r1`.
+    ///
+    /// An XDP program treats its context as read-only; the kernel verifier
+    /// enforces that and `rbpf` does not. A store through `r1` would rewrite
+    /// `data`/`data_end`, which the interpreter trusts when it builds the packet
+    /// slice from the md. Checking here keeps the flight path free of the test.
+    ///
+    /// The scan is linear over a program of a few hundred bytes and runs once
+    /// per lease.
+    #[cfg(feature = "interp")]
+    fn check_interp_slot(&self, slot: SlotId) -> Result<(), ReadyError> {
+        let state = self.slots.get(slot).ok_or(ReadyError::UnknownSlot)?;
+        let len = state.loaded_len;
+        if len == 0 {
+            return Err(ReadyError::PrimaryEmpty);
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(state.slot.base() as *const u8, len) };
+        if crate::xdp::interp::rejects_ctx_writes(bytes) {
+            return Err(ReadyError::Arch);
+        }
         Ok(())
     }
 
@@ -547,7 +590,11 @@ impl XdpRt {
                     if let Some(meta) = maps.meta.get(idx)
                         && !meta.storage.ptr.is_null()
                     {
-                        let _ = ranges.push((meta.storage.ptr as usize, meta.size));
+                        // The whole allocation, not the `size` estimate: the
+                        // estimate is a heap-budget figure and may exceed what
+                        // the map actually owns.
+                        let _ = ranges
+                            .push((meta.storage.ptr as usize, meta.storage.layout.size()));
                     }
                 }
                 crate::xdp::interp::set_ranges(ranges.as_slice());

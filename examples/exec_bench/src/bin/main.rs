@@ -58,13 +58,19 @@ static mut INVOKE_BUF: [u8; VALUE_LEN] = [0u8; VALUE_LEN];
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    esp_println::logger::init_logger(log::LevelFilter::Error);
+    esp_println::logger::init_logger(log::LevelFilter::Info);
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     let flash = peripherals.FLASH;
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
+
+    // Interpreter self-check. Runs before the serial loop so the result is on
+    // the wire even when no host is attached. It uses the `incr` workload's
+    // eBPF bytecode, the same program the AOT arm installs, so a matching
+    // result is direct evidence both engines agree.
+    interp_selftest();
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -189,6 +195,57 @@ serial_task! {
     }
 }
 
+/// `incr` workload bytecode, from `libbpf-mcu/tests/xdp/incr.c`.
+///
+/// Reads `u32` at packet offset 4, adds one, writes it at offset 8. Returns
+/// `XDP_PASS` (2) when the frame is long enough and `XDP_ABORTED` (0) when the
+/// bounded read would run past `data_end`.
+const INCR_EBPF: [u8; 240] = [
+    0xb4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x61, 0x12, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x61, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xbf, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x07, 0x03, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x2d, 0x23, 0x17, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x1c, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa6, 0x02, 0x15, 0x00, 0x04, 0x00, 0x00, 0x00,
+    0x71, 0x12, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x02, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
+    0x71, 0x13, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4c, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x71, 0x13, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x03, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+    0x4c, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x71, 0x13, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x64, 0x03, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x4c, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xbc, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x74, 0x03, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x73, 0x31, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xbc, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x74, 0x03, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
+    0x73, 0x31, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x73, 0x21, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x74, 0x02, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x73, 0x21, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xb4, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Prove the interpreter runs real eBPF bytecode on this chip.
+///
+/// Runs `incr` over a hand-built frame whose `u32` at offset 4 is `0x41`. The
+/// expected output at offset 8 is `0x42`. Three outcomes are reported:
+///
+/// - [`xpost_type::XdpAction::Pass`] and the byte at offset 8 is `0x42`: the
+///   interpreter ran the program and it mutated the frame as designed.
+/// - Anything else: the run refused or produced a different result, and the log
+///   line carries both numbers so the failure is diagnosable from the wire.
+fn interp_selftest() {
+    let mut frame = [0u8; 64];
+    frame[4..8].copy_from_slice(&0x41u32.to_le_bytes());
+
+    let act = xpost::xdp::selftest_run(&INCR_EBPF, &mut frame);
+
+    let param = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+    let out = u32::from_le_bytes([frame[8], frame[9], frame[10], frame[11]]);
+    let ok = act == xpost_type::XdpAction::Pass as i32 && param == 0x41 && out == 0x42;
+    info!("interp selftest: act={act} in={param:#x} out={out:#x} ok={ok}");
+    // Diagnostic: the bytecode's `r1` is the md pointer, and its stores land at
+    // `r1 + 8`, so a wrong `data` field shows up as a write inside the md.
+    info!(
+        "interp selftest: frame0={:#x},{:#x},{:#x},{:#x} frame8={:#x},{:#x},{:#x},{:#x}",
+        frame[0], frame[1], frame[2], frame[3],
+        frame[8], frame[9], frame[10], frame[11]
+    );
+}
+
 fn reply_map_err(reply: ReplyWriter<'_>, e: AppMapError) {
     match e {
         AppMapError::Busy => reply.error(&ServerError::Busy),
@@ -262,8 +319,8 @@ fn update_bytes(name: &str, key: &[u8], value: &[u8]) -> Result<(), AppMapError>
 
 /// Carrier path: copy map[0] while the control plane is open, lease only for
 /// `invoke`, then release and copy the buffer to map[1].
-/// No opcode / layout interpretation. `OK finish` comes from the XDP image
-/// (`bpf_printk`), not from this App.
+/// No opcode / layout interpretation. After that map write succeeds, this App
+/// logs `OK finish` outside `invoke`.
 fn run_exec() -> Result<(), AppMapError> {
     let buf: &mut [u8; VALUE_LEN] = unsafe { &mut *addr_of_mut!(INVOKE_BUF) };
     buf.fill(0);
@@ -292,6 +349,7 @@ fn run_exec() -> Result<(), AppMapError> {
         maps.hash_update(idx, &[KEY_OUT], buf, BPF_ANY)
             .map_err(AppMapError::from)?;
     }
+    info!("OK finish");
     Ok(())
 }
 

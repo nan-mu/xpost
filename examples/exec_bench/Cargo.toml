@@ -50,6 +50,7 @@ xpost = { path = "../..", features = [
   "perf-aggregate",
   "perf-gauge",
   "perf-trace",
+  "interp",
 ] }
 xpost-type = { path = "../../xpost-type" }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
