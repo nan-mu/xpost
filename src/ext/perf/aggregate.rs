@@ -228,6 +228,8 @@ impl Aggregate {
 pub struct AggregateSet {
     pub rx_processing: Aggregate,
     pub xdp_execution: Aggregate,
+    /// The engine call alone: `xdp_dispatch`'s sibling without the hooks.
+    pub xdp_engine: Aggregate,
     pub xdp_dispatch: Aggregate,
     pub post_action: Aggregate,
     pub tx_submission: Aggregate,
@@ -328,6 +330,7 @@ impl AggregateSet {
         Self {
             rx_processing: Aggregate::new(),
             xdp_execution: Aggregate::new(),
+            xdp_engine: Aggregate::new(),
             xdp_dispatch: Aggregate::new(),
             post_action: Aggregate::new(),
             tx_submission: Aggregate::new(),
@@ -348,6 +351,7 @@ impl AggregateSet {
     pub fn reset_all(&self) {
         self.rx_processing.reset();
         self.xdp_execution.reset();
+        self.xdp_engine.reset();
         self.xdp_dispatch.reset();
         self.post_action.reset();
         self.tx_submission.reset();
@@ -377,4 +381,17 @@ pub(crate) fn record_lookup(dt: u64, returned_null: bool, empty_dt: u64) {
         set.lookup_non_null.record(dt);
     }
     set.lookup_timer_empty.record(empty_dt);
+}
+
+/// Record the engine call alone, in microseconds.
+///
+/// Separate from `xdp_execution`: that aggregate measures between the
+/// `xdp_invocations` and `xdp_action` hooks, which includes the counter and
+/// trace work on both sides. Measured on the ESP32-C3, those hooks cost about
+/// 15 microseconds per flight while a small program takes about 1, which makes
+/// the wider interval useless for comparing engines.
+#[cfg(any(feature = "perf-aggregate", feature = "perf-trace"))]
+#[inline]
+pub(crate) fn record_engine(us: u64) {
+    crate::xdp::ingress::XDP_PROG.aggregate.xdp_engine.record(us);
 }

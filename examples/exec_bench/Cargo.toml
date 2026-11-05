@@ -50,13 +50,21 @@ xpost = { path = "../..", features = [
   "perf-aggregate",
   "perf-gauge",
   "perf-trace",
-  "interp",
+  "perf-report",
 ] }
 xpost-type = { path = "../../xpost-type" }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
 
 [build-dependencies]
 xpost-build = { path = "../../xpost-build" }
+
+[features]
+# Build-time variants. `interp` selects the eBPF interpreter as the engine; a
+# build without it runs AOT machine code. Both report through `perf-report`, so
+# the two arms produce comparable bytes.
+interp = ["xpost/interp"]
+# Firmware self-checks that print segment timings over the UART.
+diag = ["interp"]
 
 [profile.dev]
 opt-level = "s"

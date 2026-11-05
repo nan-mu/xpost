@@ -266,6 +266,45 @@ impl<'a> EbpfVmMbuff<'a> {
     /// // Instantiate a VM.
     /// let mut vm = rbpf::EbpfVmMbuff::new(Some(prog)).unwrap();
     /// ```
+    /// Build a VM for a program the caller has already verified.
+    ///
+    /// `EbpfVmMbuff::new` runs the rbpf verifier, which is a linear scan over the
+    /// whole program. That is the right cost to pay when a program loads, and the
+    /// wrong cost to pay per run: a runtime that executes the same leased image
+    /// many times would rescan it every time.
+    ///
+    /// This constructor stores the program and skips the scan. The caller takes
+    /// on the verifier's obligations: branch targets stay inside the program,
+    /// the last instruction is `exit`, and no instruction writes a register
+    /// outside `r0..r10`. Those are exactly the checks `verifier::check` makes,
+    /// and the `mcu` embedding already has them from the load path.
+    ///
+    /// # Safety
+    ///
+    /// `prog` must satisfy `verifier::check`. An unchecked program that jumps
+    /// outside its own bytes reaches `ebpf::get_insn`, which panics, and a
+    /// firmware panic is a hang.
+    #[cfg(feature = "mcu")]
+    pub unsafe fn new_verified(prog: &'a [u8]) -> EbpfVmMbuff<'a> {
+        EbpfVmMbuff {
+            prog: Some(prog),
+            verifier: verifier::check,
+            #[cfg(feature = "cranelift")]
+            cranelift_prog: None,
+            stack_usage: Some(stack::StackUsage::uniform(stack::StackUsageType::Default)),
+            stack_verifier: StackVerifier::new(None),
+        }
+    }
+
+    /// Run `verifier::check` over `prog` without building a VM.
+    ///
+    /// For a loader that verifies once and then calls [`Self::new_verified`] per
+    /// run.
+    #[cfg(feature = "mcu")]
+    pub fn verify(prog: &[u8]) -> Result<(), Error> {
+        verifier::check(prog)
+    }
+
     pub fn new(prog: Option<&'a [u8]>) -> Result<EbpfVmMbuff<'a>, Error> {
         // `mcu`: skip the per-function stack map entirely. It exists to size
         // local-function frames from a caller calculator; without one every

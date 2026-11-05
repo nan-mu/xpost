@@ -29,6 +29,18 @@ pub mod trace;
 ))]
 mod report;
 
+/// Interpreter-arm report in the `xpost-perf` format.
+///
+/// Lives beside the fixed-layout report rather than replacing it: the fixed
+/// layout's slot names belong to the HAL arm, and this one carries its own
+/// names so a host needs no per-firmware knowledge.
+///
+/// Not gated on `interp`: the engine timing it reports is recorded in
+/// `ingress::run` for both engines, so the AOT arm needs the same report to be
+/// comparable on one wire.
+#[cfg(all(feature = "perf-aggregate", feature = "perf-report"))]
+pub mod interp_report;
+
 /// EspRadioTrace impl — file under `trace/`, linked here for any `perf-*`.
 #[cfg(any(
     feature = "perf-counter",

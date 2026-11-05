@@ -159,7 +159,17 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
         crate::ext::perf::counter::inc_inactive_skip();
         return None;
     }
+    // Timed here, around the engine call only. The perf aggregates bracket a
+    // wider interval that includes the counter and trace hooks on both sides,
+    // and those hooks cost more than a small program does, so a figure taken
+    // between them describes the hooks rather than the work.
+    let t0 = crate::ext::perf::aggregate::AggregateSet::now_ticks();
     let action = unsafe { super::engine::flight(engine, entry, ctx_ptr) };
+    let engine_us = crate::ext::perf::aggregate::AggregateSet::now_ticks().wrapping_sub(t0);
+    #[cfg(any(feature = "perf-aggregate", feature = "perf-trace"))]
+    crate::ext::perf::aggregate::record_engine(engine_us);
+    #[cfg(not(any(feature = "perf-aggregate", feature = "perf-trace")))]
+    let _ = engine_us;
     IN_FLIGHT.store(0, Ordering::Release);
 
     let data = ctx_md.data;

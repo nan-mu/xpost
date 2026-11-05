@@ -24,6 +24,38 @@ pub use crate::error::{
 // internally, so no context type leaves the crate.
 
 pub use state::set_boot_id;
+/// The mounted program singleton, for board-level perf probes.
+///
+/// The datapath never exposes this: applications read performance data through
+/// [`crate::ext::perf`]. A firmware self-check needs it to measure the cost of
+/// the hooks that bracket every flight.
+#[cfg(feature = "perf-trace")]
+pub fn test_prog() -> &'static ingress::XdpProg {
+    &ingress::XDP_PROG
+}
+
+/// One leased-path flight with its three stages timed separately.
+///
+/// `xdp_invocations` and `xdp_action` bracket the engine call in
+/// [`crate::ext::exec_call::invoke`], and the perf report measures the interval
+/// between them. Splitting the three makes it possible to tell how much of a
+/// reported figure is the program and how much is the hooks around it.
+///
+/// Returns `(before_us, engine_us, after_us, action)`.
+#[cfg(feature = "perf-trace")]
+pub fn test_flight_split(buf: &mut [u8]) -> (u32, u32, u32, i32) {
+    use xpost_type::EspRadioTrace;
+    let prog = test_prog();
+    let now = || esp_hal::time::Instant::now().duration_since_epoch().as_micros() as u32;
+    let t0 = now();
+    prog.xdp_invocations();
+    let t1 = now();
+    let (act, _) = ingress::run(buf);
+    let t2 = now();
+    prog.xdp_action(act);
+    let t3 = now();
+    (t1.wrapping_sub(t0), t2.wrapping_sub(t1), t3.wrapping_sub(t2), act as i32)
+}
 /// Run one eBPF program outside a lease, for a firmware self-check.
 ///
 /// Only available with the `interp` feature. The leased datapath reaches the

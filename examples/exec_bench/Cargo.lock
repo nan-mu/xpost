@@ -2094,6 +2094,7 @@ dependencies = [
  "talc",
  "xpost-elf",
  "xpost-macros",
+ "xpost-perf",
  "xpost-type",
 ]
 
@@ -2126,6 +2127,10 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "xpost-perf"
+version = "0.1.0"
 
 [[package]]
 name = "xpost-serial"

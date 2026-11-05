@@ -39,6 +39,10 @@ perf-lookup = ["perf-aggregate"]
 perf-gauge = ["esp-radio/xdp-observe"]
 # Trace rings (sole timeline) → `xpost::ext::perf::trace()`.
 perf-trace = ["esp-radio/xdp-observe"]
+# Versioned self-describing perf report (`perf::interp_report`). Independent of
+# `interp`: both engines record the same `engine` span, so both need the report
+# to be comparable on one wire.
+perf-report = ["dep:xpost-perf"]
 # Function-call invoke of a leased XDP image → `xpost::ext::exec_call::invoke`.
 # Additive ext surface; not an ingress attach (esp-radio remains the network path).
 exec-call = []
@@ -102,6 +106,8 @@ esp-storage      = { version = "0.9.0", default-features = false, features = ["e
 # Local fork: eBPF interpreter used by the `interp` feature. `mcu` drops alloc
 # and the JIT; the firmware must target a core without the A extension.
 rbpf = { path = "rbpf", default-features = false, features = ["mcu"], optional = true }
+# Versioned self-describing perf report. No dependencies, no allocator.
+xpost-perf = { path = "xpost-perf", optional = true }
 esp-hal = { version = "~1.1.0", default-features = false, features = [
   "esp32c3",
   "unstable",

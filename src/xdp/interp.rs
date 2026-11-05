@@ -162,14 +162,23 @@ pub(crate) unsafe fn run(base: usize, len: usize, ctx: *mut XdpMd) -> i32 {
     BUDGET.store(MAX_STEPS, Ordering::Relaxed);
 
     let env = McuEnv::new(call_helper, check_access, step);
-    let vm = match rbpf::EbpfVmMbuff::new(Some(prog)) {
-        Ok(vm) => vm,
-        Err(_) => return ABORTED,
-    };
+    // The program was verified when it was staged, so this does not rescan it.
+    // Building the VM itself is a few word copies: `new_verified` stores the
+    // program slice and one constant stack size.
+    let vm = unsafe { rbpf::EbpfVmMbuff::new_verified(prog) };
     match vm.execute_program_mcu(pkt, md_bytes, stack, &env) {
         Ok(r0) => r0 as u32 as i32,
         Err(_) => ABORTED,
     }
+}
+
+/// Verify a program before it is published.
+///
+/// Runs once per image at load time. Without it the interpreter executes
+/// whatever bytes the slot holds, and a program that jumps outside its own
+/// bytes reaches `ebpf::get_insn`, which panics.
+pub(crate) fn verify(prog: &[u8]) -> bool {
+    rbpf::EbpfVmMbuff::verify(prog).is_ok()
 }
 
 /// Whether one instruction stores through `r1`.
@@ -270,6 +279,11 @@ fn step() -> Step {
 /// compare the mutated bytes.
 pub fn selftest_run(prog: &[u8], frame: &mut [u8]) -> i32 {
     clear_ranges();
+    // No stage ran for this program, so verify here. The leased path verifies
+    // once at load; a self-check has no loader.
+    if !verify(prog) {
+        return xpost_type::XdpAction::Aborted as i32;
+    }
     let mut ctx = XdpMd::from_buf(frame);
     unsafe { run(prog.as_ptr() as usize, prog.len(), &mut ctx as *mut XdpMd) }
 }

@@ -70,6 +70,7 @@ async fn main(spawner: Spawner) -> ! {
     // the wire even when no host is attached. It uses the `incr` workload's
     // eBPF bytecode, the same program the AOT arm installs, so a matching
     // result is direct evidence both engines agree.
+    #[cfg(feature = "diag")]
     interp_selftest();
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -186,9 +187,13 @@ serial_task! {
             reply.ok(OkReply::ClearPerf);
         })
         .on_get_perf(|reply: ReplyWriter<'_>| {
-            let n = xpost::ext::perf::report_payload_len();
+            // The interpreter arm reports in the `xpost-perf` format, which
+            // carries its own metric names. The fixed slot layout it replaces
+            // has no slot for the engine call alone, and the two empty slots
+            // belong to the HAL firmware.
+            let n = xpost::ext::perf::interp_report::payload_len();
             reply.get_perf(n, |write| {
-                xpost::ext::perf::report_perf(write);
+                xpost::ext::perf::interp_report::report(write);
             });
         })
         .build()
@@ -200,6 +205,7 @@ serial_task! {
 /// Reads `u32` at packet offset 4, adds one, writes it at offset 8. Returns
 /// `XDP_PASS` (2) when the frame is long enough and `XDP_ABORTED` (0) when the
 /// bounded read would run past `data_end`.
+#[cfg(feature = "diag")]
 const INCR_EBPF: [u8; 240] = [
     0xb4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x61, 0x12, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x61, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xbf, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -227,6 +233,7 @@ const INCR_EBPF: [u8; 240] = [
 ///   interpreter ran the program and it mutated the frame as designed.
 /// - Anything else: the run refused or produced a different result, and the log
 ///   line carries both numbers so the failure is diagnosable from the wire.
+#[cfg(feature = "diag")]
 fn interp_selftest() {
     // The workload computes on packet bytes 8..12 and passes packet 4..8
     // through untouched, so the fixture seeds both regions with different
@@ -249,6 +256,70 @@ fn interp_selftest() {
     info!(
         "interp selftest: act={act} in={INPUT:#x} out={out:#x} through={through:#x} ok={ok}"
     );
+
+    // Clock cost. Every segment boundary in `run_exec` and every aggregate in
+    // the perf report reads this clock, so its price bounds what the reported
+    // numbers can resolve. A timer read that costs more than the work it times
+    // makes the work invisible.
+    let t0 = inst_us();
+    for _ in 0..1000 {
+        core::hint::black_box(inst_us());
+    }
+    let per_read = inst_us().wrapping_sub(t0);
+    info!("clock probe: 1000 reads = {per_read} us ({:.1} us/read)", per_read as f64 / 1000.0);
+
+    // Empty-flight cost. The leased path is entered and left without any
+    // program work when the bytecode is a single `exit`, so this isolates the
+    // carrier: IN_FLIGHT claim, engine dispatch, window validation, release.
+    let exit_only: [u8; 8] = [0x95, 0, 0, 0, 0, 0, 0, 0];
+    let mut buf = [0u8; 64];
+    let t1 = inst_us();
+    for _ in 0..100 {
+        core::hint::black_box(xpost::xdp::selftest_run(&exit_only, &mut buf));
+    }
+    let empty_total = inst_us().wrapping_sub(t1);
+    info!(
+        "empty flight: 100 runs = {empty_total} us ({:.1} us/run)",
+        empty_total as f64 / 100.0
+    );
+
+    // Same loop for the real program, so the two per-run figures are measured
+    // the same way.
+    let mut buf2 = [0u8; 64];
+    buf2[8..12].copy_from_slice(&INPUT.to_le_bytes());
+    let t2 = inst_us();
+    for _ in 0..100 {
+        buf2[8] = INPUT as u8;
+        core::hint::black_box(xpost::xdp::selftest_run(&INCR_EBPF, &mut buf2));
+    }
+    let incr_total = inst_us().wrapping_sub(t2);
+    info!(
+        "incr flight: 100 runs = {incr_total} us ({:.1} us/run)",
+        incr_total as f64 / 100.0
+    );
+
+    // Perf hooks, measured on their own. The leased path calls
+    // `xdp_invocations` before the flight and `xdp_action` after it, and the
+    // perf report measures the interval between the two. If these hooks cost
+    // more than the work, the reported figure describes the hooks.
+    {
+        let mut buf3 = [0u8; 64];
+        let t3 = inst_us();
+        let mut before = 0u32;
+        let mut engine = 0u32;
+        let mut after = 0u32;
+        for _ in 0..50 {
+            let (a, b, c, _) =
+                xpost::xdp::test_flight_split(&mut buf3);
+            before = before.saturating_add(a);
+            engine = engine.saturating_add(b);
+            after = after.saturating_add(c);
+        }
+        let total = inst_us().wrapping_sub(t3);
+        info!(
+            "leased split x50: before_hook={before} engine={engine} after_hook={after} outer={total} us"
+        );
+    }
 }
 
 fn reply_map_err(reply: ReplyWriter<'_>, e: AppMapError) {
@@ -381,19 +452,6 @@ fn run_exec() -> Result<(), AppMapError> {
 /// the differences are comparable.
 fn inst_us() -> u32 {
     esp_hal::time::Instant::now().duration_since_epoch().as_micros() as u32
-}
-
-/// One flight through the interpreter, outside any lease.
-///
-/// Exists because `enable exec` cannot tell a refused run from a program that
-/// returned `XDP_ABORTED`: both surface as the same `ERR logic`. This reports
-/// the action and the bytes the run produced.
-fn interp_exec_probe() {
-    let mut frame = [0u8; 32];
-    frame[8..12].copy_from_slice(&0x41u32.to_le_bytes());
-    let act = xpost::xdp::selftest_run(&INCR_EBPF, &mut frame);
-    let out = u32::from_le_bytes([frame[8], frame[9], frame[10], frame[11]]);
-    info!("interp exec probe: act={act} out={out:#x}");
 }
 
 fn map_xdp_err(err: AppXdpError) -> AppMapError {
