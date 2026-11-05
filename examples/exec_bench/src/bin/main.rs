@@ -329,6 +329,7 @@ fn update_bytes(name: &str, key: &[u8], value: &[u8]) -> Result<(), AppMapError>
 fn run_exec() -> Result<(), AppMapError> {
     let buf: &mut [u8; VALUE_LEN] = unsafe { &mut *addr_of_mut!(INVOKE_BUF) };
     buf.fill(0);
+    let t_start = inst_us();
 
     {
         let (maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
@@ -340,22 +341,59 @@ fn run_exec() -> Result<(), AppMapError> {
             return Err(AppMapError::Logic);
         }
     }
+    let t_load = inst_us();
 
     app_ctrl::enable_xdp().map_err(map_xdp_err)?;
+    let t_lease = inst_us();
     let (act, _) = xpost::ext::exec_call::invoke(buf);
     let aborted = act == xpost_type::XdpAction::Aborted;
+    let t_engine = inst_us();
     app_ctrl::disable_xdp().map_err(map_xdp_err)?;
     if aborted {
         return Err(AppMapError::Logic);
     }
+    let t_release = inst_us();
 
     {
         let (mut maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
         maps.hash_update(idx, &[KEY_OUT], buf, BPF_ANY)
             .map_err(AppMapError::from)?;
     }
+    let t_store = inst_us();
+
+    // The AOT baseline reports one `execution` figure for the whole of this
+    // function's middle, and all eight workloads measured the same value. These
+    // four segments split it, so the fixed cost is visible next to the work.
+    info!(
+        "exec seg: load={} lease={} engine={} release={} store={} total={}",
+        t_load.wrapping_sub(t_start),
+        t_lease.wrapping_sub(t_load),
+        t_engine.wrapping_sub(t_lease),
+        t_release.wrapping_sub(t_engine),
+        t_store.wrapping_sub(t_release),
+        t_store.wrapping_sub(t_start),
+    );
     info!("OK finish");
     Ok(())
+}
+
+/// Device microseconds since boot. One source for every segment boundary, so
+/// the differences are comparable.
+fn inst_us() -> u32 {
+    esp_hal::time::Instant::now().duration_since_epoch().as_micros() as u32
+}
+
+/// One flight through the interpreter, outside any lease.
+///
+/// Exists because `enable exec` cannot tell a refused run from a program that
+/// returned `XDP_ABORTED`: both surface as the same `ERR logic`. This reports
+/// the action and the bytes the run produced.
+fn interp_exec_probe() {
+    let mut frame = [0u8; 32];
+    frame[8..12].copy_from_slice(&0x41u32.to_le_bytes());
+    let act = xpost::xdp::selftest_run(&INCR_EBPF, &mut frame);
+    let out = u32::from_le_bytes([frame[8], frame[9], frame[10], frame[11]]);
+    info!("interp exec probe: act={act} out={out:#x}");
 }
 
 fn map_xdp_err(err: AppXdpError) -> AppMapError {

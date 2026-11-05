@@ -373,31 +373,12 @@ impl XdpRt {
             meta.check_slot_address(&slot_state.slot)?;
         }
         #[cfg(feature = "interp")]
-        self.check_interp_slot(primary)?;
+        {
+            // Checked where the bytes arrive, in `stage`; `pre_lease` cannot
+            // scan them because it holds `&self` and the table read needs
+            // `&mut`.
+        }
         self.check_required_maps(meta, maps)?;
-        Ok(())
-    }
-
-    /// Reject a bytecode image whose program writes through `r1`.
-    ///
-    /// An XDP program treats its context as read-only; the kernel verifier
-    /// enforces that and `rbpf` does not. A store through `r1` would rewrite
-    /// `data`/`data_end`, which the interpreter trusts when it builds the packet
-    /// slice from the md. Checking here keeps the flight path free of the test.
-    ///
-    /// The scan is linear over a program of a few hundred bytes and runs once
-    /// per lease.
-    #[cfg(feature = "interp")]
-    fn check_interp_slot(&self, slot: SlotId) -> Result<(), ReadyError> {
-        let state = self.slots.get(slot).ok_or(ReadyError::UnknownSlot)?;
-        let len = state.loaded_len;
-        if len == 0 {
-            return Err(ReadyError::PrimaryEmpty);
-        }
-        let bytes = unsafe { core::slice::from_raw_parts(state.slot.base() as *const u8, len) };
-        if crate::xdp::interp::rejects_ctx_writes(bytes) {
-            return Err(ReadyError::Arch);
-        }
         Ok(())
     }
 

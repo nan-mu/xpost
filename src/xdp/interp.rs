@@ -172,39 +172,43 @@ pub(crate) unsafe fn run(base: usize, len: usize, ctx: *mut XdpMd) -> i32 {
     }
 }
 
-/// Whether `prog` ever stores through `r1`.
+/// Whether one instruction stores through `r1`.
 ///
 /// An XDP program must treat its context as read-only: the kernel's verifier
 /// enforces that, and `rbpf` does not. A store through `r1` would let the
 /// program rewrite `data`/`data_end`, which are the pointers this module trusts
 /// when it builds the packet slice. Reject those programs when the image is
 /// leased so the flight path needs no check.
-///
-/// The scan runs once per lease, over a program of a few hundred bytes.
+pub(crate) fn rejects_ctx_write_insn(insn: &[u8]) -> bool {
+    use rbpf::ebpf;
+    if insn.len() < ebpf::INSN_SIZE {
+        return false;
+    }
+    let opc = insn[0];
+    let dst = insn[1] & 0x0f;
+    dst == 1
+        && matches!(
+            opc,
+            ebpf::ST_B_IMM
+                | ebpf::ST_H_IMM
+                | ebpf::ST_W_IMM
+                | ebpf::ST_DW_IMM
+                | ebpf::ST_B_REG
+                | ebpf::ST_H_REG
+                | ebpf::ST_W_REG
+                | ebpf::ST_DW_REG
+                | ebpf::ST_W_XADD
+        )
+}
+
+/// [`rejects_ctx_write_insn`] over a whole program.
 pub(crate) fn rejects_ctx_writes(prog: &[u8]) -> bool {
     use rbpf::ebpf;
     if !prog.len().is_multiple_of(ebpf::INSN_SIZE) {
         return false;
     }
-    (0..prog.len() / ebpf::INSN_SIZE).any(|i| {
-        let at = i * ebpf::INSN_SIZE;
-        let opc = prog[at];
-        let dst = prog[at + 1] & 0x0f;
-        // BPF_ST (imm stores) and BPF_STX (register stores), all widths.
-        dst == 1
-            && matches!(
-                opc,
-                ebpf::ST_B_IMM
-                    | ebpf::ST_H_IMM
-                    | ebpf::ST_W_IMM
-                    | ebpf::ST_DW_IMM
-                    | ebpf::ST_B_REG
-                    | ebpf::ST_H_REG
-                    | ebpf::ST_W_REG
-                    | ebpf::ST_DW_REG
-                    | ebpf::ST_W_XADD
-            )
-    })
+    (0..prog.len() / ebpf::INSN_SIZE)
+        .any(|i| rejects_ctx_write_insn(&prog[i * ebpf::INSN_SIZE..]))
 }
 
 /// Helper dispatch for `call` with `src == 0`.

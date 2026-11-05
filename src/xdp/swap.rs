@@ -128,6 +128,10 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
         self.table
             .read(aot_abs, &mut buf[..image_len])
             .map_err(|e| self.fail(e.into()))?;
+        #[cfg(feature = "interp")]
+        if crate::xdp::interp::rejects_ctx_writes(&buf[..image_len]) {
+            return Err(self.fail(XdpSwapError::Arch));
+        }
         if xpost_elf::sha256(&buf[..image_len]) != digest {
             return Err(self.fail(XdpSwapError::Digest));
         }
