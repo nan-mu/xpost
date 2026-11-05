@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: (Apache-2.0 OR MIT)
 
+#[cfg(not(feature = "mcu"))]
 use core::any::Any;
 
+#[cfg_attr(feature = "mcu", allow(unused_imports))]
 use crate::{
     ebpf::{self, LOCAL_FUNCTION_STACK_SIZE},
     lib::*,
@@ -70,28 +72,29 @@ impl StackUsageType {
 }
 
 pub struct StackVerifier {
+    #[cfg_attr(feature = "mcu", allow(dead_code))]
     calculator: Option<StackUsageCalculator>,
+    /// Local fork: absent under `mcu`, which never carries calculator state.
+    #[cfg(not(feature = "mcu"))]
     data: Option<Box<dyn Any>>,
 }
 
 impl StackVerifier {
     pub fn new(
         stack_usage_calculator: Option<StackUsageCalculator>,
-        data: Option<Box<dyn Any>>,
+        #[cfg(not(feature = "mcu"))] data: Option<Box<dyn Any>>,
     ) -> Self {
         Self {
             calculator: stack_usage_calculator,
+            #[cfg(not(feature = "mcu"))]
             data,
         }
     }
-    /// Validate the stack usage of a program
+    /// Validate the stack usage of a program.
     ///
-    /// This function checks the stack usage of a program and returns a `StackUsage` object
-    /// containing the stack usage for each local function in the program.
-    ///
-    /// # Returns
-    /// - `Ok(StackUsage)` if the stack usage is valid
-    /// - `Err(Error)` if the stack usage is invalid
+    /// Local fork: absent under `mcu`. It fills a per-function `HashMap`, and
+    /// the MCU build uses `StackUsage::uniform` instead.
+    #[cfg(not(feature = "mcu"))]
     pub fn stack_validate(&mut self, prog: &[u8]) -> Result<StackUsage, Error> {
         let mut stack_usage = HashMap::new();
         let ty = self.calculate_stack_usage_for_local_func(prog, 0)?;
@@ -108,6 +111,7 @@ impl StackVerifier {
     }
 
     /// Calculate the stack usage for a local function
+    #[cfg(not(feature = "mcu"))]
     fn calculate_stack_usage_for_local_func(
         &mut self,
         prog: &[u8],
@@ -134,7 +138,7 @@ pub struct StackUsage(StackUsageMap);
 /// gets the same size, so the map disappears and the lookup becomes an `Option`
 /// that is always `Some` when a program calls local functions.
 enum StackUsageMap {
-    #[cfg_attr(feature = "mcu", allow(dead_code))]
+    #[cfg(not(feature = "mcu"))]
     PerFunction(HashMap<usize, StackUsageType>),
     #[cfg(feature = "mcu")]
     Uniform(StackUsageType),
@@ -153,6 +157,7 @@ impl StackUsage {
     /// Get the stack usage for a local function
     pub fn stack_usage_for_local_func(&self, pc: usize) -> Option<StackUsageType> {
         match &self.0 {
+            #[cfg(not(feature = "mcu"))]
             StackUsageMap::PerFunction(map) => map.get(&pc).cloned(),
             #[cfg(feature = "mcu")]
             StackUsageMap::Uniform(usage) => {

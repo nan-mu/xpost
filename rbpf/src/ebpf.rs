@@ -16,7 +16,9 @@
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 
+#[cfg_attr(feature = "mcu", allow(unused_imports))]
 use crate::lib::*;
+#[cfg_attr(feature = "mcu", allow(unused_imports))]
 use byteorder::{ByteOrder, LittleEndian};
 
 /// Maximum number of instructions in an eBPF program.
@@ -505,6 +507,9 @@ impl Insn {
     /// };
     /// assert_eq!(insn.to_vec(), prog);
     /// ```
+    /// Local fork: absent under `mcu`, which loads finished bytecode and never
+    /// decodes instructions back into structs.
+    #[cfg(not(feature = "mcu"))]
     pub fn to_vec(&self) -> Vec<u8> {
         vec![
             self.opc,
@@ -615,6 +620,8 @@ pub fn get_insn(prog: &[u8], idx: usize) -> Insn {
 ///     },
 /// ]);
 /// ```
+/// Local fork: absent under `mcu`, which loads finished bytecode.
+#[cfg(not(feature = "mcu"))]
 pub fn to_insn_vec(prog: &[u8]) -> Vec<Insn> {
     if !prog.len().is_multiple_of(INSN_SIZE) {
         panic!(

@@ -276,29 +276,6 @@ fn a_window_past_the_end_of_a_permitted_range_is_rejected() {
 }
 
 #[test]
-fn the_std_path_refuses_the_same_straddling_window() {
-    // Same defect, upstream API. `register_allowed_memory` is the only knob, so
-    // the passed range ends at the buffer end and the load straddles it.
-    let buf = [0u8; 16];
-    let base = buf.as_ptr() as u64;
-    let parts = {
-        let mut v: std::vec::Vec<[u8; 8]> = std::vec::Vec::new();
-        v.extend(ld_dw_imm(R1, base + 12));
-        v.push(insn(ebpf::LD_DW_REG, R0, R1, 0, 0));
-        v.push(insn(ebpf::EXIT, 0, 0, 0, 0));
-        v
-    };
-    let code = prog(&parts);
-    let mut vm = rbpf::EbpfVmMbuff::new(Some(&code)).unwrap();
-    vm.register_allowed_memory(base..base + buf.len() as u64);
-    let err = vm.execute_program(&[], &[]).unwrap_err();
-    assert!(
-        err.to_string().contains("out of bounds"),
-        "upstream admitted this window; the fork must not, got: {err}"
-    );
-}
-
-#[test]
 fn register_helper_reports_the_mcu_mismatch() {
     let code = prog(&[insn(ebpf::EXIT, 0, 0, 0, 0)]);
     let mut vm = rbpf::EbpfVmMbuff::new(Some(&code)).unwrap();

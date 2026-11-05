@@ -393,6 +393,15 @@ The MCU path is the interpreter only.
 Cache the helper and permission decisions.
 Both hooks run per instruction.
 
+The `mcu` build needs no global allocator and links no `alloc`.
+Do not add `extern crate alloc`, `hashbrown`, `format!`, or `Vec` back into that path.
+Naming `extern crate alloc` alone makes the linker demand a `#[global_allocator]`.
+Diagnostics format into `rbpf::fixed::FixedStr`, which truncates at 128 bytes.
+
+Do not confuse this fork with RIOT-OS `rBPF`, the C implementation behind CertrBPF and HAVM.
+They differ in language, author, and host.
+Cite them separately.
+
 XDP firmware calls `xpost_build::firmware_codegen()` in `build.rs`.
 It reads `[package.metadata.xpost]` defaults from the root crate, applies board overrides, and derives the cold Flash span from `partitions.csv`.
 The `xpost-build/xpost-link` wrapper embeds the `.xpost.mem` XPM1 contract into the linked Firmware ELF for host tools.

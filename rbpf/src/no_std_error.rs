@@ -1,49 +1,62 @@
 // SPDX-License-Identifier: (Apache-2.0 OR MIT)
 
-//! This module provides a simple implementation of the Error struct that is
-//! used as a drop-in replacement for `std::io::Error` when using `rbpf` in `no_std`.
+//! `no_std` `Error` that never allocates.
+//!
+//! Upstream's `no_std` error stores a `String`, so every `rbpf` error allocates
+//! and the crate needs a global allocator. This version stores a fixed-capacity
+//! buffer instead, which is what lets the `mcu` build drop `alloc` entirely.
+//!
+//! The interface stays compatible with the `std` variants: `Error::new` and
+//! `Error::other` keep their signatures, and `Display` renders the message.
 
-use crate::lib::String;
+use crate::fixed::{ERR_CAP, FixedStr};
 
-/// Implementation of Error for no_std applications.
-/// Ensures that the existing code can use it with the same interface
-/// as the Error from std::io::Error.
-#[derive(Debug)]
+/// Implementation of `Error` for `no_std` and `mcu` builds.
+#[derive(Clone, Copy)]
 pub struct Error {
     #[allow(dead_code)]
     kind: ErrorKind,
-    #[allow(dead_code)]
-    error: String,
+    message: FixedStr<ERR_CAP>,
 }
 
 impl Error {
     /// New function exposing the same signature as `std::io::Error::new`.
-    #[allow(dead_code)]
-    pub fn new<S: Into<String>>(kind: ErrorKind, error: S) -> Error {
-        Error {
-            kind,
-            error: error.into(),
-        }
+    pub fn new<S: AsRef<str>>(kind: ErrorKind, error: S) -> Error {
+        let mut message = FixedStr::new();
+        // Capacity overflow truncates. A truncated diagnostic is acceptable;
+        // failing to build one is not.
+        let _ = core::fmt::Write::write_str(&mut message, error.as_ref());
+        Error { kind, message }
+    }
+
+    /// The message without the `[Verifier]`-style prefix, truncated if long.
+    pub fn message(&self) -> &str {
+        self.message.as_str()
     }
 }
 
-/// The current version of `rbpf` only uses the [`Other`](ErrorKind::Other) variant
-/// from the [std::io::ErrorKind] enum. If a dependency on other variants were
-/// introduced in the future, this enum needs to be updated accordingly to maintain
-/// compatibility with the real `ErrorKind`. The reason all available variants
-/// aren't included in the first place is that [std::io::ErrorKind] exposes
-/// 40 variants, and not all of them are meaningful under `no_std`.
-#[derive(Debug)]
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.message.as_str())
+    }
+}
+
+impl core::fmt::Debug for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Error").field(&self.message.as_str()).finish()
+    }
+}
+
+/// The current version of `rbpf` only uses the [`Other`](ErrorKind::Other) variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// The no_std code only uses this variant.
-    #[allow(dead_code)]
+    /// The `no_std` code only uses this variant.
     Other,
 }
 
 impl Error {
     /// Convenience function to create an `Other` kind error.
-    #[allow(dead_code)]
-    pub fn other<S: Into<String>>(error: S) -> Error {
+    pub fn other<S: AsRef<str>>(error: S) -> Error {
         Error::new(ErrorKind::Other, error)
     }
 }

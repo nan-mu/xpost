@@ -634,6 +634,36 @@ let action = vm.execute_program_mcu(packet, &ctx, &mut stack, &env)?;
 # let _ = (McuEnv::deny_all(), Step::Go, action);
 ```
 
+### No allocator
+
+The `mcu` build needs no `#[global_allocator]` and links no `alloc`.
+
+This matters because naming `extern crate alloc` is enough to make the linker
+demand one, even when nothing allocates. Upstream reaches `alloc` through three
+things the MCU path does not want: `format!` on every diagnostic, the `HashMap`
+helper table, and the `Vec` stack. Each is replaced rather than tuned:
+
+| Upstream | `mcu` replacement |
+| --- | --- |
+| `format!` into a `String` | `err_fmt!` into a fixed 128-byte buffer (`fixed::FixedStr`) |
+| `std::io::Error` / `String` error | `fixed::Error` holding a `FixedStr` |
+| `HashMap<u32, Helper>` | `McuEnv::call_helper` |
+| `HashSet<Range<u64>>` | `McuEnv::check_access` |
+| `Vec<u8>` eBPF stack | the caller's `&mut [u8]` |
+| `hashbrown` per-function stack map | `StackUsage::uniform` |
+
+No allocator, no TALC, no bump arena. If a platform later needs heap anywhere,
+that is a separate decision; the interpreter does not require it.
+
+The assembler, disassembler, instruction builder, and JIT are all absent under
+`mcu`. A firmware loads finished bytecode, and a JIT for x86-64 has no role on an
+MCU. The three metadata-buffer wrappers (`EbpfVmFixedMbuff`, `EbpfVmRaw`,
+`EbpfVmNoData`) are absent too: each owns a `Vec` for the mbuff, and the MCU
+runtime builds an `xdp_md` and passes it to `EbpfVmMbuff` directly.
+
+One consequence: an error message longer than 128 bytes is truncated. Diagnostics
+that a caller needs to match must be matched on a prefix, not on the whole text.
+
 ### Divergence from upstream
 
 Every change is behind `mcu` unless stated otherwise.
@@ -652,23 +682,46 @@ Every change is behind `mcu` unless stated otherwise.
 5. **Step budget** — new. Upstream has no termination guard; a program that the
    verifier cannot prove terminating runs forever.
 6. **`StackUsage::uniform`** — new. Under `mcu` the per-function stack map
-   becomes one constant, which is what removes `hashbrown` from the load path.
+   becomes one constant, which is one of the things that removes `alloc`.
 7. **`portable-atomic`** — RV32IMC has no A extension, so `AtomicU32::fetch_add`
    does not exist there. `mcu` builds use `portable-atomic` and must enable
    `--cfg portable_atomic_unsafe_assume_single_core`.
+8. **No `alloc` under `mcu`** — `extern crate alloc` is gated out, as are
+   `hashbrown`, the host tooling modules, the JIT, and the three metadata-buffer
+   wrappers. See "No allocator" above.
+9. **`err_fmt!`** — new. Expands to `format!` under `std` and to a fixed buffer
+   otherwise. `std::io::Error` needs a `String`, so one call site cannot serve
+   both shapes.
+
+`mcu` takes precedence over `std` where they would conflict. Enabling both is
+supported for testing the hook surface on a host, and the fixed-capacity error
+wins there.
+
+### Relationship to prior work
+
+This fork is `qmonnet/rbpf`, the Rust user-space VM. It is **not** the `rBPF` of
+RIOT-OS, which is a separate C implementation by Koen Zandberg and is the base
+of CertrBPF and HAVM (CAV 2022 / CAV 2024). The two names differ by one letter
+and by language. Cite them separately.
+
+µBPF (Kubica, Imperial 2024) ports this same Rust VM to bare metal and reports
+the same gaps this fork addresses: no maps, no PC-relative calls, a minimal
+verifier with no branch bound. Its remedy for the last one — monitor taken
+branches at run time and preempt — is what [`McuEnv::step`] implements.
 
 ### Measured footprint
 
-RV32IMC, `--release`, `opt-level = "s"`, after `--gc-sections`:
+RV32IMC, `--release`, `opt-level = "s"`, after `--gc-sections`, with no global
+allocator:
 
 | Symbol / section | Bytes |
 | --- | --- |
-| `execute_inner::<McuHost>` (the interpreter loop) | 11,410 |
-| `.text` for a minimal caller (parse + run + `_start`) | 23,046 |
-| `.rodata` | 7,436 |
+| `execute_inner::<McuHost>` (the interpreter loop) | 11,776 |
+| `.text` for a minimal caller (parse + run + `_start`) | 22,786 |
+| `.rodata` | 7,028 |
 
-The `.text` total includes `rbpf::verifier::check` (~1,870 B), which the
-embedding runtime may skip if it already holds a verifier verdict.
+The `.text` total includes `rbpf::verifier::check` (2,010 B), which the embedding
+runtime may skip if it already holds a verifier verdict.
 
 The JIT is not part of this path. It needs `libc` and `std`, and it targets
 x86-64 only.

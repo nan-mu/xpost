@@ -12,10 +12,13 @@
 
 use crate::ebpf;
 use crate::ebpf::MAX_CALL_DEPTH;
+use crate::fixed::err_fmt;
 #[cfg(feature = "mcu")]
 use crate::mcu::{McuEnv, Step};
+#[cfg_attr(feature = "mcu", allow(unused_imports))]
 use crate::lib::*;
 use crate::stack::{StackFrame, StackUsage};
+#[cfg(not(feature = "mcu"))]
 use core::ops::Range;
 // RV32IMC has no A extension, so `target_has_atomic = "32"` is unset there.
 // The `mcu` build takes `portable-atomic` instead; every other build keeps the
@@ -50,11 +53,16 @@ trait Host {
 }
 
 /// Upstream behaviour: `HashMap` helpers, `HashSet` permitted ranges, no budget.
+///
+/// Local fork: absent under `mcu`, which has neither map type and uses
+/// `McuHost` instead.
+#[cfg(not(feature = "mcu"))]
 struct StdHost<'a> {
     helpers: &'a HashMap<u32, ebpf::Helper>,
     allowed_memory: &'a HashSet<Range<u64>>,
 }
 
+#[cfg(not(feature = "mcu"))]
 impl Host for StdHost<'_> {
     fn call(&self, id: u32, args: [u64; 5]) -> Option<u64> {
         let f = self.helpers.get(&id)?;
@@ -126,7 +134,7 @@ fn check_mem(
         }
     }
 
-    Err(Error::other(format!(
+    Err(Error::other(err_fmt!(
         "Error: out of bounds memory {} (insn #{:?}), addr {:#x}, size {:?}\nmbuff: {:#x}/{:#x}, mem: {:#x}/{:#x}, stack: {:#x}/{:#x}",
         access_type, insn_ptr, addr, len,
         mbuff.as_ptr() as u64, mbuff.len(),
@@ -135,6 +143,9 @@ fn check_mem(
     )))
 }
 
+/// Local fork: absent under `mcu`, which has no heap for the eBPF stack.
+/// Use [`execute_program_mcu`] there.
+#[cfg(not(feature = "mcu"))]
 pub fn execute_program(
     prog_: Option<&[u8]>,
     stack_usage: Option<&StackUsage>,
@@ -149,12 +160,28 @@ pub fn execute_program(
             "Error: No program set, call prog_set() to load one",
         ))?,
     };
-    let mut stack = vec![0u8; ebpf::STACK_SIZE];
     let host = StdHost {
         helpers,
         allowed_memory,
     };
-    execute_inner(prog, stack_usage, mem, mbuff, &mut stack, &host)
+    execute_host(prog, stack_usage, mem, mbuff, &host)
+}
+
+/// Heap-backed entry for the host path, keeping `vec!` out of `mcu`.
+///
+/// The `mcu` build never reaches this function: `EbpfVmMbuff::execute_program`
+/// is gated out there and replaced by `execute_program_mcu`, which takes the
+/// stack from the caller.
+#[cfg(not(feature = "mcu"))]
+fn execute_host(
+    prog: &[u8],
+    stack_usage: &StackUsage,
+    mem: &[u8],
+    mbuff: &[u8],
+    host: &impl Host,
+) -> Result<u64, Error> {
+    let mut stack = vec![0u8; ebpf::STACK_SIZE];
+    execute_inner(prog, stack_usage, mem, mbuff, &mut stack, host)
 }
 
 /// Run one program on caller-provided stack memory with no heap use (`mcu`).
@@ -191,7 +218,7 @@ pub fn execute_program_mcu(
     env: &McuEnv,
 ) -> Result<u64, Error> {
     if stack.len() < ebpf::STACK_SIZE {
-        return Err(Error::other(format!(
+        return Err(Error::other(err_fmt!(
             "Error: MCU stack too small ({} < {})",
             stack.len(),
             ebpf::STACK_SIZE
@@ -277,7 +304,7 @@ fn execute_inner<H: Host>(
     let mut insn_ptr: usize = 0;
     while insn_ptr * ebpf::INSN_SIZE < prog.len() {
         if !host.step() {
-            return Err(Error::other(format!(
+            return Err(Error::other(err_fmt!(
                 "Error: instruction budget exhausted (insn #{insn_ptr})"
             )));
         }
@@ -434,7 +461,7 @@ fn execute_inner<H: Host>(
                     let a = x as *const AtomicU32;
                     let _prev = (*a).fetch_add(add, Ordering::Relaxed);
                 } else {
-                    Err(Error::other(format!(
+                    Err(Error::other(err_fmt!(
                         "Error: unaligned atomic XADD (ST_W_XADD) (insn #{}), addr {:#x}, required alignment {}",
                         insn_ptr - 1,
                         x as u64,
@@ -456,7 +483,7 @@ fn execute_inner<H: Host>(
                     let a = x as *const AtomicU64;
                     let _prev = (*a).fetch_add(add, Ordering::Relaxed);
                 } else {
-                    Err(Error::other(format!(
+                    Err(Error::other(err_fmt!(
                         "Error: unaligned atomic XADD (ST_DW_XADD) (insn #{}), addr {:#x}, required alignment {}",
                         insn_ptr - 1,
                         x as u64,
@@ -465,7 +492,7 @@ fn execute_inner<H: Host>(
                 }
             },
             #[cfg(not(target_has_atomic = "64"))]
-            ebpf::ST_DW_XADD => Err(Error::other(format!(
+            ebpf::ST_DW_XADD => Err(Error::other(err_fmt!(
                 "Error: atomic XADD (ST_DW_XADD) requires 64-bit atomics on this target (insn #{})",
                 insn_ptr - 1
             )))?,
@@ -615,7 +642,7 @@ fn execute_inner<H: Host>(
                     0 => {
                         match host.call(insn.imm as u32, [reg[1], reg[2], reg[3], reg[4], reg[5]]) {
                             Some(value) => reg[0] = value,
-                            None => Err(Error::other(format!(
+                            None => Err(Error::other(err_fmt!(
                                 "Error: unknown helper function (id: {:#x})",
                                 insn.imm as u32
                             )))?,
@@ -625,7 +652,7 @@ fn execute_inner<H: Host>(
                     1 => {
                         if stack_frame_idx >= MAX_CALL_DEPTH {
                             Err(Error::other(
-                                format!(
+                                err_fmt!(
                                     "Error: too many nested calls (max: {MAX_CALL_DEPTH})"
                                 )
                             ))?;
@@ -641,7 +668,7 @@ fn execute_inner<H: Host>(
                     }
                     _ => {
                         Err(Error::other(
-                            format!("Error: unsupported call type #{} (insn #{})",
+                            err_fmt!("Error: unsupported call type #{} (insn #{})",
                                 _src,
                                 insn_ptr-1
                             )
@@ -649,7 +676,7 @@ fn execute_inner<H: Host>(
                     }
                 }
             }
-            ebpf::TAIL_CALL  => Err(Error::other(format!("Error: TAIL_CALL is not supported (insn #{})", insn_ptr - 1)))?,
+            ebpf::TAIL_CALL  => Err(Error::other(err_fmt!("Error: TAIL_CALL is not supported (insn #{})", insn_ptr - 1)))?,
             ebpf::EXIT       => {
                 if stack_frame_idx > 0 {
                     stack_frame_idx -= 1;

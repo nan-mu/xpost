@@ -47,7 +47,10 @@ cranelift-frontend = { version = "0.127", optional = true }
 cranelift-jit = { version = "0.127", optional = true }
 cranelift-native = { version = "0.127", optional = true }
 cranelift-module = { version = "0.127", optional = true }
-hashbrown = { version = "0.16", default-features = false, features = ["default-hasher"] }
+# `HashMap`/`HashSet` for the host helper table and permitted-memory set.
+# Local fork: this crate always pulls `alloc`, so the `mcu` build must not link
+# it. `mcu` takes helpers and permissions from `mcu::McuEnv` instead.
+hashbrown = { version = "0.16", optional = true, default-features = false, features = ["default-hasher"] }
 # RV32IMC has no A extension. `mcu` targets are single-core, so the caller
 # asserts that assumption with `portable_atomic_unsafe_assume_single_core`.
 portable-atomic = { version = "1", optional = true }
@@ -60,7 +63,10 @@ hex = "0.4.3"
 
 [features]
 default = ["std"]
-std = ["dep:libc", "combine/std"]
+# Local fork: `std` implies `hashbrown`, because the host helper table and the
+# permitted-memory set are hash maps there. `mcu` deliberately does not enable
+# it: `hashbrown` pulls in `alloc`, and the MCU path takes both from `McuEnv`.
+std = ["dep:libc", "combine/std", "dep:hashbrown"]
 # Local fork: MCU embedding ABI. Removes every heap use from the interpreter
 # and routes helpers / memory permission / step budget through `mcu::McuEnv`.
 # See README "Local fork: MCU ABI".

@@ -20,21 +20,22 @@
 
 use crate::ebpf;
 use crate::lib::*;
+use crate::fixed::err_fmt;
 
 fn reject<S: AsRef<str>>(msg: S) -> Result<(), Error> {
-    let full_msg = format!("[Verifier] Error: {}", msg.as_ref());
+    let full_msg = err_fmt!("[Verifier] Error: {}", msg.as_ref());
     Err(Error::other(full_msg))
 }
 
 fn check_prog_len(prog: &[u8]) -> Result<(), Error> {
     if !prog.len().is_multiple_of(ebpf::INSN_SIZE) {
-        reject(format!(
+        reject(err_fmt!(
             "eBPF program length must be a multiple of {:?} octets",
             ebpf::INSN_SIZE
         ))?;
     }
     if prog.len() > ebpf::PROG_MAX_SIZE {
-        reject(format!(
+        reject(err_fmt!(
             "eBPF program length limited to {:?}, here {:?}",
             ebpf::PROG_MAX_INSNS,
             prog.len() / ebpf::INSN_SIZE
@@ -55,7 +56,7 @@ fn check_prog_len(prog: &[u8]) -> Result<(), Error> {
 fn check_imm_endian(insn: &ebpf::Insn, insn_ptr: usize) -> Result<(), Error> {
     match insn.imm {
         16 | 32 | 64 => Ok(()),
-        _ => reject(format!(
+        _ => reject(err_fmt!(
             "unsupported argument for LE/BE (insn #{insn_ptr:?})"
         )),
     }
@@ -66,7 +67,7 @@ fn check_load_dw(prog: &[u8], insn_ptr: usize) -> Result<(), Error> {
     // this function should be called only for LD_DW insn, that cannot be last in program.
     let next_insn = ebpf::get_insn(prog, insn_ptr + 1);
     if next_insn.opc != 0 {
-        reject(format!("incomplete LD_DW instruction (insn #{insn_ptr:?})"))?;
+        reject(err_fmt!("incomplete LD_DW instruction (insn #{insn_ptr:?})"))?;
     }
 
     Ok(())
@@ -75,19 +76,19 @@ fn check_load_dw(prog: &[u8], insn_ptr: usize) -> Result<(), Error> {
 fn check_jmp_offset(prog: &[u8], insn_ptr: usize) -> Result<(), Error> {
     let insn = ebpf::get_insn(prog, insn_ptr);
     if insn.off == -1 {
-        reject(format!("infinite loop (insn #{insn_ptr:?})"))?;
+        reject(err_fmt!("infinite loop (insn #{insn_ptr:?})"))?;
     }
 
     let dst_insn_ptr = insn_ptr as isize + 1 + insn.off as isize;
     if dst_insn_ptr < 0 || dst_insn_ptr as usize >= (prog.len() / ebpf::INSN_SIZE) {
-        reject(format!(
+        reject(err_fmt!(
             "jump out of code to #{dst_insn_ptr:?} (insn #{insn_ptr:?})"
         ))?;
     }
 
     let dst_insn = ebpf::get_insn(prog, dst_insn_ptr as usize);
     if dst_insn.opc == 0 {
-        reject(format!(
+        reject(err_fmt!(
             "jump to middle of LD_DW at #{dst_insn_ptr:?} (insn #{insn_ptr:?})"
         ))?;
     }
@@ -97,15 +98,15 @@ fn check_jmp_offset(prog: &[u8], insn_ptr: usize) -> Result<(), Error> {
 
 fn check_registers(insn: &ebpf::Insn, store: bool, insn_ptr: usize) -> Result<(), Error> {
     if insn.src > 10 {
-        reject(format!("invalid source register (insn #{insn_ptr:?})"))?;
+        reject(err_fmt!("invalid source register (insn #{insn_ptr:?})"))?;
     }
 
     match (insn.dst, store) {
         (0..=9, _) | (10, true) => Ok(()),
-        (10, false) => reject(format!(
+        (10, false) => reject(err_fmt!(
             "cannot write into register r10 (insn #{insn_ptr:?})"
         )),
-        (_, _) => reject(format!("invalid destination register (insn #{insn_ptr:?})")),
+        (_, _) => reject(err_fmt!("invalid destination register (insn #{insn_ptr:?})")),
     }
 }
 
@@ -157,7 +158,7 @@ pub fn check(prog: &[u8]) -> Result<(), Error> {
             ebpf::ST_W_XADD  => {
                 // Same opcode as BPF atomic stores; legacy XADD uses imm == 0.
                 if insn.imm != 0 {
-                    reject(format!(
+                    reject(err_fmt!(
                         "atomic operations other than legacy XADD are not supported (insn #{insn_ptr:?})"
                     ))?;
                 }
@@ -165,7 +166,7 @@ pub fn check(prog: &[u8]) -> Result<(), Error> {
             },
             ebpf::ST_DW_XADD => {
                 if insn.imm != 0 {
-                    reject(format!(
+                    reject(err_fmt!(
                         "atomic operations other than legacy XADD are not supported (insn #{insn_ptr:?})"
                     ))?;
                 }
@@ -284,17 +285,17 @@ pub fn check(prog: &[u8]) -> Result<(), Error> {
                     1 => {
                         let dst_insn_ptr = insn_ptr as isize + 1 + insn.imm as isize;
                         if dst_insn_ptr < 0 || dst_insn_ptr as usize >= (prog.len() / ebpf::INSN_SIZE) {
-                            reject(format!("call out of code to #{dst_insn_ptr:?} (insn #{insn_ptr:?})"))?;
+                            reject(err_fmt!("call out of code to #{dst_insn_ptr:?} (insn #{insn_ptr:?})"))?;
                         }
                     }
-                    _ => { reject(format!("unsupported call type #{src:?} (insn #{insn_ptr:?})"))?; }
+                    _ => { reject(err_fmt!("unsupported call type #{src:?} (insn #{insn_ptr:?})"))?; }
                 }
             },
-            ebpf::TAIL_CALL  => { reject(format!("TAIL_CALL is not supported (insn #{insn_ptr:?})"))?; },
+            ebpf::TAIL_CALL  => { reject(err_fmt!("TAIL_CALL is not supported (insn #{insn_ptr:?})"))?; },
             ebpf::EXIT       => {},
 
             _                => {
-                reject(format!("unknown eBPF opcode {:#2x} (insn #{insn_ptr:?})", insn.opc))?;
+                reject(err_fmt!("unknown eBPF opcode {:#2x} (insn #{insn_ptr:?})", insn.opc))?;
             },
         };
 
@@ -305,7 +306,7 @@ pub fn check(prog: &[u8]) -> Result<(), Error> {
 
     // insn_ptr should now be equal to number of instructions.
     if insn_ptr != prog.len() / ebpf::INSN_SIZE {
-        reject(format!("jumped out of code to #{insn_ptr:?}"))?;
+        reject(err_fmt!("jumped out of code to #{insn_ptr:?}"))?;
     }
 
     Ok(())
