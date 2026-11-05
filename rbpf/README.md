@@ -697,6 +697,33 @@ Every change is behind `mcu` unless stated otherwise.
 supported for testing the hook surface on a host, and the fixed-capacity error
 wins there.
 
+### Scope decisions
+
+These four are settled. Do not reopen them as design questions.
+
+**No eBPF-to-eBPF calls.** The interpreter still contains the `call` with
+`src == 1` path, because removing it would diverge from upstream for no gain.
+No program under test uses it. If one did, the limits are: the verifier checks
+the jump target (`verifier.rs`), `check_mem` covers the whole stack buffer, and
+`MAX_CALL_DEPTH` is 8 while 512 B / 256 B allows only two frames. That is a
+capability limit, not an isolation hole.
+
+**The rbpf verifier runs.** `EbpfVmMbuff::new` calls `verifier::check` before the
+first instruction. It costs 2,010 B of `.text` and one full program scan. It is
+what guarantees branch targets stay inside the program, which the interpreter
+does not re-check. rBPF's original design reaches the same conclusion: jump
+destinations are validated ahead of execution, not per instruction.
+
+**`check_access` keeps the upstream design.** A full-window scan over a set of
+permitted ranges, one call per load and store. It is not the cheapest possible
+check, but it is what upstream does, and this fork exists to be a comparison
+baseline. An optimisation can be added behind a feature flag later; measure
+with the flag off and on rather than assuming the gain.
+
+**No ingress-path gating.** Whether a measurement runs on the Wi-Fi path makes
+no difference to this work: the performance numbers of interest are collected
+after the Wi-Fi work is done.
+
 ### Relationship to prior work
 
 This fork is `qmonnet/rbpf`, the Rust user-space VM. It is **not** the `rBPF` of
@@ -720,8 +747,9 @@ allocator:
 | `.text` for a minimal caller (parse + run + `_start`) | 22,786 |
 | `.rodata` | 7,028 |
 
-The `.text` total includes `rbpf::verifier::check` (2,010 B), which the embedding
-runtime may skip if it already holds a verifier verdict.
+The `.text` total includes `rbpf::verifier::check` (2,010 B). See "Scope
+decisions": that check stays, because it is what guarantees branch targets stay
+inside the program.
 
 The JIT is not part of this path. It needs `libc` and `std`, and it targets
 x86-64 only.

@@ -398,6 +398,12 @@ Do not add `extern crate alloc`, `hashbrown`, `format!`, or `Vec` back into that
 Naming `extern crate alloc` alone makes the linker demand a `#[global_allocator]`.
 Diagnostics format into `rbpf::fixed::FixedStr`, which truncates at 128 bytes.
 
+`rbpf/README.md`, "Scope decisions" records four fixed decisions.
+No eBPF-to-eBPF calls.
+The rbpf verifier runs before the first instruction.
+`check_access` keeps the upstream per-access design, because this fork is a comparison baseline.
+Do not reopen these as design questions.
+
 Do not confuse this fork with RIOT-OS `rBPF`, the C implementation behind CertrBPF and HAVM.
 They differ in language, author, and host.
 Cite them separately.
