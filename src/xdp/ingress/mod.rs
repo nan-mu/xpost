@@ -36,7 +36,8 @@ use xpost_type::XdpAction;
 use crate::xdp::{
     ingress::ctx::XdpMd,
     state::{
-        ACTIVE, IN_FLIGHT, PAUSE, PRIMARY_ENTRY, QUIESCE_DROPS, QUIESCE_PASS, QUIESCE_PASSES,
+        ACTIVE, IN_FLIGHT, PAUSE, PRIMARY_ENGINE, PRIMARY_ENTRY, PRIMARY_LEN, QUIESCE_DROPS,
+        QUIESCE_PASS, QUIESCE_PASSES,
     },
 };
 
@@ -129,10 +130,28 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
     }
     // Dekker pair with `XdpRt::release` (ACTIVE=false → wait IN_FLIGHT==0):
     // either we see ACTIVE=false here, or release waits for this flight.
-    let entry = if ACTIVE.load(Ordering::SeqCst) {
-        PRIMARY_ENTRY.load(Ordering::SeqCst)
+    // The engine triple is stored before ACTIVE, so one `ACTIVE` load gates all
+    // three reads below.
+    let (entry, engine) = if ACTIVE.load(Ordering::SeqCst) {
+        let code = PRIMARY_ENGINE.load(Ordering::SeqCst);
+        let engine = match code {
+            crate::xdp::engine::Engine::AOT_CODE => crate::xdp::engine::Engine::Aot,
+            #[cfg(feature = "interp")]
+            crate::xdp::engine::Engine::INTERP_CODE => crate::xdp::engine::Engine::Interp {
+                len: PRIMARY_LEN.load(Ordering::SeqCst),
+            },
+            // A code the flight does not understand fails closed rather than
+            // guessing which engine produced the bytes.
+            _ => {
+                IN_FLIGHT.store(0, Ordering::Release);
+                #[cfg(feature = "perf-counter")]
+                crate::ext::perf::counter::inc_inactive_skip();
+                return None;
+            }
+        };
+        (PRIMARY_ENTRY.load(Ordering::SeqCst), engine)
     } else {
-        0
+        (0, crate::xdp::engine::Engine::Aot)
     };
     if entry == 0 {
         IN_FLIGHT.store(0, Ordering::Release);
@@ -140,7 +159,7 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
         crate::ext::perf::counter::inc_inactive_skip();
         return None;
     }
-    let action = unsafe { inner_xdp(entry, ctx_ptr) };
+    let action = unsafe { super::engine::flight(engine, entry, ctx_ptr) };
     IN_FLIGHT.store(0, Ordering::Release);
 
     let data = ctx_md.data;
@@ -163,7 +182,7 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
 /// `entry` must be a live IRAM XDP entry; `ctx` must remain valid for the call.
 /// Caller must own `IN_FLIGHT` for the whole call (protects `XDP_FRAME`).
 #[inline(always)]
-unsafe fn inner_xdp(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
+pub(crate) unsafe fn inner_xdp(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
     stack::paint_canary();
 
     let sp: usize;

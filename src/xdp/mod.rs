@@ -2,7 +2,10 @@
 //! RX sees only the atomically published entry in `state`.
 
 pub(crate) mod image;
+pub(crate) mod engine;
 pub(crate) mod ingress;
+#[cfg(feature = "interp")]
+pub(crate) mod interp;
 pub(crate) mod map;
 mod ready;
 pub(crate) mod slot;
@@ -36,7 +39,7 @@ use crate::{
     xdp::{
         map::MapLease,
         ready::ReadyError,
-        state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PAUSE, PRIMARY_ENTRY},
+        state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PAUSE, PRIMARY_ENGINE, PRIMARY_ENTRY, PRIMARY_LEN},
     },
 };
 pub type XdpId = usize;
@@ -530,6 +533,25 @@ impl XdpRt {
                 crate::map::set_map_aliases(binds.as_slice())?;
                 crate::map::set_fast_arrays(maps, binds.as_slice());
             }
+            // The interpreter needs the value windows; `rbpf` decides the
+            // packet, the md and the VM stack itself, but a map value pointer
+            // comes out of a helper and only this crate knows its bounds.
+            //
+            // Read the storage pointers directly: the control plane is still
+            // open here, but `MapRt::get` would run `require_stopped` and this
+            // path is about to close it.
+            #[cfg(feature = "interp")]
+            {
+                let mut ranges: heapless::Vec<(usize, usize), 16> = heapless::Vec::new();
+                for &(_, idx) in binds.iter() {
+                    if let Some(meta) = maps.meta.get(idx)
+                        && !meta.storage.ptr.is_null()
+                    {
+                        let _ = ranges.push((meta.storage.ptr as usize, meta.size));
+                    }
+                }
+                crate::xdp::interp::set_ranges(ranges.as_slice());
+            }
         } else if let Some(id) = self.slots.get(self.primary).and_then(|s| s.image)
             && !self.images[id].meta.required_maps.is_empty()
         {
@@ -549,6 +571,26 @@ impl XdpRt {
             crate::map::close_ctrl();
         }
         PAUSE.store(false, Ordering::Release);
+        // Which engine runs the published bytes is a firmware build decision:
+        // with `interp` compiled in, the slot holds eBPF bytecode and the
+        // interpreter runs it. Without it, the AOT path is the only engine.
+        //
+        // A per-image engine tag would need a container format change; this
+        // keeps the XDP ELF wire format untouched and makes the comparison
+        // explicit in the build, which is what the two arms of the experiment
+        // differ in.
+        #[cfg(feature = "interp")]
+        let engine = crate::xdp::engine::Engine::Interp {
+            len: self
+                .slots
+                .get(self.primary)
+                .map(|s| s.loaded_len)
+                .unwrap_or(0),
+        };
+        #[cfg(not(feature = "interp"))]
+        let engine = crate::xdp::engine::Engine::Aot;
+        PRIMARY_ENGINE.store(engine.code(), Ordering::Release);
+        PRIMARY_LEN.store(crate::xdp::engine::image_len(engine), Ordering::Release);
         PRIMARY_ENTRY.store(entry, Ordering::Release);
         ACTIVE.store(true, Ordering::Release);
         let mcu_us = swap::mcu_now();
@@ -590,6 +632,10 @@ impl XdpRt {
         }
         PAUSE.store(false, Ordering::Release);
         PRIMARY_ENTRY.store(0, Ordering::Release);
+        // The lease that owned these windows is over. Ingress is already
+        // quiesced above (`IN_FLIGHT == 0`), so no flight can be reading them.
+        #[cfg(feature = "interp")]
+        crate::xdp::interp::clear_ranges();
         crate::map::clear_map_aliases();
         for id in self.map_lease.refs.drain(..) {
             let _ = crate::map::remove_user_sync(id);

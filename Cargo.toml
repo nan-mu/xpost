@@ -3,9 +3,9 @@ resolver = "2"
 # MCU packages only under the default RV32 target. Host tools live under
 # `exclude` so they are not typechecked as riscv32 (thousands of false RA
 # errors from std crates). Invoke via `--manifest-path` or their own cwd.
-members = [".", "esp-radio", "xpost-macros", "xpost-elf", "xpost-type"]
+members = [".", "esp-radio", "xpost-macros", "xpost-elf", "xpost-type", "rbpf"]
 default-members = ["."]
-exclude = ["xpost-build", "xpost-agent", "xpost-serial", "xpost-test", "examples", "rbpf"]
+exclude = ["xpost-build", "xpost-agent", "xpost-serial", "xpost-test", "examples"]
 
 [package]
 edition      = "2024"
@@ -42,6 +42,10 @@ perf-trace = ["esp-radio/xdp-observe"]
 # Function-call invoke of a leased XDP image → `xpost::ext::exec_call::invoke`.
 # Additive ext surface; not an ingress attach (esp-radio remains the network path).
 exec-call = []
+# eBPF interpreter (`rbpf` local fork) as an alternative to AOT machine code.
+# Compiles the fork with `mcu`: no allocator, no JIT, fixed-capacity errors.
+# Firmware that enables this must also run on a target without the A extension.
+interp = ["dep:rbpf"]
 
 # Path A defaults for `xpost-build::firmware_codegen` when the firmware crate
 # omits `[package.metadata.xpost]`. Firmware may override map/slots/target;
@@ -95,6 +99,9 @@ embassy-time     = { version = "0.5.0", default-features = false, features = ["l
 embassy-sync     = { version = "0.8.0", default-features = false, features = ["log"] }
 embedded-storage = { version = "0.3.1" }
 esp-storage      = { version = "0.9.0", default-features = false, features = ["esp32c3"] }
+# Local fork: eBPF interpreter used by the `interp` feature. `mcu` drops alloc
+# and the JIT; the firmware must target a core without the A extension.
+rbpf = { path = "rbpf", default-features = false, features = ["mcu"], optional = true }
 esp-hal = { version = "~1.1.0", default-features = false, features = [
   "esp32c3",
   "unstable",

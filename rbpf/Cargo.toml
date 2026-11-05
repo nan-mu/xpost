@@ -1,10 +1,8 @@
-# Local fork: standalone workspace.
+# Local fork: part of the parent `xpost` workspace.
 #
-# This crate keeps its own workspace so `cargo test` runs with the host default
-# target. The parent `xpost` workspace defaults to `riscv32imc-unknown-none-elf`
-# and excludes this directory; `xpost` reaches it as a path dependency.
-[workspace]
-
+# The fork's own tests run under the host target through the `--target` flag
+# rather than a separate workspace. A second `[workspace]` here would make
+# Cargo report two workspace roots for a path dependency.
 [package]
 
 # Project metadata
