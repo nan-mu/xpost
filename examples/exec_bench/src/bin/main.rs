@@ -228,21 +228,26 @@ const INCR_EBPF: [u8; 240] = [
 /// - Anything else: the run refused or produced a different result, and the log
 ///   line carries both numbers so the failure is diagnosable from the wire.
 fn interp_selftest() {
+    // The workload computes on packet bytes 8..12 and passes packet 4..8
+    // through untouched, so the fixture seeds both regions with different
+    // values. A run that touches the wrong one shows up immediately.
+    const PASS_THROUGH: u32 = 0x00c0_ffee;
+    const INPUT: u32 = 0x41;
+    const EXPECT: u32 = INPUT + 1;
+
     let mut frame = [0u8; 64];
-    frame[4..8].copy_from_slice(&0x41u32.to_le_bytes());
+    frame[4..8].copy_from_slice(&PASS_THROUGH.to_le_bytes());
+    frame[8..12].copy_from_slice(&INPUT.to_le_bytes());
 
     let act = xpost::xdp::selftest_run(&INCR_EBPF, &mut frame);
 
-    let param = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+    let through = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
     let out = u32::from_le_bytes([frame[8], frame[9], frame[10], frame[11]]);
-    let ok = act == xpost_type::XdpAction::Pass as i32 && param == 0x41 && out == 0x42;
-    info!("interp selftest: act={act} in={param:#x} out={out:#x} ok={ok}");
-    // Diagnostic: the bytecode's `r1` is the md pointer, and its stores land at
-    // `r1 + 8`, so a wrong `data` field shows up as a write inside the md.
+    let ok = act == xpost_type::XdpAction::Pass as i32
+        && through == PASS_THROUGH
+        && out == EXPECT;
     info!(
-        "interp selftest: frame0={:#x},{:#x},{:#x},{:#x} frame8={:#x},{:#x},{:#x},{:#x}",
-        frame[0], frame[1], frame[2], frame[3],
-        frame[8], frame[9], frame[10], frame[11]
+        "interp selftest: act={act} in={INPUT:#x} out={out:#x} through={through:#x} ok={ok}"
     );
 }
 
