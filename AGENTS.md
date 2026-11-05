@@ -35,6 +35,11 @@ Use **XDP ELF** or **`xdp.elf`** instead of "Compact ELF" in documents and logs.
   `examples/esp32c3` is a Wi-Fi starter project, outside the formal profile registry.
 - `xpost-serial` provides the serial protocol library.
 - `xpost-agent` provides the host daemon.
+- `rbpf/` is a local fork of the eBPF interpreter (see `rbpf/README.md`, "Local fork: MCU ABI").
+  It is its own Cargo workspace, so add it to `exclude`, not `members`.
+  The `mcu` feature carries the hook surface.
+  The default `std` build keeps upstream behaviour.
+  Read its README before describing helper, map, or stack behaviour on the interpreter path.
 - `xpost-build` provides build tools, including `xpost-link` and `xpost-compact-elf`.
   Preserve these executable names. Call their cold-install artifacts XDP ELFs.
 - `xpost-test` controls the complete test procedure.
@@ -135,10 +140,10 @@ HAL reports use the compatible CAGT layout from `examples/hal_perf`.
 `Command::GetFinish` waits for unsolicited `OK finish` on the host.
 Neither command sends a UART request.
 `enable exec` runs one computation in the exec firmware.
-The XDP image emits `OK finish` through `bpf_printk`.
-The HAL firmware writes the same UART marker.
-This line is the host wait for `GetFinish`.
-It is not the workload time.
+The App logs `OK finish` with `info!` after Trace records `xdp_end`.
+esp-println writes that record as `INFO - OK finish`.
+`GetFinish` waits for that line.
+The line is outside `xdp_begin` and `xdp_end`.
 Cold installation selects an image by its XDP name.
 
 ## Test procedure
@@ -197,11 +202,11 @@ The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` setti
 
 - Only `just_tx`: `run = ["just_tx"]`.
 - Only `firewall`: `run = ["firewall"]`.
-- Current selection: `run = ["case", "hot_swap"]`.
+- Current selection: `run = ["just_tx", "just_drop", "firewall", "exec_bench", "case", "hot_swap"]`.
 - `case` flashes `examples/case_xdp` once and checks both images. `case_swap` rewrites the IPv4 destination to `203.0.113.10`. `case_mark` rewrites it to `203.0.113.77`. Both return `XDP_TX` for the same UDP payload. The latency loop then installs both images into the cold table once. That install may reboot and is not timed. The timed loop uses one slot only: each repeat stops XDP, copies the next image from the cold table over slot 0, and starts XDP again, while a 2 ms `CASE0` stream stays up for 100 repeats. Odd repeats copy `case_mark`, even repeats copy `case_swap`. Slot 1 is never touched and the cold table is not erased inside the loop. Stages, all offsets from the test clock at the `disable` command: `stopped_ms` when disable returned, `copied_ms` when the copy returned, `started_ms` when enable returned, `last old frame`, and `end` for the first DUT frame with the new destination. `mcu_us` is the device clock when `enable` published the new entry. `disable_rx` and `agent_rx` are agent clock instants when the two UART replies were read. `rxcnt` is cleared and read only while XDP is disabled, during the functional checks. Scored frames carry `CASE0` through `CASE3`. No capture file is written on TR3000.
 - `hot_swap` uses the same firmware. Cold install of `case_swap` and `case_mark_idle` may reboot and is not timed. The exam drops the lease, copies each image into its slot, and leases slot 0. A 2 ms `CASE0` stream stays up for 100 switches, alternating slot 1 and slot 0. The slot a switch leaves stays `Staged` with its original generation, so the return does not copy. Stages are `start`, `last old frame`, `end`, and `switched_ms` when the switch returned. `mcu_us` is taken when the new entry is admitted.
 - All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
-- All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench"]`.
+- All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench", "case", "hot_swap"]`.
 
 `lookup` runs the helper side experiment.
 TX at 1400 pps flashes one `just-tx-cag-lookup` firmware per round.
@@ -318,20 +323,28 @@ The `ebpf` database label identifies the image-loading path.
 eBPF-arm firmware compiles Counter, Aggregate, Gauge, and Trace into the report.
 `exec_call::invoke` records `xdp_invocations` / `xdp_action` (Trace `xdp_begin` / `xdp_end` and the `execution` aggregate).
 HAL `enable exec` records the same counter names plus `execution` ticks through `hal_perf`.
-It also pushes Trace `xdp_begin`, printk helper enter/leave (id 6), and `xdp_end`.
+It pushes Trace `xdp_begin` before `run_hal`.
+It pushes `xdp_end` after the result-map write.
 The exam writes eBPF Trace into `trace_event` (`firmware` tag `xdp_t`).
 It writes HAL CAGT into `exec_bench_hal_*` plus `trace_event`.
-It aborts collection if Trace lacks `xdp_begin`, `xdp_end`, or the printk helper pair.
+It aborts collection if Trace lacks `xdp_begin` or `xdp_end`.
 This check occurs after the condition and result rows enter the database.
 `OK finish` is the host wait only.
-The report's `runtime_us` is the invocation interval minus its nested printk intervals (helper id 6).
-This value includes work outside the algorithm itself.
-HAL Trace includes result-map insertion. XDP Trace excludes the carrier's result-map insertion.
-The HAL `execution` aggregate measures `run_hal` only. The XDP aggregate includes invocation and printk work.
+The App prints it with `info!` after `xdp_end` and after a successful result write.
+The logger line is `INFO - OK finish`.
+`GetFinish` strips ANSI color codes.
+It then accepts that line or a bare `OK finish` line.
+A failed result write ends Trace and does not print the line.
+On the eBPF arm the result write stays outside `invoke`.
+On the HAL arm the result write stays before `xdp_end`.
+The call interval is `xdp_end.t_us - xdp_begin.t_us`.
+This interval includes work outside the algorithm itself.
+HAL Trace includes the result-map write.
+XDP Trace ends before the carrier writes the result map.
+The HAL `execution` aggregate measures `run_hal` only.
+The XDP `execution` aggregate includes the invocation.
 Do not treat these aggregate timers as equivalent.
-Check Trace pairs, event order, nesting, and successful return before subtracting printk time.
-Keep the full invocation and printk durations beside the derived value.
-Do not report helper time or the host command interval as computation latency.
+Do not report the host command interval as computation latency.
 Do not report algorithm speedup ratios from these differently scoped intervals.
 
 ### HAL smoke test
@@ -370,6 +383,15 @@ Use bare-metal firmware only, without ESP-IDF.
 Use static loading to place XDP ELF image bytes into slots.
 Do not parse the firmware ELF on the device.
 Preserve the ABI and linker layout shared with libbpf-mcu through the XPM1 contract and the board's `partitions.csv`.
+
+`rbpf/` is a local fork of the eBPF interpreter for the MCU path.
+Its `mcu` feature exposes three hook points in `rbpf::mcu::McuEnv`: helper dispatch, memory permission, and a per-instruction step budget.
+The fork has no map type, because a map is only a pointer a helper returned.
+Map reads and writes therefore enter the interpreter through the helper hook and the permission hook.
+Do not describe `rbpf` as providing XDP maps, verifier soundness, or a JIT for RV32IMC.
+The MCU path is the interpreter only.
+Cache the helper and permission decisions.
+Both hooks run per instruction.
 
 XDP firmware calls `xpost_build::firmware_codegen()` in `build.rs`.
 It reads `[package.metadata.xpost]` defaults from the root crate, applies board overrides, and derives the cold Flash span from `partitions.csv`.

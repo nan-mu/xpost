@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  pull_request: {}
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.after }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_test:
+    name: Build and test package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta, nightly]
+        features: [--all-features]
+        include:
+          - toolchain: nightly
+            features: --no-default-features
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install toolchain (${{ matrix.toolchain }})
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          override: true
+          components: clippy
+
+      - name: Build with ${{ matrix.toolchain }}, ${{ matrix.features }}
+        run: |
+          cargo +${{ matrix.toolchain }} build \
+              --release ${{ matrix.features }} --all-targets
+
+      - name: Test with ${{ matrix.toolchain }}, ${{ matrix.features }}
+        run: |
+          if [[ "${{ matrix.toolchain }}" == 'nightly' ]]; then
+              export RUSTDOCFLAGS='-Zsanitizer=address'
+              export RUSTFLAGS='-Zsanitizer=address'
+              export ASAN_OPTIONS='detect_leaks=1'
+          fi
+          cargo +${{ matrix.toolchain }} test \
+              --target=x86_64-unknown-linux-gnu \
+              ${{ matrix.features }}
+
+      - name: Lint with ${{ matrix.toolchain }}, ${{ matrix.features }}
+        run: |
+          cargo +${{ matrix.toolchain }} clippy ${{ matrix.features }}
+
+  conformance_and_coverage:
+    name: Check eBPF conformance and code coverage
+    runs-on: ubuntu-latest
+    env:
+      # Exclude features not supported by rbpf yet.
+      # atomic operations - https://github.com/qmonnet/rbpf/issues/47
+      # mem-len - Tests assume r2 contains the length of the memory.
+      KNOWN_FAILURES: "(lock|mem-len)"
+      CONFORMANCE_IMAGE: "ghcr.io/alan-jowett/bpf_conformance@sha256:547765717557e0f222de71fbf26f4bd9621c0149911aa03296024b469dd4598b"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install toolchain (${{ matrix.toolchain }})
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+
+      - name: Build plug-in
+        run: |
+          cargo build --all-features --release --example rbpf_plugin
+
+      - name: Run BPF conformance tests - Interpreter
+        run: |
+          docker run -v ${{github.workspace}}:/rbpf --rm \
+          "${{ env.CONFORMANCE_IMAGE }}" \
+          bin/bpf_conformance_runner --test_file_directory tests \
+          --plugin_path /rbpf/target/release/examples/rbpf_plugin \
+          --exclude_regex "${{ env.KNOWN_FAILURES }}"
+
+      # JIT tests results are ignored due to https://github.com/qmonnet/rbpf/issues/60
+      - name: Run BPF conformance tests - JIT
+        run: |
+          docker run -v ${{github.workspace}}:/rbpf --rm \
+          "${{ env.CONFORMANCE_IMAGE }}" \
+          bin/bpf_conformance_runner --test_file_directory tests \
+          --plugin_path /rbpf/target/release/examples/rbpf_plugin \
+          --exclude_regex "${{ env.KNOWN_FAILURES }}"  \
+          --plugin_options "--jit" || true
+
+      - name: Run BPF conformance tests - Cranelift
+        run: |
+          docker run -v ${{github.workspace}}:/rbpf --rm \
+          "${{ env.CONFORMANCE_IMAGE }}" \
+          bin/bpf_conformance_runner --test_file_directory tests \
+          --plugin_path /rbpf/target/release/examples/rbpf_plugin \
+          --exclude_regex "lock"  \
+          --plugin_options "--cranelift"
+
+      - name: Install development tools
+        uses: taiki-e/install-action@v1.14.2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Generate coverage report
+        run: |
+          cargo llvm-cov --lcov --all --all-features --all-targets > lcov.info
+
+      - name: Upload coverage to coveralls
+        uses: coverallsapp/github-action@master
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path-to-lcov: lcov.info

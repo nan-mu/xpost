@@ -1,0 +1,13 @@
+# Local fork: this crate builds for the host by default.
+#
+# Cargo discovers config files by walking up from here, so the parent
+# `xpost/.cargo/config.toml` would otherwise force `build.target =
+# "riscv32imc-unknown-none-elf"` on this crate and break host `cargo test`.
+# The same convention already applies to `xpost-agent` and `xpost-serial`,
+# which override the root target with `aarch64-apple-darwin`.
+#
+# As a path dependency of `xpost`, the parent workspace drives the build and
+# this file is not consulted for that build; `rbpf` is compiled for RV32IMC
+# there.
+[build]
+target = "aarch64-apple-darwin"

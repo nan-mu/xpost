@@ -5,7 +5,7 @@ resolver = "2"
 # errors from std crates). Invoke via `--manifest-path` or their own cwd.
 members = [".", "esp-radio", "xpost-macros", "xpost-elf", "xpost-type"]
 default-members = ["."]
-exclude = ["xpost-build", "xpost-agent", "xpost-serial", "xpost-test", "examples"]
+exclude = ["xpost-build", "xpost-agent", "xpost-serial", "xpost-test", "examples", "rbpf"]
 
 [package]
 edition      = "2024"

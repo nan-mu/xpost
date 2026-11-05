@@ -1,0 +1,97 @@
+# Local fork: standalone workspace.
+#
+# This crate keeps its own workspace so `cargo test` runs with the host default
+# target. The parent `xpost` workspace defaults to `riscv32imc-unknown-none-elf`
+# and excludes this directory; `xpost` reaches it as a path dependency.
+[workspace]
+
+[package]
+
+# Project metadata
+name = "rbpf"
+version = "0.4.1"
+authors = ["Quentin Monnet <qmo@qmon.net>"]
+
+# Additional metadata for packaging
+description = "Virtual machine and JIT compiler for eBPF programs"
+repository = "https://github.com/qmonnet/rbpf"
+readme = "README.md"
+keywords = ["BPF", "eBPF", "interpreter", "JIT", "filtering"]
+license = "Apache-2.0/MIT"
+edition = "2024"
+
+# Packaging directives
+include = [
+    "src/**",
+    "examples/**",
+    "tests/**",
+    "bench/**",
+    "LICENSE*",
+    "Cargo.toml",
+]
+
+[dependencies]
+
+# Default features (std) are disabled so that the dependencies don't pull in the
+# standard library when the crate is compiled for no_std
+byteorder = { version = "1.5", default-features = false }
+log = { version = "0.4", default-features = false }
+combine = { version = "4.6", default-features = false }
+
+# Optional Dependencies when using the standard library
+libc = { version = "0.2", optional = true }
+
+# Optional Dependencies for the CraneLift JIT
+cranelift-codegen = { version = "0.127", optional = true }
+cranelift-frontend = { version = "0.127", optional = true }
+cranelift-jit = { version = "0.127", optional = true }
+cranelift-native = { version = "0.127", optional = true }
+cranelift-module = { version = "0.127", optional = true }
+hashbrown = { version = "0.16", default-features = false, features = ["default-hasher"] }
+# RV32IMC has no A extension. `mcu` targets are single-core, so the caller
+# asserts that assumption with `portable_atomic_unsafe_assume_single_core`.
+portable-atomic = { version = "1", optional = true }
+
+[dev-dependencies]
+libc = { version = "0.2" }
+elf = "0.8.0"
+json = "0.12"
+hex = "0.4.3"
+
+[features]
+default = ["std"]
+std = ["dep:libc", "combine/std"]
+# Local fork: MCU embedding ABI. Removes every heap use from the interpreter
+# and routes helpers / memory permission / step budget through `mcu::McuEnv`.
+# See README "Local fork: MCU ABI".
+mcu = ["dep:portable-atomic"]
+cranelift = [
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-jit",
+    "dep:cranelift-native",
+    "dep:cranelift-module",
+]
+
+# Examples that depend on the standard library should be disabled when
+# testing the `no_std` configuration.
+[[example]]
+name = "disassemble"
+required-features = ["std"]
+
+[[example]]
+name = "load_elf"
+required-features = ["std"]
+
+[[example]]
+name = "date"
+required-features = ["std"]
+
+[[example]]
+name = "to_json"
+
+[[example]]
+name = "rbpf_plugin"
+
+[[example]]
+name = "allowed_memory"
