@@ -79,22 +79,16 @@ xpost-test/      host experiment runner
 
 The current code uses `xpost-type`. `xpost-trait/` is an older interface. Workspace members do not reference it.
 
-## Measurements
+## Experiments
 
-Both figures below were taken on an ESP32-C3.
+![just_tx, just_drop, and firewall](docs/figures/packet-exams.png)
 
-### Execution time
+`xpost-test/common/src/exam/just_tx.rs`, `xpost-test/common/src/exam/just_drop.rs`, `xpost-test/common/src/exam/firewall.rs`
 
-The eight workloads are `incr`, `square`, `bitswap`, `fib`, `buf`, `memcpy`, `fletcher32`, and `bsort`. `incr`, `square`, and `bitswap` do a fixed operation, and the sweep repeats that operation at several parameter values. `fib` loops for `param` iterations, up to 47. `buf` copies `param` bytes, up to 1024. `memcpy` copies up to 12 bytes, `fletcher32` checksums up to 20 bytes, and `bsort` sorts up to six 32-bit words.
+![exec_bench](docs/figures/exec-bench-sweeps.png)
 
-Each point is the mean time of one call. The firmware times 200 calls as one batch on the microsecond clock and divides by 200. Each engine was booted five times. The vertical bars are the standard deviation across those boots. The line is a straight fit of mean time against work size. The band is the 99% confidence interval of that line. The vertical scale is shared. `fib` and `buf` use a log base 2 horizontal axis. The other panels are linear, with ticks at the sizes that were run.
+`examples/exec_bench`, `examples/exec_bench_hal`, `xpost-test/common/src/exam/exec_bench.rs`
 
-HAL is `exec_bench_hal`. AOT is `exec_bench` running RV32IMC machine code. Interpreter is `exec_bench` built with `interp`.
+![case and hot_swap](docs/figures/update-latency.png)
 
-![Execution time of eight workloads on HAL, AOT, and the interpreter](docs/figures/exec-bench-sweeps.png)
-
-### Update latency
-
-This figure is a different experiment. It times one XDP image update on the test host clock, in milliseconds from the moment the command was issued. Cold replace stops the running image, overwrites the slot, and enables the new image. Hot switch publishes an image that is already staged, and it skips the stop and overwrite stages. The dashed segment is that skip. The bars are the 10th to 90th percentile of 100 repeats. The device's own microsecond counter is not included, because it starts at boot and shares no epoch with the host clock.
-
-![Update latency of a cold replace and a hot switch](docs/figures/update-latency.png)
+`xpost-test/common/src/exam/case.rs`, `xpost-test/common/src/exam/hot_swap.rs`
