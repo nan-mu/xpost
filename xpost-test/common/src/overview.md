@@ -1,4 +1,4 @@
-# `xpost-test` — TR3000 formal / flame harness
+# xpost-test, the TR3000 formal and flame harness
 
 This crate owns the **end-to-end experiment workflow**. Mac-side USB is owned by
 `xpost-agent` (HTTP `/v1/*`); low-level serial types live in **`xpost-serial`**.
@@ -34,7 +34,7 @@ cargo run --release --                  │                              ▲
 | `just_drop` | `xdp_cag` PPS grid + Array Map + `xdp_t` Trace | `exam` + `just_drop_*` + perf |
 | `just_tx` | `xdp_cag` pps grid RTT + `xdp_t` Trace | `exam` + `just_tx_*` (sent/ok; success RTT) + perf |
 | `firewall` | hash blacklist size×hit/miss PPS + Trace | `exam` + `firewall_*` + perf |
-| `dev` | HAL smoke: just_tx / just_drop / firewall `@100pps×2s`; **no XDP, no DB** | — |
+| `dev` | HAL smoke: just_tx / just_drop / firewall `@100pps×2s`; **no XDP, no DB** | none |
 | `formal-clear` | `TRUNCATE exam CASCADE` | wipe |
 
 Formal DDL: `sql/formal.sql` (shared) + `just_tx.sql` / `just_drop.sql` / `firewall.sql`.
@@ -43,9 +43,9 @@ Open-run never DROP/TRUNCATE; wipe with `run = ["formal-clear"]`.
 # Topology
 
 ```text
-主路由 (DHCP/GW)
+gateway (DHCP)
         │
-Mac Mini / TR3000 / ESP 同网段
+Mac Mini, TR3000, and ESP32-C3 on one subnet
         │
    TR3000 ──2.4G── ESP32-C3 STA
      RAW + TC; agent on Mac flashes DUT
