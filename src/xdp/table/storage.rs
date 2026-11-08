@@ -12,8 +12,13 @@ pub(crate) trait XdpTableStorage: Send {
     fn read(&mut self, offset: usize, out: &mut [u8]) -> Result<(), FlashError>;
 }
 
-/// Default image stride when embedder hands a flat SRAM/DRAM blob.
-pub(crate) const DEFAULT_IMAGE_CAPACITY: usize = 4096;
+/// Scratch and default image ceiling when the embedder hands a flat blob.
+///
+/// `stage` and `switch` copy through a buffer of this size, so an image larger
+/// than it cannot be published even when the slot is bigger. 8 KiB matches the
+/// container encoder and fits `bsort`'s eBPF image (~5 KiB). Callers with a
+/// smaller slot are still bounded by that slot.
+pub(crate) const DEFAULT_IMAGE_CAPACITY: usize = 8192;
 
 /// Packed Compact ELF region in Flash (`espflash write-bin` target).
 #[derive(Clone, Copy, Debug)]

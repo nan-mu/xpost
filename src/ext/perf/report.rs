@@ -151,7 +151,10 @@ fn encode_aggregate(out: &mut [u8; AGGREGATE_WIRE_LEN]) {
         Some(a.post_action.snapshot()),
         Some(a.tx_submission.snapshot()),
         Some(a.tx_block.snapshot()),
-        None,
+        // Slot 6 was empty on the XDP path (HAL uses it for
+        // `helper_execution`). The engine-only timing goes here because the
+        // wire layout is fixed and every other slot is taken.
+        Some(a.xdp_engine.snapshot()),
         None,
         Some(a.lookup_non_null.snapshot()),
         Some(a.lookup_null.snapshot()),

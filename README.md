@@ -1,97 +1,75 @@
 # xpost
 
-xpost 是裸机 MCU 上的 XDP 运行时，包含板级示例和主机工具。固件使用 Rust `core` 和 esp-rs 裸机栈，不使用 ESP-IDF。已实现的目标是 ESP32-C3，ISA 为 RV32IMC，ABI 为 `ilp32`，没有 FPU。
+xpost is an XDP runtime for bare-metal MCU firmware, with board examples and host tools. Firmware uses Rust `core` and the esp-rs bare-metal stack. It does not use ESP-IDF. The implemented target is the ESP32-C3. The ISA is RV32IMC, the ABI is `ilp32`, and there is no FPU.
 
-XDP 程序由 libbpf-mcu 从同一份 C 分别编译出 eBPF 对象和 RV32IMC 的 XDP ELF。安装到板上的是 RV32IMC 镜像。运行时按链接脚本里的绝对地址调用入口，不在设备上解析固件 ELF，也不做动态重定位。
+libbpf-mcu compiles one C source into an eBPF object and an RV32IMC XDP ELF. The image installed on the board is the RV32IMC image for ahead-of-time execution, or the eBPF object packed into the same container for the interpreter. The runtime calls the entry at the absolute address in the linker script. It does not parse a firmware ELF on the device, and it does not apply dynamic relocations.
 
-论文 coming soon。
-
-本仓库自己的代码使用 [MIT](LICENSE)。`esp-radio/` 保持上游许可证 MIT OR Apache-2.0。
-
-xpost is an XDP runtime for bare-metal MCU firmware, with board examples and host tools. Firmware uses Rust `core` and the esp-rs bare-metal stack. It does not use ESP-IDF. The implemented target is the ESP32-C3, the ISA is RV32IMC, the ABI is `ilp32`, and there is no FPU.
-
-libbpf-mcu compiles one C source into an eBPF object and an RV32IMC XDP ELF. The image installed on the board is the RV32IMC image. The runtime calls the entry at the absolute address in the linker script. It does not parse a firmware ELF on the device, and it does not apply dynamic relocations.
-
-Paper: coming soon.
+The evaluation figures under Experiments are copied from the paper draft. That draft is not in this repository.
 
 Code in this repository uses the [MIT](LICENSE) license. `esp-radio/` keeps the upstream MIT OR Apache-2.0 license.
 
-## 现状
-
-代码还在改。这次按现状发布，不把实验室配置改成通用部署。`xpost-test/rust-toolchain.toml` 写着本机绝对路径 `/Users/nan/bs/...`。`xpost-test/config/default.toml` 写着实验室地址和数据库设置。脚本里的 SSH 主机名是 `tr3000`。这些以后再删。换一台机器运行，需要自己读代码，再改这些位置。下文的构建步骤是当前机器上的用法，不是一份移植说明。
-
 ## Status
 
-The code is still changing. This publication keeps the tree as it is. `xpost-test/rust-toolchain.toml` contains the absolute path `/Users/nan/bs/...`. `xpost-test/config/default.toml` contains lab addresses and database settings. Scripts use the SSH host name `tr3000`. Those will be removed later. Running this on another machine means reading the code and editing those spots. The build steps below describe the current machine. They are not a porting guide.
+The tree is still changing. This publication keeps the lab configuration in place. `xpost-test/rust-toolchain.toml` contains a machine-local absolute path. `xpost-test/config/default.toml` contains lab addresses and database settings. Scripts use the SSH host name `tr3000`. Running the tests on another machine means reading those files and editing them. The build steps below are the commands used on the current machine.
 
-## 名称
+## Files
 
-三份文件不要混用。
-
-固件 ELF 是板级程序，路径通常是 `examples/<app>/target/riscv32imc-unknown-none-elf/release/<app>`。带 XDP 的固件包含 `XdpRt`。HAL 固件没有这套运行时。
-
-XDP ELF 也写作 `xdp.elf`。它是冷区容器，带 `.xpost.meta` 和 `.xpost.image`。路径通常是 `../build/<stem>/<stem>.elf`。冷安装使用这一份。
-
-`esp32c3.elf` 是 libbpf-mcu 的 AOT 调试 ELF，路径通常是 `../build/<stem>/esp32c3.elf`。不要用它做冷安装。
-
-Keep the three files distinct.
+Keep the three build products distinct.
 
 The firmware ELF is the board application. Its usual path is `examples/<app>/target/riscv32imc-unknown-none-elf/release/<app>`. XDP firmware includes `XdpRt`. HAL firmware does not include this runtime.
 
-The XDP ELF, also written `xdp.elf`, is the cold-region container. It has `.xpost.meta` and `.xpost.image`. Its usual path is `../build/<stem>/<stem>.elf`. Cold installation uses this file.
+The XDP ELF, also written `xdp.elf`, is the cold-region container. It has `.xpost.meta` and `.xpost.image`. `<stem>` is the program name, such as `just_tx`. libbpf-mcu writes it to `../build/<stem>/<stem>.elf`. Cold installation writes that file into the firmware's `xdp` flash partition. The firmware ELF and the XDP ELF are programmed separately.
 
-`esp32c3.elf` is the libbpf-mcu AOT debug ELF. Its usual path is `../build/<stem>/esp32c3.elf`. Do not use it for cold installation.
+`esp32c3.elf` is the libbpf-mcu ahead-of-time debug ELF. Its usual path is `../build/<stem>/esp32c3.elf`. Do not use it for cold installation.
 
-## 工具链
-
-`rust-toolchain.toml` 使用 nightly，并包含目标 `riscv32imc-unknown-none-elf`。根包的 `rust-version` 是 1.88。
-
-根 Cargo 工作区成员是根包、`esp-radio`、`xpost-macros`、`xpost-elf` 和 `xpost-type`。`xpost-build`、`xpost-agent`、`xpost-serial`、`xpost-test` 和 `examples/` 各自有工作区。
+## Toolchain
 
 `rust-toolchain.toml` selects nightly and includes the `riscv32imc-unknown-none-elf` target. The root package sets `rust-version` to 1.88.
 
-The root Cargo workspace contains the root package, `esp-radio`, `xpost-macros`, `xpost-elf`, and `xpost-type`. `xpost-build`, `xpost-agent`, `xpost-serial`, `xpost-test`, and `examples/` each have their own workspace.
+The root Cargo workspace contains the root package, `esp-radio`, `xpost-macros`, `xpost-elf`, `xpost-perf`, `xpost-type`, and `rbpf`. `xpost-build`, `xpost-agent`, `xpost-serial`, `xpost-test`, and `examples/` each have their own workspace.
 
-## 构建固件
+`rbpf` is the in-tree eBPF interpreter. The `mcu` feature builds it without a global allocator and without a JIT.
 
-在示例目录里构建。网络示例还要在该目录的 `.env` 里提供 `WIFI_SSID` 和 `WIFI_PASS`。`WIFI_PASSWORD` 是 `WIFI_PASS` 的别名。
+## Engines
+
+`examples/exec_bench_hal` runs the eight workloads as native Rust. It does not link the xpost runtime.
+
+`examples/exec_bench` runs an XDP image through `exec_call` and does not start Wi-Fi. A build without `interp` executes the RV32IMC machine code in the XDP ELF. A build with `--features interp` executes the eBPF object through `rbpf`. `diag` is a Cargo feature. It turns on the scale sweep in the exec_bench figure under Experiments.
+
+On `exec_bench`, the hot slot and the cold-table cell are 8 KiB, and the XDP ELF encoder accepts a container up to 8 KiB. That is what lets the `bsort` bytecode image be staged. Other examples still declare the smaller slot in their own manifests.
+
+## Build firmware
+
+Build from the example directory. A network example also needs `WIFI_SSID` and `WIFI_PASS` in that directory's `.env`. `WIFI_PASSWORD` is an alias for `WIFI_PASS`.
 
 ```bash
 cargo build --release --features perf-cag
 ```
 
-上面的命令针对 `examples/just_xdp`。`perf-cag` 打开 counter、aggregate 和 gauge。`perf-t` 打开 counter 和 trace。没有默认 feature。
+The command above is for `examples/just_xdp`. `perf-cag` enables the counter, the aggregate, and the gauge. `perf-t` enables the counter and trace. There is no default feature. Build `xpost-test` in `xpost-test/` and run that binary. It reads `run` from `xpost-test/config/default.toml` and calls the agent to flash.
 
-`examples/exec_bench` 通过函数调用运行 XDP 镜像，不初始化 Wi-Fi。`examples/exec_bench_hal` 是不带 xpost 运行时的原生对照。HAL 网络示例是 `examples/just_tx_hal`、`examples/just_drop_hal` 和 `examples/firewall_hal`。
+The HAL network examples are `examples/just_tx_hal`, `examples/just_drop_hal`, and `examples/firewall_hal`.
 
-Build from the example directory. A network example also needs `WIFI_SSID` and `WIFI_PASS` in that directory's `.env`. `WIFI_PASSWORD` is an alias for `WIFI_PASS`.
+## Host agent
 
-The command above is for `examples/just_xdp`. `perf-cag` enables the counter, the aggregate, and the gauge. `perf-t` enables the counter and trace. There is no default feature.
+`xpost-agent` owns the USB serial port. It serves HTTP `/health`, `/v1/*`, and MCP `/mcp` on one port. Startup only opens the USB session. `xpost-test` later asks the agent, over HTTP, to flash a firmware ELF or an XDP ELF.
 
-`examples/exec_bench` runs an XDP image through a function call and does not start Wi-Fi. `examples/exec_bench_hal` is the native comparison without the xpost runtime. The HAL network examples are `examples/just_tx_hal`, `examples/just_drop_hal`, and `examples/firewall_hal`.
-
-## 主机代理
-
-`xpost-agent` 占用 USB 串口。它在同一端口提供 HTTP `/health`、`/v1/*` 和 MCP `/mcp`。进程启动时只打开 USB 会话。烧录和切换应用发生在请求到达之后。
-
-在 `xpost-agent/` 里运行：
+Run the command from `xpost-agent/`.
 
 ```bash
 cargo run --release -- --bind 127.0.0.1:9240
 ```
 
-`xpost-agent` owns the USB serial port. It serves HTTP `/health`, `/v1/*`, and MCP `/mcp` on one port. Startup only opens the USB session. Flashing and application changes happen when a request arrives.
-
-Run the command from `xpost-agent/`.
-
-## 目录
+## Layout
 
 ```text
 src/             runtime: maps, helpers, slots, RX, optional exec-call
 esp-radio/       local radio driver and XDP ingress
+rbpf/            eBPF interpreter used by the interp engine
 xpost-type/      shared XDP actions and traits
 xpost-elf/       XDP ELF codec and the XPM1 memory-map contract
 xpost-macros/    map derives and flash_layout!
+xpost-perf/      shared sweep sizes and the versioned perf report
 examples/        board firmware, one Cargo workspace each
 xpost-serial/    serial protocol library
 xpost-agent/     host daemon
@@ -99,8 +77,62 @@ xpost-build/     xpost-link and the XDP ELF packer
 xpost-test/      host experiment runner
 ```
 
-`src/` 是运行时，包含 map、helper、槽位、RX，以及可选的 `exec-call`。`esp-radio/` 是本地无线驱动和 XDP 入口。`xpost-type/` 是共用的 XDP 动作和 trait。`xpost-elf/` 负责 XDP ELF 编解码和 XPM1 内存图。`xpost-macros/` 提供 map 派生和 `flash_layout!`。`examples/` 里每个固件是单独的 Cargo 工作区。`xpost-serial/` 是串口协议库。`xpost-agent/` 是主机守护进程。`xpost-build/` 提供 `xpost-link` 和 XDP ELF 打包。`xpost-test/` 是主机上的实验运行器。
-
-当前代码使用 `xpost-type`。`xpost-trait/` 是旧接口，工作区成员不引用它。
-
 The current code uses `xpost-type`. `xpost-trait/` is an older interface. Workspace members do not reference it.
+
+## Experiments
+
+`xpost-test` runs the names in the `run` key of `xpost-test/config/default.toml`. HAL is native Rust on the same ESP32-C3 and does not link this runtime. XPOST is the ahead-of-time RV32IMC image loaded into that runtime. On the three network experiments, each point is one 30 second run. The horizontal axis is the target send rate, from 400 to 4000 packets per second. Those figures are copied from the paper and compare HAL with XPOST only.
+
+TODO: fix the abnormal shapes in `just_tx` and `firewall`, and add an rbpf control group beside HAL and XPOST on all three network experiments, including the lookup panels. In `just_tx`, the XPOST round-trip time stays below HAL and then jumps above it after 1400 packets per second. In `firewall`, HAL delivery and hit ratio fall as the rate rises, while XPOST stays near 1. `just_drop` has no separate rate plot. Its result is the Counting panel, and that panel also lacks the rbpf series.
+
+### just_tx
+
+The host sends one UDP packet per request. The program exchanges the Ethernet source and destination, exchanges the IP source and destination, and transmits the packet back. The first figure is that round-trip time in milliseconds. The second is the percentage of requests with no matching reply. The program also counts packets in array map `rxcnt`, keyed by IP protocol. That lookup is the Reply panel below.
+
+`xpost-test/common/src/exam/just_tx.rs` drives the host. The board firmware is `examples/just_xdp`, and the image it loads is `../build/just_tx/just_tx.elf`. The HAL firmware is `examples/just_tx_hal`.
+
+![just_tx round-trip time](docs/figures/evaluation-tx-rtt-boxplot.png)
+
+![just_tx loss](docs/figures/evaluation-tx-loss.png)
+
+### just_drop
+
+The host sends UDP packets whose IPv4 source addresses differ in the last byte. The program uses that byte as the key of array map `counter`, adds one to the stored count, and drops the packet. It sends nothing back. There is no HAL-versus-XPOST plot against send rate for this experiment. The published result is how long that map lookup takes while the counting runs. That is panel (b) Counting in the lookup figures below.
+
+`xpost-test/common/src/exam/just_drop.rs` drives the host. The board firmware is `examples/just_xdp`, and the image it loads is `../build/just_drop/just_drop.elf`. The HAL firmware is `examples/just_drop_hal`.
+
+### firewall
+
+The program keeps a hash map of 200 blocked IPv4 addresses. In each 30 second window, one packet in ten uses a source address outside that map and should pass. The other nine should be dropped, and a drop adds one to the matching key. The host counts a legal packet as delivered when it observes that packet's token come back from the board. Panel (a) is those deliveries divided by legal packets sent. A hit is one increment of a blacklist key. Panel (b) is the sum of those increments divided by illegal packets sent. Panel (c) is that sum minus the number of illegal packets sent.
+
+`xpost-test/common/src/exam/firewall.rs` drives the host. The XPOST firmware is `examples/firewall`. The HAL firmware is `examples/firewall_hal`.
+
+![firewall delivery and hits](docs/figures/evaluation-firewall.png)
+
+### Map lookup
+
+These two figures are the map lookups taken during the three network runs, not a fourth experiment. Reply is `just_tx`, Counting is `just_drop`, and Filtering is `firewall`. The three series on each panel are a non-null return, a null return, and the timer baseline. They are not HAL, XPOST, and rbpf. A non-null return found a map entry. A null return did not. The timer baseline is the clock cost with no map operation. The mean figure's vertical axis is the average of that series in microseconds, and its horizontal axis is the same target send rate. The distribution figure draws each series at 400, 1400, and 4000 packets per second as its own cumulative curve. Its horizontal axis is the upper edge of each time bin, in microseconds, and its vertical axis is the fraction of lookups in that series at or below that edge.
+
+![mean map-lookup time](docs/figures/evaluation-lookup-mean.png)
+
+![map-lookup time distribution](docs/figures/evaluation-lookup-cdf.png)
+
+### exec_bench
+
+Eight programs run as a function call, with no Wi-Fi. `incr` adds one to a word. `square` squares a word. `bitswap` reverses the bits of a word. `fib` loops. `buf` and `memcpy` copy bytes. `fletcher32` checksums bytes. `bsort` sorts up to six 32-bit words. The input's work-size field is the horizontal axis. `incr`, `square`, and `bitswap` ignore it and do a fixed amount of work, so their lines are flat. `fib` loops that many times, up to 47. `buf` copies that many bytes, up to 1024. `memcpy` copies at most 12 bytes, `fletcher32` checksums at most 20 bytes, and `bsort` sorts at most six words. For `fib` and `buf`, the horizontal axis is logarithmic with base 2. The vertical axis is microseconds for one call, from the board's microsecond clock. The line is a straight fit of time against the work size itself. On the logarithmic axis that line is not straight. The band is the 99% confidence interval of the fit.
+
+HAL is `examples/exec_bench_hal`. AOT is `examples/exec_bench` running the RV32IMC image. Interpreter is that same example built with `--features interp`, which runs the eBPF object in `rbpf`. `bsort`'s eBPF object is larger than 4 KiB, so this example's hot slot, cold-table cell, and XDP ELF encoder all accept 8 KiB. Other examples keep the smaller slot declared in their own manifests.
+
+`xpost-test/common/src/exam/exec_bench.rs` is the host check for these workloads.
+
+![exec_bench on HAL, AOT, and the interpreter](docs/figures/exec-bench-sweeps.png)
+
+### case and hot_swap
+
+`case` loads two images into `examples/case_xdp`, one at a time. For the active image the host sends four UDP packets, `CASE0` through `CASE3`, and checks the board's transmit on a packet capture. `case_swap` is correct when the Ethernet addresses are exchanged, the IPv4 destination is `203.0.113.10`, and the payload is unchanged. `case_mark` is correct when the Ethernet addresses are exchanged, the IPv4 destination is `203.0.113.77`, and the payload is unchanged. `hot_swap` then switches between the two images. The image being left stays staged, so the switch does not copy it again.
+
+Each point on the figure is one stage. Its value is the number of milliseconds from the first command until the agent's reply for that stage. Cold replace stops the old image, overwrites the slot, and enables the new one. Hot switch only publishes an image that is already staged. The dashed segment crosses the stop and overwrite stages, which the hot path does not run.
+
+`xpost-test/common/src/exam/case.rs` and `xpost-test/common/src/exam/hot_swap.rs` drive the host.
+
+![cold replace and hot switch](docs/figures/update-latency.png)

@@ -4,7 +4,7 @@
 //! lease/flight live alongside them.
 
 use embassy_sync::once_lock::OnceLock;
-use portable_atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use portable_atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use crate::{RtMutex, xdp::XdpRt};
 
@@ -32,6 +32,13 @@ pub(crate) const STACK_CANARY_GAP_BYTES: usize = 16;
 pub static XDP_RT: OnceLock<RtMutex<XdpRt>> = OnceLock::new();
 pub(crate) static ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(crate) static PRIMARY_ENTRY: AtomicUsize = AtomicUsize::new(0);
+/// Which engine `PRIMARY_ENTRY` points at. Stored with the same release
+/// sequence as the entry, before `ACTIVE`; a flight that reads `ACTIVE` true
+/// sees a complete triple.
+pub(crate) static PRIMARY_ENGINE: AtomicU8 = AtomicU8::new(0);
+/// Byte length of the image at `PRIMARY_ENTRY`. Only the interpreter reads it:
+/// an AOT entry is a function address, not a range.
+pub(crate) static PRIMARY_LEN: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 /// Hot-update swing. Ingress drops a new flight; `ACTIVE` stays true.
 ///

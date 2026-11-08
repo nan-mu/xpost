@@ -2,7 +2,10 @@
 //! RX sees only the atomically published entry in `state`.
 
 pub(crate) mod image;
+pub(crate) mod engine;
 pub(crate) mod ingress;
+#[cfg(feature = "interp")]
+pub(crate) mod interp;
 pub(crate) mod map;
 mod ready;
 pub(crate) mod slot;
@@ -15,7 +18,120 @@ pub(crate) mod table;
 pub use crate::error::{
     XdpInitError, XdpLeaseError, XdpReleaseError, XdpSlotError, XdpSwapError, XdpSwitchError,
 };
+// `xdp_md` layout for the interpreter self-check.
+//
+// Not re-exported: `selftest_run` takes a frame slice and builds the context
+// internally, so no context type leaves the crate.
+
+/// Run the published engine once with no lease bookkeeping, for measurement.
+///
+/// Skips the `IN_FLIGHT` claim, the quiesce check and the packet window
+/// validation. The caller must hold the lease and keep `ctx` valid; nothing
+/// here checks either, which is what makes it a measurement tool and not a
+/// datapath entry.
+///
+/// Returns the engine's `r0`, or `None` when nothing is published.
+///
+/// # Safety
+///
+/// `ctx` must point to a live context whose `data..data_end` stays inside the
+/// caller's frame for the call.
+#[cfg(all(feature = "perf-aggregate", feature = "interp"))]
+pub unsafe fn test_flight_bare(ctx: *mut ingress::ctx::XdpMd) -> Option<i32> {
+    if !state::ACTIVE.load(Ordering::Acquire) {
+        return None;
+    }
+    let entry = state::PRIMARY_ENTRY.load(Ordering::Relaxed);
+    if entry == 0 {
+        return None;
+    }
+    let engine = engine::Engine::Interp {
+        len: state::PRIMARY_LEN.load(Ordering::Relaxed),
+    };
+    Some(unsafe { engine::flight(engine, entry, ctx) })
+}
+
+/// Run the sequence `[vm construction, engine call]` with the construction
+/// hoisted out, for comparison against [`test_flight_bare`].
+///
+/// [`interp::run`](crate::xdp::interp) builds an `EbpfVmMbuff` every call. This
+/// variant builds it once and runs the engine in a loop, so the difference
+/// between the two means is exactly that construction.
+///
+/// Returns mean nanoseconds per run, or `None` when nothing is leased.
+///
+/// # Safety
+///
+/// Same contract as [`test_flight_bare`].
+#[cfg(all(feature = "perf-aggregate", feature = "interp"))]
+pub unsafe fn test_flight_hoisted(ctx: *mut ingress::ctx::XdpMd, runs: u32) -> Option<u64> {
+    if !state::ACTIVE.load(Ordering::Acquire) || runs == 0 {
+        return None;
+    }
+    let entry = state::PRIMARY_ENTRY.load(Ordering::Relaxed);
+    let len = state::PRIMARY_LEN.load(Ordering::Relaxed);
+    if entry == 0 || len == 0 {
+        return None;
+    }
+    let prog = unsafe { core::slice::from_raw_parts(entry as *const u8, len) };
+    let vm = unsafe { rbpf::EbpfVmMbuff::new_verified(prog) };
+    let t0 = crate::ext::perf::aggregate::AggregateSet::now_ticks();
+    for _ in 0..runs {
+        unsafe {
+            core::hint::black_box(interp::run_with(&vm, ctx));
+        }
+    }
+    let total_us = crate::ext::perf::aggregate::AggregateSet::now_ticks().saturating_sub(t0);
+    Some(total_us.saturating_mul(1000) / runs as u64)
+}
+
 pub use state::set_boot_id;
+/// Instructions executed by the interpreter since the last call, and reset.
+///
+/// Present only with the `interp` feature. A measurement aid: the cost of one
+/// interpreted instruction is a flight's time divided by this.
+#[cfg(feature = "interp")]
+pub fn interp_take_steps() -> u32 {
+    interp::take_steps()
+}
+/// The mounted program singleton, for board-level perf probes.
+///
+/// The datapath never exposes this: applications read performance data through
+/// [`crate::ext::perf`]. A firmware self-check needs it to measure the cost of
+/// the hooks that bracket every flight.
+#[cfg(feature = "perf-trace")]
+pub fn test_prog() -> &'static ingress::XdpProg {
+    &ingress::XDP_PROG
+}
+
+/// One leased-path flight with its three stages timed separately.
+///
+/// `xdp_invocations` and `xdp_action` bracket the engine call in
+/// [`crate::ext::exec_call::invoke`], and the perf report measures the interval
+/// between them. Splitting the three makes it possible to tell how much of a
+/// reported figure is the program and how much is the hooks around it.
+///
+/// Returns `(before_us, engine_us, after_us, action)`.
+#[cfg(feature = "perf-trace")]
+pub fn test_flight_split(buf: &mut [u8]) -> (u32, u32, u32, i32) {
+    use xpost_type::EspRadioTrace;
+    let prog = test_prog();
+    let now = || esp_hal::time::Instant::now().duration_since_epoch().as_micros() as u32;
+    let t0 = now();
+    prog.xdp_invocations();
+    let t1 = now();
+    let (act, _) = ingress::run(buf);
+    let t2 = now();
+    prog.xdp_action(act);
+    let t3 = now();
+    (t1.wrapping_sub(t0), t2.wrapping_sub(t1), t3.wrapping_sub(t2), act as i32)
+}
+/// Run one eBPF program outside a lease, for a firmware self-check.
+///
+/// Only available with the `interp` feature. The leased datapath reaches the
+/// same entry through the engine seam; this wrapper installs no map windows.
+#[cfg(feature = "interp")]
+pub use interp::selftest_run;
 pub use swap::{QuiescePolicy, StageReport, SwitchReport, XdpStatus};
 pub use crate::{RtMutex, RtMutexGuard};
 pub(crate) use image::XdpMeta;
@@ -36,7 +152,7 @@ use crate::{
     xdp::{
         map::MapLease,
         ready::ReadyError,
-        state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PAUSE, PRIMARY_ENTRY},
+        state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PAUSE, PRIMARY_ENGINE, PRIMARY_ENTRY, PRIMARY_LEN},
     },
 };
 pub type XdpId = usize;
@@ -348,9 +464,22 @@ impl XdpRt {
         };
 
         self.check_image_size(meta, primary)?;
-        meta.check_arch()?;
-        meta.check_helper_address()?;
-        meta.check_slot_address(&slot_state.slot)?;
+        // An eBPF image is architecture independent: it carries no AOT
+        // machine-code tag, no linked helper address and no slot link address,
+        // because the interpreter resolves all three at run time. Checking them
+        // would reject every bytecode image.
+        #[cfg(not(feature = "interp"))]
+        {
+            meta.check_arch()?;
+            meta.check_helper_address()?;
+            meta.check_slot_address(&slot_state.slot)?;
+        }
+        #[cfg(feature = "interp")]
+        {
+            // Checked where the bytes arrive, in `stage`; `pre_lease` cannot
+            // scan them because it holds `&self` and the table read needs
+            // `&mut`.
+        }
         self.check_required_maps(meta, maps)?;
         Ok(())
     }
@@ -412,7 +541,11 @@ impl XdpRt {
             self.primary = prev_primary;
             return Err(XdpSwitchError::ImageTooLarge);
         }
-        let mut buf = [0u8; DEFAULT_IMAGE_CAPACITY];
+        // Static, not a stack array: the buffer is the full image ceiling, and
+        // an 8 KiB frame on the embassy stack is enough to fault the boot path
+        // that publishes the primary image.
+        static mut SWITCH_BUF: [u8; DEFAULT_IMAGE_CAPACITY] = [0; DEFAULT_IMAGE_CAPACITY];
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(SWITCH_BUF) };
         if image_len > buf.len() {
             self.primary = prev_primary;
             return Err(XdpSwitchError::ScratchTooSmall);
@@ -530,6 +663,29 @@ impl XdpRt {
                 crate::map::set_map_aliases(binds.as_slice())?;
                 crate::map::set_fast_arrays(maps, binds.as_slice());
             }
+            // The interpreter needs the value windows; `rbpf` decides the
+            // packet, the md and the VM stack itself, but a map value pointer
+            // comes out of a helper and only this crate knows its bounds.
+            //
+            // Read the storage pointers directly: the control plane is still
+            // open here, but `MapRt::get` would run `require_stopped` and this
+            // path is about to close it.
+            #[cfg(feature = "interp")]
+            {
+                let mut ranges: heapless::Vec<(usize, usize), 16> = heapless::Vec::new();
+                for &(_, idx) in binds.iter() {
+                    if let Some(meta) = maps.meta.get(idx)
+                        && !meta.storage.ptr.is_null()
+                    {
+                        // The whole allocation, not the `size` estimate: the
+                        // estimate is a heap-budget figure and may exceed what
+                        // the map actually owns.
+                        let _ = ranges
+                            .push((meta.storage.ptr as usize, meta.storage.layout.size()));
+                    }
+                }
+                crate::xdp::interp::set_ranges(ranges.as_slice());
+            }
         } else if let Some(id) = self.slots.get(self.primary).and_then(|s| s.image)
             && !self.images[id].meta.required_maps.is_empty()
         {
@@ -549,6 +705,26 @@ impl XdpRt {
             crate::map::close_ctrl();
         }
         PAUSE.store(false, Ordering::Release);
+        // Which engine runs the published bytes is a firmware build decision:
+        // with `interp` compiled in, the slot holds eBPF bytecode and the
+        // interpreter runs it. Without it, the AOT path is the only engine.
+        //
+        // A per-image engine tag would need a container format change; this
+        // keeps the XDP ELF wire format untouched and makes the comparison
+        // explicit in the build, which is what the two arms of the experiment
+        // differ in.
+        #[cfg(feature = "interp")]
+        let engine = crate::xdp::engine::Engine::Interp {
+            len: self
+                .slots
+                .get(self.primary)
+                .map(|s| s.loaded_len)
+                .unwrap_or(0),
+        };
+        #[cfg(not(feature = "interp"))]
+        let engine = crate::xdp::engine::Engine::Aot;
+        PRIMARY_ENGINE.store(engine.code(), Ordering::Release);
+        PRIMARY_LEN.store(crate::xdp::engine::image_len(engine), Ordering::Release);
         PRIMARY_ENTRY.store(entry, Ordering::Release);
         ACTIVE.store(true, Ordering::Release);
         let mcu_us = swap::mcu_now();
@@ -590,6 +766,10 @@ impl XdpRt {
         }
         PAUSE.store(false, Ordering::Release);
         PRIMARY_ENTRY.store(0, Ordering::Release);
+        // The lease that owned these windows is over. Ingress is already
+        // quiesced above (`IN_FLIGHT == 0`), so no flight can be reading them.
+        #[cfg(feature = "interp")]
+        crate::xdp::interp::clear_ranges();
         crate::map::clear_map_aliases();
         for id in self.map_lease.refs.drain(..) {
             let _ = crate::map::remove_user_sync(id);

@@ -128,6 +128,17 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
         self.table
             .read(aot_abs, &mut buf[..image_len])
             .map_err(|e| self.fail(e.into()))?;
+        // Verify before publishing: the interpreter executes these bytes and
+        // skips its own per-run scan, so the checks have to happen here.
+        #[cfg(feature = "interp")]
+        {
+            if !crate::xdp::interp::verify(&buf[..image_len]) {
+                return Err(self.fail(XdpSwapError::Arch));
+            }
+            if crate::xdp::interp::rejects_ctx_writes(&buf[..image_len]) {
+                return Err(self.fail(XdpSwapError::Arch));
+            }
+        }
         if xpost_elf::sha256(&buf[..image_len]) != digest {
             return Err(self.fail(XdpSwapError::Digest));
         }

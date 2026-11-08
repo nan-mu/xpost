@@ -214,9 +214,21 @@ fn ok_init() {
 
 #[test]
 fn ok_finish() {
-    // Encode path exists for host parse of UART lines from eBPF printk;
-    // server must not emit Finish in normal App callbacks.
+    // Encode path exists for host parse of the unsolicited finish line.
+    // Server must not emit Finish in normal App callbacks.
     roundtrip_ok(Command::GetFinish, OkReply::Finish);
+}
+
+#[test]
+fn ok_finish_logger_prefix() {
+    let got = OkReply::try_from((b"INFO - OK finish".as_slice(), &Command::GetFinish))
+        .expect("logger line");
+    assert!(matches!(got, OkReply::Finish));
+    let colored =
+        OkReply::try_from((b"\x1b[32mINFO - OK finish\x1b[0m".as_slice(), &Command::GetFinish))
+            .expect("colored logger line");
+    assert!(matches!(colored, OkReply::Finish));
+    assert!(OkReply::try_from((b"WARN - OK finish".as_slice(), &Command::GetFinish)).is_err());
 }
 
 #[test]

@@ -27,7 +27,7 @@ exec_bench (ebpf):
     agent clear perf
     agent update map workload          # key/value = opaque bytes
     agent enable exec                  # App: map[0] → invoke → map[1]
-    agent get finish                   # UART OK finish from eBPF bpf_printk
+    agent get finish                   # UART `INFO - OK finish` from App `info!` after `xdp_end`
     agent disable exec
     agent get perf
     agent get map                      # host parses output bytes
@@ -36,8 +36,9 @@ exec_bench (ebpf):
 
 ### HAL arm (`exec-bench-hal`)
 
-Same control-plane verbs; no XDP flash. `OK finish` is a raw UART line from
-the HAL App (twin of `bpf_printk`), not `OkReply::Finish`.
+Same control-plane verbs. This arm does not flash XDP. `OK finish` is an App
+`info!` line after `xdp_end` (logger text `INFO - OK finish`). It is not
+`OkReply::Finish`.
 
 ```text
 exec_bench (hal):
@@ -45,7 +46,7 @@ exec_bench (hal):
   for workload in {incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort}:
     agent clear perf
     agent update map workload
-    agent enable exec                  # App: map[0] → run_hal → map[1] + OK finish
+    agent enable exec                  # App: map[0] → run_hal → map[1] → xdp_end → info!
     agent get finish
     agent disable exec
     agent get perf
@@ -62,8 +63,9 @@ exec_bench (hal):
 - **Map wire**: xpost-serial `UpdateMap` / get-map blob entries carry **opaque
   byte tokens** only — no opcode structs in serial
 - Map name `workload`: keys `0`=input / `1`=output; value 32-byte blob
-- **`OK finish`**: unsolicited UART line (eBPF `bpf_printk` or HAL App raw
-  write) — **not** serial `OkReply::Finish`
+- **`OK finish`**: unsolicited UART line from App `info!` after `xdp_end`
+  (logger text `INFO - OK finish`). Not serial `OkReply::Finish`.
+  The line is outside `xdp_begin` and `xdp_end`.
 - Default perf kinds: **cagt** (counter, aggregate, gauge, trace)
 - Unsolicited `OK init` still comes from serial server start (settle)
 

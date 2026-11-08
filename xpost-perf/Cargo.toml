@@ -1,0 +1,17 @@
+[package]
+edition      = "2024"
+name         = "xpost-perf"
+rust-version = "1.88"
+version      = "0.1.0"
+publish      = false
+description  = "Versioned performance report wire format shared by every firmware arm"
+
+[dependencies]
+# Nothing. The encoder runs on the datapath and must not pull in a heap, an
+# OS, or a driver. Decode-side helpers stay behind `host` so an MCU build does
+# not carry them.
+
+[features]
+default = []
+# Decode and describe. Host only: the encoder is all firmware needs.
+host = []

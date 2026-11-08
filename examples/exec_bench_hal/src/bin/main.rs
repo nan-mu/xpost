@@ -21,11 +21,13 @@ use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use heapless::FnvIndexMap;
-use log::error;
+use log::{error, info};
 use xpost_serial::reply::{MapError, OkReply, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
 use exec_bench_hal::{cag, run_hal, wire};
+#[cfg(feature = "diag")]
+use xpost_perf::sweep;
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -54,7 +56,7 @@ static mut RUN_BUF: [u8; VALUE_LEN] = [0u8; VALUE_LEN];
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    esp_println::logger::init_logger(log::LevelFilter::Error);
+    esp_println::logger::init_logger(log::LevelFilter::Info);
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -71,6 +73,11 @@ async fn main(spawner: Spawner) -> ! {
     // Emit `OK init` inside that window; immediate spawn races and is lost.
     Timer::after(Duration::from_millis(800)).await;
     spawner.spawn(control_serial(usb_rx).unwrap());
+
+    // Scale sweep, for the three-engine comparison. Runs after the serial task
+    // starts so a reset still produces the boot banner first.
+    #[cfg(feature = "diag")]
+    hal_scale_sweep();
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
@@ -206,16 +213,15 @@ fn update_bytes(name: &str, key: &[u8], value: &[u8]) -> Result<(), MapError> {
     }
 }
 
-/// Same pipeline step as eBPF `enable exec`: map[0] → compute → map[1], then
-/// raw UART `OK finish` (twin of eBPF `bpf_printk`; not a serial reply).
+/// Same pipeline step as eBPF `enable exec`: map[0] → compute → result map,
+/// then `xdp_end`, then `info!("OK finish")` (host `GetFinish`, not a serial reply).
 fn run_exec() -> Result<(), MapError> {
     let mut in_val = [0u8; VALUE_LEN];
     let found = critical_section::with(|cs| {
         let map = WORKLOAD.borrow(cs).borrow();
         match map.get(&KEY_IN) {
             Some(v) => {
-                in_val.copy_from_slice(v);
-                true
+                in_val.copy_from_slice(v);                true
             }
             None => false,
         }
@@ -226,6 +232,23 @@ fn run_exec() -> Result<(), MapError> {
 
     let buf: &mut [u8; VALUE_LEN] = unsafe { &mut *addr_of_mut!(RUN_BUF) };
     buf.copy_from_slice(&in_val);
+
+    // Diagnostic build: repeat the call so the mean is readable. One call takes
+    // a few microseconds and the clock resolves one, so a single sample is
+    // mostly quantization noise. Two thousand calls divide that uncertainty and
+    // average over interrupt and cache noise.
+    #[cfg(feature = "diag")]
+    {
+        const RUNS: u32 = 2000;
+        let t0 = cag::now_ticks();
+        for _ in 0..RUNS {
+            let mut scratch: [u8; VALUE_LEN] = in_val;
+            let _ = run_hal(&mut scratch);
+        }
+        let total_us = cag::now_ticks().saturating_sub(t0);
+        let mean_ns = total_us.saturating_mul(1000) / RUNS as u64;
+        info!("bench runs={RUNS} mean_ns={mean_ns} act=XDP_PASS");
+    }
 
     cag::bump_xdp_invocations();
     cag::push_xdp_begin();
@@ -248,10 +271,52 @@ fn run_exec() -> Result<(), MapError> {
         return Err(MapError::Full);
     }
 
-    // Twin of eBPF bpf_printk("OK finish"); host GetFinish waits on this line.
-    cag::push_helper_enter(cag::TRACE_HELPER_PRINTK);
-    esp_println::Printer::write_bytes(b"OK finish\n");
-    cag::push_helper_leave(cag::TRACE_HELPER_PRINTK);
     cag::push_xdp_end(cag::TRACE_XDP_PASS);
+    info!("OK finish");
     Ok(())
+}
+
+/// Sweep a workload's work size through the HAL path.
+///
+/// Same work sizes and run count as the two XDP engines, so the three sweeps
+/// describe identical work. `run_hal` takes any length of buffer, so the frame
+/// here is sized for the largest parameter rather than the 32-byte carrier the
+/// App path uses.
+///
+/// The measurement brackets `run_hal` only, matching how the arm reports
+/// `execution`.
+#[cfg(feature = "diag")]
+fn hal_scale_sweep() {
+    hal_sweep_one(sweep::OP_INCR, "incr");
+    hal_sweep_one(sweep::OP_SQUARE, "square");
+    hal_sweep_one(sweep::OP_BITSWAP, "bitswap");
+    hal_sweep_one(sweep::OP_FIB, "fib");
+    hal_sweep_one(sweep::OP_BUF, "buf");
+    hal_sweep_one(sweep::OP_MEMCPY, "memcpy");
+    hal_sweep_one(sweep::OP_FLETCHER32, "fletcher32");
+    hal_sweep_one(sweep::OP_BSORT, "bsort");
+}
+
+/// One workload's sweep.
+///
+/// Sizes come from the shared list, so this measures the same work the two XDP
+/// engines measure. `fib` clamps at 47 and `bsort` at 6, which their lists
+/// already respect.
+#[cfg(feature = "diag")]
+fn hal_sweep_one(opcode: u32, name: &str) {
+    let Some(params) = sweep::params_for(opcode) else {
+        return;
+    };
+    let mut frame = [0u8; 8 + 1024 + 4];
+    for &param in params {
+        let n = sweep::frame_len_for(opcode, param);
+        sweep::fill_op(&mut frame[..n], opcode, param);
+        let t0 = cag::now_ticks();
+        for _ in 0..sweep::RUNS {
+            let _ = run_hal(&mut frame[..n]);
+        }
+        let total_us = cag::now_ticks().saturating_sub(t0);
+        let mean_ns = total_us.saturating_mul(1000) / sweep::RUNS as u64;
+        info!("sweep wl={name} param={param} runs={} mean_ns={mean_ns}", sweep::RUNS);
+    }
 }

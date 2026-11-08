@@ -6,7 +6,11 @@ use sha2::{Digest, Sha256};
 use crate::{MAX_LAYOUT, MAX_MAPS, MAX_NAME, align4};
 
 /// Complete file size limit (ESP32-C3 profile).
-pub const MAX_CONTAINER_SIZE: usize = 4096;
+///
+/// 8 KiB covers a workload whose eBPF image is about 5 KiB (`bsort`). The
+/// exec_bench flash cell and hot slot use the same ceiling. Smaller images
+/// still pack; this is only the encoder's buffer.
+pub const MAX_CONTAINER_SIZE: usize = 8192;
 /// `.xpost.meta` size limit.
 pub const MAX_META_SIZE: usize = 1024;
 /// Map capacity profile limit.
@@ -487,10 +491,12 @@ mod tests {
         let mut meta = example_meta();
         meta.maps.clear();
         meta.name = name("x");
-        let data = build_container(&[0u8; 3804], &meta, None).unwrap();
-        assert_eq!(data.len(), 4096);
+        // Non-image overhead for this metadata is 292 bytes, so an image of
+        // `MAX_CONTAINER_SIZE - 292` fills the file exactly.
+        let data = build_container(&[0u8; 7900], &meta, None).unwrap();
+        assert_eq!(data.len(), 8192);
         assert_eq!(
-            build_container(&[0u8; 3805], &meta, None),
+            build_container(&[0u8; 7901], &meta, None),
             Err(EncodeError::ContainerTooLarge)
         );
     }

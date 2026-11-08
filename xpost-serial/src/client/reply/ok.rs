@@ -60,8 +60,41 @@ fixed_ok! {
     parse_update_map_reply => UpdateMap: [b"update", b"map"];
     /// `OK init` — unsolicited settle line (not a command reply).
     parse_init_reply => Init: [b"init"];
-    /// `OK finish` — unsolicited completion line (e.g. eBPF printk; not a command reply).
-    parse_finish_reply => Finish: [b"finish"];
+}
+
+/// `OK finish` — unsolicited completion line (not a command reply).
+///
+/// A bare `OK finish` matches. The exec App logs `info!("OK finish")`.
+/// esp-println writes that record as `INFO - OK finish`, with optional SGR color.
+pub fn parse_finish_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let line = input.strip_suffix(b"\n").unwrap_or(input);
+    let plain = strip_ansi_sgr(line);
+    let line = plain.strip_prefix(b"INFO - ").unwrap_or(plain.as_slice());
+    (b"OK", space1::<_, EmptyError>, b"finish")
+        .void()
+        .parse(line)
+        .map(|()| OkReply::Finish)
+        .map_err(|_| ParseError::InvalidSyntax)
+}
+
+fn strip_ansi_sgr(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'[' {
+            let mut j = i + 2;
+            while j < input.len() && (input[j].is_ascii_digit() || input[j] == b';') {
+                j += 1;
+            }
+            if j < input.len() && input[j] == b'm' {
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(input[i]);
+        i += 1;
+    }
+    out
 }
 
 // —— variable OK (length-prefixed blob) ——————————————————————————————————————
