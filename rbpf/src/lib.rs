@@ -305,6 +305,15 @@ impl<'a> EbpfVmMbuff<'a> {
         verifier::check(prog)
     }
 
+    /// The loaded program bytes.
+    ///
+    /// Lets an embedding runtime keep one VM across many runs instead of
+    /// rebuilding it, which matters when the program outlives a single call.
+    #[cfg(feature = "mcu")]
+    pub fn program(&self) -> Option<&'a [u8]> {
+        self.prog
+    }
+
     pub fn new(prog: Option<&'a [u8]>) -> Result<EbpfVmMbuff<'a>, Error> {
         // `mcu`: skip the per-function stack map entirely. It exists to size
         // local-function frames from a caller calculator; without one every

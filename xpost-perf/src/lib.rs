@@ -54,6 +54,8 @@
 
 #![no_std]
 
+pub mod sweep;
+
 /// First four bytes of every report.
 pub const MAGIC: u32 = 0x3152_4650;
 /// Current format version.

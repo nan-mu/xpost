@@ -166,9 +166,9 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
     let t0 = crate::ext::perf::aggregate::AggregateSet::now_ticks();
     let action = unsafe { super::engine::flight(engine, entry, ctx_ptr) };
     let engine_us = crate::ext::perf::aggregate::AggregateSet::now_ticks().wrapping_sub(t0);
-    #[cfg(any(feature = "perf-aggregate", feature = "perf-trace"))]
+    #[cfg(feature = "perf-aggregate")]
     crate::ext::perf::aggregate::record_engine(engine_us);
-    #[cfg(not(any(feature = "perf-aggregate", feature = "perf-trace")))]
+    #[cfg(not(feature = "perf-aggregate"))]
     let _ = engine_us;
     IN_FLIGHT.store(0, Ordering::Release);
 

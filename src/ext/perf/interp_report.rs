@@ -28,7 +28,11 @@ use crate::ext::perf::aggregate;
 const MAX_NAME: usize = 16;
 
 /// Names, in wire order.
-const NAMES: [&str; 3] = ["engine", "execution", "invocations"];
+///
+/// The unit is in the name so a reader cannot mistake ticks for microseconds.
+/// That confusion is what made the earlier numbers look like they described the
+/// engine.
+const NAMES: [&str; 3] = ["engine_us", "execution_us", "invocations"];
 
 /// Bytes one entry occupies, given the fixed names above.
 const fn entry_bytes(name: &str, kind: Kind) -> usize {
@@ -49,6 +53,9 @@ fn stats() -> [SpanStats; 3] {
     let mut engine = SpanStats::new();
     let mut execution = SpanStats::new();
 
+    // Ticks, not microseconds: the system timer resolves 62.5 ns and a
+    // microsecond clock would round a one-microsecond call to 1 or 2 with no
+    // information in between.
     let e = a.xdp_engine.snapshot();
     if e.count > 0 {
         engine.count = e.count;
@@ -65,6 +72,9 @@ fn stats() -> [SpanStats; 3] {
     }
     [engine, execution, SpanStats::new()]
 }
+
+/// Ticks per microsecond on the ESP32-C3 system timer.
+pub const TICKS_PER_US: u64 = 16;
 
 /// Write the report in `xpost-perf` format.
 ///

@@ -22,7 +22,7 @@
 //!   for workload in {…}:
 //!     agent clear perf
 //!     agent update map workload
-//!     agent enable exec          # run_hal + raw UART OK finish
+//!     agent enable exec          # run_hal → map[1] → xdp_end → info! OK finish
 //!     agent get finish
 //!     agent disable exec
 //!     agent get perf
@@ -36,9 +36,9 @@
 //! - `exec` 为相对 `xdp` 的新 ingress：`enable/disable exec` 对标 `enable/disable xdp`
 //! - hash map 名 `workload`：键 **input**=`0` / **output**=`1`；value 定长 32B
 //! - `update map workload` 写入 input；同一字节落库为 `exec_bench_config.input`
-//! - `enable exec`：eBPF 臂 `invoke`；HAL 臂 `run_hal`。成功路径 UART 出现
-//!   **`OK finish`**（eBPF=`bpf_printk`；HAL=App 原始写行；**不是** serial reply）
-//! - `get finish`：host-only 等 transcript 上的 `OK finish`
+//! - `enable exec`：eBPF 臂在 `invoke` 之后写回 map[1]。HAL 臂在 `run_hal` 之后写结果表，再写下 `xdp_end`。
+//!   写入成功后，App 用 `info!` 打出 **`OK finish`**。logger 行是 `INFO - OK finish`。该行不是 serial reply。
+//! - `get finish`：host-only 等待 transcript 上的 `OK finish`。带 `INFO - ` 前缀的同一行也算。
 //! - **默认 cagt**：counter / aggregate / gauge / trace 全开
 //!
 //! **解析（xpost-test / 本草案）**

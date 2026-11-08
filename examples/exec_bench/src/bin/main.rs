@@ -48,7 +48,7 @@ static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 /// Primary RX slot. Loaded before lease; immutable while it is the entry.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".xdp.hotload_0")]
-static xdp_slot: Slot<0xE00> = Slot::new([0u8; 0xE00]);
+static xdp_slot: Slot<0x2000> = Slot::new([0u8; 0x2000]);
 
 static mut INVOKE_BUF: [u8; VALUE_LEN] = [0u8; VALUE_LEN];
 
@@ -66,11 +66,9 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
 
-    // Interpreter self-check. Runs before the serial loop so the result is on
-    // the wire even when no host is attached. It uses the `incr` workload's
-    // eBPF bytecode, the same program the AOT arm installs, so a matching
-    // result is direct evidence both engines agree.
-    #[cfg(feature = "diag")]
+    // Interpreter self-check: two flights on a hand-built frame, before the
+    // runtime exists so the result is on the wire even if boot fails later.
+    #[cfg(all(feature = "diag", feature = "interp"))]
     interp_selftest();
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -118,6 +116,8 @@ async fn main(spawner: Spawner) -> ! {
     drop(rt);
     drop(maps);
 
+    // The sweep needs the host to seed the input first, so it runs on the first
+    // `enable exec` rather than at boot. See `on_enable_exec`.
     spawner.spawn(control_serial(usb_rx).unwrap());
 
     loop {
@@ -150,9 +150,20 @@ serial_task! {
             Ok(()) => reply.ok(OkReply::DisableXdp),
             Err(e) => reply_xdp_err(reply, e),
         })
-        .on_enable_exec(|reply: ReplyWriter<'_>| match run_exec() {
-            Ok(()) => reply.ok(OkReply::EnableExec),
-            Err(e) => reply_map_err(reply, e),
+        .on_enable_exec(|reply: ReplyWriter<'_>| {
+            // In a diagnostic build, `enable exec` also runs the scale sweep and
+            // reports the mean of many calls, because one call is too short to
+            // time. The normal result path still runs, so the host's `OK finish`
+            // wait is unchanged.
+            #[cfg(feature = "diag")]
+            {
+                scale_sweep();
+                workload_bench();
+            }
+            match run_exec() {
+                Ok(()) => reply.ok(OkReply::EnableExec),
+                Err(e) => reply_map_err(reply, e),
+            }
         })
         .on_disable_exec(|reply: ReplyWriter<'_>| match app_ctrl::disable_xdp() {
             // Exec shares the leased image; disable releases the lease.
@@ -233,7 +244,7 @@ const INCR_EBPF: [u8; 240] = [
 ///   interpreter ran the program and it mutated the frame as designed.
 /// - Anything else: the run refused or produced a different result, and the log
 ///   line carries both numbers so the failure is diagnosable from the wire.
-#[cfg(feature = "diag")]
+#[cfg(all(feature = "diag", feature = "interp"))]
 fn interp_selftest() {
     // The workload computes on packet bytes 8..12 and passes packet 4..8
     // through untouched, so the fixture seeds both regions with different
@@ -320,6 +331,142 @@ fn interp_selftest() {
             "leased split x50: before_hook={before} engine={engine} after_hook={after} outer={total} us"
         );
     }
+}
+
+/// Sweep `buf`'s loop count through the leased path and report the mean per run.
+///
+/// `buf` copies `param` bytes one at a time, so `param` is the work and the mean
+/// must grow with it. A flat line means the rig measures its own overhead; a
+/// large intercept means a fixed cost that would swamp small workloads;
+/// non-linear growth means the interpreter does not do one pass per pass.
+///
+/// Batched because one microsecond of clock resolution divided over a thousand
+/// runs is a nanosecond per run. Each run is a full flight through
+/// `ingress::run`, so the lease check and the `IN_FLIGHT` claim are included in
+/// every sample.
+/// Sweep a workload's work size through the leased path.
+///
+/// The installed image decides which workload runs, so the host swaps the image
+/// between resets. `buf` is the only workload whose work size is a free
+/// parameter: it copies `param` bytes one at a time, so time must grow linearly
+/// with it. `fib` runs a loop `param` times, bounded at 47. The rest clamp their
+/// parameter hard enough that a sweep says little.
+///
+/// The frame is sized for the largest parameter, so an engine that reads
+/// `data_end` sees the whole packet. The AOT images read the same range from the
+/// carrier slice, so both engines sweep identical work.
+///
+/// Batched because one microsecond of clock resolution divided over two hundred
+/// runs is a few nanoseconds per run.
+/// Sweep the installed workload over its work size.
+///
+/// Every workload in exec_bench expresses its work in the `param` field at value
+/// offset 4, so one firmware sweeps them all: the host writes a value whose
+/// first field is the opcode, installs the matching image, and the size list is
+/// chosen from that opcode.
+///
+/// # Why every workload gets a figure
+///
+/// The workloads differ in how much of `param` they use:
+///
+/// - `buf` copies `param` bytes and `fib` loops `param` times, so both span
+///   ranges wide enough for a slope to stand well clear of the intercept.
+/// - `memcpy` stops at 12, `fletcher32` at 20, `bsort` at 6. Their sources
+///   clamp hard, so the range is narrow but the slope is still a slope.
+/// - `incr`, `square` and `bitswap` do a fixed amount of work and only pass
+///   `param` through. Their figures are flat by construction, and the flat line
+///   is the result: it says what each engine costs for that fixed work, and it
+///   is the cleanest measurement of the intercept the other figures have to
+///   subtract.
+#[cfg(feature = "diag")]
+fn scale_sweep() {
+    use xpost_perf::sweep;
+    // The opcode comes from the value the host seeded, so this firmware needs no
+    // per-workload build.
+    let mut head = [0u8; 8];
+    {
+        let (maps, idx) = match app_ctrl::lock_map(MAP_NAME) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("sweep: map: {e:?}");
+                return;
+            }
+        };
+        if let Err(e) = maps.hash_lookup(idx, &[KEY_IN], &mut head) {
+            error!("sweep: lookup: {e:?}");
+            return;
+        }
+    }
+    let opcode = u32::from_le_bytes([head[0], head[1], head[2], head[3]]);
+    let Some(params) = sweep::params_for(opcode) else {
+        error!("sweep: unknown opcode {opcode}");
+        return;
+    };
+    match app_ctrl::enable_xdp() {
+        Ok(()) => {}
+        Err(e) => {
+            error!("sweep: cannot lease: {e:?}");
+            return;
+        }
+    }
+    let mut frame = [0u8; 8 + 1024 + 4];
+    for &param in params {
+        let n = sweep::frame_len_for(opcode, param);
+        sweep::fill_op(&mut frame[..n], opcode, param);
+        match xpost::ext::exec_call::invoke_batch(&mut frame[..n], sweep::RUNS) {
+            Some((mean_ns, act)) => {
+                info!(
+                    "sweep op={opcode} param={param} runs={} mean_ns={mean_ns} act={act}",
+                    sweep::RUNS
+                );
+            }
+            None => info!("sweep op={opcode} param={param} runs={} refused", sweep::RUNS),
+        }
+    }
+    #[cfg(feature = "interp")]
+    info!("sweep steps={}", xpost::xdp::interp_take_steps());
+    let _ = app_ctrl::disable_xdp();
+}
+
+/// Repeat the input already in the carrier map many times and report the mean.
+///
+/// The host writes the workload's input with `update map workload 0 <hex>` and
+/// installs the matching image, so this measures whatever pair is in place. One
+/// fixed input per workload, the same size the exam uses.
+///
+/// Repeating makes the number usable: a call takes tens of microseconds and the
+/// clock resolves one, so a single call cannot be read with precision. Two
+/// thousand calls divide that uncertainty and average over the cache and
+/// interrupt noise a single sample carries.
+#[cfg(feature = "diag")]
+fn workload_bench() {
+    const RUNS: u32 = 2000;
+    let mut value = [0u8; VALUE_LEN];
+    {
+        let (maps, idx) = match app_ctrl::lock_map(MAP_NAME) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("bench: map: {e:?}");
+                return;
+            }
+        };
+        if let Err(e) = maps.hash_lookup(idx, &[KEY_IN], &mut value) {
+            error!("bench: lookup: {e:?}");
+            return;
+        }
+    }
+    match app_ctrl::enable_xdp() {
+        Ok(()) => {}
+        Err(e) => {
+            error!("bench: cannot lease: {e:?}");
+            return;
+        }
+    }
+    match xpost::ext::exec_call::invoke_batch(&mut value, RUNS) {
+        Some((mean_ns, act)) => info!("bench runs={RUNS} mean_ns={mean_ns} act={act}"),
+        None => info!("bench runs={RUNS} refused"),
+    }
+    let _ = app_ctrl::disable_xdp();
 }
 
 fn reply_map_err(reply: ReplyWriter<'_>, e: AppMapError) {

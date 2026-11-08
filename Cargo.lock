@@ -2442,6 +2442,7 @@ dependencies = [
  "talc",
  "xpost-elf",
  "xpost-macros",
+ "xpost-perf",
  "xpost-type",
 ]
 

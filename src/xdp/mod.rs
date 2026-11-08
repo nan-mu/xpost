@@ -23,7 +23,77 @@ pub use crate::error::{
 // Not re-exported: `selftest_run` takes a frame slice and builds the context
 // internally, so no context type leaves the crate.
 
+/// Run the published engine once with no lease bookkeeping, for measurement.
+///
+/// Skips the `IN_FLIGHT` claim, the quiesce check and the packet window
+/// validation. The caller must hold the lease and keep `ctx` valid; nothing
+/// here checks either, which is what makes it a measurement tool and not a
+/// datapath entry.
+///
+/// Returns the engine's `r0`, or `None` when nothing is published.
+///
+/// # Safety
+///
+/// `ctx` must point to a live context whose `data..data_end` stays inside the
+/// caller's frame for the call.
+#[cfg(all(feature = "perf-aggregate", feature = "interp"))]
+pub unsafe fn test_flight_bare(ctx: *mut ingress::ctx::XdpMd) -> Option<i32> {
+    if !state::ACTIVE.load(Ordering::Acquire) {
+        return None;
+    }
+    let entry = state::PRIMARY_ENTRY.load(Ordering::Relaxed);
+    if entry == 0 {
+        return None;
+    }
+    let engine = engine::Engine::Interp {
+        len: state::PRIMARY_LEN.load(Ordering::Relaxed),
+    };
+    Some(unsafe { engine::flight(engine, entry, ctx) })
+}
+
+/// Run the sequence `[vm construction, engine call]` with the construction
+/// hoisted out, for comparison against [`test_flight_bare`].
+///
+/// [`interp::run`](crate::xdp::interp) builds an `EbpfVmMbuff` every call. This
+/// variant builds it once and runs the engine in a loop, so the difference
+/// between the two means is exactly that construction.
+///
+/// Returns mean nanoseconds per run, or `None` when nothing is leased.
+///
+/// # Safety
+///
+/// Same contract as [`test_flight_bare`].
+#[cfg(all(feature = "perf-aggregate", feature = "interp"))]
+pub unsafe fn test_flight_hoisted(ctx: *mut ingress::ctx::XdpMd, runs: u32) -> Option<u64> {
+    if !state::ACTIVE.load(Ordering::Acquire) || runs == 0 {
+        return None;
+    }
+    let entry = state::PRIMARY_ENTRY.load(Ordering::Relaxed);
+    let len = state::PRIMARY_LEN.load(Ordering::Relaxed);
+    if entry == 0 || len == 0 {
+        return None;
+    }
+    let prog = unsafe { core::slice::from_raw_parts(entry as *const u8, len) };
+    let vm = unsafe { rbpf::EbpfVmMbuff::new_verified(prog) };
+    let t0 = crate::ext::perf::aggregate::AggregateSet::now_ticks();
+    for _ in 0..runs {
+        unsafe {
+            core::hint::black_box(interp::run_with(&vm, ctx));
+        }
+    }
+    let total_us = crate::ext::perf::aggregate::AggregateSet::now_ticks().saturating_sub(t0);
+    Some(total_us.saturating_mul(1000) / runs as u64)
+}
+
 pub use state::set_boot_id;
+/// Instructions executed by the interpreter since the last call, and reset.
+///
+/// Present only with the `interp` feature. A measurement aid: the cost of one
+/// interpreted instruction is a flight's time divided by this.
+#[cfg(feature = "interp")]
+pub fn interp_take_steps() -> u32 {
+    interp::take_steps()
+}
 /// The mounted program singleton, for board-level perf probes.
 ///
 /// The datapath never exposes this: applications read performance data through
@@ -471,7 +541,11 @@ impl XdpRt {
             self.primary = prev_primary;
             return Err(XdpSwitchError::ImageTooLarge);
         }
-        let mut buf = [0u8; DEFAULT_IMAGE_CAPACITY];
+        // Static, not a stack array: the buffer is the full image ceiling, and
+        // an 8 KiB frame on the embassy stack is enough to fault the boot path
+        // that publishes the primary image.
+        static mut SWITCH_BUF: [u8; DEFAULT_IMAGE_CAPACITY] = [0; DEFAULT_IMAGE_CAPACITY];
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(SWITCH_BUF) };
         if image_len > buf.len() {
             self.primary = prev_primary;
             return Err(XdpSwitchError::ScratchTooSmall);

@@ -23,7 +23,7 @@
 //!   the `jalr` on the AOT path.
 //! - [`ALLOW`]: map value windows, installed at lease and cleared at release.
 //!   Packet, md and stack windows are decided by `rbpf` itself.
-//! - [`BUDGET`]: instructions remaining in this flight. Upstream has no
+//! - `BUDGET_LEFT`: instructions remaining in this flight. Upstream has no
 //!   termination guard; rBPF's own paper names the missing CPU cap as its next
 //!   step, and Femto-Containers monitors branches for the same reason.
 
@@ -47,7 +47,7 @@ const MAX_STEPS: u32 = 200_000;
 static mut EBPF_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
 /// Instructions left in the current flight.
-static BUDGET: AtomicU32 = AtomicU32::new(0);
+
 
 /// Map value windows the program may touch: `(start, size)` pairs.
 ///
@@ -135,6 +135,29 @@ pub(crate) unsafe fn run(base: usize, len: usize, ctx: *mut XdpMd) -> i32 {
         return ABORTED;
     }
     let prog = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
+    // The program was verified when it was staged, so this does not rescan it.
+    // Building the VM itself is a few word copies: `new_verified` stores the
+    // program slice and one constant stack size.
+    let vm = unsafe { rbpf::EbpfVmMbuff::new_verified(prog) };
+    unsafe { run_with(&vm, ctx) }
+}
+
+/// Run with an already-built VM.
+///
+/// Split out so a measurement can hoist the construction out of a loop and see
+/// how much of a flight it costs.
+///
+/// # Safety
+///
+/// Same contract as [`run`].
+#[inline]
+pub(crate) unsafe fn run_with(vm: &rbpf::EbpfVmMbuff<'_>, ctx: *mut XdpMd) -> i32 {
+    const ABORTED: i32 = xpost_type::XdpAction::Aborted as i32;
+
+    let prog = match vm.program() {
+        Some(p) if !p.is_empty() => p,
+        _ => return ABORTED,
+    };
 
     // Packet window, validated before it becomes a slice. A malformed md must
     // not produce a slice that runs off the frame.
@@ -156,16 +179,21 @@ pub(crate) unsafe fn run(base: usize, len: usize, ctx: *mut XdpMd) -> i32 {
     };
 
     let stack = unsafe { &mut *addr_of_mut!(EBPF_STACK) };
+    // The VM reads `r10` before writing it only inside a local-function call,
+    // which an XDP program does not use, so clearing the whole 512 bytes on
+    // every flight is work paid for nothing. Set `XPOST_INTERP_STACK_CLEAR=1` in
+    // Cargo features to restore it for a comparison.
+    #[cfg(feature = "interp-stack-clear")]
     for b in stack.iter_mut() {
         *b = 0;
     }
-    BUDGET.store(MAX_STEPS, Ordering::Relaxed);
+    // Reset the per-flight counters. Plain stores: the `IN_FLIGHT` owner is
+    // the only context that touches them.
+    unsafe {
+        *core::ptr::addr_of_mut!(BUDGET_LEFT) = MAX_STEPS;
+    }
 
     let env = McuEnv::new(call_helper, check_access, step);
-    // The program was verified when it was staged, so this does not rescan it.
-    // Building the VM itself is a few word copies: `new_verified` stores the
-    // program slice and one constant stack size.
-    let vm = unsafe { rbpf::EbpfVmMbuff::new_verified(prog) };
     match vm.execute_program_mcu(pkt, md_bytes, stack, &env) {
         Ok(r0) => r0 as u32 as i32,
         Err(_) => ABORTED,
@@ -258,12 +286,52 @@ fn check_access(addr: u64, len: usize) -> bool {
 }
 
 /// Charge one instruction to the flight budget.
+///
+/// Both counters are plain static muts touched only from the `IN_FLIGHT` owner,
+/// so they need no atomics. The earlier version used `fetch_add`, which on
+/// RV32IMC compiles to an interrupt-disabling sequence: two of those per
+/// instruction dominated the very thing being measured.
+#[inline(always)]
 fn step() -> Step {
-    if BUDGET.load(Ordering::Relaxed) == 0 {
-        return Step::Exhausted;
+    unsafe {
+        let budget = core::ptr::addr_of_mut!(BUDGET_LEFT);
+        if *budget == 0 {
+            return Step::Exhausted;
+        }
+        *budget -= 1;
+        let executed = core::ptr::addr_of_mut!(EXECUTED);
+        *executed = executed.read_volatile().wrapping_add(1);
     }
-    BUDGET.fetch_sub(1, Ordering::Relaxed);
     Step::Go
+}
+
+/// Instructions left in the current flight. Safe as a plain static: only the
+/// `IN_FLIGHT` owner touches it, and that is at most one context at a time.
+static mut BUDGET_LEFT: u32 = 0;
+
+/// Instructions executed since the last [`take_steps`].
+static mut EXECUTED: u32 = 0;
+
+/// Read and clear the executed-instruction counter.
+pub fn take_steps() -> u32 {
+    unsafe {
+        let p = core::ptr::addr_of_mut!(EXECUTED);
+        let v = p.read_volatile();
+        p.write_volatile(0);
+        v
+    }
+}
+
+/// Instructions executed in the last flight.
+///
+/// A measurement aid: dividing a flight's time by this gives the cost of one
+/// interpreted instruction, which is what tells apart a slow engine from a slow
+/// clock.
+static LAST_STEPS: AtomicU32 = AtomicU32::new(0);
+
+/// Read the instruction count of the most recent flight.
+pub fn last_steps() -> u32 {
+    LAST_STEPS.load(Ordering::Relaxed)
 }
 
 /// Run one program outside a lease, for a firmware self-check.

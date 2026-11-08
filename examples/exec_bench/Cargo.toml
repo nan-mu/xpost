@@ -18,13 +18,13 @@ schema_version = 1
 
 [[package.metadata.xpost.slots.entries]]
 name = "a"
-length = 0xE00
+length = 0x2000
 mount = "rx"
 primary = true
 
 [package.metadata.xpost.xdp_table]
 partition = "xdp"
-image_capacity = 0x1000
+image_capacity = 0x2000
 
 [dependencies]
 esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
@@ -53,6 +53,7 @@ xpost = { path = "../..", features = [
   "perf-report",
 ] }
 xpost-type = { path = "../../xpost-type" }
+xpost-perf = { path = "../../xpost-perf" }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
 
 [build-dependencies]
@@ -63,8 +64,9 @@ xpost-build = { path = "../../xpost-build" }
 # build without it runs AOT machine code. Both report through `perf-report`, so
 # the two arms produce comparable bytes.
 interp = ["xpost/interp"]
-# Firmware self-checks that print segment timings over the UART.
-diag = ["interp"]
+# Firmware self-checks that print segment timings and run the scale sweep.
+# Independent of `interp`: the same sweep must run on the AOT build to compare.
+diag = []
 
 [profile.dev]
 opt-level = "s"

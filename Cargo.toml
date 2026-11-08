@@ -50,6 +50,8 @@ exec-call = []
 # Compiles the fork with `mcu`: no allocator, no JIT, fixed-capacity errors.
 # Firmware that enables this must also run on a target without the A extension.
 interp = ["dep:rbpf"]
+# Restore the per-flight eBPF stack clear, for an A/B measurement.
+interp-stack-clear = ["interp"]
 
 # Path A defaults for `xpost-build::firmware_codegen` when the firmware crate
 # omits `[package.metadata.xpost]`. Firmware may override map/slots/target;
