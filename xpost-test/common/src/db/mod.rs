@@ -7,6 +7,7 @@
 mod decode;
 mod names;
 mod pg;
+pub mod schema;
 mod write;
 
 use anyhow::{Context, Result};
@@ -78,6 +79,11 @@ pub async fn ensure(client: &Client, opts: PgOpts) -> Result<()> {
         .batch_execute(CASE_SQL)
         .await
         .with_context(|| format!("ensure case.sql in {schema}"))?;
+    // Per-mode experiment tables. These are additive: the legacy `formal.*`
+    // tables stay frozen and are not touched here.
+    schema::ensure(client)
+        .await
+        .context("ensure per-mode experiment schemas")?;
     info!("formal schema={schema}: ensured (no truncate)");
     Ok(())
 }
