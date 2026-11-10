@@ -59,6 +59,24 @@ The `common` package provides the ABI library and the `xpost-test` binary.
 The `ebpf` package uses aya: TC egress timestamps and XDP ingress timestamps, with TC ingress as an attach fallback.
 The host modules are `agent`, `config`, `db`, `pipeline`, and `exam`.
 
+## Working with the user
+
+The user trusts the agent to make decisions without asking first.
+Act on reversible work, then report what was decided.
+
+Before each decision, check whether a fact held in this session contradicts a final decision the user already made.
+Read `docs/user-decisions.md` before starting work and before acting on anything that file covers.
+If the facts contradict a recorded decision, stop and ask the user.
+Do not silently override a recorded decision.
+
+When the user makes a final decision about a single thing, record it in `docs/user-decisions.md` with the date and the reason.
+Append, do not rewrite history.
+A later decision about the same thing replaces the value but keeps the earlier entry with a note saying it was superseded.
+
+Ordinary facts about the code are not decisions.
+Do not record them.
+They change with the code, and a stale copy misleads the next reader.
+
 ## Agent access
 
 The `xpost-agent` daemon controls the shared USB connection.
