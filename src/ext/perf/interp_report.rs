@@ -1,107 +1,121 @@
-//! Interpreter-arm report in the `xpost-perf` format.
+//! The firmware report: which entries this build sends, and how they are read.
 //!
-//! Separate from [`super::report`] on purpose. That module encodes a fixed slot
-//! layout whose slot names belong to the HAL arm, and the interpreter needs a
-//! metric those slots do not have: the engine call alone.
+//! Every entry here is declared once, in [`METRICS`]. The encoder writes exactly
+//! that list, so a reader labels the bytes from the plan and needs no per-build
+//! knowledge. The old fixed-slot layout is gone: it named its slots for one arm
+//! and had no room for a number another arm needed.
 //!
-//! The format here carries its own names, so a host labels every entry from the
-//! bytes and needs no knowledge of which firmware produced them. Nothing in
-//! this file changes the fixed layout, so the published baselines still decode.
+//! # Why these three
 //!
-//! # What the entries mean
+//! - `engine_us` is the call itself: from the `IN_FLIGHT` claim to its release.
+//!   It is the only figure both engines measure identically, so it is the one to
+//!   compare them with.
+//! - `execution_us` is the wider interval between `xdp_invocations` and
+//!   `xdp_action`. It includes the counter and trace hooks on both sides, so it
+//!   describes the accounting as much as the work. Kept so the gap between the
+//!   two is visible.
+//! - `invocations` is how many flights ran. A comparison between a figure from
+//!   one flight and a figure from none is not a comparison.
 //!
-//! - `engine` — the engine call inside one flight, between the `IN_FLIGHT` claim
-//!   and its release. This is the number that compares AOT against the
-//!   interpreter; it excludes the counter and trace hooks on both sides.
-//! - `execution` — the wider interval the perf aggregates already report, from
-//!   `xdp_invocations` to `xdp_action`. Kept so the two can be compared on one
-//!   wire and the difference between them is visible.
-//! - `invocations` — how many flights ran.
+//! Both counters are already recorded inside `ingress::run` for either engine, so
+//! a build without the interpreter still reports the same names.
 
 use core::convert::Infallible;
 
-use xpost_perf::{Kind, SpanStats, write_entry, write_header};
+use xpost_perf::plan::{encode_report, entry_count, report_len, MetricSpec, MetricValue};
+use xpost_perf::{Kind, Sink, SpanStats};
 
 use crate::ext::perf::aggregate;
 
-/// Longest entry name this report writes.
-const MAX_NAME: usize = 16;
-
-/// Names, in wire order.
-///
-/// The unit is in the name so a reader cannot mistake ticks for microseconds.
-/// That confusion is what made the earlier numbers look like they described the
-/// engine.
-const NAMES: [&str; 3] = ["engine_us", "execution_us", "invocations"];
-
-/// Bytes one entry occupies, given the fixed names above.
-const fn entry_bytes(name: &str, kind: Kind) -> usize {
-    1 + name.as_bytes().len() + 1 + kind.fixed_len()
+fn engine() -> MetricValue {
+    MetricValue::Span(span_of(&aggregate().xdp_engine.snapshot()))
 }
 
-/// Exact payload length, so the host can frame the blob before reading it.
-pub fn payload_len() -> usize {
-    xpost_perf::HEADER_LEN
-        + entry_bytes(NAMES[0], Kind::Span)
-        + entry_bytes(NAMES[1], Kind::Span)
-        + entry_bytes(NAMES[2], Kind::Counter)
+fn execution() -> MetricValue {
+    MetricValue::Span(span_of(&aggregate().xdp_execution.snapshot()))
 }
 
-/// Read the aggregates into the report's statistics.
-fn stats() -> [SpanStats; 3] {
-    let a = aggregate();
-    let mut engine = SpanStats::new();
-    let mut execution = SpanStats::new();
+fn invocations() -> MetricValue {
+    MetricValue::Counter(aggregate().xdp_engine.snapshot().count)
+}
 
+fn span_of(snap: &aggregate::AggregateSnapshot) -> SpanStats {
     // Ticks, not microseconds: the system timer resolves 62.5 ns and a
     // microsecond clock would round a one-microsecond call to 1 or 2 with no
     // information in between.
-    let e = a.xdp_engine.snapshot();
-    if e.count > 0 {
-        engine.count = e.count;
-        engine.total_us = e.total_ticks;
-        engine.min_us = e.min_ticks;
-        engine.max_us = e.max_ticks;
+    if snap.count == 0 {
+        return SpanStats::new();
     }
-    let x = a.xdp_execution.snapshot();
-    if x.count > 0 {
-        execution.count = x.count;
-        execution.total_us = x.total_ticks;
-        execution.min_us = x.min_ticks;
-        execution.max_us = x.max_ticks;
+    SpanStats {
+        count: snap.count,
+        total_us: snap.total_ticks,
+        min_us: snap.min_ticks,
+        max_us: snap.max_ticks,
     }
-    [engine, execution, SpanStats::new()]
 }
 
-/// Ticks per microsecond on the ESP32-C3 system timer.
-pub const TICKS_PER_US: u64 = 16;
+/// Names, in wire order. The unit is in the name so a reader cannot mistake
+/// ticks for microseconds, which is what made the earlier numbers look like they
+/// described the engine.
+pub const METRICS: &[MetricSpec] = &[
+    MetricSpec {
+        name: "engine_us",
+        get: engine,
+    },
+    MetricSpec {
+        name: "execution_us",
+        get: execution,
+    },
+    MetricSpec {
+        name: "invocations",
+        get: invocations,
+    },
+];
 
-/// Write the report in `xpost-perf` format.
+/// Payload length, so the host can frame the blob before reading it.
+pub fn payload_len() -> usize {
+    report_len(METRICS, None).unwrap_or(0)
+}
+
+/// Entries this report sends.
+pub fn entries() -> u16 {
+    entry_count(METRICS, None)
+}
+
+/// Stream the report through `sink`.
 ///
-/// The buffer is local and fixed, so this allocates nothing and can run from the
-/// control plane without disturbing a flight.
-pub fn report(mut write: impl FnMut(&[u8]) -> Result<(), Infallible>) {
-    let [engine, execution, _] = stats();
-    let invocations = engine.count;
+/// Writes straight into the serial writer: the report needs no buffer of its
+/// own, and the length it announced came from the same plan.
+pub fn report(sink: &mut WriteSink<'_>) -> bool {
+    encode_report(METRICS, None, &mut [], sink)
+}
 
-    // Header plus three entries; the longest name bounds the rest.
-    const MAX: usize = xpost_perf::HEADER_LEN
-        + 3 * (1 + MAX_NAME + 1 + Kind::Span.fixed_len());
-    let mut buf = [0u8; MAX];
+/// Adapts the serial reply writer to a [`Sink`].
+///
+/// Holds a trait object because `ReplyWriter::get_perf` hands the encoder a
+/// `&mut dyn FnMut`, and a generic wrapper would not accept that unsized type.
+pub struct WriteSink<'a> {
+    write: &'a mut dyn FnMut(&[u8]) -> Result<(), Infallible>,
+}
 
-    let mut o = match write_header(&mut buf, 3) {
-        Some(o) => o,
-        None => return,
-    };
-    for (name, kind, st, value) in [
-        (NAMES[0], Kind::Span, engine, (0u64, 0u64)),
-        (NAMES[1], Kind::Span, execution, (0u64, 0u64)),
-        (NAMES[2], Kind::Counter, SpanStats::new(), (invocations, 0u64)),
-    ] {
-        match write_entry(&mut buf, o, name, kind, &st, value, &[]) {
-            Some(next) => o = next,
-            None => return,
-        }
+impl<'a> WriteSink<'a> {
+    pub fn new(write: &'a mut dyn FnMut(&[u8]) -> Result<(), Infallible>) -> Self {
+        Self { write }
     }
-    let _ = write(&buf[..o]);
+}
+
+impl Sink for WriteSink<'_> {
+    fn put(&mut self, bytes: &[u8]) -> bool {
+        (self.write)(bytes).is_ok()
+    }
+}
+
+/// Names this report declares, for a host that wants to check it saw them all.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    METRICS.iter().map(|m| m.name)
+}
+
+/// Kind of the entry at `i`, or `None` when out of range.
+pub fn kind_at(i: usize) -> Option<Kind> {
+    METRICS.get(i).map(|m| (m.get)().kind())
 }

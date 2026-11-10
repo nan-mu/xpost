@@ -54,6 +54,7 @@
 
 #![no_std]
 
+pub mod plan;
 pub mod sweep;
 
 /// First four bytes of every report.
@@ -112,7 +113,8 @@ impl Kind {
             Self::Counter => 8,
             Self::Span => 32,
             Self::Gauge => 16,
-            // count, total, min, max, then a `u16` edge count.
+            // count, total, min, max, then a `u16` bucket count. Each bucket
+            // then carries one upper edge and one count; see `encode_histogram`.
             Self::Histogram => 34,
             // dropped, then a `u32` event count.
             Self::Event => 12,
@@ -193,6 +195,9 @@ impl Default for SpanStats {
 }
 
 /// Bytes one entry occupies on the wire.
+///
+/// `tail` is the variable part: `16 * buckets` for a histogram, `EVENT_WIRE_LEN *
+/// count` for an event entry, zero otherwise.
 pub fn entry_len(name: &str, kind: Kind, tail: usize) -> usize {
     1 + name.len() + 1 + kind.fixed_len() + tail
 }
@@ -309,8 +314,10 @@ fn encode_name(sink: &mut impl Sink, name: &str, kind: Kind) -> bool {
 
 /// Writes one counter, span, gauge, or histogram entry.
 ///
-/// `value` is the counter value or a gauge's `(current, peak)`; `edges` is empty
-/// unless `kind` is [`Kind::Histogram`].
+/// `value` is the counter value or a gauge's `(current, peak)`. `edges` and
+/// `buckets` are empty unless `kind` is [`Kind::Histogram`]; a histogram carries
+/// one upper edge and one count per bucket, because edges alone say where the
+/// bins are but not how many samples landed in them.
 pub fn encode_metric(
     sink: &mut impl Sink,
     name: &str,
@@ -318,16 +325,23 @@ pub fn encode_metric(
     stats: &SpanStats,
     value: (u64, u64),
     edges: &[u64],
+    buckets: &[u64],
 ) -> bool {
     if kind == Kind::Event {
         // Events carry a different payload shape; use `encode_events`.
         return false;
     }
-    if kind == Kind::Histogram && edges.is_empty() {
-        return false;
-    }
-    if !matches!(kind, Kind::Histogram) && !edges.is_empty() {
-        return false;
+    match kind {
+        Kind::Histogram => {
+            if edges.is_empty() || edges.len() != buckets.len() || edges.len() > u16::MAX as usize {
+                return false;
+            }
+        }
+        _ => {
+            if !edges.is_empty() || !buckets.is_empty() {
+                return false;
+            }
+        }
     }
     if !encode_name(sink, name, kind) {
         return false;
@@ -340,14 +354,19 @@ pub fn encode_metric(
             if !stats_fields(sink, stats) || !sink.put(&(edges.len() as u16).to_le_bytes()) {
                 return false;
             }
-            edges.iter().all(|e| put_u64(sink, *e))
+            // Interleaved edge/count, not edges then counts: a reader can then
+            // label each bucket in one pass, and a truncated stream fails at the
+            // bucket it reached instead of after a full edge table.
+            for (edge, bucket) in edges.iter().zip(buckets) {
+                if !put_u64(sink, *edge) || !put_u64(sink, *bucket) {
+                    return false;
+                }
+            }
+            true
         }
         Kind::Event => unreachable!(),
     };
-    if !ok {
-        return false;
-    }
-    true
+    ok
 }
 
 fn stats_fields(sink: &mut impl Sink, stats: &SpanStats) -> bool {
@@ -398,8 +417,8 @@ pub fn event_entry_len(name: &str, count: usize) -> usize {
     entry_len(name, Kind::Event, count * EVENT_WIRE_LEN)
 }
 
-/// Writes one entry into a fixed buffer. Returns the new cursor, or `None` on a
-/// short buffer. A thin wrapper over [`encode_metric`].
+/// Writes one entry into a fixed buffer at `at`. Returns the new cursor, or
+/// `None` on a short buffer. A thin wrapper over [`encode_metric`].
 pub fn write_entry(
     buf: &mut [u8],
     at: usize,
@@ -408,13 +427,14 @@ pub fn write_entry(
     stats: &SpanStats,
     value: (u64, u64),
     edges: &[u64],
+    buckets: &[u64],
 ) -> Option<usize> {
     let mut sink = SliceSink {
         buf,
         at,
         overflow: false,
     };
-    if !encode_metric(&mut sink, name, kind, stats, value, edges) {
+    if !encode_metric(&mut sink, name, kind, stats, value, edges, buckets) {
         return None;
     }
     sink.wrote()
@@ -490,8 +510,9 @@ pub struct Entry<'a> {
     pub stats: SpanStats,
     /// Counter value, or gauge (current, peak).
     pub value: (u64, u64),
-    /// Histogram edges, empty for other kinds.
-    pub edges: &'a [u8],
+    /// Histogram buckets, empty for other kinds. Each bucket is 16 bytes: a
+    /// `u64` upper edge, then a `u64` count.
+    pub hist: &'a [u8],
     /// Event entries only: the ring's overflow count.
     pub dropped: u64,
     /// Event entries only: the events, packed as `EVENT_WIRE_LEN` bytes each.
@@ -515,6 +536,29 @@ impl Entry<'_> {
     pub fn event_count(&self) -> usize {
         self.events.len() / EVENT_WIRE_LEN
     }
+
+    /// Histogram bucket count, or 0 for other kinds.
+    pub fn bucket_len(&self) -> usize {
+        self.hist.len() / 16
+    }
+
+    /// Upper edge of histogram bucket `i`, or `None` when out of range.
+    pub fn edge(&self, i: usize) -> Option<u64> {
+        u64_pair(self.hist, i).map(|p| p.0)
+    }
+
+    /// Count of samples in histogram bucket `i`, or `None` when out of range.
+    pub fn bucket(&self, i: usize) -> Option<u64> {
+        u64_pair(self.hist, i).map(|p| p.1)
+    }
+}
+
+fn u64_pair(buf: &[u8], i: usize) -> Option<(u64, u64)> {
+    let at = i.checked_mul(16)?;
+    let b = buf.get(at..at + 16)?;
+    let a = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+    let c = u64::from_le_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]);
+    Some((a, c))
 }
 
 /// Visitor for [`visit_entries`].
@@ -556,7 +600,7 @@ pub fn visit_entries<V: Visitor>(buf: &[u8], visitor: &mut V) -> Result<Header, 
 
         let mut stats = SpanStats::new();
         let mut value = (0u64, 0u64);
-        let mut edges: &[u8] = &[];
+        let mut hist: &[u8] = &[];
         let mut dropped = 0u64;
         let mut events: &[u8] = &[];
         match kind {
@@ -587,7 +631,7 @@ pub fn visit_entries<V: Visitor>(buf: &[u8], visitor: &mut V) -> Result<Header, 
                 if stats.count == 0 {
                     stats.min_us = u64::MAX;
                 }
-                let edges_len = {
+                let nbuckets = {
                     let at = o + 32;
                     if at + 2 > buf.len() {
                         return Err(DecodeError::Short);
@@ -595,12 +639,13 @@ pub fn visit_entries<V: Visitor>(buf: &[u8], visitor: &mut V) -> Result<Header, 
                     u16::from_le_bytes([buf[at], buf[at + 1]]) as usize
                 };
                 o += Kind::Histogram.fixed_len();
-                let ebytes = edges_len * 8;
-                let end = o.checked_add(ebytes).ok_or(DecodeError::Short)?;
+                // One edge and one count per bucket, interleaved.
+                let pair = nbuckets.checked_mul(16).ok_or(DecodeError::Short)?;
+                let end = o.checked_add(pair).ok_or(DecodeError::Short)?;
                 if end > buf.len() {
                     return Err(DecodeError::Short);
                 }
-                edges = &buf[o..end];
+                hist = &buf[o..end];
                 o = end;
             }
             Kind::Event => {
@@ -629,7 +674,7 @@ pub fn visit_entries<V: Visitor>(buf: &[u8], visitor: &mut V) -> Result<Header, 
             kind,
             stats,
             value,
-            edges,
+            hist,
             dropped,
             events,
         })?;

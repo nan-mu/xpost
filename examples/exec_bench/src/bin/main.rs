@@ -198,13 +198,13 @@ serial_task! {
             reply.ok(OkReply::ClearPerf);
         })
         .on_get_perf(|reply: ReplyWriter<'_>| {
-            // The interpreter arm reports in the `xpost-perf` format, which
-            // carries its own metric names. The fixed slot layout it replaces
-            // has no slot for the engine call alone, and the two empty slots
-            // belong to the HAL firmware.
+            // Report what this experiment measures, by name: the engine call,
+            // the wider interval around it, and the invocation count. The
+            // format carries each name, so a reader needs no per-build table.
             let n = xpost::ext::perf::interp_report::payload_len();
             reply.get_perf(n, |write| {
-                xpost::ext::perf::interp_report::report(write);
+                let mut sink = xpost::ext::perf::interp_report::WriteSink::new(write);
+                xpost::ext::perf::interp_report::report(&mut sink);
             });
         })
         .build()
