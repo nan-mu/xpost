@@ -19,7 +19,7 @@
 //! It never drops or truncates. Creating is idempotent; removing a table is a
 //! human's decision, because a drop silently deletes the measurements in it.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use tokio_postgres::Client;
 
 /// The three ways the same test can run.
@@ -196,7 +196,22 @@ pub fn expand(mode: &str) -> Vec<(String, Template, Option<String>)> {
 /// every later `LIKE` fail with a confusing message.
 pub fn template_sql() -> String {
     let mut sql = String::from(
-        "CREATE SCHEMA IF NOT EXISTS tmpl;\n\
+        // The event kind enum. Created here rather than assumed: the per-mode
+        // tables use it, so a database that never ran the legacy schema must
+        // still get it.
+        "DO $do$ BEGIN
+           CREATE TYPE perf_trace_kind AS ENUM (
+             'rx_begin','xdp_begin','xdp_end','rx_end','slow_execution',
+             'rx_overflow','runtime_error','user_marker','span_begin','span_end',
+             'helper_enter','helper_leave','rx_delivered','rx_discarded',
+             'tx_sub_begin','tx_submitted','tx_failed','tx_completed',
+             'tx_fail_bad_buf','tx_fail_token','tx_enq','tx_kick','tx_poll',
+             'tx_cap_wait','tx_nomem_wait','tx_block','tx_enq_fail_claim',
+             'tx_enq_fail_ring','tx_flush','tx_grp_src','tx_no_retain',
+             'app_udp_recv','app_echo_begin','app_echo_end','app_udp_send_begin',
+             'app_udp_send_end','app_wifi_tx_begin','app_wifi_tx_end');
+         EXCEPTION WHEN duplicate_object THEN NULL; END $do$;\n\
+         CREATE SCHEMA IF NOT EXISTS tmpl;\n\
          CREATE TABLE IF NOT EXISTS tmpl.run_config (\n\
            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n\
            exam_id uuid NOT NULL,\n\
@@ -369,6 +384,18 @@ pub const fn template_name(t: Template) -> &'static str {
     t.name()
 }
 
+/// Reject a mode name the schema layer does not know.
+///
+/// Mode names reach SQL as schema identifiers, so this is the one place a bad
+/// value is stopped.
+pub fn check_mode(mode: &str) -> Result<()> {
+    if MODES.contains(&mode) {
+        Ok(())
+    } else {
+        bail!("unknown mode `{mode}`; expected one of {MODES:?}")
+    }
+}
+
 /// Table names for one mode.
 pub fn tables_for(mode: &str) -> Vec<String> {
     expand(mode).into_iter().map(|(n, _, _)| n).collect()
@@ -397,25 +424,73 @@ async fn verify_present(client: &Client) -> Result<()> {
     Ok(())
 }
 
+async fn ensure_schema(client: &Client, name: &str) -> Result<()> {
+    if let Err(e) = client
+        .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {name};"))
+        .await
+    {
+        let already = e
+            .as_db_error()
+            .map(|d| d.code() == &tokio_postgres::error::SqlState::DUPLICATE_SCHEMA)
+            .unwrap_or(false);
+        if !already {
+            return Err(e).with_context(|| format!("create schema {name}"));
+        }
+    }
+    Ok(())
+}
+
+/// Lock key for the schema bootstrap.
+///
+/// `CREATE TABLE IF NOT EXISTS` has the same race as `CREATE SCHEMA IF NOT
+/// EXISTS`: two sessions can both find the name absent and one then fails on the
+/// catalog's unique index. A session-level advisory lock serialises the whole
+/// bootstrap, which is a one-time cost per process start.
+const BOOTSTRAP_LOCK: i64 = 0x7870_6f73_745f_7363;
+
 /// Creates every schema, template, and table. Idempotent.
 ///
 /// Runs in passes: schemas and templates, then every table with its extra
 /// columns, then foreign keys. Keys come last so a table's parent exists no
 /// matter what order the expansion produced.
 pub async fn ensure(client: &Client) -> Result<()> {
+    // Serialise the bootstrap against another process starting at the same time.
+    // Released by the same call at the end, including on the error paths below.
+    let locked = client
+        .query_one("SELECT pg_try_advisory_lock($1)", &[&BOOTSTRAP_LOCK])
+        .await
+        .context("take bootstrap lock")?
+        .get::<_, bool>(0);
+    let out = if locked {
+        bootstrap(client).await
+    } else {
+        // Another process holds it, so its bootstrap is already running or done.
+        // Waiting is better than failing: the tables this process needs will
+        // exist when the lock is released.
+        client
+            .batch_execute(&format!("SELECT pg_advisory_lock({BOOTSTRAP_LOCK})"))
+            .await
+            .context("wait for bootstrap lock")?;
+        bootstrap(client).await
+    };
+    let _ = client
+        .batch_execute(&format!("SELECT pg_advisory_unlock({BOOTSTRAP_LOCK})"))
+        .await;
+    out
+}
+
+async fn bootstrap(client: &Client) -> Result<()> {
+    // `CREATE SCHEMA IF NOT EXISTS` is not race-free either, so each schema is
+    // created through a step that tolerates a concurrent creator.
+    ensure_schema(client, "tmpl").await?;
+    for mode in MODES {
+        ensure_schema(client, mode).await?;
+    }
+
     client
         .batch_execute(&template_sql())
         .await
         .context("create templates")?;
-
-    let mut schemas = String::new();
-    for mode in MODES {
-        schemas.push_str(&format!("CREATE SCHEMA IF NOT EXISTS {mode};\n"));
-    }
-    client
-        .batch_execute(&schemas)
-        .await
-        .context("create mode schemas")?;
 
     for mode in MODES {
         client
@@ -432,9 +507,13 @@ pub async fn ensure(client: &Client) -> Result<()> {
     verify_present(client).await
 }/// Every statement `ensure` would run, in order, separated by newlines.
 ///
+/// Test and diagnostic only: `ensure` runs the statements itself, and a host
+/// executes this export when it needs to inspect the DDL rather than apply it.
+///
 /// Exposed so a host can execute the exact DDL the collector uses instead of a
 /// copy of it. A second copy would be a second thing to keep in step, and the
 /// copy is what a reviewer would end up trusting.
+#[cfg(any(test, feature = "host-schema-dump"))]
 pub fn all_sql() -> String {
     let mut sql = template_sql();
     for mode in MODES {
