@@ -313,7 +313,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                 ui.check_ok(&format!(
                     "config={cfg_id} ok={ok}/{} mask={:#x}",
                     stats.sent,
-                    decoded.mask
+                    decoded.mask()
                 ));
             }
             eta.consume_fixed(WARMUP + window + DRAIN);
@@ -422,7 +422,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                 &decoded,
             )
             .await?;
-            let n_ev = decoded.trace.as_ref().map(|t| t.events.len()).unwrap_or(0);
+            let n_ev = decoded.trace().as_ref().map(|t| t.events.len()).unwrap_or(0);
             ui.check_ok(&format!("trace events={n_ev}"));
         }
         ui.end_round();

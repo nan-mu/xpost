@@ -59,7 +59,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::agent::AgentClient;
 use crate::config::FileConfig;
-use crate::db::{self, Firmware, PgOpts};
+use crate::db::{self, PgOpts};
 use crate::pipeline::{status, BudgetEta, READY_BUDGET, RoundUi};
 
 const FLASH_IDLE: Duration = Duration::from_secs(300);
@@ -67,30 +67,66 @@ const MAP_NAME: &str = "workload";
 const KEY_IN: &str = "0";
 /// Dump encoding for 1-byte key `1` (see `format_hash_key`).
 const KEY_OUT_DUMP: &str = "01";
-const FW_EBPF: &str = "exec-bench-ebpf";
+const FW_EBPF: &str = "exec-bench-aot";
+const FW_RBPF: &str = "exec-bench-rbpf";
 const FW_HAL: &str = "exec-bench-hal";
 const MAP_VALUE_LEN: usize = 32;
 const KIND_XDP_BEGIN: u8 = 2;
 const KIND_XDP_END: u8 = 3;
 
 fn require_exec_trace(arm: Arm, name: &str, decoded: &db::DecodedReport) -> Result<()> {
-    if decoded.mask & db::MASK_T == 0 {
+    if decoded.mask() & db::MASK_T == 0 {
         bail!(
-            "{}/{}: get/perf missing Trace section (mask={:#x})",
+            "{}/{}: get/perf carried no event stream (mask={:#x})",
             arm.as_db(),
             name,
-            decoded.mask
+            decoded.mask(),
         );
     }
-    let Some(tr) = decoded.trace.as_ref() else {
-        bail!("{}/{}: Trace section decoded empty", arm.as_db(), name);
+    let trace = decoded.trace();
+    let Some(tr) = trace.as_ref() else {
+        bail!("{}/{}: trace section decoded empty", arm.as_db(), name);
     };
+    if tr.events.is_empty() {
+        bail!("{}/{}: event stream has no events", arm.as_db(), name);
+    }
+    if tr.dropped != 0 {
+        bail!(
+            "{}/{}: ring dropped {} events; the timeline is incomplete",
+            arm.as_db(),
+            name,
+            tr.dropped
+        );
+    }
     let has = |kind: u8| tr.events.iter().any(|e| e.kind == kind);
     if !has(KIND_XDP_BEGIN) {
         bail!("{}/{}: Trace has no xdp_begin", arm.as_db(), name);
     }
     if !has(KIND_XDP_END) {
         bail!("{}/{}: Trace has no xdp_end", arm.as_db(), name);
+    }
+    // One flight means one invocation. A count of zero would mean the timing
+    // figures describe no run at all, and a count above one would mean this cell
+    // measured more calls than it claims.
+    match decoded.counter("invocations") {
+        Some(1) => {}
+        Some(other) => bail!(
+            "{}/{}: expected 1 invocation, report says {other}",
+            arm.as_db(),
+            name
+        ),
+        None => bail!("{}/{}: report carries no invocations counter", arm.as_db(), name),
+    }
+    // The engine span must have been sampled, or there is nothing to compare.
+    let engine = decoded
+        .metric("engine_us")
+        .ok_or_else(|| anyhow::anyhow!("{}/{}: report carries no engine_us", arm.as_db(), name))?;
+    if engine.is_absent() {
+        bail!(
+            "{}/{}: engine_us has no samples; the interval never ran",
+            arm.as_db(),
+            name
+        );
     }
     Ok(())
 }
@@ -149,37 +185,57 @@ struct Workload {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arm {
-    Ebpf,
+    /// RV32IMC machine code, entered by the xpost runtime.
+    Aot,
+    /// The same C compiled to eBPF bytecode, run by the rbpf interpreter.
+    Rbpf,
+    /// Native Rust, no xpost runtime.
     Hal,
 }
 
 impl Arm {
     pub fn parse(s: &str) -> Result<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "ebpf" | "xdp" => Ok(Self::Ebpf),
+            // `ebpf` and `xdp` are the names the config used before the mode
+            // split; they always meant the machine-code path.
+            "aot" | "ebpf" | "xdp" => Ok(Self::Aot),
+            "rbpf" | "interp" => Ok(Self::Rbpf),
             "hal" => Ok(Self::Hal),
-            other => bail!("exec_bench arm must be ebpf|hal, got {other}"),
+            other => bail!("exec_bench arm must be aot|rbpf|hal, got {other}"),
         }
     }
 
+    /// The mode name, which is also the schema name.
     pub fn as_db(self) -> &'static str {
         match self {
-            Self::Ebpf => "ebpf",
+            Self::Aot => "aot",
+            Self::Rbpf => "rbpf",
             Self::Hal => "hal",
         }
     }
 
     pub fn fw_profile(self) -> &'static str {
         match self {
-            Self::Ebpf => FW_EBPF,
+            Self::Aot => FW_EBPF,
+            Self::Rbpf => FW_RBPF,
             Self::Hal => FW_HAL,
         }
     }
 
-    pub fn as_firmware(self) -> Firmware {
+    /// Whether this mode loads a cold image per workload.
+    pub fn loads_images(self) -> bool {
+        !matches!(self, Self::Hal)
+    }
+
+    /// The `[[xdp]]` profile name for a workload.
+    ///
+    /// The rbpf images are separate containers from the AOT ones: the same
+    /// metadata, different bytes. Keeping the names apart lets both live in the
+    /// registry without the agent confusing one for the other.
+    pub fn xdp_name(self, workload: &str) -> String {
         match self {
-            Self::Ebpf => Firmware::XdpT,
-            Self::Hal => Firmware::Hal,
+            Self::Rbpf => format!("{workload}_rbpf"),
+            _ => workload.to_string(),
         }
     }
 }
@@ -257,12 +313,12 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
     let mut eta = BudgetEta::new();
     eta.add_flashes(arms.len());
     // Rough: one flash_xdp per eBPF workload + settle budget per cell.
-    let ebpf_cells = if arms.contains(&Arm::Ebpf) {
+    let image_cells = if arms.iter().any(|a| a.loads_images()) {
         workloads.len()
     } else {
         0
     };
-    eta.add_flashes(ebpf_cells);
+    eta.add_flashes(image_cells);
     eta.add_fixed(
         READY_BUDGET.saturating_mul(
             (arms.len() * workloads.len() * super::repeat::ROUNDS as usize) as u32,
@@ -283,14 +339,14 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
         flash_fw(cfg, &agent, &ui, &mut eta, arm.fw_profile()).await?;
 
         for wl in workloads {
-            if *arm == Arm::Ebpf {
+            if arm.loads_images() {
                 // Clear first so the new name is Created at offset 0 (sector-aligned).
                 agent
                     .clear_xdp("*")
                     .await
                     .context("clear/xdp before flash_xdp")?;
                 agent
-                    .flash_xdp(wl.name)
+                    .flash_xdp(&arm.xdp_name(wl.name))
                     .await
                     .with_context(|| format!("flash/xdp {}", wl.name))?;
                 agent
@@ -367,33 +423,80 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
 
             if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
                 ui.check_start(&format!("写入 {}/{}", arm.as_db(), wl.name));
-                let cfg_id = db::insert_exec_bench_config(
-                    client,
-                    exam_id,
-                    arm.as_db(),
-                    wl.name,
-                    &input,
-                    started_at,
-                    stopped_at,
-                )
-                .await?;
-                db::insert_exec_bench_data(client, cfg_id, rep, ok, output.as_deref()).await?;
                 let msg = agent.get_perf().await.context("get/perf")?;
                 if msg.is_empty() {
                     bail!("{}/{}: get/perf empty after ok cell", arm.as_db(), wl.name);
                 }
                 let decoded = db::decode_report_msg(&msg)?;
                 require_exec_trace(*arm, wl.name, &decoded)?;
-                db::write_perf(
+
+                // The config row carries what the report cannot: which run this
+                // was, what went in, what came out, and how long the host's
+                // command took. Command time is recorded and deliberately not
+                // used as compute latency.
+                let exec_note = format!("entries={}", decoded.entries);
+                let row = db::store::ConfigRow {
+                    experiment: db::store::Experiment::ExecBench,
+                    mode: arm.as_db(),
+                    variant: db::store::Variant::Trace,
+                    round: Some(1),
+                    rep: Some(rep),
+                    plan_seed: None,
+                    mode_order: None,
+                    target_pps: Some(1.0),
+                    window_s: Some(0.0),
+                    sent: 1,
+                    ok: Some(1),
+                    // The entry count is the report's own statement of how many
+                    // metrics it carried, kept so a later check can see whether
+                    // the plan changed between runs.
+                    note: Some(&exec_note),
+                };
+                let started = std::time::SystemTime::now()
+                    .checked_sub(wall)
+                    .unwrap_or_else(std::time::SystemTime::now);
+                let cfg_id = db::store::insert_config(
                     client,
                     exam_id,
-                    cfg_id,
-                    arm.as_firmware(),
-                    db::PerfExperiment::ExecBench,
-                    &decoded,
+                    &row,
+                    started,
+                    Some(stopped_at),
+                    None,
+                    Some(i64::try_from(wall.as_nanos()).unwrap_or(i64::MAX)),
                 )
                 .await?;
-                ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
+                // Exec-only columns live on the config table beside the shared
+                // ones, so a query needs one join, not a second table.
+                let output_hex = output
+                    .as_ref()
+                    .map(|b| {
+                        b.iter()
+                            .map(|x| format!("{x:02x}"))
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default();
+                db::store::set_config_columns(
+                    client,
+                    arm.as_db(),
+                    db::store::Experiment::ExecBench,
+                    cfg_id,
+                    &[
+                        ("workload", wl.name),
+                        ("input", wl.input_hex),
+                        ("output", &output_hex),
+                        ("ok", if ok { "true" } else { "false" }),
+                    ],
+                )
+                .await?;
+
+                let target = db::store::DataTarget::ExecWorkload(arm.as_db(), wl.name);
+                db::store::insert_report_metrics(client, target, cfg_id, &decoded).await?;
+                let (n_ev, unknown) =
+                    db::store::insert_events_into(client, &target, cfg_id, &decoded).await?;
+                ui.check_ok(&format!(
+                    "config={cfg_id} metrics={} events={n_ev} unknown={unknown}",
+                    decoded.metrics.len()
+                ));
             }
 
             eta.consume_fixed(Duration::from_secs(5));

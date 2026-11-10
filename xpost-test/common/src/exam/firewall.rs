@@ -312,7 +312,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                     &decoded,
                 )
                 .await?;
-                ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
+                ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask()));
             }
             let _ = agent.clear_map(MAP_NAME).await;
             eta.consume_fixed(window);
@@ -379,7 +379,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 &decoded,
             )
             .await?;
-            let n_ev = decoded.trace.as_ref().map(|t| t.events.len()).unwrap_or(0);
+            let n_ev = decoded.trace().as_ref().map(|t| t.events.len()).unwrap_or(0);
             ui.check_ok(&format!("trace events={n_ev}"));
         }
     }

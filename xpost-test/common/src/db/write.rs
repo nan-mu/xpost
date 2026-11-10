@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use tokio_postgres::Client;
 
 use super::decode::DecodedReport;
+use super::legacy::{project, LegacyReport, TraceSnap};
 use super::names::{Firmware, HAL_COUNTER_NAMES, map_agg_name, map_trace_kind};
 use super::{ConfigId, ExamId};
 
@@ -297,7 +298,6 @@ pub enum PerfExperiment {
     JustTx,
     JustDrop,
     Firewall,
-    ExecBench,
 }
 
 pub async fn insert_firewall_config(
@@ -419,12 +419,16 @@ pub async fn write_perf(
     experiment: PerfExperiment,
     report: &DecodedReport,
 ) -> Result<()> {
+    // The legacy tables want the fixed-slot shape, so project the named
+    // metrics once. Deriving it here keeps every old insert reading the same
+    // numbers the per-mode tables will.
+    let legacy = project(report);
+    let report = &legacy;
     if firmware.is_hal() {
         match experiment {
             PerfExperiment::JustTx => write_just_tx_hal(client, config_id, report).await?,
             PerfExperiment::JustDrop => write_just_drop_hal(client, config_id, report).await?,
             PerfExperiment::Firewall => write_firewall_hal(client, config_id, report).await?,
-            PerfExperiment::ExecBench => write_exec_bench_hal(client, config_id, report).await?,
         }
     } else {
         write_xdp(client, exam_id, config_id, report).await?;
@@ -439,7 +443,7 @@ async fn write_xdp(
     client: &Client,
     exam_id: ExamId,
     config_id: ConfigId,
-    report: &DecodedReport,
+    report: &LegacyReport,
 ) -> Result<()> {
     for (name, value) in &report.counters {
         let label = name.clone();
@@ -515,7 +519,7 @@ async fn write_xdp(
 async fn write_just_tx_hal(
     client: &Client,
     config_id: ConfigId,
-    report: &DecodedReport,
+    report: &LegacyReport,
 ) -> Result<()> {
     write_hal_tables(
         client,
@@ -531,7 +535,7 @@ async fn write_just_tx_hal(
 async fn write_just_drop_hal(
     client: &Client,
     config_id: ConfigId,
-    report: &DecodedReport,
+    report: &LegacyReport,
 ) -> Result<()> {
     write_hal_tables(
         client,
@@ -547,7 +551,7 @@ async fn write_just_drop_hal(
 async fn write_firewall_hal(
     client: &Client,
     config_id: ConfigId,
-    report: &DecodedReport,
+    report: &LegacyReport,
 ) -> Result<()> {
     write_hal_tables(
         client,
@@ -560,80 +564,89 @@ async fn write_firewall_hal(
     .await
 }
 
-async fn write_exec_bench_hal(
-    client: &Client,
-    config_id: ConfigId,
-    report: &DecodedReport,
-) -> Result<()> {
-    write_hal_tables(
-        client,
-        config_id,
-        report,
-        "exec_bench_hal_counter",
-        "exec_bench_hal_agg",
-        "exec_bench_hal_gauge",
-    )
-    .await
+/// One cold-image step. `tcpdump` is the capture process text, not a file path.
+pub struct CaseObs<'a> {
+    pub seq: i32,
+    pub xdp: &'a str,
+    pub capability: &'a str,
+    pub action: &'a str,
+    pub expect: &'a str,
+    pub map_name: &'a str,
+    pub map_slot: i32,
+    pub map_before: i64,
+    pub map_after: i64,
+    pub sent: i32,
+    pub saw_reply: bool,
+    pub ok: bool,
+    pub tcpdump: &'a str,
 }
 
-pub async fn insert_exec_bench_config(
-    client: &Client,
-    exam_id: ExamId,
-    firmware: &str,
-    workload: &str,
-    input: &[u8],
-    started_at: SystemTime,
-    stopped_at: SystemTime,
-) -> Result<ConfigId> {
-    let row = client
-        .query_one(
-            r#"
-            INSERT INTO exec_bench_config (
-                exam_id, firmware, workload, input, started_at, stopped_at
-            ) VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id
-            "#,
-            &[
-                &exam_id,
-                &firmware,
-                &workload,
-                &input,
-                &started_at,
-                &stopped_at,
-            ],
-        )
-        .await
-        .context("INSERT exec_bench_config")?;
-    Ok(row.get(0))
-}
-
-pub async fn insert_exec_bench_data(
-    client: &Client,
-    config_id: ConfigId,
-    rep: i32,
-    ok: bool,
-    output: Option<&[u8]>,
-) -> Result<()> {
+pub async fn insert_case_obs(client: &Client, exam_id: ExamId, row: &CaseObs<'_>) -> Result<()> {
     client
         .execute(
             r#"
-            INSERT INTO exec_bench_data (config_id, rep, ok, output)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (config_id, rep) DO UPDATE SET
-                ok = EXCLUDED.ok,
-                output = EXCLUDED.output
+            INSERT INTO case_obs (
+                exam_id, seq, xdp, capability, action, expect,
+                map_name, map_slot, map_before, map_after,
+                sent, saw_reply, ok, tcpdump
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
             "#,
-            &[&config_id, &rep, &ok, &output],
+            &[
+                &exam_id,
+                &row.seq,
+                &row.xdp,
+                &row.capability,
+                &row.action,
+                &row.expect,
+                &row.map_name,
+                &row.map_slot,
+                &row.map_before,
+                &row.map_after,
+                &row.sent,
+                &row.saw_reply,
+                &row.ok,
+                &row.tcpdump,
+            ],
         )
         .await
-        .context("INSERT exec_bench_data")?;
+        .context("INSERT case_obs")?;
+    Ok(())
+}
+
+async fn write_trace(
+    client: &Client,
+    exam_id: ExamId,
+    config_id: ConfigId,
+    tr: &TraceSnap,
+) -> Result<()> {
+    for (seq, ev) in tr.events.iter().enumerate() {
+        let Some(kind) = map_trace_kind(ev.kind) else {
+            continue;
+        };
+        let seq_i = seq as i32;
+        let t_us = ev.t_us as i64;
+        let arg0 = ev.arg0 as i64;
+        let arg1 = ev.arg1 as i64;
+        client
+            .execute(
+                r#"
+                INSERT INTO trace_event (
+                    exam_id, config_id, seq, kind, t_us, arg0, arg1
+                ) VALUES ($1, $2, $3, $4::text::perf_trace_kind, $5, $6, $7)
+                ON CONFLICT (config_id, seq) DO NOTHING
+                "#,
+                &[&exam_id, &config_id, &seq_i, &kind, &t_us, &arg0, &arg1],
+            )
+            .await
+            .with_context(|| format!("INSERT trace_event seq={seq}"))?;
+    }
     Ok(())
 }
 
 async fn write_hal_tables(
     client: &Client,
     config_id: ConfigId,
-    report: &DecodedReport,
+    report: &LegacyReport,
     counter_table: &str,
     agg_table: &str,
     gauge_table: &str,
@@ -710,84 +723,5 @@ async fn write_hal_tables(
             .await
             .with_context(|| format!("INSERT {gauge_table} {label}"))?;
     }
-    Ok(())
-}
-
-async fn write_trace(
-    client: &Client,
-    exam_id: ExamId,
-    config_id: ConfigId,
-    tr: &super::decode::TraceSnap,
-) -> Result<()> {
-    for (seq, ev) in tr.events.iter().enumerate() {
-        let Some(kind) = map_trace_kind(ev.kind) else {
-            continue;
-        };
-        let seq_i = seq as i32;
-        let t_us = ev.t_us as i64;
-        let arg0 = ev.arg0 as i64;
-        let arg1 = ev.arg1 as i64;
-        client
-            .execute(
-                r#"
-                INSERT INTO trace_event (
-                    exam_id, config_id, seq, kind, t_us, arg0, arg1
-                ) VALUES ($1, $2, $3, $4::text::perf_trace_kind, $5, $6, $7)
-                ON CONFLICT (config_id, seq) DO NOTHING
-                "#,
-                &[&exam_id, &config_id, &seq_i, &kind, &t_us, &arg0, &arg1],
-            )
-            .await
-            .with_context(|| format!("INSERT trace_event seq={seq}"))?;
-    }
-    Ok(())
-}
-
-/// One cold-image step. `tcpdump` is the capture process text, not a file path.
-pub struct CaseObs<'a> {
-    pub seq: i32,
-    pub xdp: &'a str,
-    pub capability: &'a str,
-    pub action: &'a str,
-    pub expect: &'a str,
-    pub map_name: &'a str,
-    pub map_slot: i32,
-    pub map_before: i64,
-    pub map_after: i64,
-    pub sent: i32,
-    pub saw_reply: bool,
-    pub ok: bool,
-    pub tcpdump: &'a str,
-}
-
-pub async fn insert_case_obs(client: &Client, exam_id: ExamId, row: &CaseObs<'_>) -> Result<()> {
-    client
-        .execute(
-            r#"
-            INSERT INTO case_obs (
-                exam_id, seq, xdp, capability, action, expect,
-                map_name, map_slot, map_before, map_after,
-                sent, saw_reply, ok, tcpdump
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-            "#,
-            &[
-                &exam_id,
-                &row.seq,
-                &row.xdp,
-                &row.capability,
-                &row.action,
-                &row.expect,
-                &row.map_name,
-                &row.map_slot,
-                &row.map_before,
-                &row.map_after,
-                &row.sent,
-                &row.saw_reply,
-                &row.ok,
-                &row.tcpdump,
-            ],
-        )
-        .await
-        .context("INSERT case_obs")?;
     Ok(())
 }

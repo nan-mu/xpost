@@ -289,7 +289,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
                     &decoded,
                 )
                 .await?;
-                ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
+                ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask()));
             }
             eta.consume_fixed(window);
             ui.set_eta(&eta.fmt());
@@ -332,7 +332,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig, opts: JustDropPpsOpts) -> Resul
                 &decoded,
             )
             .await?;
-            let n_ev = decoded.trace.as_ref().map(|t| t.events.len()).unwrap_or(0);
+            let n_ev = decoded.trace().as_ref().map(|t| t.events.len()).unwrap_or(0);
             ui.check_ok(&format!("trace events={n_ev}"));
         }
     }
