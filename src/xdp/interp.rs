@@ -209,16 +209,109 @@ pub(crate) fn verify(prog: &[u8]) -> bool {
     rbpf::EbpfVmMbuff::verify(prog).is_ok()
 }
 
-/// Whether one instruction stores through `r1`.
+/// Why a map reference could not be resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MapPatchError {
+    /// The program is not a whole number of instructions.
+    BadLength,
+    /// An `lddw` claimed a map index the image does not declare.
+    IndexOutOfRange,
+    /// A program that references maps was loaded without a binding table.
+    NoBinds,
+}
+
+/// Replace the map index in every `lddw` with the map's linked address.
+///
+/// The bytecode says `lddw r1, <index>` with the pseudocode source bit set; the
+/// index identifies which map in the image's own declaration order. The
+/// interpreter has no map table, so the helper hook needs a plain address, and
+/// the address the AOT code would have loaded is the one `bind` carries.
+///
+/// # What this does not do
+///
+/// It does not decide whether the program may touch that map. The lease already
+/// installs the value windows those maps live in, and `check_access` refuses any
+/// address outside them. This rewrites an index into an address; the permission
+/// decision stays with the lease.
+///
+/// `binds` is the image's `aot_binds` in declaration order, which is the order
+/// the packer numbered the maps in.
+pub(crate) fn apply_map_addresses(prog: &mut [u8], binds: &[usize]) -> Result<(), MapPatchError> {
+    use rbpf::ebpf;
+    if !prog.len().is_multiple_of(ebpf::INSN_SIZE) {
+        return Err(MapPatchError::BadLength);
+    }
+    let mut i = 0usize;
+    while i < prog.len() / ebpf::INSN_SIZE {
+        let at = i * ebpf::INSN_SIZE;
+        let opc = prog[at];
+        // `lddw` is a two-instruction form, so the second half is skipped below.
+        if opc == ebpf::LD_DW_IMM {
+            let src = (prog[at + 1] >> 4) & 0x0f;
+            // src == 1 marks a map index rather than a constant.
+            if src == 1 {
+                let idx = u32::from_le_bytes([prog[at + 4], prog[at + 5], prog[at + 6], prog[at + 7]])
+                    as usize;
+                if binds.is_empty() {
+                    return Err(MapPatchError::NoBinds);
+                }
+                let addr = *binds.get(idx).ok_or(MapPatchError::IndexOutOfRange)?;
+                // A 32-bit address on this target, so the high half is zero.
+                prog[at + 4..at + 8].copy_from_slice(&(addr as u32).to_le_bytes());
+                prog[at + 12..at + 16].copy_from_slice(&0u32.to_le_bytes());
+                // Clear the source bit: the value is now an ordinary constant.
+                prog[at + 1] &= 0x0f;
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+/// Count the `lddw` instructions that carry a map index.
+///
+/// Used to reject a program whose map references were never resolved: a
+/// bytecode image with one such instruction and no binds would run with a null
+/// map pointer and every lookup would silently miss.
+pub(crate) fn map_ref_count(prog: &[u8]) -> usize {
+    use rbpf::ebpf;
+    if !prog.len().is_multiple_of(ebpf::INSN_SIZE) {
+        return 0;
+    }
+    let mut n = 0;
+    let mut i = 0;
+    while i < prog.len() / ebpf::INSN_SIZE {
+        let at = i * ebpf::INSN_SIZE;
+        if prog[at] == ebpf::LD_DW_IMM {
+            let src = (prog[at + 1] >> 4) & 0x0f;
+            if src == 1 {
+                n += 1;
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// Whether one instruction stores through `r1` while `r1` is still the context.
 ///
 /// An XDP program must treat its context as read-only: the kernel's verifier
 /// enforces that, and `rbpf` does not. A store through `r1` would let the
 /// program rewrite `data`/`data_end`, which are the pointers this module trusts
-/// when it builds the packet slice. Reject those programs when the image is
-/// leased so the flight path needs no check.
-pub(crate) fn rejects_ctx_write_insn(insn: &[u8]) -> bool {
+/// when it builds the packet slice.
+///
+/// Only a store that reaches the context counts. A program is free to rebind
+/// `r1` to a data pointer and store through it, which is what the compiler emits
+/// for `*(u8 *)(r1 + n) = v` after `r1 += offset`; treating every `r1` store as a
+/// context write rejected those programs outright. `r1_is_ctx` tracks whether the
+/// register still holds the context so far.
+pub(crate) fn rejects_ctx_write_insn(insn: &[u8], r1_is_ctx: bool) -> bool {
     use rbpf::ebpf;
-    if insn.len() < ebpf::INSN_SIZE {
+    if insn.len() < ebpf::INSN_SIZE || !r1_is_ctx {
         return false;
     }
     let opc = insn[0];
@@ -238,15 +331,57 @@ pub(crate) fn rejects_ctx_write_insn(insn: &[u8]) -> bool {
         )
 }
 
-/// [`rejects_ctx_write_insn`] over a whole program.
+/// Whether an instruction rebinds `r1` away from the context.
+///
+/// True for any instruction that writes `r1` other than a store: a move, a load,
+/// an arithmetic update, or a call (whose `r1` is an argument, and whose return
+/// lands in `r0`). Jumps do not write their destination, so they are excluded.
+fn rebinds_r1(insn: &[u8]) -> bool {
+    use rbpf::ebpf;
+    if insn.len() < ebpf::INSN_SIZE {
+        return false;
+    }
+    let opc = insn[0];
+    let dst = insn[1] & 0x0f;
+    if dst != 1 {
+        return false;
+    }
+    let is_store = matches!(
+        opc,
+        ebpf::ST_B_IMM
+            | ebpf::ST_H_IMM
+            | ebpf::ST_W_IMM
+            | ebpf::ST_DW_IMM
+            | ebpf::ST_B_REG
+            | ebpf::ST_H_REG
+            | ebpf::ST_W_REG
+            | ebpf::ST_DW_REG
+            | ebpf::ST_W_XADD
+    );
+    let is_jump = matches!(opc & 0x07, 0x05 | 0x06);
+    !is_store && !is_jump
+}
+
+/// [`rejects_ctx_write_insn`] over a whole program, tracking `r1`'s meaning.
 pub(crate) fn rejects_ctx_writes(prog: &[u8]) -> bool {
     use rbpf::ebpf;
     if !prog.len().is_multiple_of(ebpf::INSN_SIZE) {
         return false;
     }
-    (0..prog.len() / ebpf::INSN_SIZE)
-        .any(|i| rejects_ctx_write_insn(&prog[i * ebpf::INSN_SIZE..]))
+    let mut r1_is_ctx = true;
+    for i in 0..prog.len() / ebpf::INSN_SIZE {
+        let insn = &prog[i * ebpf::INSN_SIZE..];
+        if rejects_ctx_write_insn(insn, r1_is_ctx) {
+            return true;
+        }
+        if rebinds_r1(insn) {
+            r1_is_ctx = false;
+        }
+    }
+    false
 }
+
+/// [`rejects_ctx_write_insn`] over a whole program.
 
 /// Helper dispatch for `call` with `src == 0`.
 ///
@@ -355,3 +490,4 @@ pub fn selftest_run(prog: &[u8], frame: &mut [u8]) -> i32 {
     let mut ctx = XdpMd::from_buf(frame);
     unsafe { run(prog.as_ptr() as usize, prog.len(), &mut ctx as *mut XdpMd) }
 }
+
