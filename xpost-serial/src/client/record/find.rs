@@ -114,6 +114,13 @@ fn scan_simple<E>(
 where
     E: RequestError,
 {
+    // `get finish` is the one command whose reply the device prints before the
+    // host asks for it, so the newest matching line is the one that belongs to
+    // this run. Every other command takes the first match after `after`, because
+    // its reply cannot exist yet.
+    let newest_only = matches!(cmd, Command::GetFinish);
+    let mut last: Option<(Found, SystemTime)> = None;
+    let mut scanned = 0usize;
     for idx in guard.indices_after(after) {
         let Some(entry) = guard.entry(idx) else {
             continue;
@@ -125,14 +132,26 @@ where
         let Some(line) = guard.payload(*payload) else {
             continue;
         };
+        scanned += 1;
         if let Some(err) = wire_err_line(line, cmd) {
             return Err(err);
         }
         if let Some(found) = match_simple(cmd, line) {
-            return Ok(Some((found, at)));
+            if !newest_only {
+                return Ok(Some((found, at)));
+            }
+            last = Some((found, at));
+        } else if newest_only && scanned <= 40 {
+            // Only reachable while diagnosing a finish wait that finds nothing:
+            // printing the tail makes it obvious whether the line is present
+            // with an unexpected shape or absent entirely.
+            eprintln!(
+                "[find] skip line {:?}",
+                String::from_utf8_lossy(&line[..line.len().min(60)])
+            );
         }
     }
-    Ok(None)
+    Ok(last)
 }
 
 /// Header line then a following [`Entry::Blob`].

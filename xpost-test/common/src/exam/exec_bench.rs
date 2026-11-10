@@ -467,25 +467,27 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
                 .await?;
                 // Exec-only columns live on the config table beside the shared
                 // ones, so a query needs one join, not a second table.
-                let output_hex = output
-                    .as_ref()
-                    .map(|b| {
-                        b.iter()
-                            .map(|x| format!("{x:02x}"))
-                            .collect::<String>()
-                    })
-                    .unwrap_or_default();
+                // Text columns go through the generic setter. The boolean and the
+                // two byte columns need their own types, so they share one
+                // parameterized statement: the driver will not coerce a string to
+                // `bool` or `bytea`, and a silent cast would store the wrong
+                // thing.
                 db::store::set_config_columns(
                     client,
                     arm.as_db(),
                     db::store::Experiment::ExecBench,
                     cfg_id,
-                    &[
-                        ("workload", wl.name),
-                        ("input", wl.input_hex),
-                        ("output", &output_hex),
-                        ("ok", if ok { "true" } else { "false" }),
-                    ],
+                    &[("workload", wl.name)],
+                )
+                .await?;
+                db::store::set_exec_result(
+                    client,
+                    arm.as_db(),
+                    cfg_id,
+                    input.as_slice(),
+                    output.as_deref().unwrap_or(&[]),
+                    ok,
+                    wall.as_secs_f64() * 1e3,
                 )
                 .await?;
 

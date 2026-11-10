@@ -273,11 +273,15 @@ fn extra_for(table: &str) -> Extra {
         }
     }
     if table == "exec_bench_config" {
+        // `result_ok`, not `ok`: the template already has `ok bigint` for the
+        // count of passing samples, and `ADD COLUMN IF NOT EXISTS` would skip a
+        // second column of the same name, leaving the boolean unset. Two
+        // different facts, two names.
         return Extra(&[
             ("workload", "text"),
             ("input", "bytea"),
             ("output", "bytea"),
-            ("ok", "boolean"),
+            ("result_ok", "boolean"),
             ("command_ms", "double precision"),
         ]);
     }
@@ -504,8 +508,58 @@ async fn bootstrap(client: &Client) -> Result<()> {
             .await
             .with_context(|| format!("create keys in {mode}"))?;
     }
+    client
+        .batch_execute(&compare_view_sql())
+        .await
+        .context("create compare view")?;
     verify_present(client).await
-}/// Every statement `ensure` would run, in order, separated by newlines.
+}
+
+/// A view that holds every mode's metrics in one shape.
+///
+/// A comparison needs three things in every row: which mode produced the number,
+/// which experiment, and which metric. The per-mode tables carry the first in
+/// their name and the last two in their columns, so a reader has to union five
+/// table families by hand to get one comparable series. That hand-written union
+/// is where a report loses the mode and becomes unreadable.
+///
+/// The view is the union. Every row names its mode, so a query cannot drop it.
+pub fn compare_view_sql() -> String {
+    let mut arms: Vec<String> = Vec::new();
+    for mode in MODES {
+        for spec in FAMILIES {
+            for variant in ["stream", "trace"] {
+                arms.push(format!(
+                    "SELECT '{mode}'::text AS mode, '{exp}'::text AS experiment, \
+                     '{variant}'::text AS variant, \
+                     c.workload::text AS workload, \
+                     d.metric, d.kind, d.count, d.total_us, d.min_us, d.max_us, \
+                     d.current, d.peak, d.edges, d.buckets \
+                     FROM {mode}.{exp}_{variant}_data d \
+                     JOIN {mode}.{exp}_config c ON c.id = d.config_id",
+                    exp = spec.family,
+                ));
+            }
+        }
+        for wl in WORKLOADS {
+            arms.push(format!(
+                "SELECT '{mode}'::text AS mode, 'exec_bench'::text AS experiment, \
+                 'trace'::text AS variant, \
+                 c.workload::text AS workload, \
+                 d.metric, d.kind, d.count, d.total_us, d.min_us, d.max_us, \
+                 d.current, d.peak, d.edges, d.buckets \
+                 FROM {mode}.exec_bench_{wl}_data d \
+                 JOIN {mode}.exec_bench_config c ON c.id = d.config_id"
+            ));
+        }
+    }
+    format!(
+        "CREATE OR REPLACE VIEW aot.compare AS\n{}\n",
+        arms.join("\nUNION ALL\n")
+    )
+}
+
+/// Every statement `ensure` would run, in order, separated by newlines.
 ///
 /// Test and diagnostic only: `ensure` runs the statements itself, and a host
 /// executes this export when it needs to inspect the DDL rather than apply it.
