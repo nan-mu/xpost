@@ -111,6 +111,23 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
                 slot_state.slot.len(),
             )
         };
+        // The interpreter needs each map's linked address. Collected before the
+        // read because the borrow of `self.images` ends here; the addresses are
+        // small integers, so a fixed array holds them without an allocation.
+        #[cfg(feature = "interp")]
+        let mut binds: heapless::Vec<usize, { crate::xdp::state::MAX_REQUIRED_MAPS }> =
+            heapless::Vec::new();
+        #[cfg(feature = "interp")]
+        {
+            let meta = &self
+                .images
+                .get(id)
+                .ok_or(XdpSwapError::UnknownImage)?
+                .meta;
+            for (_, addr) in meta.aot_binds.iter() {
+                let _ = binds.push(*addr);
+            }
+        }
         if image_len > capacity {
             return Err(self.fail(XdpSwapError::ImageTooLarge));
         }
@@ -119,6 +136,10 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
         };
         if let Err(e) = self.table.read(aot_abs, buf) {
             return Err(self.fail(e.into()));
+        }
+        // Check the stored image before the interpreter rewrites its map references.
+        if xpost_elf::sha256(buf) != digest {
+            return Err(self.fail(XdpSwapError::Digest));
         }
         // Verify before publishing: the interpreter executes these bytes and
         // skips its own per-run scan, so the checks have to happen here.
@@ -130,9 +151,19 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
             if crate::xdp::interp::rejects_ctx_writes(buf) {
                 return Err(self.fail(XdpSwapError::Arch));
             }
-        }
-        if xpost_elf::sha256(buf) != digest {
-            return Err(self.fail(XdpSwapError::Digest));
+            // A program that references a map needs its references turned into
+            // addresses. Without this the helper hook receives the index and
+            // every lookup silently misses, so a missing binding is a load
+            // failure rather than a run that reports zeros.
+            let refs = crate::xdp::interp::map_ref_count(buf);
+            if refs > 0 {
+                if binds.is_empty() {
+                    return Err(self.fail(XdpSwapError::Arch));
+                }
+                if crate::xdp::interp::apply_map_addresses(buf, binds.as_slice()).is_err() {
+                    return Err(self.fail(XdpSwapError::Arch));
+                }
+            }
         }
         let generation = self.alloc_generation();
         let buf = &self.copy_buffer[..image_len];
@@ -141,9 +172,21 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
             core::ptr::write_bytes(dst.add(image_len), 0, capacity - image_len);
         }
         Self::fence_instruction_cache();
+        // Read back what actually landed in the slot and run the interpreter's
+        // checks against those bytes, not against the scratch copy: a failed
+        // copy must be caught here rather than at run time.
         let copied = unsafe { core::slice::from_raw_parts(dst, image_len) };
         if copied != buf {
             return Err(self.fail(XdpSwapError::Digest));
+        }
+        #[cfg(feature = "interp")]
+        {
+            if !crate::xdp::interp::verify(copied) {
+                return Err(self.fail(XdpSwapError::Arch));
+            }
+            if crate::xdp::interp::rejects_ctx_writes(copied) {
+                return Err(self.fail(XdpSwapError::Arch));
+            }
         }
         let slot_state = self
             .slots
