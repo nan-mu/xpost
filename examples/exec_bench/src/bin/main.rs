@@ -161,7 +161,14 @@ serial_task! {
                 workload_bench();
             }
             match run_exec() {
-                Ok(()) => reply.ok(OkReply::EnableExec),
+                Ok(()) => {
+                    reply.ok(OkReply::EnableExec);
+                    // Printed after the reply, not before. The host reads this
+                    // line with a separate `get finish` call, and when it came
+                    // first the reader picked it up together with the enable
+                    // reply, so the later wait found nothing.
+                    info!("OK finish");
+                }
                 Err(e) => reply_map_err(reply, e),
             }
         })
@@ -591,7 +598,6 @@ fn run_exec() -> Result<(), AppMapError> {
         t_store.wrapping_sub(t_release),
         t_store.wrapping_sub(t_start),
     );
-    info!("OK finish");
     Ok(())
 }
 

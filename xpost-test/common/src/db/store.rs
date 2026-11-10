@@ -171,6 +171,67 @@ pub async fn set_config_columns(
     Ok(())
 }
 
+/// Set an experiment's bytes-valued config columns.
+///
+/// Separate from [`set_config_columns`] because those columns are `bytea` and a
+/// text binding would be rejected by the driver. Keeping the two apart means a
+/// caller cannot pass the wrong type by accident.
+pub async fn set_config_bytes(
+    client: &Client,
+    mode: &str,
+    experiment: Experiment,
+    config_id: ConfigId,
+    columns: &[(&str, &[u8])],
+) -> Result<()> {
+    for (col, value) in columns {
+        if !col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            anyhow::bail!("column name {col:?} is not an identifier");
+        }
+        let table = format!("{}.{}_config", mode, experiment.text());
+        let sql = format!("UPDATE {table} SET {col} = $2 WHERE id = $1");
+        client
+            .execute(&sql, &[&config_id, &value])
+            .await
+            .with_context(|| format!("UPDATE {table}.{col}"))?;
+    }
+    Ok(())
+}
+
+/// Record an exec run's input, output, verdict, and host command time.
+///
+/// One statement because the three value types are different: `bytea`, `bool`,
+/// and a number. Binding them together keeps a caller from pairing the wrong
+/// value with a column, which a string-based setter cannot prevent.
+///
+/// `command_ms` is the wall time from `enable exec` to `disable exec`. It
+/// includes the host round trip, so it is a record of the command, not of the
+/// computation.
+pub async fn set_exec_result(
+    client: &Client,
+    mode: &str,
+    config_id: ConfigId,
+    input: &[u8],
+    output: &[u8],
+    result_ok: bool,
+    command_ms: f64,
+) -> Result<()> {
+    super::schema::check_mode(mode)?;
+    let table = format!("{mode}.exec_bench_config");
+    let sql = format!(
+        "UPDATE {table}
+            SET input = $2, output = $3, result_ok = $4, command_ms = $5
+          WHERE id = $1"
+    );
+    client
+        .execute(
+            &sql,
+            &[&config_id, &input, &output, &result_ok, &command_ms],
+        )
+        .await
+        .with_context(|| format!("UPDATE {table} result"))?;
+    Ok(())
+}
+
 /// Where a metric row goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DataTarget<'a> {

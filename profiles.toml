@@ -149,7 +149,7 @@ build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware"
 # ---------------------------------------------------------------------------
 
 [[fw]]
-name = "exec-bench-ebpf"
+name = "exec-bench-aot"
 target = "esp32c3"
 partition_table = "examples/exec_bench/partitions.csv"
 artifact = "examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench"
@@ -158,51 +158,62 @@ xdp = ["incr"]
 
 [[xdp]]
 name = "incr"
-fw = "exec-bench-ebpf"
+fw = "exec-bench-aot"
 artifact = "../build/incr/incr.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "incr"] }
 
 [[xdp]]
 name = "square"
-fw = "exec-bench-ebpf"
+fw = "exec-bench-aot"
 artifact = "../build/square/square.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "square"] }
 
 [[xdp]]
 name = "bitswap"
-fw = "exec-bench-ebpf"
+fw = "exec-bench-aot"
 artifact = "../build/bitswap/bitswap.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "bitswap"] }
 
 [[xdp]]
 name = "fib"
-fw = "exec-bench-ebpf"
+fw = "exec-bench-aot"
 artifact = "../build/fib/fib.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "fib"] }
 
 [[xdp]]
 name = "buf"
-fw = "exec-bench-ebpf"
+fw = "exec-bench-aot"
 artifact = "../build/buf/buf.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "buf"] }
 
 [[xdp]]
 name = "memcpy"
-fw = "exec-bench-ebpf"
+fw = "exec-bench-aot"
 artifact = "../build/memcpy/memcpy.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "memcpy"] }
 
 [[xdp]]
 name = "fletcher32"
-fw = "exec-bench-ebpf"
+fw = "exec-bench-aot"
 artifact = "../build/fletcher32/fletcher32.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "fletcher32"] }
 
 [[xdp]]
 name = "bsort"
-fw = "exec-bench-ebpf"
+fw = "exec-bench-aot"
 artifact = "../build/bsort/bsort.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "bsort"] }
+
+# exec_bench for the interpreter: the same example built with `interp`, whose
+# slot holds eBPF bytecode instead of machine code. The images come from the bpf
+# object, with each map reference rewritten to its index.
+[[fw]]
+name = "exec-bench-rbpf"
+target = "esp32c3"
+partition_table = "examples/exec_bench/partitions.csv"
+artifact = "examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench"
+build = { cwd = "examples/exec_bench", command = ["cargo", "build", "--release", "--features", "interp"] }
+xdp = ["incr_rbpf"]
 
 [[fw]]
 name = "exec-bench-hal"
@@ -244,3 +255,51 @@ name = "case_mark_idle"
 fw = "case-cag"
 artifact = "../build/case_mark/case_mark_idle.elf"
 build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/case_xdp/target/riscv32imc-unknown-none-elf/release/case_xdp", "--slot-symbol", "xdp_slot_idle", "--image-name", "case_mark_idle", "-c", "case_mark"] }
+
+[[xdp]]
+name = "incr_rbpf"
+fw = "exec-bench-rbpf"
+artifact = "../build/incr_rbpf/incr_rbpf.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "incr_rbpf", "-c", "incr"] }
+
+[[xdp]]
+name = "square_rbpf"
+fw = "exec-bench-rbpf"
+artifact = "../build/square_rbpf/square_rbpf.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "square_rbpf", "-c", "square"] }
+
+[[xdp]]
+name = "bitswap_rbpf"
+fw = "exec-bench-rbpf"
+artifact = "../build/bitswap_rbpf/bitswap_rbpf.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "bitswap_rbpf", "-c", "bitswap"] }
+
+[[xdp]]
+name = "fib_rbpf"
+fw = "exec-bench-rbpf"
+artifact = "../build/fib_rbpf/fib_rbpf.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "fib_rbpf", "-c", "fib"] }
+
+[[xdp]]
+name = "buf_rbpf"
+fw = "exec-bench-rbpf"
+artifact = "../build/buf_rbpf/buf_rbpf.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "buf_rbpf", "-c", "buf"] }
+
+[[xdp]]
+name = "memcpy_rbpf"
+fw = "exec-bench-rbpf"
+artifact = "../build/memcpy_rbpf/memcpy_rbpf.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "memcpy_rbpf", "-c", "memcpy"] }
+
+[[xdp]]
+name = "fletcher32_rbpf"
+fw = "exec-bench-rbpf"
+artifact = "../build/fletcher32_rbpf/fletcher32_rbpf.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "fletcher32_rbpf", "-c", "fletcher32"] }
+
+[[xdp]]
+name = "bsort_rbpf"
+fw = "exec-bench-rbpf"
+artifact = "../build/bsort_rbpf/bsort_rbpf.elf"
+build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "bsort_rbpf", "-c", "bsort"] }

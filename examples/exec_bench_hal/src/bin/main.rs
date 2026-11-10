@@ -104,7 +104,12 @@ serial_task! {
         .on_enable_xdp(|reply: ReplyWriter<'_>| reply.error(&ServerError::Unsupported))
         .on_disable_xdp(|reply: ReplyWriter<'_>| reply.error(&ServerError::Unsupported))
         .on_enable_exec(|reply: ReplyWriter<'_>| match run_exec() {
-            Ok(()) => reply.ok(OkReply::EnableExec),
+            Ok(()) => {
+                reply.ok(OkReply::EnableExec);
+                // After the reply, so the host's separate finish wait sees it
+                // rather than having it consumed with the enable response.
+                info!("OK finish");
+            }
             Err(e) => reply.error(&e),
         })
         .on_disable_exec(|reply: ReplyWriter<'_>| {
@@ -272,7 +277,6 @@ fn run_exec() -> Result<(), MapError> {
     }
 
     cag::push_xdp_end(cag::TRACE_XDP_PASS);
-    info!("OK finish");
     Ok(())
 }
 

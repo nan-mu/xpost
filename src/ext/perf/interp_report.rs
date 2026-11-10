@@ -22,7 +22,7 @@
 
 use core::convert::Infallible;
 
-use xpost_perf::plan::{encode_report, entry_count, report_len, MetricSpec, MetricValue};
+use xpost_perf::plan::{encode_report, entry_count, report_len, EventSpec, MetricSpec, MetricValue};
 use xpost_perf::{Kind, Sink, SpanStats};
 
 use crate::ext::perf::aggregate;
@@ -72,14 +72,42 @@ pub const METRICS: &[MetricSpec] = &[
     },
 ];
 
+/// The flight's timeline.
+///
+/// A single-run experiment needs the event order as well as the totals: the
+/// totals say how long the call took, and the events say what happened inside
+/// it. The ring is drained into the caller's buffer, so this reports what the
+/// live ring held rather than a second copy.
+fn events(out: &mut [xpost_perf::Event]) -> (u64, usize) {
+    let ring = crate::ext::perf::trace();
+    let mut radio = [crate::ext::perf::Event::default(); crate::ext::perf::TRACE_CAP];
+    let n = ring.snapshot_radio(&mut radio);
+    let take = n.min(out.len());
+    for (slot, ev) in out.iter_mut().zip(radio.iter()).take(take) {
+        *slot = xpost_perf::Event {
+            kind: ev.kind,
+            arg0: ev.arg0,
+            arg1: ev.arg1,
+            t_us: ev.t_us,
+        };
+    }
+    (ring.dropped() as u64, n)
+}
+
+/// The one event stream this report carries.
+pub const FLIGHT: EventSpec = EventSpec {
+    name: "flight",
+    get: events,
+};
+
 /// Payload length, so the host can frame the blob before reading it.
 pub fn payload_len() -> usize {
-    report_len(METRICS, None).unwrap_or(0)
+    report_len(METRICS, Some(FLIGHT)).unwrap_or(0)
 }
 
 /// Entries this report sends.
 pub fn entries() -> u16 {
-    entry_count(METRICS, None)
+    entry_count(METRICS, Some(FLIGHT))
 }
 
 /// Stream the report through `sink`.
@@ -87,7 +115,11 @@ pub fn entries() -> u16 {
 /// Writes straight into the serial writer: the report needs no buffer of its
 /// own, and the length it announced came from the same plan.
 pub fn report(sink: &mut WriteSink<'_>) -> bool {
-    encode_report(METRICS, None, &mut [], sink)
+    // A fixed snapshot buffer, because the report crate has no allocator and the
+    // ring's capacity is a compile-time constant. A full ring is the worst case,
+    // so the buffer cannot be short.
+    let mut events = [xpost_perf::Event::default(); crate::ext::perf::TRACE_CAP];
+    encode_report(METRICS, Some(FLIGHT), &mut events, sink)
 }
 
 /// Adapts the serial reply writer to a [`Sink`].
