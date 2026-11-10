@@ -59,7 +59,11 @@ pub mod sweep;
 /// First four bytes of every report.
 pub const MAGIC: u32 = 0x3152_4650;
 /// Current format version.
-pub const VERSION: u16 = 1;
+///
+/// Version 2 adds [`Kind::Event`], which carries a whole flight's event stream
+/// in one entry. A reader that knows only version 1 must refuse version 2
+/// rather than skip the entry: the entry's payload length depends on its kind.
+pub const VERSION: u16 = 2;
 
 /// Longest entry name, in bytes.
 pub const MAX_NAME: usize = 31;
@@ -79,10 +83,30 @@ pub enum Kind {
     Gauge = 3,
     /// A duration with fixed bucket edges.
     Histogram = 4,
+    /// A flight's event stream, in time order.
+    Event = 5,
 }
 
+/// One timeline event, as the firmware rings store it.
+///
+/// The zero value is a valid "nothing" filler, so a snapshot of a partially
+/// filled ring needs no separate length.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Event {
+    /// Event kind byte. Its meaning is the firmware's ring contract, not this
+    /// crate's: a reader labels it from that contract, never by guessing.
+    pub kind: u8,
+    pub arg0: u32,
+    pub arg1: u32,
+    /// Device clock, microseconds.
+    pub t_us: u32,
+}
+
+/// Bytes one event occupies on the wire.
+pub const EVENT_WIRE_LEN: usize = 16;
+
 impl Kind {
-    /// Bytes this kind carries after the name, excluding histogram edges.
+    /// Bytes this kind carries after the name, excluding variable-length tails.
     pub const fn fixed_len(self) -> usize {
         match self {
             Self::Counter => 8,
@@ -90,6 +114,8 @@ impl Kind {
             Self::Gauge => 16,
             // count, total, min, max, then a `u16` edge count.
             Self::Histogram => 34,
+            // dropped, then a `u32` event count.
+            Self::Event => 12,
         }
     }
 
@@ -99,6 +125,7 @@ impl Kind {
             2 => Some(Self::Span),
             3 => Some(Self::Gauge),
             4 => Some(Self::Histogram),
+            5 => Some(Self::Event),
             _ => None,
         }
     }
@@ -165,24 +192,214 @@ impl Default for SpanStats {
     }
 }
 
-/// Writes the report header. Returns bytes written, or `None` on a short buffer.
-pub fn write_header(buf: &mut [u8], count: u16) -> Option<usize> {
-    if buf.len() < HEADER_LEN {
-        return None;
-    }
-    buf[0..4].copy_from_slice(&MAGIC.to_le_bytes());
-    buf[4..6].copy_from_slice(&VERSION.to_le_bytes());
-    buf[6..8].copy_from_slice(&0u16.to_le_bytes());
-    buf[8..10].copy_from_slice(&count.to_le_bytes());
-    Some(HEADER_LEN)
-}
-
 /// Bytes one entry occupies on the wire.
-pub fn entry_len(name: &str, kind: Kind, edges: usize) -> usize {
-    1 + name.len() + 1 + kind.fixed_len() + edges * 8
+pub fn entry_len(name: &str, kind: Kind, tail: usize) -> usize {
+    1 + name.len() + 1 + kind.fixed_len() + tail
 }
 
-/// Writes one entry at `at`. Returns the new cursor, or `None` on a short buffer.
+/// Sink for the encoder.
+///
+/// One encoder serves both jobs: writing the bytes and measuring them. A caller
+/// that needs the length first points it at [`Counting`], then points the same
+/// encoder at a [`SliceSink`] or a serial writer. Two separate length and write
+/// functions would drift, and a mismatch on the wire cannot be repaired after
+/// the header has announced a length.
+pub trait Sink {
+    /// Append `bytes`. Returns `false` when the sink cannot take them all.
+    fn put(&mut self, bytes: &[u8]) -> bool;
+}
+
+/// Writes into a fixed buffer. `at` tracks the cursor.
+pub struct SliceSink<'a> {
+    buf: &'a mut [u8],
+    at: usize,
+    overflow: bool,
+}
+
+impl<'a> SliceSink<'a> {
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        Self {
+            buf,
+            at: 0,
+            overflow: false,
+        }
+    }
+
+    /// Bytes written, or `None` if anything overflowed.
+    pub fn wrote(&self) -> Option<usize> {
+        if self.overflow { None } else { Some(self.at) }
+    }
+}
+
+impl Sink for SliceSink<'_> {
+    fn put(&mut self, bytes: &[u8]) -> bool {
+        let end = match self.at.checked_add(bytes.len()) {
+            Some(e) if e <= self.buf.len() => e,
+            _ => {
+                self.overflow = true;
+                return false;
+            }
+        };
+        self.buf[self.at..end].copy_from_slice(bytes);
+        self.at = end;
+        true
+    }
+}
+
+/// Counts bytes and keeps none.
+pub struct Counting(usize);
+
+impl Counting {
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    pub const fn len(&self) -> usize {
+        self.0
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl Default for Counting {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Sink for Counting {
+    fn put(&mut self, bytes: &[u8]) -> bool {
+        self.0 = self.0.saturating_add(bytes.len());
+        true
+    }
+}
+
+fn put_u64(sink: &mut impl Sink, v: u64) -> bool {
+    sink.put(&v.to_le_bytes())
+}
+
+/// Writes the report header.
+pub fn encode_header(sink: &mut impl Sink, count: u16) -> bool {
+    let mut hdr = [0u8; HEADER_LEN];
+    hdr[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+    hdr[4..6].copy_from_slice(&VERSION.to_le_bytes());
+    // reserved stays zero; readers must ignore it.
+    hdr[8..10].copy_from_slice(&count.to_le_bytes());
+    sink.put(&hdr)
+}
+
+fn name_ok(name: &str) -> bool {
+    !name.is_empty() && name.len() <= MAX_NAME && name.is_ascii()
+}
+
+fn encode_name(sink: &mut impl Sink, name: &str, kind: Kind) -> bool {
+    if !name_ok(name) {
+        return false;
+    }
+    if !sink.put(&[name.len() as u8]) {
+        return false;
+    }
+    if !sink.put(name.as_bytes()) {
+        return false;
+    }
+    sink.put(&[kind as u8])
+}
+
+/// Writes one counter, span, gauge, or histogram entry.
+///
+/// `value` is the counter value or a gauge's `(current, peak)`; `edges` is empty
+/// unless `kind` is [`Kind::Histogram`].
+pub fn encode_metric(
+    sink: &mut impl Sink,
+    name: &str,
+    kind: Kind,
+    stats: &SpanStats,
+    value: (u64, u64),
+    edges: &[u64],
+) -> bool {
+    if kind == Kind::Event {
+        // Events carry a different payload shape; use `encode_events`.
+        return false;
+    }
+    if kind == Kind::Histogram && edges.is_empty() {
+        return false;
+    }
+    if !matches!(kind, Kind::Histogram) && !edges.is_empty() {
+        return false;
+    }
+    if !encode_name(sink, name, kind) {
+        return false;
+    }
+    let ok = match kind {
+        Kind::Counter => put_u64(sink, value.0),
+        Kind::Span => stats_fields(sink, stats),
+        Kind::Gauge => put_u64(sink, value.0) && put_u64(sink, value.1),
+        Kind::Histogram => {
+            if !stats_fields(sink, stats) || !sink.put(&(edges.len() as u16).to_le_bytes()) {
+                return false;
+            }
+            edges.iter().all(|e| put_u64(sink, *e))
+        }
+        Kind::Event => unreachable!(),
+    };
+    if !ok {
+        return false;
+    }
+    true
+}
+
+fn stats_fields(sink: &mut impl Sink, stats: &SpanStats) -> bool {
+    for v in [
+        stats.count,
+        stats.total_us,
+        stats.min().unwrap_or(0),
+        stats.max_us,
+    ] {
+        if !put_u64(sink, v) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Writes one event entry: the ring's overflow count, then the events in order.
+///
+/// `events` is the snapshot the firmware already keeps for its ring. A report
+/// built this way needs one stack array the size of the ring, which is what the
+/// fixed-slot encoder used too.
+pub fn encode_events(sink: &mut impl Sink, name: &str, dropped: u64, events: &[Event]) -> bool {
+    if !encode_name(sink, name, Kind::Event) {
+        return false;
+    }
+    if !put_u64(sink, dropped) {
+        return false;
+    }
+    if !sink.put(&(events.len() as u32).to_le_bytes()) {
+        return false;
+    }
+    for ev in events {
+        let mut b = [0u8; EVENT_WIRE_LEN];
+        b[0] = ev.kind;
+        // b[1..4] pad stays zero.
+        b[4..8].copy_from_slice(&ev.arg0.to_le_bytes());
+        b[8..12].copy_from_slice(&ev.arg1.to_le_bytes());
+        b[12..16].copy_from_slice(&ev.t_us.to_le_bytes());
+        if !sink.put(&b) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Bytes one event entry occupies on the wire.
+pub fn event_entry_len(name: &str, count: usize) -> usize {
+    entry_len(name, Kind::Event, count * EVENT_WIRE_LEN)
+}
+
+/// Writes one entry into a fixed buffer. Returns the new cursor, or `None` on a
+/// short buffer. A thin wrapper over [`encode_metric`].
 pub fn write_entry(
     buf: &mut [u8],
     at: usize,
@@ -192,54 +409,24 @@ pub fn write_entry(
     value: (u64, u64),
     edges: &[u64],
 ) -> Option<usize> {
-    if name.is_empty() || name.len() > MAX_NAME || !name.is_ascii() {
+    let mut sink = SliceSink {
+        buf,
+        at,
+        overflow: false,
+    };
+    if !encode_metric(&mut sink, name, kind, stats, value, edges) {
         return None;
     }
-    let total = entry_len(name, kind, edges.len());
-    let end = at.checked_add(total)?;
-    if end > buf.len() {
-        return None;
-    }
-    let mut o = at;
-    buf[o] = name.len() as u8;
-    o += 1;
-    buf[o..o + name.len()].copy_from_slice(name.as_bytes());
-    o += name.len();
-    buf[o] = kind as u8;
-    o += 1;
+    sink.wrote()
+}
 
-    match kind {
-        Kind::Counter => {
-            buf[o..o + 8].copy_from_slice(&value.0.to_le_bytes());
-            o += 8;
-        }
-        Kind::Span => {
-            for v in [stats.count, stats.total_us, stats.min().unwrap_or(0), stats.max_us] {
-                buf[o..o + 8].copy_from_slice(&v.to_le_bytes());
-                o += 8;
-            }
-        }
-        Kind::Gauge => {
-            buf[o..o + 8].copy_from_slice(&value.0.to_le_bytes());
-            o += 8;
-            buf[o..o + 8].copy_from_slice(&value.1.to_le_bytes());
-            o += 8;
-        }
-        Kind::Histogram => {
-            for v in [stats.count, stats.total_us, stats.min().unwrap_or(0), stats.max_us] {
-                buf[o..o + 8].copy_from_slice(&v.to_le_bytes());
-                o += 8;
-            }
-            buf[o..o + 2].copy_from_slice(&(edges.len() as u16).to_le_bytes());
-            o += 2;
-            for e in edges {
-                buf[o..o + 8].copy_from_slice(&e.to_le_bytes());
-                o += 8;
-            }
-        }
+/// Writes the report header into a fixed buffer.
+pub fn write_header(buf: &mut [u8], count: u16) -> Option<usize> {
+    let mut sink = SliceSink::new(buf);
+    if !encode_header(&mut sink, count) {
+        return None;
     }
-    debug_assert_eq!(o, end);
-    Some(end)
+    sink.wrote()
 }
 
 /// Header fields of a report.
@@ -295,7 +482,7 @@ fn u64_at(buf: &[u8], o: usize) -> Result<u64, DecodeError> {
     Ok(u64::from_le_bytes(b))
 }
 
-/// One decoded entry, borrowing its name from the report bytes.
+/// One decoded entry, borrowing its name and edges from the report bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry<'a> {
     pub name: &'a str,
@@ -305,6 +492,29 @@ pub struct Entry<'a> {
     pub value: (u64, u64),
     /// Histogram edges, empty for other kinds.
     pub edges: &'a [u8],
+    /// Event entries only: the ring's overflow count.
+    pub dropped: u64,
+    /// Event entries only: the events, packed as `EVENT_WIRE_LEN` bytes each.
+    pub events: &'a [u8],
+}
+
+impl Entry<'_> {
+    /// Read event `i` of an [`Kind::Event`] entry, or `None` when out of range.
+    pub fn event(&self, i: usize) -> Option<Event> {
+        let at = i.checked_mul(EVENT_WIRE_LEN)?;
+        let bytes = self.events.get(at..at + EVENT_WIRE_LEN)?;
+        Some(Event {
+            kind: bytes[0],
+            arg0: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            arg1: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            t_us: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+        })
+    }
+
+    /// Number of events this entry carries.
+    pub fn event_count(&self) -> usize {
+        self.events.len() / EVENT_WIRE_LEN
+    }
 }
 
 /// Visitor for [`visit_entries`].
@@ -347,6 +557,8 @@ pub fn visit_entries<V: Visitor>(buf: &[u8], visitor: &mut V) -> Result<Header, 
         let mut stats = SpanStats::new();
         let mut value = (0u64, 0u64);
         let mut edges: &[u8] = &[];
+        let mut dropped = 0u64;
+        let mut events: &[u8] = &[];
         match kind {
             Kind::Counter => {
                 value.0 = u64_at(buf, o)?;
@@ -391,6 +603,26 @@ pub fn visit_entries<V: Visitor>(buf: &[u8], visitor: &mut V) -> Result<Header, 
                 edges = &buf[o..end];
                 o = end;
             }
+            Kind::Event => {
+                dropped = u64_at(buf, o)?;
+                let count = {
+                    let at = o + 8;
+                    if at + 4 > buf.len() {
+                        return Err(DecodeError::Short);
+                    }
+                    u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]) as usize
+                };
+                o += Kind::Event.fixed_len();
+                let ebytes = count
+                    .checked_mul(EVENT_WIRE_LEN)
+                    .ok_or(DecodeError::Short)?;
+                let end = o.checked_add(ebytes).ok_or(DecodeError::Short)?;
+                if end > buf.len() {
+                    return Err(DecodeError::Short);
+                }
+                events = &buf[o..end];
+                o = end;
+            }
         }
         visitor.entry(&Entry {
             name,
@@ -398,6 +630,8 @@ pub fn visit_entries<V: Visitor>(buf: &[u8], visitor: &mut V) -> Result<Header, 
             stats,
             value,
             edges,
+            dropped,
+            events,
         })?;
     }
     Ok(header)
