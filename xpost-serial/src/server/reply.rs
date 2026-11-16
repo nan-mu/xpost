@@ -97,6 +97,34 @@ pub fn write_ok<E>(
         OkReply::EnableXdpStamped { mcu_us } => {
             return write_nums(b"OK enable xdp", &[*mcu_us], write_all);
         }
+        OkReply::PerfPrepare { epoch, boot_id } => {
+            return write_nums_mixed(
+                b"OK perf prepare",
+                &[Num::U32(*epoch), Num::U64(*boot_id)],
+                write_all,
+            );
+        }
+        OkReply::PerfArm { tick } => {
+            return write_nums_mixed(b"OK perf arm", &[Num::U64(*tick)], write_all);
+        }
+        OkReply::PerfFreeze {
+            tick,
+            flags,
+            len,
+            digest,
+        } => {
+            return write_nums_mixed(
+                b"OK perf freeze",
+                &[
+                    Num::U64(*tick),
+                    Num::U32(*flags),
+                    Num::U32(*len),
+                    Num::U32(*digest),
+                ],
+                write_all,
+            );
+        }
+        OkReply::PerfRelease => b"OK perf release\n",
         OkReply::DisableXdp => b"OK disable xdp\n",
         OkReply::EnableExec => b"OK enable exec\n",
         OkReply::DisableExec => b"OK disable exec\n",
@@ -108,9 +136,16 @@ pub fn write_ok<E>(
         OkReply::Finish => b"OK finish\n",
         OkReply::GetMap { blob } => return write_blob(b"OK get map ", blob, write_all),
         OkReply::GetPerf { blob } => return write_blob(b"OK get perf ", blob, write_all),
-        OkReply::XdpFlash { .. }
-        | OkReply::XdpSwitch { .. }
-        | OkReply::GetXdpStatus { .. } => return Ok(()),
+        OkReply::PerfRead {
+            total,
+            digest,
+            blob,
+        } => {
+            return write_perf_read(*total, *digest, blob, write_all);
+        }
+        OkReply::XdpFlash { .. } | OkReply::XdpSwitch { .. } | OkReply::GetXdpStatus { .. } => {
+            return Ok(());
+        }
     };
     write_all(line)
 }
@@ -118,6 +153,26 @@ pub fn write_ok<E>(
 fn write_nums<E>(
     prefix: &[u8],
     nums: &[u32],
+    write_all: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut fields = [Num::U32(0); 9];
+    let mut i = 0;
+    while i < nums.len() {
+        fields[i] = Num::U32(nums[i]);
+        i += 1;
+    }
+    write_nums_mixed(prefix, &fields[..nums.len()], write_all)
+}
+
+#[derive(Clone, Copy)]
+enum Num {
+    U32(u32),
+    U64(u64),
+}
+
+fn write_nums_mixed<E>(
+    prefix: &[u8],
+    nums: &[Num],
     mut write_all: impl FnMut(&[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
     let mut buf = [0u8; 128];
@@ -127,7 +182,10 @@ fn write_nums<E>(
     for num in nums {
         buf[n] = b' ';
         n += 1;
-        n += write_u32(&mut buf[n..], *num);
+        n += match *num {
+            Num::U32(value) => write_u32(&mut buf[n..], value),
+            Num::U64(value) => write_u64(&mut buf[n..], value),
+        };
     }
     buf[n] = b'\n';
     n += 1;
@@ -150,12 +208,49 @@ fn write_u32(dst: &mut [u8], mut num: u32) -> usize {
     digits.len()
 }
 
+fn write_u64(dst: &mut [u8], mut num: u64) -> usize {
+    let mut tmp = [0u8; 20];
+    let mut i = tmp.len();
+    loop {
+        i -= 1;
+        tmp[i] = b'0' + (num % 10) as u8;
+        num /= 10;
+        if num == 0 {
+            break;
+        }
+    }
+    let digits = &tmp[i..];
+    dst[..digits.len()].copy_from_slice(digits);
+    digits.len()
+}
+
 fn write_blob<E>(
     prefix: &[u8],
     blob: &[u8],
     mut write_all: impl FnMut(&[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
     write_blob_header(prefix, blob.len(), &mut write_all)?;
+    if !blob.is_empty() {
+        write_all(blob)?;
+    }
+    Ok(())
+}
+
+fn write_perf_read<E>(
+    total: u32,
+    digest: u32,
+    blob: &[u8],
+    mut write_all: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    write_nums_mixed(
+        b"OK perf read",
+        &[
+            Num::U32(total),
+            Num::U32(digest),
+            Num::U32(blob.len() as u32),
+        ],
+        &mut write_all,
+    )?;
     if !blob.is_empty() {
         write_all(blob)?;
     }

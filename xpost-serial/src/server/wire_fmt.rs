@@ -62,6 +62,9 @@ impl WireError for PerfError {
             Self::Unavailable => b"ERR perf unavailable\n",
             Self::Unsupported => b"ERR perf unsupported\n",
             Self::BufferTooSmall => b"ERR perf buffer-too-small\n",
+            Self::Epoch => b"ERR perf epoch\n",
+            Self::Offset => b"ERR perf offset\n",
+            Self::Phase => b"ERR perf phase\n",
         }
     }
 }

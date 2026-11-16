@@ -14,12 +14,14 @@ use crate::{
             parse_disable_xdp_reply, parse_enable_exec_reply, parse_enable_xdp_reply,
             parse_err_reply, parse_finish_reply, parse_get_map_reply, parse_get_perf_reply,
             parse_get_xdp_status_reply, parse_init_reply, parse_map_err_reply,
-            parse_perf_err_reply, parse_ping_reply, parse_syntax_err_reply,
-            parse_update_map_reply, parse_xdp_switch_reply, parse_xdp_flash_reply,
+            parse_perf_arm_reply, parse_perf_err_reply, parse_perf_freeze_reply,
+            parse_perf_prepare_reply, parse_perf_read_reply, parse_perf_release_reply,
+            parse_ping_reply, parse_syntax_err_reply, parse_update_map_reply,
+            parse_xdp_flash_reply, parse_xdp_switch_reply,
         },
     },
     r#type::{
-        command::Command,
+        command::{Command, PerfVariant},
         reply::{MapError, OkReply, PerfError, ServerError, SyntaxError},
     },
 };
@@ -50,6 +52,27 @@ impl fmt::Display for Command<'_> {
             }
             Self::ClearPerf => f.write_str("clear perf"),
             Self::GetPerf => f.write_str("get perf"),
+            Self::PerfPrepare {
+                uuid,
+                kind,
+                profile,
+            } => {
+                f.write_str("perf prepare ")?;
+                write_hex(f, uuid)?;
+                match kind {
+                    PerfVariant::Metrics => f.write_str(" metrics ")?,
+                    PerfVariant::Trace => f.write_str(" trace ")?,
+                }
+                write_hex(f, profile)
+            }
+            Self::PerfArm { epoch } => write!(f, "perf arm {epoch}"),
+            Self::PerfFreeze { epoch } => write!(f, "perf freeze {epoch}"),
+            Self::PerfRead {
+                epoch,
+                offset,
+                max_bytes,
+            } => write!(f, "perf read {epoch} {offset} {max_bytes}"),
+            Self::PerfRelease { epoch } => write!(f, "perf release {epoch}"),
             Self::XdpFlash { name, slot } => write!(f, "xdp flash {name} {slot}"),
             Self::XdpSwitch {
                 slot,
@@ -80,6 +103,11 @@ impl<'a> TryFrom<(&'a [u8], &Command<'_>)> for OkReply<'a> {
             Command::ClearPerf => parse_clear_perf_reply(raw),
             Command::UpdateMap { .. } => parse_update_map_reply(raw),
             Command::GetPerf => parse_get_perf_reply(raw),
+            Command::PerfPrepare { .. } => parse_perf_prepare_reply(raw),
+            Command::PerfArm { .. } => parse_perf_arm_reply(raw),
+            Command::PerfFreeze { .. } => parse_perf_freeze_reply(raw),
+            Command::PerfRead { .. } => parse_perf_read_reply(raw),
+            Command::PerfRelease { .. } => parse_perf_release_reply(raw),
             Command::GetMap { .. } => parse_get_map_reply(raw),
             Command::XdpFlash { .. } => parse_xdp_flash_reply(raw),
             Command::XdpSwitch { .. } => parse_xdp_switch_reply(raw),
@@ -124,4 +152,11 @@ impl<'a> TryFrom<(&'a [u8], &Command<'_>)> for SyntaxError {
 
 fn write_bytes(f: &mut fmt::Formatter<'_>, b: &[u8]) -> fmt::Result {
     f.write_str(core::str::from_utf8(b).unwrap_or("\u{FFFD}"))
+}
+
+fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+    for &byte in bytes {
+        write!(f, "{byte:02x}")?;
+    }
+    Ok(())
 }

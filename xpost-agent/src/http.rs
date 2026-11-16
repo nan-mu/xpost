@@ -147,6 +147,11 @@ async fn serve_async(addr: &str, log_dir: &Path) -> Result<()> {
         .route("/update/map/{map_name}", post(v1_update_map))
         .route("/clear/perf", post(v1_clear_perf))
         .route("/get/perf", get(v1_get_perf))
+        .route("/perf/prepare", post(v1_perf_prepare))
+        .route("/perf/arm", post(v1_perf_arm))
+        .route("/perf/freeze", post(v1_perf_freeze))
+        .route("/perf/read", post(v1_perf_read))
+        .route("/perf/release", post(v1_perf_release))
         .route("/get/serial", post(v1_get_serial))
         .route("/run", post(v1_run))
         .with_state(app_state);
@@ -387,6 +392,77 @@ async fn v1_clear_perf(State(st): State<AppState>) -> Json<ApiResp> {
 async fn v1_get_perf(State(st): State<AppState>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     run_blocking(move || ops::get_perf(shared.as_ref(), "http")).await
+}
+
+#[derive(Deserialize)]
+struct PerfPrepareBody {
+    uuid: String,
+    variant: String,
+    profile: String,
+}
+
+#[derive(Deserialize)]
+struct PerfEpochBody {
+    epoch: u32,
+}
+
+#[derive(Deserialize)]
+struct PerfReadBody {
+    epoch: u32,
+    offset: u32,
+    max_bytes: u32,
+}
+
+async fn v1_perf_prepare(
+    State(st): State<AppState>,
+    Json(body): Json<PerfPrepareBody>,
+) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || {
+        ops::perf_prepare(
+            shared.as_ref(),
+            &body.uuid,
+            &body.variant,
+            &body.profile,
+            "http",
+        )
+    })
+    .await
+}
+
+async fn v1_perf_arm(State(st): State<AppState>, Json(body): Json<PerfEpochBody>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::perf_arm(shared.as_ref(), body.epoch, "http")).await
+}
+
+async fn v1_perf_freeze(
+    State(st): State<AppState>,
+    Json(body): Json<PerfEpochBody>,
+) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::perf_freeze(shared.as_ref(), body.epoch, "http")).await
+}
+
+async fn v1_perf_read(State(st): State<AppState>, Json(body): Json<PerfReadBody>) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || {
+        ops::perf_read(
+            shared.as_ref(),
+            body.epoch,
+            body.offset,
+            body.max_bytes,
+            "http",
+        )
+    })
+    .await
+}
+
+async fn v1_perf_release(
+    State(st): State<AppState>,
+    Json(body): Json<PerfEpochBody>,
+) -> Json<ApiResp> {
+    let shared = st.shared.clone();
+    run_blocking(move || ops::perf_release(shared.as_ref(), body.epoch, "http")).await
 }
 
 async fn v1_get_serial(State(st): State<AppState>, Json(body): Json<SerialBody>) -> Json<ApiResp> {

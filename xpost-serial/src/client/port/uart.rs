@@ -9,8 +9,8 @@ use std::time::SystemTime;
 use tokio::sync::Notify;
 
 use super::byte_port::{AppBytePort, open_usb};
-use crate::client::PORT_IO_TIMEOUT;
 use crate::client::APP_READ_POLL;
+use crate::client::PORT_IO_TIMEOUT;
 use crate::client::record::SharedRecord;
 
 /// Bytes that can be written as one App UART command (no trailing newline).
@@ -163,15 +163,14 @@ fn reader_loop(port: Box<dyn AppBytePort>, record: SharedRecord, stop: Arc<Atomi
         match reader.read_line(&mut buf) {
             Ok(0) => break,
             Ok(_) => {
-                let line = buf
-                    .trim_end_matches(['\r', '\n', '\0'])
-                    .to_string();
+                let line = buf.trim_end_matches(['\r', '\n', '\0']).to_string();
                 if line.is_empty() {
                     continue;
                 }
                 let line_b = line.as_bytes();
                 let blob_len = crate::client::reply::parse_get_perf_len(line_b)
-                    .or_else(|| crate::client::reply::parse_get_map_len(line_b));
+                    .or_else(|| crate::client::reply::parse_get_map_len(line_b))
+                    .or_else(|| crate::client::reply::parse_perf_read_len(line_b));
                 if let Some(n) = blob_len {
                     record.uart(line_b);
                     match read_exact_wake(&mut reader, n, &stop) {

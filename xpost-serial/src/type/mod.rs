@@ -21,6 +21,11 @@
 //! | [`UpdateMap`](command::Command::UpdateMap) | `update map <name> <key> <value>` |
 //! | [`ClearPerf`](command::Command::ClearPerf) | `clear perf` |
 //! | [`GetPerf`](command::Command::GetPerf) | `get perf` |
+//! | [`PerfPrepare`](command::Command::PerfPrepare) | `perf prepare <uuid> <metrics\|trace> <profile>` |
+//! | [`PerfArm`](command::Command::PerfArm) | `perf arm <epoch>` |
+//! | [`PerfFreeze`](command::Command::PerfFreeze) | `perf freeze <epoch>` |
+//! | [`PerfRead`](command::Command::PerfRead) | `perf read <epoch> <offset> <max_bytes>` |
+//! | [`PerfRelease`](command::Command::PerfRelease) | `perf release <epoch>` |
 //! | [`GetInit`](command::Command::GetInit) | **no wire** — host record wait only |
 //! | [`GetFinish`](command::Command::GetFinish) | **no wire** — host record wait only |
 //!
@@ -54,6 +59,11 @@
 //! | [`UpdateMap`](reply::OkReply::UpdateMap) | `OK update map` |
 //! | [`GetMap`](reply::OkReply::GetMap) | `OK get map <n>` + `n` blob bytes |
 //! | [`GetPerf`](reply::OkReply::GetPerf) | `OK get perf <n>` + `n` blob bytes |
+//! | [`PerfPrepare`](reply::OkReply::PerfPrepare) | `OK perf prepare <epoch> <boot_id>` |
+//! | [`PerfArm`](reply::OkReply::PerfArm) | `OK perf arm <tick>` |
+//! | [`PerfFreeze`](reply::OkReply::PerfFreeze) | `OK perf freeze <tick> <flags> <len> <digest>` |
+//! | [`PerfRead`](reply::OkReply::PerfRead) | `OK perf read <total> <digest> <n>` + `n` blob bytes |
+//! | [`PerfRelease`](reply::OkReply::PerfRelease) | `OK perf release` |
 //! | [`Init`](reply::OkReply::Init) | `OK init` (unsolicited; see below) |
 //! | [`Finish`](reply::OkReply::Finish) | `OK finish` (unsolicited; see below) |
 //!
@@ -111,7 +121,8 @@
 //!   `ERR map invalid-name`, `ERR map invalid-key`, `ERR map invalid-value`,
 //!   `ERR map full`, `ERR map unsupported`, `ERR map buffer-too-small`.
 //! - Perf errors: `ERR perf unavailable`, `ERR perf unsupported`,
-//!   `ERR perf buffer-too-small`.
+//!   `ERR perf buffer-too-small`, `ERR perf epoch`, `ERR perf offset`,
+//!   `ERR perf phase`.
 //! - Request syntax errors: `ERR bad-arity` for missing/extra arguments and
 //!   `ERR invalid-utf8` for a map-name token that cannot be decoded as text,
 //!   `ERR line-too-long` after an oversized UART request has been discarded.

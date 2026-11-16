@@ -55,7 +55,9 @@
 #![no_std]
 
 pub mod plan;
+pub mod session;
 pub mod sweep;
+pub mod trace;
 
 /// First four bytes of every report.
 pub const MAGIC: u32 = 0x3152_4650;

@@ -8,7 +8,10 @@ use winnow::{
     token::take_while,
 };
 
-use crate::r#type::{command::Command, reply::ErrReply};
+use crate::r#type::{
+    command::{Command, PerfVariant},
+    reply::ErrReply,
+};
 
 /// Failure while parsing one complete command line.
 pub enum ParseCommandError {
@@ -72,6 +75,40 @@ fn parse_u8(token: &[u8]) -> Result<u8, ParseCommandError> {
     u8::try_from(parse_u32(token)?).map_err(|_| ParseCommandError::BadArity)
 }
 
+fn parse_hex_nibble(byte: u8) -> Result<u8, ParseCommandError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(ParseCommandError::BadArity),
+    }
+}
+
+fn parse_hex_fixed<const N: usize>(token: &[u8]) -> Result<[u8; N], ParseCommandError> {
+    if token.len() != N * 2 {
+        return Err(ParseCommandError::BadArity);
+    }
+    let mut out = [0u8; N];
+    let mut i = 0;
+    while i < N {
+        let hi = parse_hex_nibble(token[i * 2])?;
+        let lo = parse_hex_nibble(token[i * 2 + 1])?;
+        out[i] = (hi << 4) | lo;
+        i += 1;
+    }
+    Ok(out)
+}
+
+fn parse_perf_variant(token: &[u8]) -> Result<PerfVariant, ParseCommandError> {
+    if keyword(token, b"metrics") {
+        Ok(PerfVariant::Metrics)
+    } else if keyword(token, b"trace") {
+        Ok(PerfVariant::Trace)
+    } else {
+        Err(ParseCommandError::BadArity)
+    }
+}
+
 fn parse_policy(token: &[u8]) -> Result<bool, ParseCommandError> {
     if keyword(token, b"pass") {
         Ok(true)
@@ -131,6 +168,45 @@ pub fn parse_command(mut line: &[u8]) -> Result<Command<'_>, ParseCommandError> 
     } else if keyword(verb, b"get") && keyword(target, b"perf") {
         no_args(&mut line)?;
         Ok(Command::GetPerf)
+    } else if keyword(verb, b"perf") && keyword(target, b"prepare") {
+        let (raw_uuid, raw_kind, raw_profile, _) = (token, token, token, eof::<_, EmptyError>)
+            .parse_next(&mut line)
+            .map_err(|_| ParseCommandError::BadArity)?;
+        Ok(Command::PerfPrepare {
+            uuid: parse_hex_fixed(raw_uuid)?,
+            kind: parse_perf_variant(raw_kind)?,
+            profile: parse_hex_fixed(raw_profile)?,
+        })
+    } else if keyword(verb, b"perf") && keyword(target, b"arm") {
+        let (raw_epoch, _) = (token, eof::<_, EmptyError>)
+            .parse_next(&mut line)
+            .map_err(|_| ParseCommandError::BadArity)?;
+        Ok(Command::PerfArm {
+            epoch: parse_u32(raw_epoch)?,
+        })
+    } else if keyword(verb, b"perf") && keyword(target, b"freeze") {
+        let (raw_epoch, _) = (token, eof::<_, EmptyError>)
+            .parse_next(&mut line)
+            .map_err(|_| ParseCommandError::BadArity)?;
+        Ok(Command::PerfFreeze {
+            epoch: parse_u32(raw_epoch)?,
+        })
+    } else if keyword(verb, b"perf") && keyword(target, b"read") {
+        let (raw_epoch, raw_offset, raw_max, _) = (token, token, token, eof::<_, EmptyError>)
+            .parse_next(&mut line)
+            .map_err(|_| ParseCommandError::BadArity)?;
+        Ok(Command::PerfRead {
+            epoch: parse_u32(raw_epoch)?,
+            offset: parse_u32(raw_offset)?,
+            max_bytes: parse_u32(raw_max)?,
+        })
+    } else if keyword(verb, b"perf") && keyword(target, b"release") {
+        let (raw_epoch, _) = (token, eof::<_, EmptyError>)
+            .parse_next(&mut line)
+            .map_err(|_| ParseCommandError::BadArity)?;
+        Ok(Command::PerfRelease {
+            epoch: parse_u32(raw_epoch)?,
+        })
     } else if keyword(verb, b"clear") && keyword(target, b"map") {
         Ok(Command::ClearMap {
             name: map_name(&mut line)?,

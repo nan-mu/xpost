@@ -11,13 +11,13 @@ pub mod map;
 pub mod ok;
 pub mod perf;
 
-pub use err::{
-    parse_err_reply, parse_map_err_reply, parse_perf_err_reply, parse_syntax_err_reply,
-};
+pub use err::{parse_err_reply, parse_map_err_reply, parse_perf_err_reply, parse_syntax_err_reply};
 pub use ok::{
     parse_clear_map_reply, parse_clear_perf_reply, parse_disable_exec_reply,
     parse_disable_xdp_reply, parse_enable_exec_reply, parse_enable_xdp_reply, parse_finish_reply,
     parse_get_map_len, parse_get_map_reply, parse_get_perf_len, parse_get_perf_reply,
-    parse_get_xdp_status_reply, parse_init_reply, parse_ping_reply, parse_update_map_reply,
-    parse_xdp_switch_reply, parse_xdp_flash_reply,
+    parse_get_xdp_status_reply, parse_init_reply, parse_perf_arm_reply, parse_perf_freeze_reply,
+    parse_perf_prepare_reply, parse_perf_read_header, parse_perf_read_len, parse_perf_read_reply,
+    parse_perf_release_reply, parse_ping_reply, parse_update_map_reply, parse_xdp_flash_reply,
+    parse_xdp_switch_reply,
 };
