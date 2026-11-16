@@ -2209,7 +2209,17 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tower-http",
+ "xpost-artifact",
  "xpost-serial",
+]
+
+[[package]]
+name = "xpost-artifact"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+ "toml 0.8.23",
+ "xpost-elf",
 ]
 
 [[package]]

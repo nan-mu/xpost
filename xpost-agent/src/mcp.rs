@@ -334,10 +334,7 @@ impl XpostMcp {
     }
 
     #[tool(description = "Debug: one App command line (not for get map/perf framing)")]
-    async fn run(
-        &self,
-        Parameters(args): Parameters<RunArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    async fn run(&self, Parameters(args): Parameters<RunArgs>) -> Result<CallToolResult, McpError> {
         let shared = self.shared.clone();
         let cmd = args.cmd;
         self.run_op(move || ops::run_cmd(shared.as_ref(), &cmd, "mcp"))
@@ -368,9 +365,8 @@ impl XpostMcp {
 #[tool_handler]
 impl ServerHandler for XpostMcp {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(
-                "xpost-agent: flash fw/xdp, clear/get xdp, enable/disable xdp, map/perf/serial, run.",
-            )
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "xpost-agent: flash fw/xdp, clear/get xdp, enable/disable xdp, map/perf/serial, run.",
+        )
     }
 }
