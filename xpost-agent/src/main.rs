@@ -53,6 +53,11 @@
 //! | POST | `/v1/update/map/{map_name}` | see below | App `UpdateMap` (single or batch) |
 //! | POST | `/v1/clear/perf` | `{}` | App `ClearPerf` |
 //! | GET | `/v1/get/perf` | — | App `GetPerf` → b64 in `message` (or rich JSON) |
+//! | POST | `/v1/perf/prepare` | `{"uuid","variant","profile"}` | App `perf prepare` |
+//! | POST | `/v1/perf/arm` | `{"epoch"}` | App `perf arm` |
+//! | POST | `/v1/perf/freeze` | `{"epoch"}` | App `perf freeze` |
+//! | POST | `/v1/perf/read` | `{"epoch","offset","max_bytes"}` | App `perf read` |
+//! | POST | `/v1/perf/release` | `{"epoch"}` | App `perf release` |
 //! | POST | `/v1/get/serial` | `{"since_unix_ms","until_unix_ms"}` | transcript time window |
 //! | POST | `/v1/run` | `{"cmd"}` | one App line, first `OK`/`ERR` only — **not** for get map/perf |
 //! | — | `/mcp` | — | tools with the same semantics |
@@ -121,6 +126,9 @@
 //! | `get/map/{name}` | `Command::GetMap { name }` |
 //! | `update/map/{name}` | `Command::UpdateMap { name, key, value }` |
 //! | `clear/perf` / `get/perf` | `Command::ClearPerf` / `GetPerf` |
+//! | `perf/prepare` | `Command::PerfPrepare` |
+//! | `perf/arm` / `perf/freeze` / `perf/release` | `Command::PerfArm` / `PerfFreeze` / `PerfRelease` |
+//! | `perf/read` | `Command::PerfRead` |
 //! | `run` | parse line → `Command` (debug only) |
 //!
 //! Flat ERR domains (`ServerError` / `MapError` / `PerfError` / `SyntaxError`)

@@ -50,6 +50,28 @@ struct SerialArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct PerfPrepareArgs {
+    /// 32 hex characters, 16 raw bytes.
+    uuid: String,
+    /// `metrics` or `trace`.
+    variant: String,
+    /// 64 hex characters, 32 raw bytes.
+    profile: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct PerfEpochArgs {
+    epoch: u32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct PerfReadArgs {
+    epoch: u32,
+    offset: u32,
+    max_bytes: u32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct RunArgs {
     cmd: String,
 }
@@ -230,6 +252,72 @@ impl XpostMcp {
     async fn get_perf(&self) -> Result<CallToolResult, McpError> {
         let shared = self.shared.clone();
         self.run_op(move || ops::get_perf(shared.as_ref(), "mcp"))
+            .await
+    }
+
+    #[tool(description = "App perf prepare → epoch and boot_id")]
+    async fn perf_prepare(
+        &self,
+        Parameters(args): Parameters<PerfPrepareArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let shared = self.shared.clone();
+        self.run_op(move || {
+            ops::perf_prepare(
+                shared.as_ref(),
+                &args.uuid,
+                &args.variant,
+                &args.profile,
+                "mcp",
+            )
+        })
+        .await
+    }
+
+    #[tool(description = "App perf arm → device arm tick")]
+    async fn perf_arm(
+        &self,
+        Parameters(args): Parameters<PerfEpochArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let shared = self.shared.clone();
+        self.run_op(move || ops::perf_arm(shared.as_ref(), args.epoch, "mcp"))
+            .await
+    }
+
+    #[tool(description = "App perf freeze → freeze tick, flags, length, digest")]
+    async fn perf_freeze(
+        &self,
+        Parameters(args): Parameters<PerfEpochArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let shared = self.shared.clone();
+        self.run_op(move || ops::perf_freeze(shared.as_ref(), args.epoch, "mcp"))
+            .await
+    }
+
+    #[tool(description = "App perf read → one export chunk, total, digest")]
+    async fn perf_read(
+        &self,
+        Parameters(args): Parameters<PerfReadArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let shared = self.shared.clone();
+        self.run_op(move || {
+            ops::perf_read(
+                shared.as_ref(),
+                args.epoch,
+                args.offset,
+                args.max_bytes,
+                "mcp",
+            )
+        })
+        .await
+    }
+
+    #[tool(description = "App perf release → allow the next prepare")]
+    async fn perf_release(
+        &self,
+        Parameters(args): Parameters<PerfEpochArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let shared = self.shared.clone();
+        self.run_op(move || ops::perf_release(shared.as_ref(), args.epoch, "mcp"))
             .await
     }
 

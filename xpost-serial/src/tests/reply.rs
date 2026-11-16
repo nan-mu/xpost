@@ -1,8 +1,8 @@
 //! Server reply encoding ↔ client reply parsing (OK + all ERR domains).
 
+use crate::server::reply::{WireError, write_error, write_ok};
 use crate::r#type::command::Command;
 use crate::r#type::reply::{MapError, OkReply, PerfError, ServerError, SyntaxError};
-use crate::server::reply::{WireError, write_error, write_ok};
 
 fn encode_ok(reply: &OkReply<'_>) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -40,10 +40,7 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
         | (OkReply::GetPerf { blob: a }, OkReply::GetPerf { blob: b }) => {
             assert_eq!(a, b, "blob");
         }
-        (
-            OkReply::EnableXdpStamped { mcu_us: a },
-            OkReply::EnableXdpStamped { mcu_us: b },
-        ) => {
+        (OkReply::EnableXdpStamped { mcu_us: a }, OkReply::EnableXdpStamped { mcu_us: b }) => {
             assert_eq!(a, b, "mcu_us");
         }
         (
@@ -118,6 +115,52 @@ fn assert_ok_eq(got: &OkReply<'_>, expect: &OkReply<'_>) {
                 (b, ba, bsl, bg, bu, bse, bd, bp, be)
             );
         }
+        (
+            OkReply::PerfPrepare {
+                epoch: ae,
+                boot_id: ab,
+            },
+            OkReply::PerfPrepare {
+                epoch: be,
+                boot_id: bb,
+            },
+        ) => {
+            assert_eq!((ae, ab), (be, bb));
+        }
+        (OkReply::PerfArm { tick: a }, OkReply::PerfArm { tick: b }) => {
+            assert_eq!(a, b);
+        }
+        (
+            OkReply::PerfFreeze {
+                tick: at,
+                flags: af,
+                len: al,
+                digest: ad,
+            },
+            OkReply::PerfFreeze {
+                tick: bt,
+                flags: bf,
+                len: bl,
+                digest: bd,
+            },
+        ) => {
+            assert_eq!((at, af, al, ad), (bt, bf, bl, bd));
+        }
+        (
+            OkReply::PerfRead {
+                total: at,
+                digest: ad,
+                blob: ab,
+            },
+            OkReply::PerfRead {
+                total: bt,
+                digest: bd,
+                blob: bb,
+            },
+        ) => {
+            assert_eq!((at, ad, ab), (bt, bd, bb));
+        }
+        (OkReply::PerfRelease, OkReply::PerfRelease) => {}
         _ => panic!("ok reply variant mismatch"),
     }
 }
@@ -224,9 +267,11 @@ fn ok_finish_logger_prefix() {
     let got = OkReply::try_from((b"INFO - OK finish".as_slice(), &Command::GetFinish))
         .expect("logger line");
     assert!(matches!(got, OkReply::Finish));
-    let colored =
-        OkReply::try_from((b"\x1b[32mINFO - OK finish\x1b[0m".as_slice(), &Command::GetFinish))
-            .expect("colored logger line");
+    let colored = OkReply::try_from((
+        b"\x1b[32mINFO - OK finish\x1b[0m".as_slice(),
+        &Command::GetFinish,
+    ))
+    .expect("colored logger line");
     assert!(matches!(colored, OkReply::Finish));
     assert!(OkReply::try_from((b"WARN - OK finish".as_slice(), &Command::GetFinish)).is_err());
 }
@@ -352,6 +397,9 @@ fn err_perf_all() {
         PerfError::Unavailable,
         PerfError::Unsupported,
         PerfError::BufferTooSmall,
+        PerfError::Epoch,
+        PerfError::Offset,
+        PerfError::Phase,
     ] {
         roundtrip_perf_err(&cmd, err);
     }
@@ -381,4 +429,80 @@ fn err_domains_do_not_cross_parse() {
     let perf_line = encode_err(&PerfError::Unavailable);
     assert!(MapError::try_from((perf_line.as_slice(), &Command::GetPerf)).is_err());
     assert!(ServerError::try_from((perf_line.as_slice(), &Command::GetPerf)).is_err());
+}
+
+#[test]
+fn ok_perf_prepare_boot_id_is_u64() {
+    roundtrip_ok(
+        Command::PerfPrepare {
+            uuid: [0xab; 16],
+            kind: crate::r#type::command::PerfVariant::Metrics,
+            profile: [0x11; 32],
+        },
+        OkReply::PerfPrepare {
+            epoch: 1,
+            boot_id: 1u64 << 40,
+        },
+    );
+}
+
+#[test]
+fn ok_perf_freeze_tick_is_u64() {
+    roundtrip_ok(
+        Command::PerfFreeze { epoch: 4 },
+        OkReply::PerfFreeze {
+            tick: u64::MAX,
+            flags: 1,
+            len: 57,
+            digest: 0x811c_9dc5,
+        },
+    );
+}
+
+#[test]
+fn ok_perf_read_blob_round_trips() {
+    let blob: &[u8] = b"\x00\xfftrace-bytes";
+    let reply = OkReply::PerfRead {
+        total: 57,
+        digest: 9,
+        blob,
+    };
+    let cmd = Command::PerfRead {
+        epoch: 2,
+        offset: 0,
+        max_bytes: 600,
+    };
+    let raw = encode_ok(&reply);
+    let parsed = OkReply::try_from((raw.as_slice(), &cmd)).expect("parse perf read");
+    let again = OkReply::try_from((raw.as_slice(), &cmd)).expect("parse perf read again");
+    match (parsed, again) {
+        (
+            OkReply::PerfRead {
+                total,
+                digest,
+                blob: first,
+            },
+            OkReply::PerfRead { blob: second, .. },
+        ) => {
+            assert_eq!(first.len(), blob.len());
+            assert_eq!(first, blob);
+            assert_eq!(first, second);
+            assert_eq!(total, 57);
+            assert_eq!(digest, 9);
+        }
+        _ => panic!("expected PerfRead"),
+    }
+}
+
+#[test]
+fn err_perf_epoch_offset_phase() {
+    let cmd = Command::PerfArm { epoch: 3 };
+    for (line, expect) in [
+        (&b"ERR perf epoch\n"[..], PerfError::Epoch),
+        (&b"ERR perf offset\n"[..], PerfError::Offset),
+        (&b"ERR perf phase\n"[..], PerfError::Phase),
+    ] {
+        let parsed = PerfError::try_from((line, &cmd)).expect("parse perf session error");
+        assert!(core::mem::discriminant(&parsed) == core::mem::discriminant(&expect));
+    }
 }

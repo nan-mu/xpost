@@ -14,6 +14,13 @@ pub const GET_INIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// [`Command::GetFinish`]. Not a UART deadline for a request line.
 pub const GET_FINISH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Capture installed by `perf prepare`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PerfVariant {
+    Metrics,
+    Trace,
+}
+
 /// App-mode command shape.
 ///
 /// Most variants are UART request lines. [`GetInit`](Command::GetInit) and
@@ -41,6 +48,34 @@ pub enum Command<'a> {
     },
     ClearPerf,
     GetPerf,
+    /// `perf prepare <32 hex uuid> <metrics|trace> <64 hex profile>`.
+    ///
+    /// `uuid` is 16 raw bytes and `profile` is 32 raw bytes. The wire form is hex.
+    PerfPrepare {
+        uuid: [u8; 16],
+        kind: PerfVariant,
+        profile: [u8; 32],
+    },
+    /// `perf arm <epoch>`
+    PerfArm {
+        epoch: u32,
+    },
+    /// `perf freeze <epoch>`
+    PerfFreeze {
+        epoch: u32,
+    },
+    /// `perf read <epoch> <offset> <max_bytes>`.
+    ///
+    /// `max_bytes` above 512 is a legal request. The session clamps the copy.
+    PerfRead {
+        epoch: u32,
+        offset: u32,
+        max_bytes: u32,
+    },
+    /// `perf release <epoch>`
+    PerfRelease {
+        epoch: u32,
+    },
     /// `xdp flash <name> <slot>` — copy a cold image into a slot.
     ///
     /// A non-running slot stays staged. The active primary slot is replaced
