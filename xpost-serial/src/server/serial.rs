@@ -13,7 +13,7 @@ use super::{
     reply::{ReplyState, ReplyWriter, infallible, write_error, write_ok},
 };
 use crate::r#type::{
-    command::Command,
+    command::{Command, PerfVariant},
     reply::{OkReply, ServerError},
 };
 
@@ -103,6 +103,16 @@ impl<R, W, H: RequestHandler, const N: usize> SerialHandlerBuilder<R, W, H, N> {
         on_clear_perf() => Command::ClearPerf);
     register!(/// Register performance reporting, e.g. a closure calling `report_perf`.
         on_get_perf() => Command::GetPerf);
+    register!(/// Install a measurement epoch. Refused while an export is still held.
+        on_perf_prepare(uuid: [u8; 16], kind: PerfVariant, profile: [u8; 32]) => Command::PerfPrepare { uuid, kind, profile });
+    register!(/// Open recording for an installed epoch.
+        on_perf_arm(epoch: u32) => Command::PerfArm { epoch });
+    register!(/// Close recording and hold the export.
+        on_perf_freeze(epoch: u32) => Command::PerfFreeze { epoch });
+    register!(/// Copy one chunk of a frozen export. The session clamps `max_bytes`.
+        on_perf_read(epoch: u32, offset: u32, max_bytes: u32) => Command::PerfRead { epoch, offset, max_bytes });
+    register!(/// Drop the export so a later prepare may reuse the buffer.
+        on_perf_release(epoch: u32) => Command::PerfRelease { epoch });
     register!(/// Copy a cold image into a slot. Does not publish it.
         on_xdp_flash(name: &str, slot: u8) => Command::XdpFlash { name, slot });
     register!(/// Quiesce and publish a filled slot without dropping the lease.

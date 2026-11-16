@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use xpost_serial::client::flash::xdp_name_from_file;
 use xpost_serial::client::{Command, FlashOp, FlashResult, OkReply};
+use xpost_serial::command::PerfVariant;
 
 use crate::profiles::{BuildSpec, XdpProfile, abs_under_root};
 use crate::state::{AgentError, AgentState, NOISY_LOG_EVERY};
@@ -761,6 +762,120 @@ pub fn get_perf(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     })
 }
 
+pub fn perf_prepare(
+    state: &Mutex<AgentState>,
+    uuid_hex: &str,
+    variant: &str,
+    profile_hex: &str,
+    peer: &str,
+) -> Result<String> {
+    let uuid = decode_hex(uuid_hex)?;
+    let profile = decode_hex(profile_hex)?;
+    let kind = perf_kind(variant)?;
+    let summary = format!("variant={variant}");
+    with_log(peer, "PerfPrepare", &summary, false, state, || {
+        let g = lock(state)?;
+        format_perf_session(&req(
+            &g,
+            &Command::PerfPrepare {
+                uuid,
+                kind,
+                profile,
+            },
+        )?)
+    })
+}
+
+pub fn perf_arm(state: &Mutex<AgentState>, epoch: u32, peer: &str) -> Result<String> {
+    with_log(peer, "PerfArm", &format!("epoch={epoch}"), false, state, || {
+        let g = lock(state)?;
+        format_perf_session(&req(&g, &Command::PerfArm { epoch })?)
+    })
+}
+
+pub fn perf_freeze(state: &Mutex<AgentState>, epoch: u32, peer: &str) -> Result<String> {
+    with_log(
+        peer,
+        "PerfFreeze",
+        &format!("epoch={epoch}"),
+        false,
+        state,
+        || {
+            let g = lock(state)?;
+            format_perf_session(&req(&g, &Command::PerfFreeze { epoch })?)
+        },
+    )
+}
+
+pub fn perf_read(
+    state: &Mutex<AgentState>,
+    epoch: u32,
+    offset: u32,
+    max_bytes: u32,
+    peer: &str,
+) -> Result<String> {
+    with_log(
+        peer,
+        "PerfRead",
+        &format!("epoch={epoch} offset={offset}"),
+        false,
+        state,
+        || {
+            let g = lock(state)?;
+            format_perf_session(&req(
+                &g,
+                &Command::PerfRead {
+                    epoch,
+                    offset,
+                    max_bytes,
+                },
+            )?)
+        },
+    )
+}
+
+pub fn perf_release(state: &Mutex<AgentState>, epoch: u32, peer: &str) -> Result<String> {
+    with_log(
+        peer,
+        "PerfRelease",
+        &format!("epoch={epoch}"),
+        false,
+        state,
+        || {
+            let g = lock(state)?;
+            format_perf_session(&req(&g, &Command::PerfRelease { epoch })?)
+        },
+    )
+}
+
+fn format_perf_session(reply: &OkReply<'_>) -> Result<String> {
+    match reply {
+        OkReply::PerfPrepare { epoch, boot_id } => {
+            Ok(format!("OK perf prepare epoch={epoch} boot_id={boot_id}"))
+        }
+        OkReply::PerfArm { tick } => Ok(format!("OK perf arm tick={tick}")),
+        OkReply::PerfFreeze {
+            tick,
+            flags,
+            len,
+            digest,
+        } => Ok(format!(
+            "OK perf freeze tick={tick} flags={flags} len={len} digest={digest}"
+        )),
+        OkReply::PerfRead {
+            total,
+            digest,
+            blob,
+        } => Ok(format!(
+            "OK perf read total={total} digest={digest} n={} b64={}",
+            blob.len(),
+            base64_encode(blob)
+        )),
+        OkReply::PerfRelease => Ok("OK perf release".into()),
+        _ => bail!("unexpected perf session reply"),
+    }
+}
+
 pub fn get_serial(
     state: &Mutex<AgentState>,
     since_unix_ms: u64,
@@ -855,6 +970,39 @@ pub fn run_cmd(state: &Mutex<AgentState>, cmd: &str, peer: &str) -> Result<Strin
                 }
                 _ => bail!("unexpected get perf reply"),
             },
+            ParsedCmd::PerfPrepare {
+                uuid,
+                kind,
+                profile,
+            } => format_perf_session(&req(
+                &g,
+                &Command::PerfPrepare {
+                    uuid: *uuid,
+                    kind: *kind,
+                    profile: *profile,
+                },
+            )?),
+            ParsedCmd::PerfArm { epoch } => {
+                format_perf_session(&req(&g, &Command::PerfArm { epoch: *epoch })?)
+            }
+            ParsedCmd::PerfFreeze { epoch } => {
+                format_perf_session(&req(&g, &Command::PerfFreeze { epoch: *epoch })?)
+            }
+            ParsedCmd::PerfRead {
+                epoch,
+                offset,
+                max_bytes,
+            } => format_perf_session(&req(
+                &g,
+                &Command::PerfRead {
+                    epoch: *epoch,
+                    offset: *offset,
+                    max_bytes: *max_bytes,
+                },
+            )?),
+            ParsedCmd::PerfRelease { epoch } => {
+                format_perf_session(&req(&g, &Command::PerfRelease { epoch: *epoch })?)
+            }
         }
     })
 }
@@ -874,6 +1022,25 @@ enum ParsedCmd<'a> {
     },
     ClearPerf,
     GetPerf,
+    PerfPrepare {
+        uuid: [u8; 16],
+        kind: PerfVariant,
+        profile: [u8; 32],
+    },
+    PerfArm {
+        epoch: u32,
+    },
+    PerfFreeze {
+        epoch: u32,
+    },
+    PerfRead {
+        epoch: u32,
+        offset: u32,
+        max_bytes: u32,
+    },
+    PerfRelease {
+        epoch: u32,
+    },
 }
 
 fn parse_app_command(line: &str) -> Result<ParsedCmd<'_>> {
@@ -948,7 +1115,102 @@ fn parse_app_command(line: &str) -> Result<ParsedCmd<'_>> {
         }
         return Ok(ParsedCmd::UpdateMap { name, key, value });
     }
+    if eq(verb, "perf") && eq(target, "prepare") {
+        let uuid = parts.next().context("ERR bad-arity")?;
+        let kind = parts.next().context("ERR bad-arity")?;
+        let profile = parts.next().context("ERR bad-arity")?;
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::PerfPrepare {
+            uuid: decode_hex(uuid)?,
+            kind: perf_kind(kind)?,
+            profile: decode_hex(profile)?,
+        });
+    }
+    if eq(verb, "perf") && eq(target, "arm") {
+        let epoch = parts.next().context("ERR bad-arity")?;
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::PerfArm {
+            epoch: parse_u32_token(epoch)?,
+        });
+    }
+    if eq(verb, "perf") && eq(target, "freeze") {
+        let epoch = parts.next().context("ERR bad-arity")?;
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::PerfFreeze {
+            epoch: parse_u32_token(epoch)?,
+        });
+    }
+    if eq(verb, "perf") && eq(target, "read") {
+        let epoch = parts.next().context("ERR bad-arity")?;
+        let offset = parts.next().context("ERR bad-arity")?;
+        let max_bytes = parts.next().context("ERR bad-arity")?;
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::PerfRead {
+            epoch: parse_u32_token(epoch)?,
+            offset: parse_u32_token(offset)?,
+            max_bytes: parse_u32_token(max_bytes)?,
+        });
+    }
+    if eq(verb, "perf") && eq(target, "release") {
+        let epoch = parts.next().context("ERR bad-arity")?;
+        if parts.next().is_some() {
+            bail!("ERR bad-arity");
+        }
+        return Ok(ParsedCmd::PerfRelease {
+            epoch: parse_u32_token(epoch)?,
+        });
+    }
     bail!("ERR unknown")
+}
+
+fn decode_hex<const N: usize>(text: &str) -> Result<[u8; N]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != N * 2 {
+        bail!("ERR bad-arity");
+    }
+    let mut out = [0u8; N];
+    let mut i = 0;
+    while i < N {
+        let hi = hex_nibble(bytes[i * 2])?;
+        let lo = hex_nibble(bytes[i * 2 + 1])?;
+        out[i] = (hi << 4) | lo;
+        i += 1;
+    }
+    Ok(out)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => bail!("ERR bad-arity"),
+    }
+}
+
+fn perf_kind(text: &str) -> Result<PerfVariant> {
+    if text.eq_ignore_ascii_case("metrics") {
+        Ok(PerfVariant::Metrics)
+    } else if text.eq_ignore_ascii_case("trace") {
+        Ok(PerfVariant::Trace)
+    } else {
+        bail!("ERR bad-arity")
+    }
+}
+
+fn parse_u32_token(text: &str) -> Result<u32> {
+    if text.is_empty() || text.len() > 10 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        bail!("ERR bad-arity");
+    }
+    text.parse().map_err(|_| anyhow::anyhow!("ERR bad-arity"))
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -973,4 +1235,35 @@ fn base64_encode(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_prepare_line_keeps_the_decoded_bytes() {
+        let profile = "ab".repeat(32);
+        let line = format!("perf prepare 00112233445566778899aabbccddeeff trace {profile}");
+        match parse_app_command(&line).unwrap() {
+            ParsedCmd::PerfPrepare { uuid, kind, profile } => {
+                assert_eq!(uuid[0], 0x00);
+                assert_eq!(uuid[15], 0xff);
+                assert_eq!(kind, PerfVariant::Trace);
+                assert_eq!(profile[0], 0xab);
+                assert_eq!(profile[31], 0xab);
+            }
+            _ => panic!("expected prepare"),
+        }
+        assert!(parse_app_command("perf prepare zz trace ab").is_err());
+        assert!(parse_app_command("perf prepare 00 histogram ab").is_err());
+    }
+
+    #[test]
+    fn a_prepare_reply_keeps_a_boot_id_past_u32() {
+        let boot_id = u64::from(u32::MAX) + 9;
+        let reply = OkReply::PerfPrepare { epoch: 3, boot_id };
+        let msg = format_perf_session(&reply).unwrap();
+        assert_eq!(msg, format!("OK perf prepare epoch=3 boot_id={boot_id}"));
+    }
 }

@@ -88,6 +88,9 @@ impl fmt::Debug for PerfError {
             Self::Unavailable => f.write_str("Unavailable"),
             Self::Unsupported => f.write_str("Unsupported"),
             Self::BufferTooSmall => f.write_str("BufferTooSmall"),
+            Self::Epoch => f.write_str("Epoch"),
+            Self::Offset => f.write_str("Offset"),
+            Self::Phase => f.write_str("Phase"),
         }
     }
 }

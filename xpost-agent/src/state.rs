@@ -101,6 +101,9 @@ impl fmt::Display for AgentError {
                 PerfError::Unavailable => f.write_str("ERR perf unavailable"),
                 PerfError::Unsupported => f.write_str("ERR perf unsupported"),
                 PerfError::BufferTooSmall => f.write_str("ERR perf buffer-too-small"),
+                PerfError::Epoch => f.write_str("ERR perf epoch"),
+                PerfError::Offset => f.write_str("ERR perf offset"),
+                PerfError::Phase => f.write_str("ERR perf phase"),
             },
             Self::Syntax(e) => match e {
                 SyntaxError::BadArity => f.write_str("ERR bad-arity"),

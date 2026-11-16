@@ -3,12 +3,7 @@
 //! Domains are peers: [`ServerError`], [`MapError`], [`PerfError`], [`SyntaxError`].
 //! None wraps another. Call the domain parser that matches the expected line.
 
-use winnow::{
-    ascii::space1,
-    combinator::opt,
-    error::EmptyError,
-    Parser,
-};
+use winnow::{Parser, ascii::space1, combinator::opt, error::EmptyError};
 
 use crate::client::error::ParseError;
 use crate::r#type::command::Command;
@@ -66,6 +61,9 @@ fixed_err! {
     parse_perf_unavailable => Unavailable: [b"perf", b"unavailable"];
     parse_perf_unsupported => Unsupported: [b"perf", b"unsupported"];
     parse_perf_buffer_too_small => BufferTooSmall: [b"perf", b"buffer-too-small"];
+    parse_perf_epoch => Epoch: [b"perf", b"epoch"];
+    parse_perf_offset => Offset: [b"perf", b"offset"];
+    parse_perf_phase => Phase: [b"perf", b"phase"];
 }
 
 fixed_err! {
@@ -104,6 +102,9 @@ pub fn parse_perf_err_reply(input: &[u8], cmd: &Command<'_>) -> Result<PerfError
     parse_perf_unavailable(input)
         .or_else(|_| parse_perf_unsupported(input))
         .or_else(|_| parse_perf_buffer_too_small(input))
+        .or_else(|_| parse_perf_epoch(input))
+        .or_else(|_| parse_perf_offset(input))
+        .or_else(|_| parse_perf_phase(input))
 }
 
 /// Parse a DUT request-syntax `ERR …` line as [`SyntaxError`].
