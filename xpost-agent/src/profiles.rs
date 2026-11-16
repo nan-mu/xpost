@@ -32,7 +32,10 @@ pub struct FwProfile {
 pub struct XdpProfile {
     pub name: String,
     pub fw: String,
-    pub artifact: String,
+    /// Producer stem (`-c`), not the profile name.
+    pub program: String,
+    /// `aot`, `jit`, or `rbpf`. No default.
+    pub mode: String,
     pub build: BuildSpec,
     #[serde(default)]
     pub target: Option<String>,
@@ -40,6 +43,8 @@ pub struct XdpProfile {
 
 #[derive(Debug, Deserialize)]
 struct ProfilesFile {
+    #[serde(default)]
+    build_root: String,
     #[serde(default)]
     fw: Vec<FwProfile>,
     #[serde(default)]
@@ -51,9 +56,15 @@ struct ProfilesFile {
 pub struct Profiles {
     fw: HashMap<String, FwProfile>,
     xdp: HashMap<String, XdpProfile>,
+    build_root: String,
 }
 
 impl Profiles {
+    /// Producer index directory, relative to the workspace root.
+    pub fn build_root(&self) -> &str {
+        &self.build_root
+    }
+
     pub fn load_path(path: &Path) -> Result<Self> {
         let text = fs::read_to_string(path)
             .with_context(|| format!("read profiles {}", path.display()))?;
@@ -62,7 +73,7 @@ impl Profiles {
 
     pub fn parse(text: &str) -> Result<Self> {
         let file: ProfilesFile = toml::from_str(text).context("profiles.toml")?;
-        build_registry(file.fw, file.xdp)
+        build_registry(file.build_root, file.fw, file.xdp)
     }
 
     pub fn fw(&self, name: &str) -> Option<&FwProfile> {
@@ -121,7 +132,11 @@ impl Profiles {
 }
 
 /// Parse + validate fw/xdp lists into a registry.
-pub fn build_registry(fws: Vec<FwProfile>, xdps: Vec<XdpProfile>) -> Result<Profiles> {
+pub fn build_registry(
+    build_root: String,
+    fws: Vec<FwProfile>,
+    xdps: Vec<XdpProfile>,
+) -> Result<Profiles> {
     let mut fw_map = HashMap::new();
     for p in fws {
         validate_build(&p.build, &format!("fw `{}`", p.name))?;
@@ -147,9 +162,8 @@ pub fn build_registry(fws: Vec<FwProfile>, xdps: Vec<XdpProfile>) -> Result<Prof
         if p.name.trim().is_empty() {
             bail!("xdp entry with empty name");
         }
-        if p.artifact.trim().is_empty() {
-            bail!("xdp `{}`: empty artifact", p.name);
-        }
+        validate_program(&p.program, &format!("xdp `{}`", p.name))?;
+        validate_xdp_mode(&p.mode, &format!("xdp `{}`", p.name))?;
         if p.fw.trim().is_empty() {
             bail!("xdp `{}`: empty fw link", p.name);
         }
@@ -199,9 +213,14 @@ pub fn build_registry(fws: Vec<FwProfile>, xdps: Vec<XdpProfile>) -> Result<Prof
         }
     }
 
+    if !xdp_map.is_empty() && build_root.trim().is_empty() {
+        bail!("profiles.toml: build_root is required");
+    }
+
     Ok(Profiles {
         fw: fw_map,
         xdp: xdp_map,
+        build_root,
     })
 }
 
@@ -219,6 +238,25 @@ fn validate_target(target: &str) -> Result<()> {
     match target {
         "esp32c3" => Ok(()),
         other => bail!("unknown target `{other}` (supported: esp32c3)"),
+    }
+}
+
+fn validate_program(program: &str, ctx: &str) -> Result<()> {
+    if program.is_empty()
+        || program == "."
+        || program == ".."
+        || program.contains('/')
+        || program.contains('\\')
+    {
+        bail!("{ctx}: program must be a single path segment");
+    }
+    Ok(())
+}
+
+fn validate_xdp_mode(mode: &str, ctx: &str) -> Result<()> {
+    match mode {
+        "aot" | "jit" | "rbpf" => Ok(()),
+        other => bail!("{ctx}: unknown mode `{other}`"),
     }
 }
 
@@ -245,6 +283,8 @@ mod tests {
     use super::*;
 
     const FIXTURE: &str = r#"
+build_root = "../build"
+
 [[fw]]
 name = "board-cag"
 target = "esp32c3"
@@ -256,7 +296,8 @@ xdp = ["just_drop"]
 [[xdp]]
 name = "just_drop"
 fw = "board-cag"
-artifact = "build/just_drop/just_drop.elf"
+program = "just_drop"
+mode = "aot"
 build = { cwd = ".", command = ["pixi", "run", "build", "--firmware", "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp", "-c", "just_drop"] }
 "#;
 
@@ -276,6 +317,9 @@ build = { cwd = ".", command = ["pixi", "run", "build", "--firmware", "examples/
         assert_eq!(fw.build.command[0], "cargo");
         let x = p.xdp("just_drop").unwrap();
         assert_eq!(x.fw, "board-cag");
+        assert_eq!(x.program, "just_drop");
+        assert_eq!(x.mode, "aot");
+        assert_eq!(p.build_root(), "../build");
         assert_eq!(x.build.command[0], "pixi");
         assert_eq!(
             p.partition_table_for_xdp("just_drop").unwrap(),
@@ -286,10 +330,12 @@ build = { cwd = ".", command = ["pixi", "run", "build", "--firmware", "examples/
     #[test]
     fn reject_unknown_fw_link() {
         let toml = r#"
+build_root = "../build"
 [[xdp]]
 name = "just_drop"
 fw = "missing"
-artifact = "build/just_drop/just_drop.elf"
+program = "just_drop"
+mode = "aot"
 build = { cwd = ".", command = ["pixi", "run", "build"] }
 "#;
         let err = Profiles::parse(toml).unwrap_err().to_string();
@@ -335,6 +381,7 @@ build = { cwd = ".", command = ["echo"] }
     #[test]
     fn allow_shared_xdp_same_partition() {
         let toml = r#"
+build_root = "../build"
 [[fw]]
 name = "a"
 target = "esp32c3"
@@ -354,7 +401,8 @@ xdp = ["x"]
 [[xdp]]
 name = "x"
 fw = "a"
-artifact = "build/x/x.elf"
+program = "x"
+mode = "aot"
 build = { cwd = ".", command = ["pixi", "run", "build"] }
 "#;
         let p = Profiles::parse(toml).unwrap();
@@ -366,6 +414,7 @@ build = { cwd = ".", command = ["pixi", "run", "build"] }
     #[test]
     fn reject_shared_xdp_different_partition() {
         let toml = r#"
+build_root = "../build"
 [[fw]]
 name = "a"
 target = "esp32c3"
@@ -385,7 +434,8 @@ xdp = ["x"]
 [[xdp]]
 name = "x"
 fw = "a"
-artifact = "build/x/x.elf"
+program = "x"
+mode = "aot"
 build = { cwd = ".", command = ["pixi", "run", "build"] }
 "#;
         let err = Profiles::parse(toml).unwrap_err().to_string();
@@ -397,10 +447,7 @@ build = { cwd = ".", command = ["pixi", "run", "build"] }
         let p = Profiles::parse(FIXTURE).unwrap();
         let fw = p.fw("board-cag").unwrap();
         assert_eq!(fw.build.cwd, "examples/just_xdp");
-        assert_eq!(
-            fw.build.command,
-            vec!["cargo", "build", "--release"]
-        );
+        assert_eq!(fw.build.command, vec!["cargo", "build", "--release"]);
         let x = p.xdp("just_drop").unwrap();
         assert_eq!(x.build.cwd, ".");
         assert_eq!(
@@ -434,6 +481,7 @@ build = { cwd = ".", command = ["echo"] }
     #[test]
     fn reject_xdp_target_mismatch() {
         let toml = r#"
+build_root = "../build"
 [[fw]]
 name = "board"
 target = "esp32c3"
@@ -445,7 +493,8 @@ build = { cwd = ".", command = ["echo"] }
 name = "x"
 fw = "board"
 target = "esp32s3"
-artifact = "build/x/x.elf"
+program = "x"
+mode = "aot"
 build = { cwd = ".", command = ["pixi", "run", "build"] }
 "#;
         let err = Profiles::parse(toml).unwrap_err().to_string();
@@ -454,5 +503,42 @@ build = { cwd = ".", command = ["pixi", "run", "build"] }
             err.contains("unknown target") || err.contains("!="),
             "{err}"
         );
+    }
+
+    #[test]
+    fn reject_unknown_xdp_mode() {
+        let toml = r#"
+build_root = "../build"
+[[fw]]
+name = "board"
+target = "esp32c3"
+partition_table = "p.csv"
+artifact = "a.elf"
+build = { cwd = ".", command = ["echo"] }
+
+[[xdp]]
+name = "x"
+fw = "board"
+program = "x"
+mode = "hal"
+build = { cwd = ".", command = ["pixi", "run", "build"] }
+"#;
+        let err = Profiles::parse(toml).unwrap_err().to_string();
+        assert!(err.contains("unknown mode"), "{err}");
+    }
+
+    #[test]
+    fn parse_repo_profiles() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../profiles.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let profiles = Profiles::parse(&text).unwrap();
+        assert_eq!(profiles.build_root(), "../build");
+        let idle = profiles.xdp("case_mark_idle").unwrap();
+        assert_eq!(idle.program, "case_mark");
+        assert_eq!(idle.mode, "aot");
+        let rbpf = profiles.xdp("incr_rbpf").unwrap();
+        assert_eq!(rbpf.program, "incr");
+        assert_eq!(rbpf.mode, "rbpf");
+        assert_eq!(profiles.xdp("incr").unwrap().mode, "aot");
     }
 }

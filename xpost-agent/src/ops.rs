@@ -6,7 +6,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use xpost_serial::client::flash::xdp_name_from_file;
 use xpost_serial::client::{Command, FlashOp, FlashResult, OkReply};
 use xpost_serial::command::PerfVariant;
 
@@ -88,7 +87,10 @@ fn req<'a>(g: &'a AgentState, cmd: &Command<'_>) -> Result<OkReply<'a>> {
 }
 
 /// [`req`] plus the instant the UART reader read the reply line.
-fn req_at<'a>(g: &'a AgentState, cmd: &Command<'_>) -> Result<(OkReply<'a>, std::time::SystemTime)> {
+fn req_at<'a>(
+    g: &'a AgentState,
+    cmd: &Command<'_>,
+) -> Result<(OkReply<'a>, std::time::SystemTime)> {
     g.handler
         .request_at::<AgentError>(cmd)
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -136,7 +138,7 @@ pub fn flash_fw(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<Str
 }
 
 fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
-    let (root, fw, linked_xdps) = {
+    let (root, build_root, fw, linked_xdps) = {
         let g = lock(state)?;
         let fw = g
             .profiles
@@ -152,7 +154,12 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
                 .with_context(|| format!("fw `{name}` lists missing xdp `{xn}`"))?;
             linked.push(x);
         }
-        (g.root.clone(), fw, linked)
+        (
+            g.root.clone(),
+            g.profiles.build_root().to_owned(),
+            fw,
+            linked,
+        )
     };
 
     let build_dur = run_build(&root, &fw.build, &format!("fw `{name}`"), peer)?;
@@ -200,9 +207,7 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
         {
             let g = lock(state)?;
             g.handler
-                .flash(FlashOp::Clear {
-                    names: Vec::new(),
-                })
+                .flash(FlashOp::Clear { names: Vec::new() })
                 .context("clear xdp before co-flash")?;
         }
         flash_dur += t_clear.elapsed();
@@ -210,7 +215,7 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
 
     let mut xdp_parts = Vec::new();
     for x in &linked_xdps {
-        let part = flash_one_xdp(state, &root, x, peer)?;
+        let part = flash_one_xdp(state, &root, &build_root, x, peer)?;
         flash_dur += part.1;
         xdp_parts.push(part.0);
     }
@@ -245,7 +250,7 @@ pub fn flash_xdp(
         false,
         state,
         || {
-            let (root, xdp) = {
+            let (root, build_root, xdp) = {
                 let g = lock(state)?;
                 let xdp = g
                     .profiles
@@ -254,9 +259,9 @@ pub fn flash_xdp(
                     .with_context(|| format!("unknown xdp `{name}`"))?;
                 // Ensure linked fw / partition table resolve (validated on load).
                 let _ = g.profiles.partition_table_for_xdp(name)?;
-                (g.root.clone(), xdp)
+                (g.root.clone(), g.profiles.build_root().to_owned(), xdp)
             };
-            let (summary, _) = flash_one_xdp(state, &root, &xdp, peer)?;
+            let (summary, _) = flash_one_xdp(state, &root, &build_root, &xdp, peer)?;
             Ok(summary)
         },
     )
@@ -266,36 +271,29 @@ pub fn flash_xdp(
 fn flash_one_xdp(
     state: &Mutex<AgentState>,
     root: &Path,
+    build_root_rel: &str,
     xdp: &XdpProfile,
     peer: &str,
 ) -> Result<(String, Duration)> {
     let name = xdp.name.as_str();
     let _build_dur = run_build(root, &xdp.build, &format!("xdp `{name}`"), peer)?;
 
-    let path = abs_under_root(root, &xdp.artifact);
-    if !path.is_file() {
-        bail!(
-            "xdp artifact not found after build: {} (xdp `{name}`)",
-            path.display()
-        );
+    if build_root_rel.trim().is_empty() {
+        bail!("xdp `{name}`: profiles have no build_root");
     }
-    let elf_name = xdp_name_from_file(&path)
-        .with_context(|| format!("parse name from {}", path.display()))?;
-    if elf_name != name {
-        bail!(
-            "xdp profile name `{name}` != ELF-derived name `{elf_name}` ({})",
-            path.display()
-        );
-    }
-    let sz = file_size(&path).unwrap_or(0);
-    log_line(
-        peer,
-        &format!(
-            "[xdp] `{name}`: {} ({})",
-            path.display(),
-            fmt_bytes(sz)
-        ),
-    );
+    let build_root = abs_under_root(root, build_root_rel);
+    let mode = match xdp.mode.as_str() {
+        "aot" => xpost_artifact::XdpMode::Aot,
+        "jit" => xpost_artifact::XdpMode::Jit,
+        "rbpf" => xpost_artifact::XdpMode::Rbpf,
+        other => bail!("xdp `{name}`: unknown mode `{other}`"),
+    };
+    let image = xpost_artifact::resolve_flash_image(&build_root, &xdp.program, mode, name)
+        .with_context(|| format!("resolve xdp `{name}`"))?;
+    let flash_name = image.profile_name().to_owned();
+    let path = image.path().display().to_string();
+    let sz = image.len();
+    log_line(peer, &format!("[xdp] `{name}`: {path} ({})", fmt_bytes(sz)));
 
     let t_flash = Instant::now();
     // Transient espflash bootloader errors after HAL↔XDP fw switches; retry once.
@@ -305,8 +303,8 @@ fn flash_one_xdp(
         for attempt in 1..=ATTEMPTS {
             let g = lock(state)?;
             match g.handler.flash(FlashOp::Xdp {
-                name: elf_name.clone(),
-                path: path.display().to_string(),
+                name: flash_name.clone(),
+                path: path.clone(),
             }) {
                 Ok(o) => {
                     last = Some(Ok(o));
@@ -332,8 +330,7 @@ fn flash_one_xdp(
                 }
             }
         }
-        last
-            .unwrap_or_else(|| Err(std::io::Error::other("flash xdp: no attempts")))
+        last.unwrap_or_else(|| Err(std::io::Error::other("flash xdp: no attempts")))
             .with_context(|| format!("flash xdp `{name}`"))?
     };
     let flash_dur = t_flash.elapsed();
@@ -370,9 +367,9 @@ fn run_build(root: &Path, build: &BuildSpec, label: &str, peer: &str) -> Result<
         ),
     );
     let t0 = Instant::now();
-    // Artifact paths in profiles.toml sit under the build cwd's own target/.
-    // An inherited CARGO_TARGET_DIR compiles somewhere else and the flash
-    // then sends the stale file at the profile path.
+    // Firmware and producer builds write under their cwd. An inherited
+    // CARGO_TARGET_DIR compiles somewhere else, so the container the index
+    // names is stale or missing.
     let status = ProcCommand::new(prog)
         .args(args)
         .current_dir(&cwd)
@@ -388,10 +385,7 @@ fn run_build(root: &Path, build: &BuildSpec, label: &str, peer: &str) -> Result<
             args.join(" ")
         );
     }
-    log_line(
-        peer,
-        &format!("build {label} ok in {}", fmt_dur(elapsed)),
-    );
+    log_line(peer, &format!("build {label} ok in {}", fmt_dur(elapsed)));
     Ok(elapsed)
 }
 
@@ -455,7 +449,12 @@ pub fn disable_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     })
 }
 
-pub fn flash_xdp_slot(state: &Mutex<AgentState>, name: &str, slot: u8, peer: &str) -> Result<String> {
+pub fn flash_xdp_slot(
+    state: &Mutex<AgentState>,
+    name: &str,
+    slot: u8,
+    peer: &str,
+) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
         bail!("empty xdp name");
@@ -724,14 +723,7 @@ pub fn update_map(
             for e in entries {
                 let key = e.key.as_bytes();
                 let value = e.value.as_bytes();
-                req(
-                    &g,
-                    &Command::UpdateMap {
-                        name,
-                        key,
-                        value,
-                    },
-                )?;
+                req(&g, &Command::UpdateMap { name, key, value })?;
                 n += 1;
             }
             Ok(format!("OK update map n={n}"))
@@ -785,10 +777,17 @@ pub fn perf_prepare(
 }
 
 pub fn perf_arm(state: &Mutex<AgentState>, epoch: u32, peer: &str) -> Result<String> {
-    with_log(peer, "PerfArm", &format!("epoch={epoch}"), false, state, || {
-        let g = lock(state)?;
-        format_perf_session(&req(&g, &Command::PerfArm { epoch })?)
-    })
+    with_log(
+        peer,
+        "PerfArm",
+        &format!("epoch={epoch}"),
+        false,
+        state,
+        || {
+            let g = lock(state)?;
+            format_perf_session(&req(&g, &Command::PerfArm { epoch })?)
+        },
+    )
 }
 
 pub fn perf_freeze(state: &Mutex<AgentState>, epoch: u32, peer: &str) -> Result<String> {
@@ -913,96 +912,107 @@ pub fn run_cmd(state: &Mutex<AgentState>, cmd: &str, peer: &str) -> Result<Strin
         bail!("empty cmd");
     }
     let owned = cmd.to_string();
-    with_log(peer, "Run", &format!("`{owned}`"), false, state, move || {
-        let parsed = parse_app_command(&owned)?;
-        let g = lock(state)?;
-        match &parsed {
-            ParsedCmd::Ping => {
-                req(&g, &Command::Ping)?;
-                Ok("OK ping".into())
-            }
-            ParsedCmd::EnableXdp => {
-                req(&g, &Command::EnableXdp)?;
-                Ok("OK enable xdp".into())
-            }
-            ParsedCmd::DisableXdp => {
-                req(&g, &Command::DisableXdp)?;
-                Ok("OK disable xdp".into())
-            }
-            ParsedCmd::EnableExec => {
-                req(&g, &Command::EnableExec)?;
-                Ok("OK enable exec".into())
-            }
-            ParsedCmd::DisableExec => {
-                req(&g, &Command::DisableExec)?;
-                Ok("OK disable exec".into())
-            }
-            ParsedCmd::ClearMap { name } => {
-                req(&g, &Command::ClearMap { name })?;
-                Ok("OK clear map".into())
-            }
-            ParsedCmd::GetMap { name } => match req(&g, &Command::GetMap { name })? {
-                OkReply::GetMap { blob } => {
-                    Ok(format!("OK get map {} b64={}", blob.len(), base64_encode(blob)))
+    with_log(
+        peer,
+        "Run",
+        &format!("`{owned}`"),
+        false,
+        state,
+        move || {
+            let parsed = parse_app_command(&owned)?;
+            let g = lock(state)?;
+            match &parsed {
+                ParsedCmd::Ping => {
+                    req(&g, &Command::Ping)?;
+                    Ok("OK ping".into())
                 }
-                _ => bail!("unexpected get map reply"),
-            },
-            ParsedCmd::UpdateMap { name, key, value } => {
-                req(
+                ParsedCmd::EnableXdp => {
+                    req(&g, &Command::EnableXdp)?;
+                    Ok("OK enable xdp".into())
+                }
+                ParsedCmd::DisableXdp => {
+                    req(&g, &Command::DisableXdp)?;
+                    Ok("OK disable xdp".into())
+                }
+                ParsedCmd::EnableExec => {
+                    req(&g, &Command::EnableExec)?;
+                    Ok("OK enable exec".into())
+                }
+                ParsedCmd::DisableExec => {
+                    req(&g, &Command::DisableExec)?;
+                    Ok("OK disable exec".into())
+                }
+                ParsedCmd::ClearMap { name } => {
+                    req(&g, &Command::ClearMap { name })?;
+                    Ok("OK clear map".into())
+                }
+                ParsedCmd::GetMap { name } => match req(&g, &Command::GetMap { name })? {
+                    OkReply::GetMap { blob } => Ok(format!(
+                        "OK get map {} b64={}",
+                        blob.len(),
+                        base64_encode(blob)
+                    )),
+                    _ => bail!("unexpected get map reply"),
+                },
+                ParsedCmd::UpdateMap { name, key, value } => {
+                    req(
+                        &g,
+                        &Command::UpdateMap {
+                            name,
+                            key: key.as_bytes(),
+                            value: value.as_bytes(),
+                        },
+                    )?;
+                    Ok("OK update map".into())
+                }
+                ParsedCmd::ClearPerf => {
+                    req(&g, &Command::ClearPerf)?;
+                    Ok("OK clear perf".into())
+                }
+                ParsedCmd::GetPerf => match req(&g, &Command::GetPerf)? {
+                    OkReply::GetPerf { blob } => Ok(format!(
+                        "OK get perf {} b64={}",
+                        blob.len(),
+                        base64_encode(blob)
+                    )),
+                    _ => bail!("unexpected get perf reply"),
+                },
+                ParsedCmd::PerfPrepare {
+                    uuid,
+                    kind,
+                    profile,
+                } => format_perf_session(&req(
                     &g,
-                    &Command::UpdateMap {
-                        name,
-                        key: key.as_bytes(),
-                        value: value.as_bytes(),
+                    &Command::PerfPrepare {
+                        uuid: *uuid,
+                        kind: *kind,
+                        profile: *profile,
                     },
-                )?;
-                Ok("OK update map".into())
-            }
-            ParsedCmd::ClearPerf => {
-                req(&g, &Command::ClearPerf)?;
-                Ok("OK clear perf".into())
-            }
-            ParsedCmd::GetPerf => match req(&g, &Command::GetPerf)? {
-                OkReply::GetPerf { blob } => {
-                    Ok(format!("OK get perf {} b64={}", blob.len(), base64_encode(blob)))
+                )?),
+                ParsedCmd::PerfArm { epoch } => {
+                    format_perf_session(&req(&g, &Command::PerfArm { epoch: *epoch })?)
                 }
-                _ => bail!("unexpected get perf reply"),
-            },
-            ParsedCmd::PerfPrepare {
-                uuid,
-                kind,
-                profile,
-            } => format_perf_session(&req(
-                &g,
-                &Command::PerfPrepare {
-                    uuid: *uuid,
-                    kind: *kind,
-                    profile: *profile,
-                },
-            )?),
-            ParsedCmd::PerfArm { epoch } => {
-                format_perf_session(&req(&g, &Command::PerfArm { epoch: *epoch })?)
+                ParsedCmd::PerfFreeze { epoch } => {
+                    format_perf_session(&req(&g, &Command::PerfFreeze { epoch: *epoch })?)
+                }
+                ParsedCmd::PerfRead {
+                    epoch,
+                    offset,
+                    max_bytes,
+                } => format_perf_session(&req(
+                    &g,
+                    &Command::PerfRead {
+                        epoch: *epoch,
+                        offset: *offset,
+                        max_bytes: *max_bytes,
+                    },
+                )?),
+                ParsedCmd::PerfRelease { epoch } => {
+                    format_perf_session(&req(&g, &Command::PerfRelease { epoch: *epoch })?)
+                }
             }
-            ParsedCmd::PerfFreeze { epoch } => {
-                format_perf_session(&req(&g, &Command::PerfFreeze { epoch: *epoch })?)
-            }
-            ParsedCmd::PerfRead {
-                epoch,
-                offset,
-                max_bytes,
-            } => format_perf_session(&req(
-                &g,
-                &Command::PerfRead {
-                    epoch: *epoch,
-                    offset: *offset,
-                    max_bytes: *max_bytes,
-                },
-            )?),
-            ParsedCmd::PerfRelease { epoch } => {
-                format_perf_session(&req(&g, &Command::PerfRelease { epoch: *epoch })?)
-            }
-        }
-    })
+        },
+    )
 }
 
 enum ParsedCmd<'a> {
@@ -1011,8 +1021,12 @@ enum ParsedCmd<'a> {
     DisableXdp,
     EnableExec,
     DisableExec,
-    ClearMap { name: &'a str },
-    GetMap { name: &'a str },
+    ClearMap {
+        name: &'a str,
+    },
+    GetMap {
+        name: &'a str,
+    },
     UpdateMap {
         name: &'a str,
         key: &'a str,
@@ -1244,7 +1258,11 @@ mod tests {
         let profile = "ab".repeat(32);
         let line = format!("perf prepare 00112233445566778899aabbccddeeff trace {profile}");
         match parse_app_command(&line).unwrap() {
-            ParsedCmd::PerfPrepare { uuid, kind, profile } => {
+            ParsedCmd::PerfPrepare {
+                uuid,
+                kind,
+                profile,
+            } => {
                 assert_eq!(uuid[0], 0x00);
                 assert_eq!(uuid[15], 0xff);
                 assert_eq!(kind, PerfVariant::Trace);
