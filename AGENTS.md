@@ -119,6 +119,8 @@ Check `libbpf-mcu/make/ninja/{bpf,esp32c3}.ninja` before describing the compiler
 Current rules compile BPF and RV32IMC separately from C. The installed image comes from the RV32IMC build.
 Do not describe this build as translating eBPF bytecode into RV32IMC.
 
+The installed XDP image is not a path in `profiles.toml`. After the build, `xpost-artifact` reads `index.toml`, the program manifest, and the mode report under `build_root` (today `../build`). It returns one primary container or it refuses the flash. `aot` is `<program>/rv32/<program>_rv32.elf`. `jit` is `<program>/jit/<program>_jit.elf`. `rbpf` is `<program>/bpf-xpost/<program>_bpf-xpost.elf`. HAL firmware has no container. The raw `<program>_bpf.o` is not flashed. The reader is pinned to libbpf-mcu commit `30d8f071` while that pull request is open.
+
 Each listed network firmware project reads `WIFI_SSID` and `WIFI_PASS` from its own `.env` file:
 
 - `examples/just_xdp/`
@@ -193,8 +195,11 @@ Use the repository fish script from the repository root:
 The script builds the binary, uploads it to TR3000, and runs it without arguments through SSH.
 The `xpost-test` target is `aarch64-unknown-linux-musl`.
 On this Mac, its path toolchain delegates Cargo to Docker.
+rustup still selects the absolute shim path in `xpost-test/rust-toolchain.toml`, because a relative path toolchain is rejected.
+That shim discovers the `xpost-test` directory that contains the current directory.
+It stages sources under `/Users/nan/.cache/xpost-test-docker/<hash of that checkout>` and copies `target/` back only there.
+A second checkout does not share the stage.
 The default container `quirky_villani` must already be running.
-The shim stages sources under `/Users/nan/.cache/xpost-test-docker` and copies build outputs back to `xpost-test/target/`.
 The host build embeds the eBPF object.
 `TEST_SKIP_EBPF` produces a stub and is unsuitable for TR3000 runs.
 Use these manual steps only when necessary:
