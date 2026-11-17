@@ -3,16 +3,16 @@
 use std::convert::Infallible;
 use std::fmt;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::client::error::{Interrupted, ParseError, RequestTimeout};
 use crate::client::{MemoryPair, MemoryServer, SerialHandler};
-use crate::r#type::reply::{ErrReply, MapError, PerfError, ServerError, SyntaxError};
-use crate::server::serial::{DefaultHandler, RequestHandler, SerialHandlerBuilder};
 use crate::server::SerialHandler as ServerHandler;
+use crate::server::serial::{DefaultHandler, RequestHandler, SerialHandlerBuilder};
+use crate::r#type::reply::{ErrReply, MapError, PerfError, ServerError, SyntaxError};
 
 pub type ReadFn = Box<dyn FnMut() -> Option<u8> + Send>;
 pub type WriteFn = Box<dyn FnMut(&[u8]) -> Result<(), Infallible> + Send>;
@@ -187,8 +187,8 @@ where
     ));
 
     let pair = MemoryPair::new();
-    let client = SerialHandler::open_memory_with_log(pair.client, &log_path)
-        .expect("open_memory_with_log");
+    let client =
+        SerialHandler::open_memory_with_log(pair.client, &log_path).expect("open_memory_with_log");
     let handler = register(builder(pair.server));
     let _server = spawn_server(handler);
     thread::sleep(Duration::from_millis(20));

@@ -5,9 +5,9 @@ use std::path::Path;
 use xpost_elf::{ScanOutcome, scan_at};
 
 use crate::client::FLASH_SECTOR;
-use std::io;
 use crate::client::flash::FlashConfig;
 use crate::client::port::Port;
+use std::io;
 
 /// Absolute flash span holding packed XDP ELF containers (`partitions.csv` row).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,8 +33,8 @@ pub enum InstallOutcome {
 }
 
 pub fn xdp_name_from_file(path: &Path) -> io::Result<String> {
-    let data =
-        std::fs::read(path).map_err(|e| std::io::Error::other(format!("read {}: {e}", path.display())))?;
+    let data = std::fs::read(path)
+        .map_err(|e| std::io::Error::other(format!("read {}: {e}", path.display())))?;
     xdp_name_from_bytes(&data)
 }
 
@@ -135,8 +135,8 @@ pub(crate) fn install(
     path: &Path,
 ) -> io::Result<InstallOutcome> {
     let xdp = cfg.xdp_table()?;
-    let data =
-        std::fs::read(path).map_err(|e| std::io::Error::other(format!("read {}: {e}", path.display())))?;
+    let data = std::fs::read(path)
+        .map_err(|e| std::io::Error::other(format!("read {}: {e}", path.display())))?;
     let cap = xdp.image_capacity;
     if data.len() > cap {
         return Err(std::io::Error::other(format!(

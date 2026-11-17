@@ -3,9 +3,9 @@
 use std::sync::OnceLock;
 
 use crate::client::{Command, OkReply};
-use crate::r#type::reply::MapError;
 use crate::server::reply::ReplyWriter;
 use crate::tests::harness::{TestError, with_session_logged};
+use crate::r#type::reply::MapError;
 
 const MAP_BLOB: &[u8] = b"\x01\x02\x03";
 const PERF_BLOB: &[u8] = b"perf";
@@ -23,10 +23,12 @@ fn capture_full_session_log() -> &'static [String] {
                         assert_eq!(name, "counter");
                         reply.ok(OkReply::ClearMap);
                     })
-                    .on_update_map(|name: &str, key: &[u8], value: &[u8], reply: ReplyWriter<'_>| {
-                        assert_eq!((name, key, value), ("counter", &b"0"[..], &b"1"[..]));
-                        reply.ok(OkReply::UpdateMap);
-                    })
+                    .on_update_map(
+                        |name: &str, key: &[u8], value: &[u8], reply: ReplyWriter<'_>| {
+                            assert_eq!((name, key, value), ("counter", &b"0"[..], &b"1"[..]));
+                            reply.ok(OkReply::UpdateMap);
+                        },
+                    )
                     .on_clear_perf(|reply: ReplyWriter<'_>| reply.ok(OkReply::ClearPerf))
                     .on_get_map(|name: &str, reply: ReplyWriter<'_>| {
                         if name == "counter" {
@@ -136,10 +138,7 @@ fn log_records_init() {
 #[test]
 fn log_records_ping() {
     let log = bodies(capture_full_session_log());
-    assert_in_order(
-        &log,
-        &["[cmd] → ping", "[uart] OK ping", "[cmd] ← OK ping"],
-    );
+    assert_in_order(&log, &["[cmd] → ping", "[uart] OK ping", "[cmd] ← OK ping"]);
 }
 
 #[test]
@@ -229,9 +228,6 @@ fn log_records_map_err() {
     let log = bodies(capture_full_session_log());
     assert_in_order(
         &log,
-        &[
-            "[cmd] → get map nope",
-            "[uart] ERR map name-not-found",
-        ],
+        &["[cmd] → get map nope", "[uart] ERR map name-not-found"],
     );
 }
