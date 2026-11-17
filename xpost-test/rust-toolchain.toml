@@ -1,5 +1,6 @@
 [toolchain]
 # Absolute path required (rustup rejects relative path toolchains).
-# Mac rustup runs this cargo → docker exec quirky_villani.
-# Inside the container the shim sets RUSTUP_TOOLCHAIN=nightly (no recurse).
-path = "/Users/nan/bs/xpost/xpost-test/.cargo/docker-toolchain"
+# This directory holds the dispatcher installed by
+# .cargo/docker-toolchain/install.sh. It runs the shim of the checkout that
+# contains the current directory, so any worktree can be the build entry.
+path = "/Users/nan/.cache/xpost-test-docker/toolchain"
