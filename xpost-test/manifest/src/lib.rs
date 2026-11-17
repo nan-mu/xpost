@@ -8,9 +8,9 @@
 pub enum Pipeline {
     /// Native firmware. No XDP ELF is loaded.
     Hal,
-    /// The same C source compiled to RV32, not a translation of eBPF.
+    /// C source compiled directly to RV32IMC.
     Aot,
-    /// Host JIT of eBPF to RV32. The device runs the machine code.
+    /// eBPF bytecode compiled to RV32IMC on the host.
     Jit,
     /// eBPF bytecode for the MCU interpreter.
     Rbpf,

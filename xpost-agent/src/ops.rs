@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 use xpost_serial::client::{Command, FlashOp, FlashResult, OkReply};
 use xpost_serial::command::PerfVariant;
 
@@ -187,38 +188,32 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
         ),
     );
 
+    let firmware_sha = firmware_hash(&firmware)?;
     let t_flash = Instant::now();
-    {
-        let g = lock(state)?;
-        g.handler
-            .flash(FlashOp::Fw {
-                firmware: firmware.display().to_string(),
-                partitions: partitions.display().to_string(),
-            })
-            .with_context(|| format!("flash fw `{name}`"))?;
-    }
-    let mut flash_dur = t_flash.elapsed();
-
-    // Profiles carry one cold image per fw. Stale names (e.g. just_tx → just_drop)
-    // would append mid-sector and espflash erase_region rejects unaligned addresses.
-    if !linked_xdps.is_empty() {
-        log_line(peer, "clear xdp table before co-flash");
-        let t_clear = Instant::now();
-        {
+    let xdp_parts = prepare_and_flash(
+        &linked_xdps,
+        |x| resolve_xdp(&root, &build_root, x, firmware_sha),
+        || {
+            let g = lock(state)?;
+            g.handler
+                .flash(FlashOp::Fw {
+                    firmware: firmware.display().to_string(),
+                    partitions: partitions.display().to_string(),
+                })
+                .with_context(|| format!("flash fw `{name}`"))?;
+            Ok(())
+        },
+        || {
+            log_line(peer, "clear xdp table before co-flash");
             let g = lock(state)?;
             g.handler
                 .flash(FlashOp::Clear { names: Vec::new() })
                 .context("clear xdp before co-flash")?;
-        }
-        flash_dur += t_clear.elapsed();
-    }
-
-    let mut xdp_parts = Vec::new();
-    for x in &linked_xdps {
-        let part = flash_one_xdp(state, &root, &build_root, x, peer)?;
-        flash_dur += part.1;
-        xdp_parts.push(part.0);
-    }
+            Ok(())
+        },
+        |image| flash_one_xdp(state, image, fw.xdp_image_capacity, peer).map(|part| part.0),
+    )?;
+    let flash_dur = t_flash.elapsed();
 
     let mut msg = format!(
         "flashed fw={name} size={} build={} flash={}",
@@ -250,35 +245,76 @@ pub fn flash_xdp(
         false,
         state,
         || {
-            let (root, build_root, xdp) = {
+            let (root, build_root, xdp, firmware, image_capacity) = {
                 let g = lock(state)?;
                 let xdp = g
                     .profiles
                     .xdp(name)
                     .cloned()
                     .with_context(|| format!("unknown xdp `{name}`"))?;
-                // Ensure linked fw / partition table resolve (validated on load).
-                let _ = g.profiles.partition_table_for_xdp(name)?;
-                (g.root.clone(), g.profiles.build_root().to_owned(), xdp)
+                let fw = g
+                    .profiles
+                    .fw(&xdp.fw)
+                    .with_context(|| format!("xdp `{name}` links missing fw `{}`", xdp.fw))?;
+                (
+                    g.root.clone(),
+                    g.profiles.build_root().to_owned(),
+                    xdp.clone(),
+                    abs_under_root(&g.root, &fw.artifact),
+                    fw.xdp_image_capacity,
+                )
             };
-            let (summary, _) = flash_one_xdp(state, &root, &build_root, &xdp, peer)?;
+            let image = prepare_standalone(&root, &build_root, &xdp, &firmware, resolve_xdp)?;
+            let (summary, _) = flash_one_xdp(state, &image, image_capacity, peer)?;
             Ok(summary)
         },
     )
 }
 
-/// Build + flash one XDP profile. Returns (summary, flash duration).
-fn flash_one_xdp(
-    state: &Mutex<AgentState>,
+// The plan holds only images the resolver has verified and cached.
+struct PreparedPlan<I> {
+    images: Vec<I>,
+}
+
+fn prepare_and_flash<I>(
+    xdps: &[XdpProfile],
+    mut resolve: impl FnMut(&XdpProfile) -> Result<I>,
+    firmware: impl FnOnce() -> Result<()>,
+    clear: impl FnOnce() -> Result<()>,
+    mut install: impl FnMut(&I) -> Result<String>,
+) -> Result<Vec<String>> {
+    let plan = PreparedPlan {
+        images: xdps.iter().map(&mut resolve).collect::<Result<Vec<_>>>()?,
+    };
+    firmware()?;
+    if !plan.images.is_empty() {
+        clear()?;
+    }
+    plan.images.iter().map(&mut install).collect()
+}
+
+fn firmware_hash(path: &Path) -> Result<[u8; 32]> {
+    let bytes = std::fs::read(path).with_context(|| format!("read firmware {}", path.display()))?;
+    Ok(Sha256::digest(bytes).into())
+}
+
+fn prepare_standalone<I>(
+    root: &Path,
+    build_root: &str,
+    xdp: &XdpProfile,
+    firmware: &Path,
+    resolve: impl FnOnce(&Path, &str, &XdpProfile, [u8; 32]) -> Result<I>,
+) -> Result<I> {
+    resolve(root, build_root, xdp, firmware_hash(firmware)?)
+}
+
+fn resolve_xdp(
     root: &Path,
     build_root_rel: &str,
     xdp: &XdpProfile,
-    peer: &str,
-) -> Result<(String, Duration)> {
+    firmware_sha: [u8; 32],
+) -> Result<xpost_artifact::FlashImage> {
     let name = xdp.name.as_str();
-    let image_capacity = lock(state)?.profiles.xdp_image_capacity(xdp)?;
-    let _build_dur = run_build(root, &xdp.build, &format!("xdp `{name}`"), peer)?;
-
     if build_root_rel.trim().is_empty() {
         bail!("xdp `{name}`: profiles have no build_root");
     }
@@ -289,8 +325,25 @@ fn flash_one_xdp(
         "rbpf" => xpost_artifact::XdpMode::Rbpf,
         other => bail!("xdp `{name}`: unknown mode `{other}`"),
     };
-    let image = xpost_artifact::resolve_flash_image(&build_root, &xdp.program, mode, name)
-        .with_context(|| format!("resolve xdp `{name}`"))?;
+    xpost_artifact::resolve_flash_image(
+        &build_root,
+        &root.join(".cache/xpost-artifact"),
+        &xdp.program,
+        mode,
+        name,
+        firmware_sha,
+    )
+    .with_context(|| format!("resolve xdp `{name}`"))
+}
+
+/// Install an already verified image. Returns (summary, flash duration).
+fn flash_one_xdp(
+    state: &Mutex<AgentState>,
+    image: &xpost_artifact::FlashImage,
+    image_capacity: Option<usize>,
+    peer: &str,
+) -> Result<(String, Duration)> {
+    let name = image.profile_name();
     let flash_name = image.profile_name().to_owned();
     let path = image.path().display().to_string();
     let sz = image.len();
@@ -371,9 +424,8 @@ fn run_build(root: &Path, build: &BuildSpec, label: &str, peer: &str) -> Result<
         ),
     );
     let t0 = Instant::now();
-    // Firmware and producer builds write under their cwd. An inherited
-    // CARGO_TARGET_DIR compiles somewhere else, so the container the index
-    // names is stale or missing.
+    // Firmware builds write under their cwd. An inherited CARGO_TARGET_DIR
+    // would move the ELF away from the configured firmware artifact path.
     let status = ProcCommand::new(prog)
         .args(args)
         .current_dir(&cwd)
@@ -1256,6 +1308,173 @@ fn base64_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn xdp(name: &str) -> XdpProfile {
+        XdpProfile {
+            name: name.into(),
+            fw: "owner".into(),
+            program: name.into(),
+            mode: "aot".into(),
+            target: None,
+        }
+    }
+
+    #[test]
+    fn preparation_guards_all_device_writes_and_preserves_order() {
+        use std::cell::RefCell;
+        let xdps = [xdp("first"), xdp("second")];
+        let writes = RefCell::new(Vec::new());
+        let result = prepare_and_flash(
+            &xdps,
+            |x| {
+                if x.name == "second" {
+                    bail!("resolver failure");
+                }
+                Ok(x.name.clone())
+            },
+            || {
+                writes.borrow_mut().push("fw".to_string());
+                Ok(())
+            },
+            || {
+                writes.borrow_mut().push("clear".to_string());
+                Ok(())
+            },
+            |x| {
+                writes.borrow_mut().push(x.clone());
+                Ok(x.clone())
+            },
+        );
+        assert!(result.is_err());
+        assert!(writes.borrow().is_empty());
+
+        prepare_and_flash(
+            &xdps,
+            |x| Ok(x.name.clone()),
+            || {
+                writes.borrow_mut().push("fw".to_string());
+                Ok(())
+            },
+            || {
+                writes.borrow_mut().push("clear".to_string());
+                Ok(())
+            },
+            |x| {
+                writes.borrow_mut().push(x.clone());
+                Ok(x.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(*writes.borrow(), ["fw", "clear", "first", "second"]);
+    }
+
+    #[test]
+    fn hal_skips_resolver_and_clear() {
+        let writes = std::cell::RefCell::new(Vec::new());
+        prepare_and_flash::<String>(
+            &[],
+            |_| panic!("resolver called"),
+            || {
+                writes.borrow_mut().push("fw");
+                Ok(())
+            },
+            || {
+                writes.borrow_mut().push("clear");
+                Ok(())
+            },
+            |_| panic!("install called"),
+        )
+        .unwrap();
+        assert_eq!(*writes.borrow(), ["fw"]);
+    }
+
+    #[test]
+    fn standalone_hashes_existing_firmware_without_building() {
+        let dir = std::env::temp_dir().join(format!("xpost-agent-fw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let firmware = dir.join("fw");
+        std::fs::write(&firmware, b"abc").unwrap();
+        let result =
+            prepare_standalone(&dir, "build", &xdp("first"), &firmware, |_, _, _, hash| {
+                assert_eq!(
+                    hash,
+                    [
+                        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde,
+                        0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+                        0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad
+                    ]
+                );
+                Ok(())
+            });
+        assert!(result.is_ok());
+        std::fs::remove_file(&firmware).unwrap();
+        assert!(
+            prepare_standalone(
+                &dir,
+                "build",
+                &xdp("first"),
+                &firmware,
+                |_, _, _, _| -> Result<()> { panic!("resolver called") }
+            )
+            .is_err()
+        );
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn firmware_hash_mismatch_prevents_device_writes() {
+        fn hex_hash(bytes: &[u8]) -> String {
+            Sha256::digest(bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        }
+        let dir = std::env::temp_dir().join(format!("xpost-agent-mismatch-{}", std::process::id()));
+        let build = dir.join("build");
+        std::fs::create_dir_all(build.join("first/rv32")).unwrap();
+        let report = format!(
+            "schema = \"libbpf-mcu.report.v1\"\nstatus = \"success\"\n[firmware]\nsha256 = \"{}\"\n",
+            hex_hash(b"other firmware")
+        );
+        std::fs::write(build.join("first/rv32/report.toml"), &report).unwrap();
+        let manifest = format!(
+            "schema = \"libbpf-mcu.program.v1\"\n[[mode]]\nname = \"rv32\"\nreport = \"rv32/report.toml\"\nreport_sha256 = \"{}\"\n",
+            hex_hash(report.as_bytes())
+        );
+        std::fs::write(build.join("first/manifest.toml"), &manifest).unwrap();
+        let index = format!(
+            "schema = \"libbpf-mcu.artifacts.v1\"\n[[program]]\nname = \"first\"\nmanifest = \"first/manifest.toml\"\nmanifest_sha256 = \"{}\"\n",
+            hex_hash(manifest.as_bytes())
+        );
+        std::fs::write(build.join("index.toml"), index).unwrap();
+        let fw = dir.join("fw");
+        std::fs::write(&fw, b"current firmware").unwrap();
+        let hash = firmware_hash(&fw).unwrap();
+        let writes = std::cell::Cell::new(0);
+        let result = prepare_and_flash(
+            &[xdp("first")],
+            |x| resolve_xdp(&dir, "build", x, hash),
+            || {
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+            || {
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+            |_| {
+                writes.set(writes.get() + 1);
+                Ok(String::new())
+            },
+        );
+        let error = result.unwrap_err();
+        assert!(error.chain().any(|e| matches!(
+            e.downcast_ref::<xpost_artifact::ResolveError>(),
+            Some(xpost_artifact::ResolveError::FirmwareMismatch)
+        )));
+        assert_eq!(writes.get(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn a_prepare_line_keeps_the_decoded_bytes() {

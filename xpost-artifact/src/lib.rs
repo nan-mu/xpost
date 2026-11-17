@@ -8,7 +8,9 @@
 //! `<program>/<mode>/report.toml`. It does not read `profiles.toml`.
 //! It does not flash, and it does not talk to the serial worker.
 
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
@@ -85,15 +87,6 @@ impl ProducerMode {
             Self::BpfXpost => "bpf-xpost",
         }
     }
-
-    /// `MODE_SPECS` primary `xpost_container` file name. Not a directory scan.
-    fn container_file_name(self, program: &str) -> String {
-        match self {
-            Self::Rv32 => format!("{program}_rv32.elf"),
-            Self::Jit => format!("{program}_jit.elf"),
-            Self::BpfXpost => format!("{program}_bpf-xpost.elf"),
-        }
-    }
 }
 
 /// One container the caller may hand to the existing serial flash.
@@ -160,6 +153,10 @@ pub enum ResolveError {
     },
     /// No single primary `xpost_container` in format `xpost-compact-elf-v0`.
     ContainerMissing,
+    FirmwareMismatch,
+    CacheInvalid {
+        path: PathBuf,
+    },
     NameMismatch {
         profile: String,
         embedded: String,
@@ -194,8 +191,13 @@ impl std::fmt::Display for ResolveError {
             Self::ContainerMissing => {
                 write!(f, "no single primary xpost_container")
             }
+            Self::FirmwareMismatch => write!(f, "firmware SHA-256 mismatch"),
+            Self::CacheInvalid { path } => write!(f, "invalid cache entry {}", path.display()),
             Self::NameMismatch { profile, embedded } => {
-                write!(f, "embedded name `{embedded}` != profile `{profile}`")
+                write!(
+                    f,
+                    "embedded name `{embedded}` != profile `{profile}`; generate the requested profile via libbpf-mcu"
+                )
             }
         }
     }
@@ -207,19 +209,31 @@ impl std::error::Error for ResolveError {}
 ///
 /// `profile_name` is the xdp profile name, not the C stem. `case_mark_idle`
 /// passes program `case_mark` and profile name `case_mark_idle`.
-/// `--image-name` is the build command's job. This function only reads.
+/// `--image-name` is the build command's job. Validated containers are copied
+/// to `cache_root` and bound to `expected_firmware_sha256`.
 ///
 /// Refuses a missing file, a hash or size mismatch, a schema mismatch, a
 /// status other than `success`, a mode that is only stale or failed, a
 /// verification that is not `accepted`, a file that is not the primary
-/// `xpost_container`, and an embedded name other than `profile_name`.
+/// `xpost_container`, a firmware mismatch, and invalid cache entries. A different
+/// embedded name can use a previously cached image for the requested profile.
 pub fn resolve_flash_image(
     build_root: &Path,
+    cache_root: &Path,
     program: &str,
     mode: XdpMode,
     profile_name: &str,
+    expected_firmware_sha256: [u8; 32],
 ) -> Result<FlashImage, ResolveError> {
-    let index_path = build_root.join("index.toml");
+    let build_root = std::fs::canonicalize(build_root).map_err(|_| ResolveError::Unreadable {
+        path: build_root.to_path_buf(),
+    })?;
+    if !valid_segment(program) || !valid_segment(profile_name) {
+        return Err(ResolveError::Unreadable {
+            path: PathBuf::from("invalid program or profile name"),
+        });
+    }
+    let index_path = confined(&build_root, build_root.join("index.toml"))?;
     let index_bytes = read_bytes(&index_path)?;
     let index = parse_doc(&index_bytes, &index_path)?;
     require_schema(&index, SCHEMA_INDEX, &index_path)?;
@@ -244,9 +258,10 @@ pub fn resolve_flash_image(
     let manifest_rel = req_str(program_row, "manifest", &index_path)?;
     let manifest_sha = req_str(program_row, "manifest_sha256", &index_path)?;
     let manifest_path =
-        rel_join(build_root, manifest_rel).map_err(|_| ResolveError::Unreadable {
+        rel_join(&build_root, manifest_rel).map_err(|_| ResolveError::Unreadable {
             path: PathBuf::from(manifest_rel),
         })?;
+    let manifest_path = confined(&build_root, manifest_path)?;
     let manifest_bytes = read_bytes(&manifest_path)?;
     if hex_sha256(&manifest_bytes) != manifest_sha {
         return Err(ResolveError::ManifestHashMismatch);
@@ -273,6 +288,7 @@ pub fn resolve_flash_image(
     let report_path = rel_join(report_base, report_rel).map_err(|_| ResolveError::Unreadable {
         path: PathBuf::from(report_rel),
     })?;
+    let report_path = confined(&build_root, report_path)?;
     let report_bytes = read_bytes(&report_path)?;
     if hex_sha256(&report_bytes) != report_sha {
         return Err(ResolveError::ReportHashMismatch);
@@ -287,11 +303,20 @@ pub fn resolve_flash_image(
         });
     }
 
-    let expected_file = producer.container_file_name(program);
+    let firmware = report
+        .get("firmware")
+        .ok_or_else(|| ResolveError::SchemaMismatch {
+            path: report_path.clone(),
+        })?;
+    let firmware_sha = req_str(firmware, "sha256", &report_path)?;
+    if firmware_sha != hex_of(&expected_firmware_sha256) {
+        return Err(ResolveError::FirmwareMismatch);
+    }
+
     let artifacts = tables(&report, "artifact", &report_path)?;
     let mut checked = Vec::with_capacity(artifacts.len());
     for art in artifacts {
-        checked.push(check_artifact(art, &report_path)?);
+        checked.push(check_artifact(art, &report_path, &build_root)?);
     }
 
     let verification = match report.get("verification") {
@@ -304,27 +329,230 @@ pub fn resolve_flash_image(
         });
     }
 
-    let image = select_container(&checked, &expected_file)?;
+    let image = select_container(&checked)?;
     let embedded = embedded_name(&image.bytes).map_err(|_| ResolveError::Unreadable {
         path: image.path.clone(),
     })?;
-    if embedded != profile_name {
-        return Err(ResolveError::NameMismatch {
-            profile: profile_name.to_owned(),
-            embedded,
+    if !valid_segment(&embedded) {
+        return Err(ResolveError::Unreadable {
+            path: image.path.clone(),
         });
     }
+    let cache = cache_dir(cache_root, program, mode, profile_name)?;
+    let identity = CacheIdentity {
+        program,
+        mode: mode.as_db(),
+        profile: profile_name,
+        firmware: firmware_sha,
+        manifest: manifest_sha,
+        report: report_sha,
+    };
+    if embedded != profile_name {
+        let mut candidates = Vec::new();
+        for entry in std::fs::read_dir(&cache).map_err(|_| ResolveError::Unreadable {
+            path: cache.clone(),
+        })? {
+            let path = entry
+                .map_err(|_| ResolveError::Unreadable {
+                    path: cache.clone(),
+                })?
+                .path();
+            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                let (result, fw) = read_cache(&cache, &path, &identity, false)?;
+                if fw == firmware_sha {
+                    candidates.push(result);
+                }
+            }
+        }
+        candidates.sort_by(|a, b| a.path.cmp(&b.path));
+        if candidates.len() > 1 {
+            return Err(ResolveError::CacheInvalid { path: cache });
+        }
+        return candidates
+            .into_iter()
+            .next()
+            .ok_or_else(|| ResolveError::NameMismatch {
+                profile: profile_name.to_owned(),
+                embedded,
+            });
+    }
+    let digest = hex_of(&image.sha256);
+    let meta_path = cache.join(format!("{digest}.toml"));
+    let elf_path = cache.join(format!("{digest}.elf"));
+    if meta_path.symlink_metadata().is_ok() {
+        // Validate the existing snapshot before refreshing its provenance.
+        // A verified republication may bind identical bytes to a new firmware
+        // or update the manifest without changing the container digest.
+        read_cache(&cache, &meta_path, &identity, false)?;
+    }
+    // An uncommitted artifact can be left by an interrupted write. Verify it
+    // before completing the metadata commit; never overwrite existing bytes.
+    if elf_path.symlink_metadata().is_ok() {
+        let real = confined(&cache, elf_path.clone())?;
+        if read_bytes(&real)? != image.bytes {
+            return Err(ResolveError::CacheInvalid { path: elf_path });
+        }
+    } else {
+        atomic_write(&elf_path, &image.bytes)?;
+    }
+    let mut meta = toml::map::Map::new();
+    for (key, value) in [
+        ("program", program),
+        ("mode", mode.as_db()),
+        ("profile_name", profile_name),
+        ("artifact_sha256", digest.as_str()),
+        ("manifest_sha256", manifest_sha),
+        ("report_sha256", report_sha),
+        ("firmware_sha256", firmware_sha),
+    ] {
+        meta.insert(key.to_owned(), toml::Value::String(value.to_owned()));
+    }
+    meta.insert("size_bytes".into(), toml::Value::Integer(image.len as i64));
+    let bytes =
+        toml::to_string(&toml::Value::Table(meta)).map_err(|_| ResolveError::CacheInvalid {
+            path: meta_path.clone(),
+        })?;
+    atomic_write(&meta_path, bytes.as_bytes())?;
+    let (cached, _) = read_cache(&cache, &meta_path, &identity, true)?;
+    Ok(cached)
+}
 
-    Ok(FlashImage {
-        path: absolute(&image.path)?,
-        len: image.len,
-        sha256: image.sha256,
-        profile_name: profile_name.to_owned(),
-    })
+struct CacheIdentity<'a> {
+    program: &'a str,
+    mode: &'a str,
+    profile: &'a str,
+    firmware: &'a str,
+    manifest: &'a str,
+    report: &'a str,
+}
+
+fn cache_dir(
+    root: &Path,
+    program: &str,
+    mode: XdpMode,
+    profile: &str,
+) -> Result<PathBuf, ResolveError> {
+    std::fs::create_dir_all(root).map_err(|_| ResolveError::Unreadable {
+        path: root.to_path_buf(),
+    })?;
+    let root = std::fs::canonicalize(root).map_err(|_| ResolveError::Unreadable {
+        path: root.to_path_buf(),
+    })?;
+    let mut dir = root.clone();
+    for segment in [program, mode.as_db(), profile] {
+        dir.push(segment);
+        match std::fs::create_dir(&dir) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(_) => return Err(ResolveError::Unreadable { path: dir }),
+        }
+        let real = std::fs::canonicalize(&dir)
+            .map_err(|_| ResolveError::Unreadable { path: dir.clone() })?;
+        if !real.starts_with(&root) || !real.is_dir() {
+            return Err(ResolveError::Unreadable { path: dir });
+        }
+        dir = real;
+    }
+    Ok(dir)
+}
+
+fn read_cache(
+    dir: &Path,
+    meta_path: &Path,
+    id: &CacheIdentity<'_>,
+    exact_source: bool,
+) -> Result<(FlashImage, String), ResolveError> {
+    let invalid = || ResolveError::CacheInvalid {
+        path: meta_path.to_path_buf(),
+    };
+    let real = confined(dir, meta_path.to_path_buf()).map_err(|_| invalid())?;
+    let doc =
+        parse_doc(&read_bytes(&real).map_err(|_| invalid())?, &real).map_err(|_| invalid())?;
+    let get = |key| req_str(&doc, key, &real).map_err(|_| invalid());
+    let digest = get("artifact_sha256")?;
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || meta_path.file_name().and_then(|s| s.to_str()) != Some(&format!("{digest}.toml"))
+        || get("program")? != id.program
+        || get("mode")? != id.mode
+        || get("profile_name")? != id.profile
+    {
+        return Err(invalid());
+    }
+    let firmware = get("firmware_sha256")?;
+    let valid_hash = |v: &str| {
+        v.len() == 64
+            && v.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let manifest = get("manifest_sha256")?;
+    let report = get("report_sha256")?;
+    if !valid_hash(firmware)
+        || !valid_hash(manifest)
+        || !valid_hash(report)
+        || (exact_source
+            && (firmware != id.firmware || manifest != id.manifest || report != id.report))
+    {
+        return Err(invalid());
+    }
+    let size = req_u64(&doc, "size_bytes", &real).map_err(|_| invalid())?;
+    let path = confined(dir, dir.join(format!("{digest}.elf"))).map_err(|_| invalid())?;
+    let bytes = read_bytes(&path).map_err(|_| invalid())?;
+    let sha = sha256_bytes(&bytes);
+    if hex_of(&sha) != digest
+        || bytes.len() as u64 != size
+        || embedded_name(&bytes).ok().as_deref() != Some(id.profile)
+    {
+        return Err(invalid());
+    }
+    Ok((
+        FlashImage {
+            path,
+            len: size,
+            sha256: sha,
+            profile_name: id.profile.to_owned(),
+        },
+        firmware.to_owned(),
+    ))
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ResolveError> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().ok_or_else(|| ResolveError::Unreadable {
+        path: path.to_path_buf(),
+    })?;
+    loop {
+        let tmp = parent.join(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(ResolveError::Unreadable { path: tmp }),
+        };
+        let result = file
+            .write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .and_then(|_| std::fs::rename(&tmp, path));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(ResolveError::Unreadable {
+                path: path.to_path_buf(),
+            });
+        }
+        return Ok(());
+    }
 }
 
 struct CheckedArtifact {
-    rel: String,
     role: String,
     format: String,
     primary: bool,
@@ -334,7 +562,11 @@ struct CheckedArtifact {
     bytes: Vec<u8>,
 }
 
-fn check_artifact(art: &toml::Value, report_path: &Path) -> Result<CheckedArtifact, ResolveError> {
+fn check_artifact(
+    art: &toml::Value,
+    report_path: &Path,
+    build_root: &Path,
+) -> Result<CheckedArtifact, ResolveError> {
     let rel = req_str(art, "path", report_path)?.to_owned();
     let role = req_str(art, "role", report_path)?;
     let format = req_str(art, "format", report_path)?;
@@ -351,13 +583,13 @@ fn check_artifact(art: &toml::Value, report_path: &Path) -> Result<CheckedArtifa
         })?;
     let path =
         rel_join(base, &rel).map_err(|_| ResolveError::ArtifactMismatch { rel: rel.clone() })?;
+    let path = confined(build_root, path)?;
     let bytes = read_bytes(&path)?;
     let digest = sha256_bytes(&bytes);
     if hex_of(&digest) != sha || bytes.len() as u64 != size {
         return Err(ResolveError::ArtifactMismatch { rel: rel.clone() });
     }
     Ok(CheckedArtifact {
-        rel,
         role: role.to_owned(),
         format: format.to_owned(),
         primary,
@@ -371,16 +603,13 @@ fn check_artifact(art: &toml::Value, report_path: &Path) -> Result<CheckedArtifa
 /// Exactly one primary container, and no primary on any other role or file.
 fn select_container<'a>(
     artifacts: &'a [CheckedArtifact],
-    expected_file: &str,
 ) -> Result<&'a CheckedArtifact, ResolveError> {
     let mut chosen = None;
     for art in artifacts {
         if !art.primary {
             continue;
         }
-        let is_container = art.role == "xpost_container"
-            && art.format == "xpost-compact-elf-v0"
-            && art.rel == expected_file;
+        let is_container = art.role == "xpost_container" && art.format == "xpost-compact-elf-v0";
         if !is_container {
             return Err(ResolveError::ContainerMissing);
         }
@@ -468,7 +697,7 @@ fn req_u64(doc: &toml::Value, key: &str, path: &Path) -> Result<u64, ResolveErro
 }
 
 fn rel_join(base: &Path, rel: &str) -> Result<PathBuf, ()> {
-    if rel.is_empty() || rel.starts_with('/') || rel.starts_with('\\') {
+    if rel.is_empty() || rel.contains('\\') || rel.contains(':') {
         return Err(());
     }
     let path = Path::new(rel);
@@ -486,14 +715,22 @@ fn rel_join(base: &Path, rel: &str) -> Result<PathBuf, ()> {
     Ok(base.join(path))
 }
 
-fn absolute(path: &Path) -> Result<PathBuf, ResolveError> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
+fn valid_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c == ':' || c.is_control())
+}
+
+fn confined(root: &Path, path: PathBuf) -> Result<PathBuf, ResolveError> {
+    let real = std::fs::canonicalize(&path)
+        .map_err(|_| ResolveError::Unreadable { path: path.clone() })?;
+    if !real.starts_with(root) || !real.is_file() {
+        return Err(ResolveError::Unreadable { path });
     }
-    let cwd = std::env::current_dir().map_err(|_| ResolveError::Unreadable {
-        path: path.to_path_buf(),
-    })?;
-    Ok(cwd.join(path))
+    Ok(real)
 }
 
 fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
@@ -520,6 +757,15 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const FW: [u8; 32] = [42; 32];
+    fn resolve_flash_image(
+        root: &Path,
+        program: &str,
+        mode: XdpMode,
+        profile: &str,
+    ) -> Result<FlashImage, ResolveError> {
+        super::resolve_flash_image(root, &root.join("cache"), program, mode, profile, FW)
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let path =
@@ -575,6 +821,10 @@ mod tests {
     }
 
     fn publish(root: &Path, programs: &[Prog]) {
+        publish_for_firmware(root, programs, FW);
+    }
+
+    fn publish_for_firmware(root: &Path, programs: &[Prog], firmware: [u8; 32]) {
         let mut index = String::from("schema = \"libbpf-mcu.artifacts.v1\"\n\n");
         for prog in programs {
             let dir = root.join(prog.name);
@@ -607,6 +857,10 @@ mod tests {
                 if let Some(status) = mode.verification {
                     report.push_str(&format!("[verification]\nstatus = \"{status}\"\n\n"));
                 }
+                report.push_str(&format!(
+                    "[firmware]\nsha256 = \"{}\"\n\n",
+                    hex_of(&firmware)
+                ));
                 report.push_str(&body);
                 let rel = format!("{}/report.toml", mode.producer);
                 if mode.write_report {
@@ -698,7 +952,11 @@ mod tests {
         for (mode, _, file) in cases {
             let image = resolve_flash_image(&root, "demo", mode, "demo").unwrap();
             assert_eq!(image.profile_name(), "demo");
-            assert_eq!(image.path().file_name().unwrap(), file);
+            assert_eq!(
+                image.path().file_name().unwrap().to_str().unwrap(),
+                format!("{}.elf", hex_of(image.sha256()))
+            );
+            let _ = file;
             assert!(image.path().is_absolute());
             let bytes = std::fs::read(image.path()).unwrap();
             assert_eq!(image.len(), bytes.len() as u64);
@@ -776,6 +1034,58 @@ mod tests {
             ),
             "{jit}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_index_symlink_outside_build_root() {
+        use std::os::unix::fs::symlink;
+        let root = scratch("index-escape");
+        let outside = scratch("index-outside");
+        write(
+            &outside.join("index.toml"),
+            b"schema = \"libbpf-mcu.artifacts.v1\"\n",
+        );
+        symlink(outside.join("index.toml"), root.join("index.toml")).unwrap();
+        assert!(resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_for_each_producer_file() {
+        use std::os::unix::fs::symlink;
+        for (label, rel) in [
+            ("manifest", "demo/manifest.toml"),
+            ("report", "demo/rv32/report.toml"),
+            ("artifact", "demo/rv32/demo_rv32.elf"),
+        ] {
+            let root = scratch(&format!("escape-{label}"));
+            let outside = scratch(&format!("outside-{label}"));
+            publish(
+                &root,
+                &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+            );
+            let original = root.join(rel);
+            let external = outside.join("file");
+            std::fs::rename(&original, &external).unwrap();
+            symlink(&external, &original).unwrap();
+            assert!(
+                resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").is_err(),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_names_and_paths() {
+        let root = scratch("invalid-segments");
+        for name in ["", ".", "..", "a/b", "a\\b", "c:d"] {
+            assert!(resolve_flash_image(&root, name, XdpMode::Aot, "demo").is_err());
+            assert!(resolve_flash_image(&root, "demo", XdpMode::Aot, name).is_err());
+        }
+        for path in ["../out", "/out", "a\\out", "C:out"] {
+            assert!(rel_join(&root, path).is_err());
+        }
     }
 
     #[test]
@@ -885,8 +1195,7 @@ mod tests {
         let alpha = resolve_flash_image(&root, "alpha", XdpMode::Aot, "alpha").unwrap();
         let zed = resolve_flash_image(&root, "zed", XdpMode::Aot, "zed").unwrap();
         assert_ne!(alpha.path(), zed.path());
-        assert_eq!(alpha.path().file_name().unwrap(), "alpha_rv32.elf");
-        assert_eq!(zed.path().file_name().unwrap(), "zed_rv32.elf");
+
         assert!(!alpha.path().ends_with("zed_rv32.elf"));
         assert!(!zed.path().ends_with("alpha_rv32.elf"));
     }
@@ -903,5 +1212,201 @@ mod tests {
         );
         let err = resolve_flash_image(&root, "alpha", XdpMode::Aot, "alpha").unwrap_err();
         assert!(matches!(err, ResolveError::IndexUnsorted), "{err}");
+    }
+    #[test]
+    fn firmware_cache_and_sibling_profiles() {
+        let root = scratch("siblings");
+        let cache = root.join("cache");
+        publish(
+            &root,
+            &[prog(
+                "case_mark",
+                vec![legal_mode("case_mark", "rv32", "case_mark_idle")],
+            )],
+        );
+        let idle = resolve_flash_image(&root, "case_mark", XdpMode::Aot, "case_mark_idle").unwrap();
+        let bytes = std::fs::read(idle.path()).unwrap();
+        assert_eq!(
+            resolve_flash_image(&root, "case_mark", XdpMode::Aot, "case_mark_idle").unwrap(),
+            idle
+        );
+        assert!(matches!(
+            super::resolve_flash_image(
+                &root,
+                &cache,
+                "case_mark",
+                XdpMode::Aot,
+                "case_mark_idle",
+                [1; 32]
+            ),
+            Err(ResolveError::FirmwareMismatch)
+        ));
+        publish(
+            &root,
+            &[prog(
+                "case_mark",
+                vec![legal_mode("case_mark", "rv32", "case_mark")],
+            )],
+        );
+        let base = resolve_flash_image(&root, "case_mark", XdpMode::Aot, "case_mark").unwrap();
+        assert_ne!(base.path(), idle.path());
+        assert_eq!(
+            std::fs::read(
+                resolve_flash_image(&root, "case_mark", XdpMode::Aot, "case_mark_idle")
+                    .unwrap()
+                    .path()
+            )
+            .unwrap(),
+            bytes
+        );
+        std::fs::write(idle.path(), b"corrupt").unwrap();
+        assert!(matches!(
+            resolve_flash_image(&root, "case_mark", XdpMode::Aot, "case_mark_idle"),
+            Err(ResolveError::CacheInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn invalid_source_never_falls_back() {
+        let root = scratch("fallback-source");
+        publish(
+            &root,
+            &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+        );
+        resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").unwrap();
+        for table in ["stale", "failed"] {
+            let mut mode = legal_mode("demo", "rv32", "demo");
+            mode.table = table;
+            publish(&root, &[prog("demo", vec![mode])]);
+            assert!(matches!(
+                resolve_flash_image(&root, "demo", XdpMode::Aot, "demo"),
+                Err(ResolveError::ModeNotConsumable { .. })
+            ));
+        }
+        let mut mode = legal_mode("demo", "rv32", "demo");
+        mode.status = "failed";
+        publish(&root, &[prog("demo", vec![mode])]);
+        assert!(matches!(
+            resolve_flash_image(&root, "demo", XdpMode::Aot, "demo"),
+            Err(ResolveError::ReportNotSuccess { .. })
+        ));
+        publish(
+            &root,
+            &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+        );
+        std::fs::write(root.join("demo/rv32/demo_rv32.elf"), b"bad").unwrap();
+        assert!(matches!(
+            resolve_flash_image(&root, "demo", XdpMode::Aot, "demo"),
+            Err(ResolveError::ArtifactMismatch { .. })
+        ));
+        std::fs::remove_file(root.join("demo/rv32/report.toml")).unwrap();
+        assert!(resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").is_err());
+        std::fs::remove_file(root.join("demo/manifest.toml")).unwrap();
+        assert!(resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_symlink_escape_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let root = scratch("cache-escape");
+        let outside = scratch("cache-outside");
+        publish(
+            &root,
+            &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+        );
+        std::fs::create_dir(root.join("cache")).unwrap();
+        symlink(&outside, root.join("cache/demo")).unwrap();
+        assert!(resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").is_err());
+        assert!(!outside.join("aot").exists());
+    }
+    #[test]
+    fn valid_republication_refreshes_source_provenance() {
+        let root = scratch("republication");
+        publish(
+            &root,
+            &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+        );
+        let first = resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").unwrap();
+        let original = std::fs::read(first.path()).unwrap();
+        // Adding a second mode changes the manifest but not the AOT bytes.
+        publish(
+            &root,
+            &[prog(
+                "demo",
+                vec![
+                    legal_mode("demo", "rv32", "demo"),
+                    legal_mode("demo", "jit", "demo"),
+                ],
+            )],
+        );
+        assert_eq!(
+            resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").unwrap(),
+            first
+        );
+        // A newly verified producer report can bind identical container bytes
+        // to another firmware. Old metadata alone cannot authorize that change.
+        let next_firmware = [43; 32];
+        publish_for_firmware(
+            &root,
+            &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+            next_firmware,
+        );
+        let refreshed = super::resolve_flash_image(
+            &root,
+            &root.join("cache"),
+            "demo",
+            XdpMode::Aot,
+            "demo",
+            next_firmware,
+        )
+        .unwrap();
+        assert_eq!(refreshed, first);
+        assert_eq!(std::fs::read(refreshed.path()).unwrap(), original);
+        let metadata = parse_doc(
+            &std::fs::read(refreshed.path().with_extension("toml")).unwrap(),
+            refreshed.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            metadata["firmware_sha256"].as_str().unwrap(),
+            hex_of(&next_firmware)
+        );
+        assert!(matches!(
+            resolve_flash_image(&root, "demo", XdpMode::Aot, "demo"),
+            Err(ResolveError::FirmwareMismatch)
+        ));
+    }
+
+    #[test]
+    fn committed_metadata_corruption_is_not_repaired() {
+        let root = scratch("metadata-corruption");
+        publish(
+            &root,
+            &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+        );
+        let image = resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").unwrap();
+        let metadata = image.path().with_extension("toml");
+        std::fs::write(&metadata, b"bad = true").unwrap();
+        assert!(matches!(
+            resolve_flash_image(&root, "demo", XdpMode::Aot, "demo"),
+            Err(ResolveError::CacheInvalid { .. })
+        ));
+        assert_eq!(std::fs::read(metadata).unwrap(), b"bad = true");
+    }
+
+    #[test]
+    fn report_hash_mismatch_never_uses_cache() {
+        let root = scratch("report-hash-with-cache");
+        publish(
+            &root,
+            &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+        );
+        resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").unwrap();
+        std::fs::write(root.join("demo/rv32/report.toml"), b"bad").unwrap();
+        assert!(matches!(
+            resolve_flash_image(&root, "demo", XdpMode::Aot, "demo"),
+            Err(ResolveError::ReportHashMismatch)
+        ));
     }
 }

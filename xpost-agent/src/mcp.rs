@@ -103,7 +103,9 @@ impl XpostMcp {
         }
     }
 
-    #[tool(description = "Build + flash named firmware profile, then co-flash fw.xdp[]")]
+    #[tool(
+        description = "Build firmware and preflight existing XDP artifacts before flashing firmware and installing cached containers"
+    )]
     async fn flash_fw(
         &self,
         Parameters(args): Parameters<FlashByNameArgs>,
@@ -114,7 +116,9 @@ impl XpostMcp {
             .await
     }
 
-    #[tool(description = "Build + write named XDP profile into the cold table")]
+    #[tool(
+        description = "Validate and cache an existing XDP artifact against its linked firmware, then install it in the cold table"
+    )]
     async fn flash_xdp(
         &self,
         Parameters(args): Parameters<FlashByNameArgs>,

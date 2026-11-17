@@ -37,8 +37,8 @@
 //! | GET | `/v1/status` | — | `idle` |
 //! | GET | `/v1/dut_status` | — | UART `ready` / `booting` (uses `ping`) |
 //! | GET | `/v1/get/init` | — | host wait for unsolicited `OK init` |
-//! | POST | `/v1/flash/fw` | `{"name"}` | build+flash firmware, then co-flash `fw.xdp[]` |
-//! | POST | `/v1/flash/xdp` | `{"name","slot"?}` | no slot: write the cold table and reset. `slot`: copy that installed image into the slot, no reset |
+//! | POST | `/v1/flash/fw` | `{"name"}` | build firmware, preflight existing `fw.xdp[]` artifacts, then flash and install cached containers |
+//! | POST | `/v1/flash/xdp` | `{"name","slot"?}` | no slot: validate an existing artifact against linked firmware, cache, install, and reset. `slot`: copy an installed image without reset |
 //! | POST | `/v1/clear/xdp` | `{"name": "*"\|"prog"\|["a","b"]}` | remove image(s); `*`=all; missing name → err |
 //! | GET | `/v1/get/xdp` | — | list installed XDP images |
 //! | POST | `/v1/enable/xdp` | `{}` | App `EnableXdp` |
