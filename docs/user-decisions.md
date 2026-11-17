@@ -119,3 +119,13 @@ Its slot, rebind, and ELF fields stay null.
 XPOST case publishes two slots.
 
 Reason: the design uses HAL as a static policy control, not as another ELF loader.
+
+## 2026-11-18 XDP artifact ownership
+
+`libbpf-mcu` generates XDP artifacts.
+`xpost-artifact` validates and caches them.
+`xpost-agent` consumes existing artifacts and does not rebuild XDP.
+Firmware builds remain the Agent's responsibility.
+
+Reason: the user separated artifact production from consumption for PR #24.
+Firmware SHA-256 binding and verified cache snapshots prevent installation of artifacts for another firmware.

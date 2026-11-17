@@ -5,8 +5,8 @@
 #   xdp_t   → perf-t   (counter+trace)
 #   hal     → examples/*_hal CAGT report (no xpost runtime; Trace ring is in hal_perf)
 #
-# Firmware build: cwd = examples/<project>, `cargo build --release` plus XDP
-# feature arguments when the profile lists them.
+# Firmware builds use Cargo commands from each firmware profile.
+# XDP containers must already exist in the producer output directory.
 
 # Producer index for XDP containers. Each [[xdp]] names a program and a mode.
 build_root = "../build"
@@ -134,21 +134,18 @@ name = "just_tx"
 fw = "just-tx-cag"
 program = "just_tx"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp", "-c", "just_tx"] }
 
 [[xdp]]
 name = "just_drop"
 fw = "just-drop-cag"
 program = "just_drop"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp", "-c", "just_drop"] }
 
 [[xdp]]
 name = "firewall"
 fw = "firewall-cag"
 program = "firewall"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall", "-c", "firewall"] }
 
 # ---------------------------------------------------------------------------
 # exec_bench — function-call XDP (exec ingress; map input/output; CAGT on eBPF)
@@ -168,56 +165,48 @@ name = "incr"
 fw = "exec-bench-aot"
 program = "incr"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "incr"] }
 
 [[xdp]]
 name = "square"
 fw = "exec-bench-aot"
 program = "square"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "square"] }
 
 [[xdp]]
 name = "bitswap"
 fw = "exec-bench-aot"
 program = "bitswap"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "bitswap"] }
 
 [[xdp]]
 name = "fib"
 fw = "exec-bench-aot"
 program = "fib"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "fib"] }
 
 [[xdp]]
 name = "buf"
 fw = "exec-bench-aot"
 program = "buf"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "buf"] }
 
 [[xdp]]
 name = "memcpy"
 fw = "exec-bench-aot"
 program = "memcpy"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "memcpy"] }
 
 [[xdp]]
 name = "fletcher32"
 fw = "exec-bench-aot"
 program = "fletcher32"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "fletcher32"] }
 
 [[xdp]]
 name = "bsort"
 fw = "exec-bench-aot"
 program = "bsort"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "-c", "bsort"] }
 
 # exec_bench for the interpreter: the same example built with `interp`, whose
 # slot holds eBPF bytecode instead of machine code. The flashed file is the
@@ -258,74 +247,63 @@ name = "case_swap"
 fw = "case-cag"
 program = "case_swap"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/case_xdp/target/riscv32imc-unknown-none-elf/release/case_xdp", "-c", "case_swap"] }
 
 [[xdp]]
 name = "case_mark"
 fw = "case-cag"
 program = "case_mark"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/case_xdp/target/riscv32imc-unknown-none-elf/release/case_xdp", "-c", "case_mark"] }
 
 [[xdp]]
 name = "case_mark_idle"
 fw = "case-cag"
 program = "case_mark"
 mode = "aot"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/case_xdp/target/riscv32imc-unknown-none-elf/release/case_xdp", "--slot-symbol", "xdp_slot_idle", "--image-name", "case_mark_idle", "-c", "case_mark"] }
 
 [[xdp]]
 name = "incr_rbpf"
 fw = "exec-bench-rbpf"
 program = "incr"
 mode = "rbpf"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "incr_rbpf", "-c", "incr"] }
 
 [[xdp]]
 name = "square_rbpf"
 fw = "exec-bench-rbpf"
 program = "square"
 mode = "rbpf"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "square_rbpf", "-c", "square"] }
 
 [[xdp]]
 name = "bitswap_rbpf"
 fw = "exec-bench-rbpf"
 program = "bitswap"
 mode = "rbpf"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "bitswap_rbpf", "-c", "bitswap"] }
 
 [[xdp]]
 name = "fib_rbpf"
 fw = "exec-bench-rbpf"
 program = "fib"
 mode = "rbpf"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "fib_rbpf", "-c", "fib"] }
 
 [[xdp]]
 name = "buf_rbpf"
 fw = "exec-bench-rbpf"
 program = "buf"
 mode = "rbpf"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "buf_rbpf", "-c", "buf"] }
 
 [[xdp]]
 name = "memcpy_rbpf"
 fw = "exec-bench-rbpf"
 program = "memcpy"
 mode = "rbpf"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "memcpy_rbpf", "-c", "memcpy"] }
 
 [[xdp]]
 name = "fletcher32_rbpf"
 fw = "exec-bench-rbpf"
 program = "fletcher32"
 mode = "rbpf"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "fletcher32_rbpf", "-c", "fletcher32"] }
 
 [[xdp]]
 name = "bsort_rbpf"
 fw = "exec-bench-rbpf"
 program = "bsort"
 mode = "rbpf"
-build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware", "../xpost/examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench", "--engine", "rbpf", "--image-name", "bsort_rbpf", "-c", "bsort"] }
