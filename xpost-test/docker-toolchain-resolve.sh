@@ -111,6 +111,70 @@ fi
 
 expect_resolve "$WORKTREE_PROJECT" "$WORKTREE_PROJECT"
 
+# rustup rejects a relative toolchain path, so rust-toolchain.toml names a
+# machine-level dispatcher. That path must not point into one checkout.
+DISPATCH="$WORKTREE_PROJECT/.cargo/docker-toolchain/dispatch.sh"
+if [ ! -f "$DISPATCH" ]; then
+  fail "missing dispatcher: $DISPATCH"
+fi
+toolchain_path="$(sed -n 's/^path = "\(.*\)"$/\1/p' "$WORKTREE_PROJECT/rust-toolchain.toml")"
+case "$toolchain_path" in
+  /*) ;;
+  *) fail "rust-toolchain.toml path [$toolchain_path] is not absolute" ;;
+esac
+case "$WORKTREE_PROJECT/" in
+  "$toolchain_path"/*) fail "toolchain path $toolchain_path is inside this checkout" ;;
+esac
+
+make_checkout() {
+  local root="$1"
+  mkdir -p "$root/xpost-test/.cargo/docker-toolchain/bin"
+  git -C "$root" init -q
+  printf '[package]\nname = "x"\nversion = "0.0.0"\n' >"$root/xpost-test/Cargo.toml"
+  printf '#!/bin/sh\nprintf "shim=%%s\\n" "$0"\n' >"$root/xpost-test/.cargo/docker-toolchain/bin/cargo"
+  chmod +x "$root/xpost-test/.cargo/docker-toolchain/bin/cargo"
+}
+
+expect_dispatch() {
+  local cwd="$1"
+  local want="$2"
+  local status=0
+  local out
+  out="$(cd "$cwd" && "$dispatcher" 2>"$tmp/err")" || status=$?
+  if [ "$status" -ne 0 ]; then
+    fail "dispatcher from $cwd exited $status"
+  fi
+  if [ "$out" != "shim=$want" ]; then
+    fail "dispatcher from $cwd printed [$out], want shim=$want"
+  fi
+}
+
+dispatcher="$(mktemp -d "$tmp/dispatch.XXXXXX")/cargo"
+cp "$DISPATCH" "$dispatcher"
+chmod +x "$dispatcher"
+
+parent_c="$(mktemp -d "$tmp/parent-c.XXXXXX")"
+parent_d="$(mktemp -d "$tmp/parent-d.XXXXXX")"
+make_checkout "$parent_c"
+make_checkout "$parent_d"
+checkout_c="$(cd "$parent_c/xpost-test" && pwd -P)"
+checkout_d="$(cd "$parent_d/xpost-test" && pwd -P)"
+expect_dispatch "$checkout_c" "$checkout_c/.cargo/docker-toolchain/bin/cargo"
+expect_dispatch "$checkout_d" "$checkout_d/.cargo/docker-toolchain/bin/cargo"
+mkdir -p "$checkout_c/nested"
+expect_dispatch "$checkout_c/nested" "$checkout_c/.cargo/docker-toolchain/bin/cargo"
+
+nogit="$(mktemp -d "$tmp/nogit.XXXXXX")"
+mkdir -p "$nogit/x"
+status=0
+(cd "$nogit/x" && "$dispatcher") >/dev/null 2>"$tmp/err" || status=$?
+if [ "$status" -eq 0 ]; then
+  fail "dispatcher ran outside a git checkout"
+fi
+if ! grep -q "not inside a git checkout" "$tmp/err"; then
+  fail "dispatcher did not name the git requirement"
+fi
+
 plain="$(mktemp -d "$tmp/plain.XXXXXX")"
 mkdir -p "$plain/xpost-test/sub"
 expect_fail "$plain" XPOST_TEST_DOCKER_RESOLVE=1 "XPOST_TEST_DOCKER_STAGE=$stage_parent"
