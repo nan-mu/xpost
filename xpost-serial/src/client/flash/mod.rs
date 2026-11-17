@@ -18,11 +18,11 @@ use futures::FutureExt;
 use futures::executor::block_on;
 use tokio::sync::{mpsc, oneshot};
 
-use std::io;
 use crate::client::POST_FLASH_INIT_CAPTURE;
 use crate::client::ops::{FlashEvent, FlashOp};
 use crate::client::port::Port;
 use crate::client::record::{SharedRecord, WriteRecord};
+use std::io;
 
 /// Default partition label for the XDP flash span (`partitions.csv` Name column).
 pub const DEFAULT_XDP_PARTITION: &str = "xdp";
@@ -167,7 +167,9 @@ async fn worker(
                 let record = Arc::clone(&record);
                 let result = tokio::task::spawn_blocking(move || run_op(&port, &cfg, &record, &op))
                     .map(|join| {
-                        join.unwrap_or_else(|e| Err(std::io::Error::other(format!("flash join: {e}"))))
+                        join.unwrap_or_else(|e| {
+                            Err(std::io::Error::other(format!("flash join: {e}")))
+                        })
                     })
                     .await;
                 let _ = resp.send(result);

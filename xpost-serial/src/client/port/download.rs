@@ -10,10 +10,10 @@ use espflash::target::{Chip as EspChip, DefaultProgressCallback};
 use log::debug;
 use serialport::UsbPortInfo;
 
-use std::io;
 use crate::client::ops::Chip;
 use crate::client::port::tempfile_path;
 use crate::client::{BAUD, READ_BLOCK, READ_MAX_IN_FLIGHT, RESET_TO_APP_SETTLE};
+use std::io;
 
 /// Default ESP-IDF partition-table flash offset (ESP32-C3).
 pub const PART_TABLE_OFFSET: u32 = 0x8000;
@@ -41,7 +41,12 @@ pub struct Downloader {
 }
 
 impl Downloader {
-    pub(crate) fn connect(name: &str, usb: &UsbPortInfo, chip: Chip, baud: u32) -> io::Result<Self> {
+    pub(crate) fn connect(
+        name: &str,
+        usb: &UsbPortInfo,
+        chip: Chip,
+        baud: u32,
+    ) -> io::Result<Self> {
         let flasher = connect_flasher(name, usb, chip, baud)?;
         Ok(Self {
             flasher: Some(flasher),
@@ -64,10 +69,7 @@ impl Downloader {
         // still held → EBUSY on macOS USB-JTAG.
         self.flasher = None;
         self.flasher = Some(connect_flasher(
-            &self.name,
-            &self.usb,
-            self.chip,
-            self.baud,
+            &self.name, &self.usb, self.chip, self.baud,
         )?);
         Ok(())
     }
@@ -103,7 +105,8 @@ impl Downloader {
         self.flasher()?
             .read_flash(addr, len, READ_BLOCK, READ_MAX_IN_FLIGHT, tmp.clone())
             .map_err(ext)?;
-        let read = fs::read(&tmp).map_err(|e| std::io::Error::other(format!("readback file: {e}")))?;
+        let read =
+            fs::read(&tmp).map_err(|e| std::io::Error::other(format!("readback file: {e}")))?;
         let _ = fs::remove_file(&tmp);
         if read.len() < data.len() {
             return Err(std::io::Error::other(format!(

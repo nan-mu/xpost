@@ -3,9 +3,9 @@
 use std::fs;
 use std::path::Path;
 
-use std::io;
 use crate::client::flash::partitions;
 use crate::client::port::Port;
+use std::io;
 
 /// Flash app ELF + partition table, then reset to app.
 pub(crate) fn flash_fw(port: &Port, firmware: &Path, partitions_csv: &Path) -> io::Result<()> {

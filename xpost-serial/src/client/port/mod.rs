@@ -25,8 +25,8 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use std::io;
 use serialport::{SerialPortType, UsbPortInfo};
+use std::io;
 
 use crate::client::BAUD;
 use crate::client::ops::Chip;
