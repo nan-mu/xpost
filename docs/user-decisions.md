@@ -129,3 +129,14 @@ Firmware builds remain the Agent's responsibility.
 
 Reason: the user separated artifact production from consumption for PR #24.
 Firmware SHA-256 binding and verified cache snapshots prevent installation of artifacts for another firmware.
+
+## 2026-11-18 Artifact identity and device firmware
+
+Sibling profile cache reuse requires matching `source_id`, `input_set_id`, and firmware SHA-256.
+Profile-specific `configuration_id` values need not match.
+Validate all producer input artifacts before cache use.
+Cold XDP installation requires device application and partition-table validation in the installation session.
+Unknown device identity must prevent installation.
+Process-local state cannot replace device validation.
+
+Reason: the user requested protection against stale sibling caches and mismatched device firmware in PR #24.

@@ -210,7 +210,9 @@ impl std::error::Error for ResolveError {}
 /// `profile_name` is the xdp profile name, not the C stem. `case_mark_idle`
 /// passes program `case_mark` and profile name `case_mark_idle`.
 /// `--image-name` is the build command's job. Validated containers are copied
-/// to `cache_root` and bound to `expected_firmware_sha256`.
+/// to `cache_root` and bound to `expected_firmware_sha256`. `cache_root` must
+/// be within `workspace_root/.cache`; both paths may be absolute, or the
+/// cache path may be relative to the workspace.
 ///
 /// Refuses a missing file, a hash or size mismatch, a schema mismatch, a
 /// status other than `success`, a mode that is only stale or failed, a
@@ -220,6 +222,7 @@ impl std::error::Error for ResolveError {}
 pub fn resolve_flash_image(
     build_root: &Path,
     cache_root: &Path,
+    workspace_root: &Path,
     program: &str,
     mode: XdpMode,
     profile_name: &str,
@@ -296,6 +299,25 @@ pub fn resolve_flash_image(
 
     let report = parse_doc(&report_bytes, &report_path)?;
     require_schema(&report, SCHEMA_REPORT, &report_path)?;
+    if req_str(&report, "program", &report_path)? != program
+        || req_str(&report, "mode", &report_path)? != producer.as_manifest()
+    {
+        return Err(ResolveError::SchemaMismatch {
+            path: report_path.clone(),
+        });
+    }
+    let build = report
+        .get("build")
+        .ok_or_else(|| ResolveError::SchemaMismatch {
+            path: report_path.clone(),
+        })?;
+    let source_id = req_str(build, "source_id", &report_path)?;
+    let input_set_id = req_str(build, "input_set_id", &report_path)?;
+    if source_id.is_empty() || input_set_id.is_empty() {
+        return Err(ResolveError::SchemaMismatch {
+            path: report_path.clone(),
+        });
+    }
     let status = req_str(&report, "status", &report_path)?;
     if status != "success" {
         return Err(ResolveError::ReportNotSuccess {
@@ -313,6 +335,42 @@ pub fn resolve_flash_image(
         return Err(ResolveError::FirmwareMismatch);
     }
 
+    let program_dir = std::fs::canonicalize(report_base).map_err(|_| ResolveError::Unreadable {
+        path: report_base.to_path_buf(),
+    })?;
+    let mut roles = Vec::new();
+    for input in tables(&report, "input_artifact", &report_path)? {
+        let role = req_str(input, "role", &report_path)?;
+        let rel = req_str(input, "path", &report_path)?;
+        let expected = req_str(input, "sha256", &report_path)?;
+        if role.is_empty()
+            || rel.is_empty()
+            || rel.contains('\\')
+            || rel.contains(':')
+            || Path::new(rel).is_absolute()
+        {
+            return Err(ResolveError::ArtifactMismatch {
+                rel: rel.to_owned(),
+            });
+        }
+        let path = confined(&program_dir, report_path.parent().unwrap().join(rel))?;
+        if hex_sha256(&read_bytes(&path)?) != expected {
+            return Err(ResolveError::ArtifactMismatch {
+                rel: rel.to_owned(),
+            });
+        }
+        roles.push(role);
+    }
+    let required: &[&str] = match producer {
+        ProducerMode::Rv32 => &["gate_bpf"],
+        ProducerMode::Jit => &["bpf_object"],
+        ProducerMode::BpfXpost => &["bpf_object", "map_index_basis"],
+    };
+    if required.iter().any(|role| !roles.contains(role)) {
+        return Err(ResolveError::SchemaMismatch {
+            path: report_path.clone(),
+        });
+    }
     let artifacts = tables(&report, "artifact", &report_path)?;
     let mut checked = Vec::with_capacity(artifacts.len());
     for art in artifacts {
@@ -338,12 +396,14 @@ pub fn resolve_flash_image(
             path: image.path.clone(),
         });
     }
-    let cache = cache_dir(cache_root, program, mode, profile_name)?;
+    let cache = cache_dir(workspace_root, cache_root, program, mode, profile_name)?;
     let identity = CacheIdentity {
         program,
         mode: mode.as_db(),
         profile: profile_name,
         firmware: firmware_sha,
+        source: source_id,
+        inputs: input_set_id,
         manifest: manifest_sha,
         report: report_sha,
     };
@@ -358,8 +418,8 @@ pub fn resolve_flash_image(
                 })?
                 .path();
             if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                let (result, fw) = read_cache(&cache, &path, &identity, false)?;
-                if fw == firmware_sha {
+                let (result, fw, source, inputs) = read_cache(&cache, &path, &identity, false)?;
+                if fw == firmware_sha && source == source_id && inputs == input_set_id {
                     candidates.push(result);
                 }
             }
@@ -404,6 +464,8 @@ pub fn resolve_flash_image(
         ("manifest_sha256", manifest_sha),
         ("report_sha256", report_sha),
         ("firmware_sha256", firmware_sha),
+        ("source_id", source_id),
+        ("input_set_id", input_set_id),
     ] {
         meta.insert(key.to_owned(), toml::Value::String(value.to_owned()));
     }
@@ -413,7 +475,7 @@ pub fn resolve_flash_image(
             path: meta_path.clone(),
         })?;
     atomic_write(&meta_path, bytes.as_bytes())?;
-    let (cached, _) = read_cache(&cache, &meta_path, &identity, true)?;
+    let (cached, _, _, _) = read_cache(&cache, &meta_path, &identity, true)?;
     Ok(cached)
 }
 
@@ -422,33 +484,56 @@ struct CacheIdentity<'a> {
     mode: &'a str,
     profile: &'a str,
     firmware: &'a str,
+    source: &'a str,
+    inputs: &'a str,
     manifest: &'a str,
     report: &'a str,
 }
 
 fn cache_dir(
+    workspace: &Path,
     root: &Path,
     program: &str,
     mode: XdpMode,
     profile: &str,
 ) -> Result<PathBuf, ResolveError> {
-    std::fs::create_dir_all(root).map_err(|_| ResolveError::Unreadable {
-        path: root.to_path_buf(),
+    let original_workspace = workspace.to_path_buf();
+    let workspace = std::fs::canonicalize(workspace).map_err(|_| ResolveError::Unreadable {
+        path: workspace.to_path_buf(),
     })?;
-    let root = std::fs::canonicalize(root).map_err(|_| ResolveError::Unreadable {
-        path: root.to_path_buf(),
-    })?;
-    let mut dir = root.clone();
-    for segment in [program, mode.as_db(), profile] {
+    let relative = if root.is_absolute() {
+        root.strip_prefix(&workspace)
+            .or_else(|_| root.strip_prefix(&original_workspace))
+            .map_err(|_| ResolveError::Unreadable {
+                path: root.to_path_buf(),
+            })?
+    } else {
+        root
+    };
+    let mut components = relative.components();
+    if components.next() != Some(Component::Normal(std::ffi::OsStr::new(".cache")))
+        || components.any(|c| !matches!(c, Component::Normal(_)))
+    {
+        return Err(ResolveError::Unreadable {
+            path: root.to_path_buf(),
+        });
+    }
+    let mut dir = workspace.clone();
+    for segment in relative.components().map(|c| c.as_os_str()).chain(
+        [program, mode.as_db(), profile]
+            .into_iter()
+            .map(std::ffi::OsStr::new),
+    ) {
         dir.push(segment);
-        match std::fs::create_dir(&dir) {
-            Ok(()) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+        match std::fs::symlink_metadata(&dir) {
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&dir)
+                .map_err(|_| ResolveError::Unreadable { path: dir.clone() })?,
             Err(_) => return Err(ResolveError::Unreadable { path: dir }),
         }
         let real = std::fs::canonicalize(&dir)
             .map_err(|_| ResolveError::Unreadable { path: dir.clone() })?;
-        if !real.starts_with(&root) || !real.is_dir() {
+        if !real.starts_with(&workspace) || !real.is_dir() {
             return Err(ResolveError::Unreadable { path: dir });
         }
         dir = real;
@@ -461,7 +546,7 @@ fn read_cache(
     meta_path: &Path,
     id: &CacheIdentity<'_>,
     exact_source: bool,
-) -> Result<(FlashImage, String), ResolveError> {
+) -> Result<(FlashImage, String, String, String), ResolveError> {
     let invalid = || ResolveError::CacheInvalid {
         path: meta_path.to_path_buf(),
     };
@@ -487,13 +572,22 @@ fn read_cache(
             && v.bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     };
+    let source = get("source_id")?;
+    let inputs = get("input_set_id")?;
+    if source.is_empty() || inputs.is_empty() {
+        return Err(invalid());
+    }
     let manifest = get("manifest_sha256")?;
     let report = get("report_sha256")?;
     if !valid_hash(firmware)
         || !valid_hash(manifest)
         || !valid_hash(report)
         || (exact_source
-            && (firmware != id.firmware || manifest != id.manifest || report != id.report))
+            && (firmware != id.firmware
+                || source != id.source
+                || inputs != id.inputs
+                || manifest != id.manifest
+                || report != id.report))
     {
         return Err(invalid());
     }
@@ -515,6 +609,8 @@ fn read_cache(
             profile_name: id.profile.to_owned(),
         },
         firmware.to_owned(),
+        source.to_owned(),
+        inputs.to_owned(),
     ))
 }
 
@@ -764,7 +860,15 @@ mod tests {
         mode: XdpMode,
         profile: &str,
     ) -> Result<FlashImage, ResolveError> {
-        super::resolve_flash_image(root, &root.join("cache"), program, mode, profile, FW)
+        super::resolve_flash_image(
+            root,
+            &root.join(".cache/artifact"),
+            root,
+            program,
+            mode,
+            profile,
+            FW,
+        )
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -851,8 +955,8 @@ mod tests {
                     ));
                 }
                 let mut report = format!(
-                    "schema = \"libbpf-mcu.report.v1\"\nstatus = \"{}\"\n\n",
-                    mode.status
+                    "schema = \"libbpf-mcu.report.v1\"\nprogram = \"{}\"\nmode = \"{}\"\nstatus = \"{}\"\n\n[build]\nsource_id = \"source-a\"\ninput_set_id = \"inputs-a\"\n\n",
+                    prog.name, mode.producer, mode.status
                 );
                 if let Some(status) = mode.verification {
                     report.push_str(&format!("[verification]\nstatus = \"{status}\"\n\n"));
@@ -861,6 +965,17 @@ mod tests {
                     "[firmware]\nsha256 = \"{}\"\n\n",
                     hex_of(&firmware)
                 ));
+                let inputs: &[&str] = match mode.producer {
+                    "rv32" => &["gate_bpf"],
+                    "jit" => &["bpf_object"],
+                    "bpf-xpost" => &["bpf_object", "map_index_basis"],
+                    _ => unreachable!(),
+                };
+                for role in inputs {
+                    let input = format!("{role}.bin");
+                    write(&dir.join("inputs").join(&input), role.as_bytes());
+                    report.push_str(&format!("[[input_artifact]]\nrole = \"{role}\"\npath = \"../inputs/{input}\"\nsha256 = \"{}\"\n\n", hex_sha256(role.as_bytes())));
+                }
                 report.push_str(&body);
                 let rel = format!("{}/report.toml", mode.producer);
                 if mode.write_report {
@@ -929,6 +1044,335 @@ mod tests {
             modes,
             manifest_sha_ok: true,
         }
+    }
+
+    fn edit_report(root: &Path, program: &str, mode: &str, edit: impl FnOnce(&mut toml::Value)) {
+        let path = root.join(program).join(mode).join("report.toml");
+        let mut report: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        edit(&mut report);
+        let bytes = toml::to_string(&report).unwrap();
+        write(&path, bytes.as_bytes());
+        let manifest_path = root.join(program).join("manifest.toml");
+        let mut manifest: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        for row in manifest["mode"].as_array_mut().unwrap() {
+            if row["name"].as_str() == Some(mode) {
+                row["report_sha256"] = hex_sha256(bytes.as_bytes()).into();
+            }
+        }
+        let manifest_text = toml::to_string(&manifest).unwrap();
+        write(&manifest_path, manifest_text.as_bytes());
+        let index_path = root.join("index.toml");
+        let mut index: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&index_path).unwrap()).unwrap();
+        for row in index["program"].as_array_mut().unwrap() {
+            if row["name"].as_str() == Some(program) {
+                row["manifest_sha256"] = hex_sha256(manifest_text.as_bytes()).into();
+            }
+        }
+        write(&index_path, toml::to_string(&index).unwrap().as_bytes());
+    }
+
+    #[test]
+    fn sibling_identity_and_configuration() {
+        let root = scratch("sibling-identity");
+        publish(
+            &root,
+            &[prog(
+                "case_mark",
+                vec![legal_mode("case_mark", "rv32", "case_mark")],
+            )],
+        );
+        resolve_flash_image(&root, "case_mark", XdpMode::Aot, "case_mark").unwrap();
+        publish(
+            &root,
+            &[prog(
+                "case_mark",
+                vec![legal_mode("case_mark", "rv32", "case_mark_idle")],
+            )],
+        );
+        edit_report(&root, "case_mark", "rv32", |r| {
+            r["build"]
+                .as_table_mut()
+                .unwrap()
+                .insert("configuration_id".into(), "different".into());
+        });
+        assert!(resolve_flash_image(&root, "case_mark", XdpMode::Aot, "case_mark").is_ok());
+        for field in ["source_id", "input_set_id"] {
+            edit_report(&root, "case_mark", "rv32", |r| {
+                r["build"][field] = "changed".into()
+            });
+            assert!(matches!(
+                resolve_flash_image(&root, "case_mark", XdpMode::Aot, "case_mark"),
+                Err(ResolveError::NameMismatch { .. })
+            ));
+            edit_report(&root, "case_mark", "rv32", |r| {
+                r["build"][field] = if field == "source_id" {
+                    "source-a"
+                } else {
+                    "inputs-a"
+                }
+                .into()
+            });
+        }
+        let next_fw = [43; 32];
+        publish_for_firmware(
+            &root,
+            &[prog(
+                "case_mark",
+                vec![legal_mode("case_mark", "rv32", "case_mark_idle")],
+            )],
+            next_fw,
+        );
+        assert!(matches!(
+            super::resolve_flash_image(
+                &root,
+                &root.join(".cache/artifact"),
+                &root,
+                "case_mark",
+                XdpMode::Aot,
+                "case_mark",
+                next_fw
+            ),
+            Err(ResolveError::NameMismatch { .. })
+        ));
+        publish(
+            &root,
+            &[prog(
+                "case_mark",
+                vec![legal_mode("case_mark", "rv32", "case_mark_idle")],
+            )],
+        );
+        let old = resolve_flash_image(&root, "case_mark", XdpMode::Aot, "case_mark").unwrap();
+        let meta = old.path().with_extension("toml");
+        let original = std::fs::read_to_string(&meta).unwrap();
+        for field in ["source_id", "input_set_id"] {
+            let mut value: toml::Value = toml::from_str(&original).unwrap();
+            value.as_table_mut().unwrap().remove(field);
+            write(&meta, toml::to_string(&value).unwrap().as_bytes());
+            assert!(matches!(
+                resolve_flash_image(&root, "case_mark", XdpMode::Aot, "case_mark"),
+                Err(ResolveError::CacheInvalid { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn cross_mode_inputs_and_dependency_changes_guard_sibling_cache() {
+        let root = scratch("cross-mode-inputs");
+        for (mode, producer, role, path) in [
+            (XdpMode::Jit, "jit", "bpf_object", "../bpf/program.o"),
+            (
+                XdpMode::Rbpf,
+                "bpf-xpost",
+                "map_index_basis",
+                "../rv32/report.toml",
+            ),
+        ] {
+            publish(
+                &root,
+                &[prog("demo", vec![legal_mode("demo", producer, "demo")])],
+            );
+            let input = root.join("demo").join(producer).join(path);
+            std::fs::create_dir_all(input.parent().unwrap()).unwrap();
+            write(&input, b"dependency A");
+            let update = |r: &mut toml::Value| {
+                for entry in r["input_artifact"].as_array_mut().unwrap() {
+                    if entry["role"].as_str() == Some(role) {
+                        entry["path"] = path.into();
+                        entry["sha256"] = hex_sha256(b"dependency A").into();
+                    }
+                }
+            };
+            edit_report(&root, "demo", producer, update);
+            resolve_flash_image(&root, "demo", mode, "demo").unwrap();
+            publish(
+                &root,
+                &[prog(
+                    "demo",
+                    vec![legal_mode("demo", producer, "demo_idle")],
+                )],
+            );
+            edit_report(&root, "demo", producer, update);
+            assert!(resolve_flash_image(&root, "demo", mode, "demo").is_ok());
+            write(&input, b"dependency B");
+            assert!(resolve_flash_image(&root, "demo", mode, "demo").is_err());
+            edit_report(&root, "demo", producer, |r| {
+                for entry in r["input_artifact"].as_array_mut().unwrap() {
+                    if entry["role"].as_str() == Some(role) {
+                        entry["sha256"] = hex_sha256(b"dependency B").into();
+                    }
+                }
+                r["build"]["input_set_id"] = "dependency-b".into();
+            });
+            assert!(matches!(
+                resolve_flash_image(&root, "demo", mode, "demo"),
+                Err(ResolveError::NameMismatch { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn every_input_field_is_required_before_cache_creation() {
+        let root = scratch("input-fields");
+        for field in ["role", "path", "sha256"] {
+            for malformed in [false, true] {
+                publish(
+                    &root,
+                    &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+                );
+                edit_report(&root, "demo", "rv32", |r| {
+                    let entry = r["input_artifact"][0].as_table_mut().unwrap();
+                    if malformed {
+                        entry.insert(field.into(), 42.into());
+                    } else {
+                        entry.remove(field);
+                    }
+                });
+                assert!(resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").is_err());
+                assert!(!root.join(".cache").exists());
+            }
+        }
+        publish(
+            &root,
+            &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+        );
+        edit_report(&root, "demo", "rv32", |r| {
+            r["input_artifact"][0]["sha256"] = "not-a-sha256".into();
+        });
+        assert!(resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").is_err());
+        assert!(!root.join(".cache").exists());
+    }
+
+    #[test]
+    fn report_identity_and_required_inputs() {
+        for (mode, producer, required) in [
+            (XdpMode::Aot, "rv32", vec!["gate_bpf"]),
+            (XdpMode::Jit, "jit", vec!["bpf_object"]),
+            (
+                XdpMode::Rbpf,
+                "bpf-xpost",
+                vec!["bpf_object", "map_index_basis"],
+            ),
+        ] {
+            let root = scratch(&format!("required-{producer}"));
+            for role in required {
+                publish(
+                    &root,
+                    &[prog("demo", vec![legal_mode("demo", producer, "demo")])],
+                );
+                edit_report(&root, "demo", producer, |r| {
+                    r["input_artifact"]
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|v| v["role"].as_str() != Some(role))
+                });
+                assert!(
+                    resolve_flash_image(&root, "demo", mode, "demo").is_err(),
+                    "{producer} {role}"
+                );
+                assert!(!root.join(".cache").exists());
+            }
+            for field in ["program", "mode"] {
+                publish(
+                    &root,
+                    &[prog("demo", vec![legal_mode("demo", producer, "demo")])],
+                );
+                edit_report(&root, "demo", producer, |r| r[field] = "wrong".into());
+                assert!(resolve_flash_image(&root, "demo", mode, "demo").is_err());
+            }
+            for field in ["source_id", "input_set_id"] {
+                publish(
+                    &root,
+                    &[prog("demo", vec![legal_mode("demo", producer, "demo")])],
+                );
+                edit_report(&root, "demo", producer, |r| {
+                    r["build"].as_table_mut().unwrap().remove(field);
+                });
+                assert!(resolve_flash_image(&root, "demo", mode, "demo").is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_bad_inputs_before_cache_use() {
+        let root = scratch("bad-inputs");
+        for path in [
+            "/tmp/out",
+            "../../outside",
+            "..\\outside",
+            "../inputs/missing",
+        ] {
+            publish(
+                &root,
+                &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+            );
+            edit_report(&root, "demo", "rv32", |r| {
+                r["input_artifact"][0]["path"] = path.into()
+            });
+            assert!(
+                resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").is_err(),
+                "{path}"
+            );
+            assert!(!root.join(".cache").exists());
+        }
+        publish(
+            &root,
+            &[prog("demo", vec![legal_mode("demo", "bpf-xpost", "demo")])],
+        );
+        resolve_flash_image(&root, "demo", XdpMode::Rbpf, "demo").unwrap();
+        write(&root.join("demo/inputs/map_index_basis.bin"), b"changed");
+        assert!(resolve_flash_image(&root, "demo", XdpMode::Rbpf, "demo").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_input_and_cache_symlinks_without_external_writes() {
+        use std::os::unix::fs::symlink;
+        for location in [".cache", ".cache/artifact", ".cache/artifact/demo"] {
+            let root = scratch(&format!("cache-symlink-{}", location.replace('/', "-")));
+            let outside = scratch(&format!("cache-target-{}", location.replace('/', "-")));
+            publish(
+                &root,
+                &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+            );
+            let link = root.join(location);
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            symlink(&outside, &link).unwrap();
+            assert!(resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").is_err());
+            assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+        }
+        let root = scratch("input-symlink");
+        let outside = scratch("input-target");
+        publish(
+            &root,
+            &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+        );
+        let input = root.join("demo/inputs/gate_bpf.bin");
+        std::fs::rename(&input, outside.join("input")).unwrap();
+        symlink(outside.join("input"), input).unwrap();
+        assert!(resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").is_err());
+        assert!(!root.join(".cache").exists());
+        std::fs::remove_file(root.join("demo/inputs/gate_bpf.bin")).unwrap();
+        publish(
+            &root,
+            &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+        );
+        let external_root = outside.join("cache");
+        assert!(
+            super::resolve_flash_image(
+                &root,
+                &external_root,
+                &root,
+                "demo",
+                XdpMode::Aot,
+                "demo",
+                FW
+            )
+            .is_err()
+        );
+        assert!(!external_root.exists());
     }
 
     #[test]
@@ -1216,7 +1660,7 @@ mod tests {
     #[test]
     fn firmware_cache_and_sibling_profiles() {
         let root = scratch("siblings");
-        let cache = root.join("cache");
+        let cache = root.join(".cache/artifact");
         publish(
             &root,
             &[prog(
@@ -1234,6 +1678,7 @@ mod tests {
             super::resolve_flash_image(
                 &root,
                 &cache,
+                &root,
                 "case_mark",
                 XdpMode::Aot,
                 "case_mark_idle",
@@ -1315,8 +1760,8 @@ mod tests {
             &root,
             &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
         );
-        std::fs::create_dir(root.join("cache")).unwrap();
-        symlink(&outside, root.join("cache/demo")).unwrap();
+        std::fs::create_dir_all(root.join(".cache/artifact")).unwrap();
+        symlink(&outside, root.join(".cache/artifact/demo")).unwrap();
         assert!(resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").is_err());
         assert!(!outside.join("aot").exists());
     }
@@ -1354,7 +1799,8 @@ mod tests {
         );
         let refreshed = super::resolve_flash_image(
             &root,
-            &root.join("cache"),
+            &root.join(".cache/artifact"),
+            &root,
             "demo",
             XdpMode::Aot,
             "demo",

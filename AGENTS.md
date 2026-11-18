@@ -52,6 +52,11 @@ Raw BPF objects and debug ELFs are not flash containers.
 The report's firmware SHA-256 must match the firmware ELF used for the operation.
 Standalone XDP installation uses the existing linked firmware ELF.
 It does not build firmware or XDP.
+Validate the device application and partition table against that firmware before cold installation.
+Keep validation and installation in one exclusive download session.
+Reject unknown device identity, read failures, and mismatches before XDP writes.
+Validate firmware on every cold installation attempt.
+Do not use process memory as device identity proof.
 
 The local cache is `.cache/xpost-artifact/`.
 It stores verified, unchanged container bytes and source metadata.
@@ -61,6 +66,11 @@ Validate cached identity, size, embedded name, firmware SHA-256, and artifact SH
 Do not track cache contents in Git.
 
 Read and validate upstream metadata before cache use.
+Validate report program and producer mode against the request.
+Validate every reported input artifact's role, path, and SHA-256.
+Resolve input paths within the current program directory, including valid references to sibling mode directories.
+Require cached `source_id` and `input_set_id` to match the current report for sibling profile reuse.
+Do not require matching `configuration_id` for sibling profile reuse.
 A valid source with another embedded profile name can use a matching cached profile.
 Missing target profiles require generation through `libbpf-mcu`.
 Failed or stale upstream reports cannot use cached replacements.
@@ -71,6 +81,7 @@ Then flash firmware, clear the cold table, and install linked containers in orde
 HAL profiles skip XDP resolution and installation.
 Validate real input paths against their allowed roots.
 Reject symlink escapes and invalid program or profile path segments.
+Keep the canonical cache root and its directory components inside the canonical XPOST workspace.
 
 ## Agent Operations
 
@@ -104,7 +115,8 @@ Keep control-plane errors separate from helper errno values.
 
 The root workspace defaults to `riscv32imc-unknown-none-elf`.
 Use an explicit host target for host crate tests.
-On this Mac, the host target is `aarch64-apple-darwin`.
+Select the host target for the current machine.
+The following commands use `aarch64-apple-darwin` as a Mac example.
 
 ```sh
 cargo test --manifest-path xpost-artifact/Cargo.toml --target aarch64-apple-darwin
@@ -112,6 +124,16 @@ cargo test --manifest-path xpost-agent/Cargo.toml --target aarch64-apple-darwin
 cargo test --manifest-path xpost-serial/Cargo.toml --target aarch64-apple-darwin --features dev,client,server
 bash xpost-test/docker-toolchain-resolve.sh
 ```
+
+Install the Docker toolchain dispatcher before the first `xpost-test` build:
+
+```sh
+bash xpost-test/.cargo/docker-toolchain/install.sh
+```
+
+Repeat this command after dispatcher changes.
+Each worktree uses its own shim through the shared dispatcher.
+Do not copy the toolchain configuration between worktrees.
 
 Validate formatting with rustfmt for changed Rust workspaces.
 Use meaningful tests for validation failures and device write ordering.

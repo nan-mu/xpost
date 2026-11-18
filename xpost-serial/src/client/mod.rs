@@ -20,7 +20,7 @@ pub use error::{Interrupted, ParseError, RequestError, RequestTimeout, Result};
 pub use flash::{
     DEFAULT_XDP_PARTITION, FlashConfig, FlashResult, InstallOutcome, XdpEntry, XdpTable,
 };
-pub use ops::{Chip, FlashOp};
+pub use ops::{Chip, FirmwareExpectation, FlashOp};
 pub use port::Port;
 #[cfg(all(test, feature = "dev"))]
 pub use port::{MemoryClient, MemoryPair, MemoryServer};
