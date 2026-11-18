@@ -4,7 +4,7 @@ mod fw;
 mod partitions;
 mod xdp;
 
-pub use partitions::xdp_table_from_csv;
+pub use partitions::{partition_table_bin, xdp_table_from_csv};
 pub use xdp::{
     InstallOutcome, XdpEntry, XdpTable, list_entries, plan_install, xdp_name_from_bytes,
     xdp_name_from_file,
@@ -18,11 +18,11 @@ use futures::FutureExt;
 use futures::executor::block_on;
 use tokio::sync::{mpsc, oneshot};
 
-use std::io;
 use crate::client::POST_FLASH_INIT_CAPTURE;
 use crate::client::ops::{FlashEvent, FlashOp};
 use crate::client::port::Port;
 use crate::client::record::{SharedRecord, WriteRecord};
+use std::io;
 
 /// Default partition label for the XDP flash span (`partitions.csv` Name column).
 pub const DEFAULT_XDP_PARTITION: &str = "xdp";
@@ -146,7 +146,9 @@ async fn worker(
                 let record = Arc::clone(&record);
                 let result = tokio::task::spawn_blocking(move || run_op(&port, &cfg, &record, &op))
                     .map(|join| {
-                        join.unwrap_or_else(|e| Err(std::io::Error::other(format!("flash join: {e}"))))
+                        join.unwrap_or_else(|e| {
+                            Err(std::io::Error::other(format!("flash join: {e}")))
+                        })
                     })
                     .await;
                 let _ = resp.send(result);
@@ -171,13 +173,15 @@ fn run_op(
     record.mark_init_after(SystemTime::now());
     let result = match op {
         FlashOp::Fw {
-            firmware,
-            partitions,
-        } => fw::flash_fw(port, Path::new(firmware), Path::new(partitions))
-            .map(|_| FlashResult::Done),
-        FlashOp::Xdp { name, path } => {
-            xdp::install(port, cfg, name, Path::new(path)).map(FlashResult::Install)
-        }
+            firmware: _,
+            partitions: _,
+            snapshot,
+        } => fw::flash_fw(port, snapshot).map(|_| FlashResult::Done),
+        FlashOp::Xdp {
+            name,
+            path,
+            expectation,
+        } => xdp::install(port, cfg, name, Path::new(path), expectation).map(FlashResult::Install),
         FlashOp::Clear { names } => xdp::clear(port, cfg, names).map(|_| FlashResult::Done),
         FlashOp::List => xdp::list(port, cfg).map(FlashResult::List),
     };

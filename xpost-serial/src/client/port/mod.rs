@@ -5,7 +5,7 @@
 //! returns early so the session drops and flash can open download.
 
 mod byte_port;
-mod download;
+pub(crate) mod download;
 mod link;
 mod uart;
 
@@ -25,8 +25,8 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use std::io;
 use serialport::{SerialPortType, UsbPortInfo};
+use std::io;
 
 use crate::client::BAUD;
 use crate::client::ops::Chip;

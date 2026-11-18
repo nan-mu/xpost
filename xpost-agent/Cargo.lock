@@ -2202,14 +2202,27 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "heapless",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "toml 0.8.23",
  "tower-http",
+ "xpost-artifact",
+ "xpost-elf",
  "xpost-serial",
+]
+
+[[package]]
+name = "xpost-artifact"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+ "toml 0.8.23",
+ "xpost-elf",
 ]
 
 [[package]]
@@ -2239,6 +2252,7 @@ dependencies = [
  "futures",
  "log",
  "serialport",
+ "sha2 0.10.9",
  "tokio",
  "winnow 1.0.4",
  "xpost-elf",

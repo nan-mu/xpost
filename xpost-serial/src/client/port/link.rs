@@ -4,12 +4,12 @@ use std::io;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
+use super::Port;
 #[cfg(all(test, feature = "dev"))]
 use super::byte_port::AppBytePort;
 #[cfg(all(test, feature = "dev"))]
 use super::memory::MemoryClient;
 use super::uart::{Interrupt, Uart};
-use super::Port;
 use crate::client::record::SharedRecord;
 
 /// Injectable App UART transport (USB production; memory only in `dev` tests).

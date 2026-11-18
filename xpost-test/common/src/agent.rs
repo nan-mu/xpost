@@ -48,7 +48,9 @@ impl AgentClient {
         Self { base, http }
     }
 
-    /// `POST /v1/flash/fw` — build+flash firmware profile (does not install xdp.elf).
+    /// Build firmware and preflight all linked XDP artifacts before any device write.
+    /// Then flash firmware and install the verified cached containers.
+    /// The caller must generate XDP artifacts through libbpf-mcu beforehand.
     pub async fn flash_fw(&self, name: &str) -> Result<()> {
         let body = serde_json::json!({ "name": name });
         let msg = self.post_json("/v1/flash/fw", &body).await?;
@@ -56,7 +58,9 @@ impl AgentClient {
         Ok(())
     }
 
-    /// `POST /v1/flash/xdp` — build and write the named image into the cold table.
+    /// Install an existing XDP artifact through `POST /v1/flash/xdp`.
+    /// The Agent validates it against the existing linked firmware and caches it.
+    /// This operation does not build firmware or XDP.
     /// The device resets.
     pub async fn flash_xdp(&self, name: &str) -> Result<()> {
         let body = serde_json::json!({ "name": name });
@@ -85,27 +89,32 @@ impl AgentClient {
 
     /// `POST /v1/enable/exec`.
     pub async fn enable_exec(&self) -> Result<String> {
-        self.post_json("/v1/enable/exec", &serde_json::json!({})).await
+        self.post_json("/v1/enable/exec", &serde_json::json!({}))
+            .await
     }
 
     /// `POST /v1/disable/exec`.
     pub async fn disable_exec(&self) -> Result<String> {
-        self.post_json("/v1/disable/exec", &serde_json::json!({})).await
+        self.post_json("/v1/disable/exec", &serde_json::json!({}))
+            .await
     }
 
     /// `POST /v1/get/finish` — host-only wait for UART `OK finish`.
     pub async fn get_finish(&self) -> Result<String> {
-        self.post_json("/v1/get/finish", &serde_json::json!({})).await
+        self.post_json("/v1/get/finish", &serde_json::json!({}))
+            .await
     }
 
     /// `POST /v1/enable/xdp`.
     pub async fn enable_xdp(&self) -> Result<String> {
-        self.post_json("/v1/enable/xdp", &serde_json::json!({})).await
+        self.post_json("/v1/enable/xdp", &serde_json::json!({}))
+            .await
     }
 
     /// `POST /v1/disable/xdp`.
     pub async fn disable_xdp(&self) -> Result<String> {
-        self.post_json("/v1/disable/xdp", &serde_json::json!({})).await
+        self.post_json("/v1/disable/xdp", &serde_json::json!({}))
+            .await
     }
 
     /// `POST /v1/xdp/switch`. `policy` is `drop` or `pass`.
@@ -177,7 +186,11 @@ impl AgentClient {
     }
 
     /// `POST /v1/update/map/{name}` — batch `entries`.
-    pub async fn update_map_batch(&self, name: &str, entries: &[(String, String)]) -> Result<String> {
+    pub async fn update_map_batch(
+        &self,
+        name: &str,
+        entries: &[(String, String)],
+    ) -> Result<String> {
         let path = format!("/v1/update/map/{name}");
         let entries: Vec<serde_json::Value> = entries
             .iter()
@@ -198,7 +211,8 @@ impl AgentClient {
 
     /// `POST /v1/clear/perf`.
     pub async fn clear_perf(&self) -> Result<String> {
-        self.post_json("/v1/clear/perf", &serde_json::json!({})).await
+        self.post_json("/v1/clear/perf", &serde_json::json!({}))
+            .await
     }
 
     /// `GET /v1/get/perf` — message carries `b64=…` (or equivalent).

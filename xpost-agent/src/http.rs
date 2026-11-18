@@ -10,8 +10,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Router, serve};
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService,
-    session::local::LocalSessionManager,
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::timeout::TimeoutLayer;
@@ -214,10 +213,7 @@ async fn v1_flash_fw(
     run_blocking(move || ops::flash_fw(shared.as_ref(), &name, "http")).await
 }
 
-async fn v1_flash_xdp(
-    State(st): State<AppState>,
-    Json(body): Json<FlashXdpBody>,
-) -> Json<ApiResp> {
+async fn v1_flash_xdp(State(st): State<AppState>, Json(body): Json<FlashXdpBody>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     let name = body.name;
     let slot = body.slot;
@@ -244,7 +240,10 @@ fn clear_xdp_names(name: ClearXdpName) -> Result<Vec<String>, String> {
             if v.len() == 1 && v[0].trim() == "*" {
                 return Ok(Vec::new());
             }
-            Ok(v.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            Ok(v.into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect())
         }
     }
 }
@@ -298,10 +297,8 @@ async fn v1_xdp_switch(
         Err(e) => return Json(ApiResp::err(e.to_string())),
     };
     let shared = st.shared.clone();
-    run_blocking(move || {
-        ops::switch_xdp(shared.as_ref(), body.slot, body.generation, pass, "http")
-    })
-    .await
+    run_blocking(move || ops::switch_xdp(shared.as_ref(), body.slot, body.generation, pass, "http"))
+        .await
 }
 
 async fn v1_xdp_status(State(st): State<AppState>) -> Json<ApiResp> {
