@@ -14,7 +14,7 @@ use crate::client::flash::XdpTable;
 use std::io;
 
 /// Parse board `partitions.csv` into a binary partition table.
-pub(crate) fn partition_table_bin(path: &Path) -> io::Result<Vec<u8>> {
+pub fn partition_table_bin(path: &Path) -> io::Result<Vec<u8>> {
     let table = load_partition_table(path)?;
     table
         .to_bin()

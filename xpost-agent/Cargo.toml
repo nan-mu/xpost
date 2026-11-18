@@ -32,5 +32,9 @@ tower-http = { version = "0.6", features = ["timeout"] }
 xpost-artifact = { path = "../xpost-artifact" }
 xpost-serial = { path = "../xpost-serial", default-features = false, features = ["client"] }
 
+[dev-dependencies]
+heapless = "0.9"
+xpost-elf = { path = "../xpost-elf" }
+
 [profile.release]
 lto = false

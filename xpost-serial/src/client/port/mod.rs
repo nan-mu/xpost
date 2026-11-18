@@ -5,7 +5,7 @@
 //! returns early so the session drops and flash can open download.
 
 mod byte_port;
-mod download;
+pub(crate) mod download;
 mod link;
 mod uart;
 

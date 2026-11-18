@@ -1,13 +1,11 @@
 //! Long-running HTTP/MCP daemon front-end for [`xpost_serial`].
 //!
-//! # HTTP / MCP control-plane contract (frozen)
+//! # HTTP / MCP control-plane contract
 //!
-//! **Frozen source:** `~/.cursor/plans/agent_map_xdp_ops_f4bae6b6.plan.md`
-//! (section from intro through **MCP / CLI**; marked `FROZEN ABOVE`).
-//! That plan is the API shape; this rustdoc restates it for implementors.
-//! App wire verbs are [`xpost_serial::command::Command`] /
-//! [`xpost_serial::reply::OkReply`] (current crate — plan’s older multiline
-//! `get map` text is superseded by header+blob; HTTP JSON below is unchanged).
+//! The route implementations in `http.rs` and `mcp.rs` define the current API.
+//! This module documents their shared operations and JSON envelopes.
+//! App wire verbs are [`xpost_serial::command::Command`] and
+//! [`xpost_serial::reply::OkReply`].
 //!
 //! Run (daemon, cwd = `xpost-agent/`):
 //! ```text
@@ -38,7 +36,7 @@
 //! | GET | `/v1/dut_status` | — | UART `ready` / `booting` (uses `ping`) |
 //! | GET | `/v1/get/init` | — | host wait for unsolicited `OK init` |
 //! | POST | `/v1/flash/fw` | `{"name"}` | build firmware, preflight existing `fw.xdp[]` artifacts, then flash and install cached containers |
-//! | POST | `/v1/flash/xdp` | `{"name","slot"?}` | no slot: validate an existing artifact against linked firmware, cache, install, and reset. `slot`: copy an installed image without reset |
+//! | POST | `/v1/flash/xdp` | `{"name","slot"?}` | no slot: validate an existing artifact, verify device firmware, install the cached container, and reset. `slot`: copy an installed image without reset |
 //! | POST | `/v1/clear/xdp` | `{"name": "*"\|"prog"\|["a","b"]}` | remove image(s); `*`=all; missing name → err |
 //! | GET | `/v1/get/xdp` | — | list installed XDP images |
 //! | POST | `/v1/enable/xdp` | `{}` | App `EnableXdp` |

@@ -4,7 +4,7 @@ mod fw;
 mod partitions;
 mod xdp;
 
-pub use partitions::xdp_table_from_csv;
+pub use partitions::{partition_table_bin, xdp_table_from_csv};
 pub use xdp::{
     InstallOutcome, XdpEntry, XdpTable, list_entries, plan_install, xdp_name_from_bytes,
     xdp_name_from_file,
@@ -194,13 +194,15 @@ fn run_op(
     record.mark_init_after(SystemTime::now());
     let result = match op {
         FlashOp::Fw {
-            firmware,
-            partitions,
-        } => fw::flash_fw(port, Path::new(firmware), Path::new(partitions))
-            .map(|_| FlashResult::Done),
-        FlashOp::Xdp { name, path } => {
-            xdp::install(port, cfg, name, Path::new(path)).map(FlashResult::Install)
-        }
+            firmware: _,
+            partitions: _,
+            snapshot,
+        } => fw::flash_fw(port, snapshot).map(|_| FlashResult::Done),
+        FlashOp::Xdp {
+            name,
+            path,
+            expectation,
+        } => xdp::install(port, cfg, name, Path::new(path), expectation).map(FlashResult::Install),
         FlashOp::Clear { names } => xdp::clear(port, cfg, names).map(|_| FlashResult::Done),
         FlashOp::List => xdp::list(port, cfg).map(FlashResult::List),
     };
