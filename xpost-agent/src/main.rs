@@ -26,6 +26,12 @@
 //!
 //! Default: `{ "ok": bool, "message": string }`. Business/DUT failure → HTTP 200
 //! + `ok:false`. Map decode failure → **502**. MCP tools = same ops, no probe.
+//! Successful firmware flash and cold XDP installation also return `flash`.
+//! MCP includes the same field in its structured content and keeps its text reply.
+//! `flash` has `firmware_profile`, `firmware_sha256`, and `containers`.
+//! Each container has `program`, `mode`, `profile`, and `container_sha256`.
+//! SHA-256 values use lowercase hex. A HAL flash returns an empty container list.
+//! Hot slot copies keep their existing reply.
 //!
 //! ## Route table (frozen)
 //!

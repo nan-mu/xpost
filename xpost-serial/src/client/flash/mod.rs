@@ -10,7 +10,7 @@ pub use xdp::{
     xdp_name_from_file,
 };
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -179,9 +179,9 @@ fn run_op(
         } => fw::flash_fw(port, snapshot).map(|_| FlashResult::Done),
         FlashOp::Xdp {
             name,
-            path,
+            bytes,
             expectation,
-        } => xdp::install(port, cfg, name, Path::new(path), expectation).map(FlashResult::Install),
+        } => xdp::install(port, cfg, name, bytes, expectation).map(FlashResult::Install),
         FlashOp::Clear { names } => xdp::clear(port, cfg, names).map(|_| FlashResult::Done),
         FlashOp::List => xdp::list(port, cfg).map(FlashResult::List),
     };

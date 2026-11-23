@@ -6,7 +6,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
+use xpost_artifact::FlashImage;
 use xpost_serial::client::{Command, FirmwareExpectation, FlashOp, FlashResult, OkReply};
 use xpost_serial::command::PerfVariant;
 
@@ -40,14 +42,14 @@ fn agent_rx_unix(at: std::time::SystemTime) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn with_log(
+fn with_log<T: AsRef<str>>(
     peer: &str,
     name: &str,
     summary: &str,
     noisy: bool,
     state: &Mutex<AgentState>,
-    f: impl FnOnce() -> Result<String>,
-) -> Result<String> {
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let log_this = maybe_log_noisy(state, noisy);
     let t0 = Instant::now();
     if log_this {
@@ -61,7 +63,7 @@ fn with_log(
                     &format!(
                         "← {name} ok in {} — {}",
                         fmt_dur(t0.elapsed()),
-                        truncate(&msg, 120)
+                        truncate(msg.as_ref(), 120)
                     ),
                 );
             }
@@ -127,7 +129,57 @@ pub fn dut_status(state: &Mutex<AgentState>) -> Result<String> {
     }
 }
 
-pub fn flash_fw(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
+pub struct OpReply {
+    pub message: String,
+    pub flash: Option<FlashIdentity>,
+}
+
+impl From<String> for OpReply {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            flash: None,
+        }
+    }
+}
+
+impl AsRef<str> for OpReply {
+    fn as_ref(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Serialize)]
+pub struct FlashIdentity {
+    firmware_profile: String,
+    firmware_sha256: String,
+    containers: Vec<XdpFlashIdentity>,
+}
+
+#[derive(Serialize)]
+struct XdpFlashIdentity {
+    program: String,
+    mode: &'static str,
+    profile: String,
+    container_sha256: String,
+}
+
+impl From<&FlashImage> for XdpFlashIdentity {
+    fn from(image: &FlashImage) -> Self {
+        Self {
+            program: image.program().to_owned(),
+            mode: image.mode().as_db(),
+            profile: image.profile_name().to_owned(),
+            container_sha256: hex_sha256(image.sha256()),
+        }
+    }
+}
+
+fn hex_sha256(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub fn flash_fw(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<OpReply> {
     with_log(
         peer,
         "FlashFw",
@@ -138,7 +190,7 @@ pub fn flash_fw(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<Str
     )
 }
 
-fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
+fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<OpReply> {
     let (root, build_root, fw, linked_xdps) = {
         let g = lock(state)?;
         let fw = g
@@ -191,7 +243,7 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
     let snapshot = firmware_snapshot(&firmware, &partitions)?;
     let firmware_sha = snapshot.sha256;
     let t_flash = Instant::now();
-    let xdp_parts = prepare_and_flash(
+    let installed = prepare_and_flash(
         &linked_xdps,
         |x| resolve_xdp(&root, &build_root, x, firmware_sha),
         || {
@@ -213,8 +265,12 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
                 .context("clear xdp before co-flash")?;
             Ok(())
         },
-        |image| flash_one_xdp(state, image, &snapshot, peer).map(|part| part.0),
+        |image| {
+            let summary = flash_one_xdp(state, image, &snapshot, peer)?;
+            Ok((summary, XdpFlashIdentity::from(image)))
+        },
     )?;
+    let (xdp_parts, containers): (Vec<_>, Vec<_>) = installed.into_iter().unzip();
     let flash_dur = t_flash.elapsed();
 
     let mut msg = format!(
@@ -228,7 +284,14 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
         msg.push_str(&xdp_parts.join(", "));
         msg.push(']');
     }
-    Ok(msg)
+    Ok(OpReply {
+        message: msg,
+        flash: Some(FlashIdentity {
+            firmware_profile: name.to_owned(),
+            firmware_sha256: hex_sha256(&firmware_sha),
+            containers,
+        }),
+    })
 }
 
 pub fn flash_xdp(
@@ -236,9 +299,9 @@ pub fn flash_xdp(
     name: &str,
     slot: Option<u8>,
     peer: &str,
-) -> Result<String> {
+) -> Result<OpReply> {
     if let Some(slot) = slot {
-        return flash_xdp_slot(state, name, slot, peer);
+        return flash_xdp_slot(state, name, slot, peer).map(OpReply::from);
     }
     with_log(
         peer,
@@ -268,32 +331,32 @@ pub fn flash_xdp(
             };
             let snapshot = firmware_snapshot(&firmware, &partitions)?;
             let image = resolve_xdp(&root, &build_root, &xdp, snapshot.sha256)?;
-            let (summary, _) = flash_one_xdp(state, &image, &snapshot, peer)?;
-            Ok(summary)
+            let message = flash_one_xdp(state, &image, &snapshot, peer)?;
+            Ok(OpReply {
+                message,
+                flash: Some(FlashIdentity {
+                    firmware_profile: xdp.fw,
+                    firmware_sha256: hex_sha256(&snapshot.sha256),
+                    containers: vec![XdpFlashIdentity::from(&image)],
+                }),
+            })
         },
     )
 }
 
-// The plan holds only images the resolver has verified and cached.
-struct PreparedPlan<I> {
-    images: Vec<I>,
-}
-
-fn prepare_and_flash<I>(
+fn prepare_and_flash<I, T>(
     xdps: &[XdpProfile],
     mut resolve: impl FnMut(&XdpProfile) -> Result<I>,
     firmware: impl FnOnce() -> Result<()>,
     clear: impl FnOnce() -> Result<()>,
-    mut install: impl FnMut(&I) -> Result<String>,
-) -> Result<Vec<String>> {
-    let plan = PreparedPlan {
-        images: xdps.iter().map(&mut resolve).collect::<Result<Vec<_>>>()?,
-    };
+    mut install: impl FnMut(&I) -> Result<T>,
+) -> Result<Vec<T>> {
+    let images = xdps.iter().map(&mut resolve).collect::<Result<Vec<_>>>()?;
     firmware()?;
-    if !plan.images.is_empty() {
+    if !images.is_empty() {
         clear()?;
     }
-    plan.images.iter().map(&mut install).collect()
+    images.iter().map(&mut install).collect()
 }
 
 fn firmware_snapshot(path: &Path, partitions: &Path) -> Result<FirmwareExpectation> {
@@ -312,7 +375,7 @@ fn resolve_xdp(
     build_root_rel: &str,
     xdp: &XdpProfile,
     firmware_sha: [u8; 32],
-) -> Result<xpost_artifact::FlashImage> {
+) -> Result<FlashImage> {
     let name = xdp.name.as_str();
     if build_root_rel.trim().is_empty() {
         bail!("xdp `{name}`: profiles have no build_root");
@@ -336,31 +399,40 @@ fn resolve_xdp(
     .with_context(|| format!("resolve xdp `{name}`"))
 }
 
-/// Install an already verified image. Returns (summary, flash duration).
+fn cold_install_op(image: &FlashImage, firmware: &FirmwareExpectation) -> Result<FlashOp> {
+    if image.firmware_sha256() != hex_sha256(&firmware.sha256) {
+        bail!(
+            "xdp `{}`: firmware snapshot does not match the resolved image",
+            image.profile_name()
+        );
+    }
+    Ok(FlashOp::Xdp {
+        name: image.profile_name().to_owned(),
+        bytes: image.bytes(),
+        expectation: firmware.clone(),
+    })
+}
+
+/// Install a verified image from the retained bytes.
 fn flash_one_xdp(
     state: &Mutex<AgentState>,
-    image: &xpost_artifact::FlashImage,
+    image: &FlashImage,
     snapshot: &FirmwareExpectation,
     peer: &str,
-) -> Result<(String, Duration)> {
+) -> Result<String> {
     let name = image.profile_name();
-    let flash_name = image.profile_name().to_owned();
-    let path = image.path().display().to_string();
+    let path = image.path().display();
     let sz = image.len();
     log_line(peer, &format!("[xdp] `{name}`: {path} ({})", fmt_bytes(sz)));
 
-    let t_flash = Instant::now();
+    let op = cold_install_op(image, snapshot)?;
     // Transient espflash bootloader errors after HAL↔XDP fw switches; retry once.
     let outcome = {
         const ATTEMPTS: usize = 2;
         let mut last = None;
         for attempt in 1..=ATTEMPTS {
             let g = lock(state)?;
-            match g.handler.flash(FlashOp::Xdp {
-                name: flash_name.clone(),
-                path: path.clone(),
-                expectation: snapshot.clone(),
-            }) {
+            match g.handler.flash(op.clone()) {
                 Ok(o) => {
                     last = Some(Ok(o));
                     break;
@@ -388,7 +460,6 @@ fn flash_one_xdp(
         last.unwrap_or_else(|| Err(std::io::Error::other("flash xdp: no attempts")))
             .with_context(|| format!("flash xdp `{name}`"))?
     };
-    let flash_dur = t_flash.elapsed();
     let summary = match outcome {
         FlashResult::Install(xpost_serial::InstallOutcome::Overwritten { offset }) => {
             format!(
@@ -403,7 +474,7 @@ fn flash_one_xdp(
         FlashResult::Done => format!("done name={name} size={}", fmt_bytes(sz)),
         FlashResult::List(_) => bail!("unexpected list result from flash xdp"),
     };
-    Ok((summary, flash_dur))
+    Ok(summary)
 }
 
 fn run_build(root: &Path, build: &BuildSpec, label: &str, peer: &str) -> Result<Duration> {
@@ -1382,7 +1453,7 @@ mod tests {
     #[test]
     fn hal_skips_resolver_and_clear() {
         let writes = std::cell::RefCell::new(Vec::new());
-        prepare_and_flash::<String>(
+        prepare_and_flash::<String, ()>(
             &[],
             |_| panic!("resolver called"),
             || {
@@ -1423,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_binds_resolved_cached_container() {
+    fn cold_install_keeps_verified_bytes_and_identity_after_cache_replacement() {
         fn hash(data: &[u8]) -> String {
             Sha256::digest(data)
                 .iter()
@@ -1446,7 +1517,7 @@ mod tests {
             slot_address: 0x40380000,
             helper_address: 0x40381000,
             machine: 1,
-            name: heapless::String::try_from("first").unwrap(),
+            name: heapless::String::try_from("first_aot").unwrap(),
             maps: heapless::Vec::new(),
         };
         let container = xpost_elf::build_container(b"\x01\x00\x82\x80\xff", &meta, None).unwrap();
@@ -1462,7 +1533,7 @@ mod tests {
         );
         std::fs::write(mode_dir.join("report.toml"), &report).unwrap();
         let manifest = format!(
-            "schema = \"libbpf-mcu.program.v1\"\n[[mode]]\nname = \"rv32\"\nreport = \"rv32/report.toml\"\nreport_sha256 = \"{}\"\n",
+            "schema = \"libbpf-mcu.program.v1\"\nprogram = \"first\"\n[[mode]]\nname = \"rv32\"\nreport = \"rv32/report.toml\"\nreport_sha256 = \"{}\"\n",
             hash(report.as_bytes())
         );
         std::fs::write(dir.join("build/first/manifest.toml"), &manifest).unwrap();
@@ -1471,7 +1542,11 @@ mod tests {
             hash(manifest.as_bytes())
         );
         std::fs::write(dir.join("build/index.toml"), index).unwrap();
-        let image = resolve_xdp(&dir, "build", &xdp("first"), snapshot.sha256).unwrap();
+        let profile = XdpProfile {
+            name: "first_aot".into(),
+            ..xdp("first")
+        };
+        let image = resolve_xdp(&dir, "build", &profile, snapshot.sha256).unwrap();
         assert_eq!(std::fs::read(image.path()).unwrap(), data);
         assert!(
             image
@@ -1482,11 +1557,41 @@ mod tests {
             resolve_xdp(
                 &dir,
                 "build",
-                &xdp("first"),
+                &profile,
                 Sha256::digest(b"firmware B").into()
             )
             .is_err()
         );
+
+        let replacement = xpost_elf::build_container(b"\x01\x00\x82\x80\x00", &meta, None).unwrap();
+        assert_ne!(replacement.as_slice(), data);
+        std::fs::write(image.path(), replacement.as_slice()).unwrap();
+        let FlashOp::Xdp {
+            name,
+            bytes,
+            expectation,
+        } = cold_install_op(&image, &snapshot).unwrap()
+        else {
+            panic!("expected cold XDP install");
+        };
+        assert_eq!(bytes.as_ref(), data);
+        assert_eq!(expectation.sha256, snapshot.sha256);
+        assert_eq!(name, "first_aot");
+
+        let identity = serde_json::to_value(XdpFlashIdentity::from(&image)).unwrap();
+        assert_eq!(
+            identity,
+            serde_json::json!({
+                "program": "first",
+                "mode": "aot",
+                "profile": name,
+                "container_sha256": hash(&bytes)
+            })
+        );
+        assert_eq!(image.firmware_sha256(), hash(&snapshot.elf));
+        let mut wrong_firmware = snapshot;
+        wrong_firmware.sha256 = Sha256::digest(b"firmware B").into();
+        assert!(cold_install_op(&image, &wrong_firmware).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1521,7 +1626,7 @@ mod tests {
         );
         std::fs::write(build.join("first/rv32/report.toml"), &report).unwrap();
         let manifest = format!(
-            "schema = \"libbpf-mcu.program.v1\"\n[[mode]]\nname = \"rv32\"\nreport = \"rv32/report.toml\"\nreport_sha256 = \"{}\"\n",
+            "schema = \"libbpf-mcu.program.v1\"\nprogram = \"first\"\n[[mode]]\nname = \"rv32\"\nreport = \"rv32/report.toml\"\nreport_sha256 = \"{}\"\n",
             hex_hash(report.as_bytes())
         );
         std::fs::write(build.join("first/manifest.toml"), &manifest).unwrap();

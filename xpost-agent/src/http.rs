@@ -31,6 +31,8 @@ struct AppState {
 struct ApiResp {
     ok: bool,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flash: Option<ops::FlashIdentity>,
 }
 
 impl ApiResp {
@@ -38,12 +40,14 @@ impl ApiResp {
         Self {
             ok: true,
             message: message.into(),
+            flash: None,
         }
     }
     fn err(e: impl std::fmt::Display) -> Self {
         Self {
             ok: false,
             message: e.to_string(),
+            flash: None,
         }
     }
 }
@@ -193,12 +197,20 @@ async fn v1_get_init(State(st): State<AppState>) -> Json<ApiResp> {
     run_blocking(move || ops::get_init(shared.as_ref(), "http")).await
 }
 
-async fn run_blocking<F>(f: F) -> Json<ApiResp>
+async fn run_blocking<F, T>(f: F) -> Json<ApiResp>
 where
-    F: FnOnce() -> anyhow::Result<String> + Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    T: Into<ops::OpReply> + Send + 'static,
 {
     match tokio::task::spawn_blocking(f).await {
-        Ok(Ok(msg)) => Json(ApiResp::ok(msg)),
+        Ok(Ok(reply)) => {
+            let reply = reply.into();
+            Json(ApiResp {
+                ok: true,
+                message: reply.message,
+                flash: reply.flash,
+            })
+        }
         Ok(Err(e)) => Json(ApiResp::err(format!("{e:#}"))),
         Err(e) => Json(ApiResp::err(format!("join: {e}"))),
     }
