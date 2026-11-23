@@ -7,7 +7,6 @@ mod xdp;
 pub use partitions::{partition_table_bin, xdp_table_from_csv};
 pub use xdp::{
     InstallOutcome, XdpEntry, XdpTable, list_entries, plan_install, xdp_name_from_bytes,
-    xdp_name_from_file,
 };
 
 use std::path::PathBuf;
@@ -193,11 +192,7 @@ fn run_op(
     }
     record.mark_init_after(SystemTime::now());
     let result = match op {
-        FlashOp::Fw {
-            firmware: _,
-            partitions: _,
-            snapshot,
-        } => fw::flash_fw(port, snapshot).map(|_| FlashResult::Done),
+        FlashOp::Fw { snapshot } => fw::flash_fw(port, snapshot).map(|_| FlashResult::Done),
         FlashOp::Xdp {
             name,
             bytes,

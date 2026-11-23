@@ -101,7 +101,7 @@ pub struct FlashImage {
     program: String,
     mode: XdpMode,
     profile_name: String,
-    firmware_sha256: String,
+    firmware_sha256: [u8; 32],
 }
 
 impl FlashImage {
@@ -133,7 +133,7 @@ impl FlashImage {
         &self.profile_name
     }
 
-    pub fn firmware_sha256(&self) -> &str {
+    pub fn firmware_sha256(&self) -> &[u8; 32] {
         &self.firmware_sha256
     }
 }
@@ -355,7 +355,7 @@ pub fn resolve_flash_image(
             path: report_path.clone(),
         })?;
     let firmware_sha = req_str(firmware, "sha256", &report_path)?;
-    if firmware_sha != hex_of(&expected_firmware_sha256) {
+    if firmware_sha != format_sha256(&expected_firmware_sha256) {
         return Err(ResolveError::FirmwareMismatch);
     }
 
@@ -425,7 +425,7 @@ pub fn resolve_flash_image(
         program,
         mode,
         profile: profile_name,
-        firmware: firmware_sha,
+        firmware: expected_firmware_sha256,
         source: source_id,
         inputs: input_set_id,
         manifest: manifest_sha,
@@ -443,7 +443,7 @@ pub fn resolve_flash_image(
                 .path();
             if path.extension().and_then(|s| s.to_str()) == Some("toml") {
                 let (result, source, inputs) = read_cache(&cache, &path, &identity, false)?;
-                if result.firmware_sha256() == firmware_sha
+                if result.firmware_sha256() == &expected_firmware_sha256
                     && source == source_id
                     && inputs == input_set_id
                 {
@@ -463,7 +463,7 @@ pub fn resolve_flash_image(
                 embedded,
             });
     }
-    let digest = hex_of(&image.sha256);
+    let digest = format_sha256(&image.sha256);
     let meta_path = cache.join(format!("{digest}.toml"));
     let elf_path = cache.join(format!("{digest}.elf"));
     if meta_path.symlink_metadata().is_ok() {
@@ -510,7 +510,7 @@ struct CacheIdentity<'a> {
     program: &'a str,
     mode: XdpMode,
     profile: &'a str,
-    firmware: &'a str,
+    firmware: [u8; 32],
     source: &'a str,
     inputs: &'a str,
     manifest: &'a str,
@@ -606,15 +606,19 @@ fn read_cache(
     }
     let manifest = get("manifest_sha256")?;
     let report = get("report_sha256")?;
-    if !valid_hash(firmware)
-        || !valid_hash(manifest)
-        || !valid_hash(report)
-        || (exact_source
-            && (firmware != id.firmware
-                || source != id.source
-                || inputs != id.inputs
-                || manifest != id.manifest
-                || report != id.report))
+    if !valid_hash(firmware) || !valid_hash(manifest) || !valid_hash(report) {
+        return Err(invalid());
+    }
+    let mut firmware_sha256 = [0; 32];
+    for (i, byte) in firmware_sha256.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&firmware[2 * i..2 * i + 2], 16).map_err(|_| invalid())?;
+    }
+    if exact_source
+        && (firmware_sha256 != id.firmware
+            || source != id.source
+            || inputs != id.inputs
+            || manifest != id.manifest
+            || report != id.report)
     {
         return Err(invalid());
     }
@@ -622,7 +626,7 @@ fn read_cache(
     let path = confined(dir, dir.join(format!("{digest}.elf"))).map_err(|_| invalid())?;
     let bytes = read_bytes(&path).map_err(|_| invalid())?;
     let sha = sha256_bytes(&bytes);
-    if hex_of(&sha) != digest
+    if format_sha256(&sha) != digest
         || bytes.len() as u64 != size
         || embedded_name(&bytes).ok().as_deref() != Some(id.profile)
     {
@@ -636,7 +640,7 @@ fn read_cache(
             program: id.program.to_owned(),
             mode: id.mode,
             profile_name: id.profile.to_owned(),
-            firmware_sha256: firmware.to_owned(),
+            firmware_sha256,
         },
         source.to_owned(),
         inputs.to_owned(),
@@ -711,7 +715,7 @@ fn check_artifact(
     let path = confined(build_root, path)?;
     let bytes = read_bytes(&path)?;
     let digest = sha256_bytes(&bytes);
-    if hex_of(&digest) != sha || bytes.len() as u64 != size {
+    if format_sha256(&digest) != sha || bytes.len() as u64 != size {
         return Err(ResolveError::ArtifactMismatch { rel: rel.clone() });
     }
     Ok(CheckedArtifact {
@@ -865,7 +869,8 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-fn hex_of(bytes: &[u8]) -> String {
+/// Encode a SHA-256 digest as lowercase hexadecimal.
+pub fn format_sha256(bytes: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -876,7 +881,7 @@ fn hex_of(bytes: &[u8]) -> String {
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    hex_of(&sha256_bytes(bytes))
+    format_sha256(&sha256_bytes(bytes))
 }
 
 #[cfg(test)]
@@ -995,7 +1000,7 @@ mod tests {
                 }
                 report.push_str(&format!(
                     "[firmware]\nsha256 = \"{}\"\n\n",
-                    hex_of(&firmware)
+                    format_sha256(&firmware)
                 ));
                 let inputs: &[&str] = match mode.producer {
                     "rv32" => &["gate_bpf"],
@@ -1436,10 +1441,10 @@ mod tests {
             assert_eq!(image.program(), "demo");
             assert_eq!(image.mode(), mode);
             assert_eq!(image.profile_name(), "demo");
-            assert_eq!(image.firmware_sha256(), hex_of(&FW));
+            assert_eq!(image.firmware_sha256(), &FW);
             assert_eq!(
                 image.path().file_name().unwrap().to_str().unwrap(),
-                format!("{}.elf", hex_of(image.sha256()))
+                format!("{}.elf", format_sha256(image.sha256()))
             );
             let _ = file;
             assert!(image.path().is_absolute());
@@ -1866,7 +1871,7 @@ mod tests {
         .unwrap();
         assert_eq!(refreshed.path(), first.path());
         assert_eq!(refreshed.sha256(), first.sha256());
-        assert_eq!(refreshed.firmware_sha256(), hex_of(&next_firmware));
+        assert_eq!(refreshed.firmware_sha256(), &next_firmware);
         assert_eq!(refreshed.bytes().as_ref(), original);
         assert_eq!(std::fs::read(refreshed.path()).unwrap(), original);
         let metadata = parse_doc(
@@ -1876,7 +1881,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             metadata["firmware_sha256"].as_str().unwrap(),
-            hex_of(&next_firmware)
+            format_sha256(&next_firmware)
         );
         assert!(matches!(
             resolve_flash_image(&root, "demo", XdpMode::Aot, "demo"),

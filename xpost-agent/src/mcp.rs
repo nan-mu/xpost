@@ -112,7 +112,7 @@ impl XpostMcp {
     }
 
     #[tool(
-        description = "Build firmware and preflight existing XDP artifacts before flashing firmware and installing cached containers"
+        description = "Build firmware. Validate linked XDP images before any write. Flash firmware. Install linked images. The `flash` field lists firmware and XDP identities."
     )]
     async fn flash_fw(
         &self,
@@ -125,7 +125,7 @@ impl XpostMcp {
     }
 
     #[tool(
-        description = "Validate and cache an existing XDP artifact against its linked firmware, then install it in the cold table"
+        description = "Validate the XDP image. Validate device firmware. Install the image in the cold table. The `flash` field lists firmware and XDP identities."
     )]
     async fn flash_xdp(
         &self,
