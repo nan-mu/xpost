@@ -1,10 +1,10 @@
 //! Host parse helpers for `get perf` replies.
 
 use winnow::{
+    ModalResult, Parser,
     ascii::{Caseless, dec_uint, multispace0, space0, space1},
     combinator::eof,
     error::{ContextError, ErrMode},
-    ModalResult, Parser,
 };
 
 use crate::client::error::ParseError;

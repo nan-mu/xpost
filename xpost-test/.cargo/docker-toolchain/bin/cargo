@@ -3,24 +3,65 @@
 # Mac: rust-toolchain.toml → these binaries → docker exec quirky_villani.
 # In-container: fall through to nightly toolchain bins (no rustup / path recurse).
 #
-# Host tree may be reached via symlink (/Users/nan/bs → /Volumes/SSD/bs).
-# pwd -P is physical; we map back to logical HOST_ROOT for docker -w.
+# The project is the nearest directory named xpost-test, with a Cargo.toml,
+# walking up from the physical cwd. This file's checkout is not the project
+# unless that checkout is the one whose cwd invoked it.
+#
+# XPOST_HOST_ROOT, when set, must exist, and the physical cwd must sit inside
+# its physical path (/Users/nan/bs → /Volumes/SSD/bs).
 #
 # OrbStack virtiofs on /Volumes is unreliable for cargo (config load / metadata
-# hang, EINTR on reads). Stage under /Users/nan/.cache (internal disk, mounted
-# into quirky_villani) then mirror target/ back into the project.
+# hang, EINTR on reads). Stage on internal disk, one directory per checkout:
+#   ${XPOST_TEST_DOCKER_STAGE:-/Users/nan/.cache/xpost-test-docker}/<hash>
+# then mirror target/ back into the discovered project.
 set -euo pipefail
 
 CONTAINER="${XPOST_TEST_DOCKER:-quirky_villani}"
-HOST_ROOT_LOGICAL="${XPOST_HOST_ROOT:-/Users/nan/bs}"
 TOOL="$(basename "$0")"
 NIGHTLY_BIN="/usr/local/rustup/toolchains/nightly-aarch64-unknown-linux-gnu/bin"
 REAL="${NIGHTLY_BIN}/${TOOL}"
-# Must be under /Users (OrbStack-native) on internal disk — not /Volumes via bs symlink.
-STAGE_ROOT="${XPOST_TEST_DOCKER_STAGE:-/Users/nan/.cache/xpost-test-docker}"
+STAGE_PARENT="${XPOST_TEST_DOCKER_STAGE:-/Users/nan/.cache/xpost-test-docker}"
 
 in_docker() {
   [ -f /.dockerenv ] || [ -n "${XPOST_TEST_IN_DOCKER:-}" ]
+}
+
+# Physical path of $1. Components that do not exist yet stay literal.
+physical_path() {
+  local path="$1"
+  local suffix=""
+  local existing="$path"
+  while [ ! -d "$existing" ]; do
+    local base parent
+    base="$(basename "$existing")"
+    parent="$(dirname "$existing")"
+    if [ "$parent" = "$existing" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+    suffix="/${base}${suffix}"
+    existing="$parent"
+  done
+  local phys
+  phys="$(cd "$existing" && pwd -P)"
+  printf '%s%s\n' "$phys" "$suffix"
+}
+
+# Nearest xpost-test with Cargo.toml, walking up from the physical cwd.
+discover_project() {
+  local dir="$1"
+  while true; do
+    if [ "$(basename "$dir")" = "xpost-test" ] && [ -f "$dir/Cargo.toml" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    local parent
+    parent="$(dirname "$dir")"
+    if [ "$parent" = "$dir" ]; then
+      return 1
+    fi
+    dir="$parent"
+  done
 }
 
 if in_docker; then
@@ -31,41 +72,73 @@ if in_docker; then
   exec env -u RUSTUP_HOME RUSTUP_TOOLCHAIN=nightly "$REAL" "$@"
 fi
 
-if [ ! -d "$HOST_ROOT_LOGICAL" ]; then
-  echo "xpost-test docker-toolchain: HOST_ROOT $HOST_ROOT_LOGICAL missing" >&2
+cwd="$(pwd -P)"
+project="$(discover_project "$cwd" || true)"
+
+if [ -z "$project" ] || [ ! -d "$project" ]; then
+  echo "xpost-test docker-toolchain: no xpost-test project with Cargo.toml above $cwd" >&2
   exit 1
 fi
-HOST_ROOT_REAL="$(cd "$HOST_ROOT_LOGICAL" && pwd -P)"
-cwd="$(pwd -P)"
 
 case "$cwd" in
-  "$HOST_ROOT_REAL" | "$HOST_ROOT_REAL"/*)
-    workdir="${HOST_ROOT_LOGICAL}${cwd#"$HOST_ROOT_REAL"}"
-    ;;
+  "$project" | "$project"/*) ;;
   *)
-    echo "xpost-test docker-toolchain: cwd $cwd is outside $HOST_ROOT_LOGICAL (→ $HOST_ROOT_REAL)" >&2
+    echo "xpost-test docker-toolchain: cwd $cwd is outside project $project" >&2
     exit 1
     ;;
 esac
+
+if [ "$(basename "$project")" != "xpost-test" ] || [ ! -f "$project/Cargo.toml" ]; then
+  echo "xpost-test docker-toolchain: expected an xpost-test directory with Cargo.toml, got $project" >&2
+  exit 1
+fi
+
+if [ -n "${XPOST_HOST_ROOT:-}" ]; then
+  if [ ! -d "$XPOST_HOST_ROOT" ]; then
+    echo "xpost-test docker-toolchain: HOST_ROOT $XPOST_HOST_ROOT missing" >&2
+    exit 1
+  fi
+  host_real="$(cd "$XPOST_HOST_ROOT" && pwd -P)"
+  case "$cwd" in
+    "$host_real" | "$host_real"/*) ;;
+    *)
+      echo "xpost-test docker-toolchain: cwd $cwd is outside $XPOST_HOST_ROOT (→ $host_real)" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+case "$STAGE_PARENT" in
+  /*) ;;
+  *) STAGE_PARENT="${cwd}/${STAGE_PARENT}" ;;
+esac
+if [ "$STAGE_PARENT" != "/" ]; then
+  STAGE_PARENT="${STAGE_PARENT%/}"
+fi
+
+project_hash="$(printf '%s' "$project" | shasum -a 256 | awk '{print $1}')"
+STAGE_PROJECT="${STAGE_PARENT}/${project_hash}"
+stage_phys="$(physical_path "$STAGE_PROJECT")"
+case "$stage_phys" in
+  /Volumes | /Volumes/*)
+    echo "xpost-test docker-toolchain: stage $stage_phys is under /Volumes; keep the stage on internal storage" >&2
+    exit 1
+    ;;
+esac
+
+if [ "${XPOST_TEST_DOCKER_RESOLVE:-}" = "1" ]; then
+  printf 'project=%s\n' "$project"
+  printf 'stage=%s\n' "$STAGE_PROJECT"
+  exit 0
+fi
 
 if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
   echo "xpost-test docker-toolchain: container $CONTAINER is not running" >&2
   exit 1
 fi
 
-# Only stage+mirror for the xpost-test workspace (path toolchain lives there).
-case "$workdir" in
-  */xpost/xpost-test | */xpost/xpost-test/*) ;;
-  *)
-    echo "xpost-test docker-toolchain: expected cwd under xpost-test, got $workdir" >&2
-    exit 1
-    ;;
-esac
-
-PROJECT_ROOT="${HOST_ROOT_LOGICAL}/xpost/xpost-test"
-REL="${workdir#"$PROJECT_ROOT"}"
+REL="${cwd#"$project"}"
 REL="${REL#/}"
-STAGE_PROJECT="$STAGE_ROOT"
 STAGE_WD="$STAGE_PROJECT"
 if [ -n "$REL" ]; then
   STAGE_WD="$STAGE_PROJECT/$REL"
@@ -77,7 +150,7 @@ rsync -a --delete \
   --exclude target \
   --exclude .cargo/docker-toolchain \
   --exclude rust-toolchain.toml \
-  "$PROJECT_ROOT"/ "$STAGE_PROJECT"/
+  "$project"/ "$STAGE_PROJECT"/
 
 # Drop path-toolchain file if rsync brought a copy; use nightly bin directly.
 rm -f "$STAGE_PROJECT/rust-toolchain.toml"
@@ -118,10 +191,10 @@ set +e
 status=$?
 set -e
 
-# Mirror build outputs back for scp / local consumers.
+# Mirror build outputs back for scp / local consumers. No --delete.
 if [ -d "$STAGE_PROJECT/target" ]; then
-  mkdir -p "$PROJECT_ROOT/target"
-  rsync -a "$STAGE_PROJECT/target"/ "$PROJECT_ROOT/target"/
+  mkdir -p "$project/target"
+  rsync -a "$STAGE_PROJECT/target"/ "$project/target"/
 fi
 
 exit "$status"

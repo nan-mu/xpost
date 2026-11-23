@@ -20,7 +20,7 @@ pub use error::{Interrupted, ParseError, RequestError, RequestTimeout, Result};
 pub use flash::{
     DEFAULT_XDP_PARTITION, FlashConfig, FlashResult, InstallOutcome, XdpEntry, XdpTable,
 };
-pub use ops::{Chip, FlashOp};
+pub use ops::{Chip, FirmwareExpectation, FlashOp};
 pub use port::Port;
 #[cfg(all(test, feature = "dev"))]
 pub use port::{MemoryClient, MemoryPair, MemoryServer};
@@ -128,7 +128,10 @@ impl SerialHandler {
     /// Like [`Self::request`], plus the time the reader thread read the reply
     /// line. That is the instant the host received the MCU reply, not the later
     /// moment the caller formats it.
-    pub fn request_at<'a, E>(&'a self, cmd: &Command<'_>) -> core::result::Result<(OkReply<'a>, SystemTime), E>
+    pub fn request_at<'a, E>(
+        &'a self,
+        cmd: &Command<'_>,
+    ) -> core::result::Result<(OkReply<'a>, SystemTime), E>
     where
         E: RequestError,
     {

@@ -6,8 +6,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use xpost_serial::client::flash::xdp_name_from_file;
-use xpost_serial::client::{Command, FlashOp, FlashResult, OkReply};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use xpost_artifact::{FlashImage, format_sha256};
+use xpost_serial::client::{Command, FirmwareExpectation, FlashOp, FlashResult, OkReply};
 use xpost_serial::command::PerfVariant;
 
 use crate::profiles::{BuildSpec, XdpProfile, abs_under_root};
@@ -40,14 +42,14 @@ fn agent_rx_unix(at: std::time::SystemTime) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn with_log(
+fn with_log<T: AsRef<str>>(
     peer: &str,
     name: &str,
     summary: &str,
     noisy: bool,
     state: &Mutex<AgentState>,
-    f: impl FnOnce() -> Result<String>,
-) -> Result<String> {
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let log_this = maybe_log_noisy(state, noisy);
     let t0 = Instant::now();
     if log_this {
@@ -61,7 +63,7 @@ fn with_log(
                     &format!(
                         "← {name} ok in {} — {}",
                         fmt_dur(t0.elapsed()),
-                        truncate(&msg, 120)
+                        truncate(msg.as_ref(), 120)
                     ),
                 );
             }
@@ -88,7 +90,10 @@ fn req<'a>(g: &'a AgentState, cmd: &Command<'_>) -> Result<OkReply<'a>> {
 }
 
 /// [`req`] plus the instant the UART reader read the reply line.
-fn req_at<'a>(g: &'a AgentState, cmd: &Command<'_>) -> Result<(OkReply<'a>, std::time::SystemTime)> {
+fn req_at<'a>(
+    g: &'a AgentState,
+    cmd: &Command<'_>,
+) -> Result<(OkReply<'a>, std::time::SystemTime)> {
     g.handler
         .request_at::<AgentError>(cmd)
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -124,7 +129,53 @@ pub fn dut_status(state: &Mutex<AgentState>) -> Result<String> {
     }
 }
 
-pub fn flash_fw(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
+pub struct OpReply {
+    pub message: String,
+    pub flash: Option<FlashIdentity>,
+}
+
+impl From<String> for OpReply {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            flash: None,
+        }
+    }
+}
+
+impl AsRef<str> for OpReply {
+    fn as_ref(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Serialize)]
+pub struct FlashIdentity {
+    firmware_profile: String,
+    firmware_sha256: String,
+    containers: Vec<XdpFlashIdentity>,
+}
+
+#[derive(Serialize)]
+struct XdpFlashIdentity {
+    program: String,
+    mode: &'static str,
+    profile: String,
+    container_sha256: String,
+}
+
+impl From<&FlashImage> for XdpFlashIdentity {
+    fn from(image: &FlashImage) -> Self {
+        Self {
+            program: image.program().to_owned(),
+            mode: image.mode().as_db(),
+            profile: image.profile_name().to_owned(),
+            container_sha256: format_sha256(image.sha256()),
+        }
+    }
+}
+
+pub fn flash_fw(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<OpReply> {
     with_log(
         peer,
         "FlashFw",
@@ -135,8 +186,8 @@ pub fn flash_fw(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<Str
     )
 }
 
-fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
-    let (root, fw, linked_xdps) = {
+fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<OpReply> {
+    let (root, build_root, fw, linked_xdps) = {
         let g = lock(state)?;
         let fw = g
             .profiles
@@ -152,7 +203,12 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
                 .with_context(|| format!("fw `{name}` lists missing xdp `{xn}`"))?;
             linked.push(x);
         }
-        (g.root.clone(), fw, linked)
+        (
+            g.root.clone(),
+            g.profiles.build_root().to_owned(),
+            fw,
+            linked,
+        )
     };
 
     let build_dur = run_build(&root, &fw.build, &format!("fw `{name}`"), peer)?;
@@ -180,40 +236,36 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
         ),
     );
 
+    let snapshot = firmware_snapshot(&firmware, &partitions)?;
+    let firmware_sha = snapshot.sha256;
     let t_flash = Instant::now();
-    {
-        let g = lock(state)?;
-        g.handler
-            .flash(FlashOp::Fw {
-                firmware: firmware.display().to_string(),
-                partitions: partitions.display().to_string(),
-            })
-            .with_context(|| format!("flash fw `{name}`"))?;
-    }
-    let mut flash_dur = t_flash.elapsed();
-
-    // Profiles carry one cold image per fw. Stale names (e.g. just_tx → just_drop)
-    // would append mid-sector and espflash erase_region rejects unaligned addresses.
-    if !linked_xdps.is_empty() {
-        log_line(peer, "clear xdp table before co-flash");
-        let t_clear = Instant::now();
-        {
+    let installed = prepare_and_flash(
+        &linked_xdps,
+        |x| resolve_xdp(&root, &build_root, x, firmware_sha),
+        || {
             let g = lock(state)?;
             g.handler
-                .flash(FlashOp::Clear {
-                    names: Vec::new(),
+                .flash(FlashOp::Fw {
+                    snapshot: snapshot.clone(),
                 })
+                .with_context(|| format!("flash fw `{name}`"))?;
+            Ok(())
+        },
+        || {
+            log_line(peer, "clear xdp table before co-flash");
+            let g = lock(state)?;
+            g.handler
+                .flash(FlashOp::Clear { names: Vec::new() })
                 .context("clear xdp before co-flash")?;
-        }
-        flash_dur += t_clear.elapsed();
-    }
-
-    let mut xdp_parts = Vec::new();
-    for x in &linked_xdps {
-        let part = flash_one_xdp(state, &root, x, peer)?;
-        flash_dur += part.1;
-        xdp_parts.push(part.0);
-    }
+            Ok(())
+        },
+        |image| {
+            let summary = flash_one_xdp(state, image, &snapshot, fw.xdp_image_capacity, peer)?;
+            Ok((summary, XdpFlashIdentity::from(image)))
+        },
+    )?;
+    let (xdp_parts, containers): (Vec<_>, Vec<_>) = installed.into_iter().unzip();
+    let flash_dur = t_flash.elapsed();
 
     let mut msg = format!(
         "flashed fw={name} size={} build={} flash={}",
@@ -226,7 +278,14 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<S
         msg.push_str(&xdp_parts.join(", "));
         msg.push(']');
     }
-    Ok(msg)
+    Ok(OpReply {
+        message: msg,
+        flash: Some(FlashIdentity {
+            firmware_profile: name.to_owned(),
+            firmware_sha256: format_sha256(&firmware_sha),
+            containers,
+        }),
+    })
 }
 
 pub fn flash_xdp(
@@ -234,9 +293,9 @@ pub fn flash_xdp(
     name: &str,
     slot: Option<u8>,
     peer: &str,
-) -> Result<String> {
+) -> Result<OpReply> {
     if let Some(slot) = slot {
-        return flash_xdp_slot(state, name, slot, peer);
+        return flash_xdp_slot(state, name, slot, peer).map(OpReply::from);
     }
     with_log(
         peer,
@@ -245,71 +304,131 @@ pub fn flash_xdp(
         false,
         state,
         || {
-            let (root, xdp) = {
+            let (root, build_root, xdp, firmware, partitions, image_capacity) = {
                 let g = lock(state)?;
                 let xdp = g
                     .profiles
                     .xdp(name)
                     .cloned()
                     .with_context(|| format!("unknown xdp `{name}`"))?;
-                (g.root.clone(), xdp)
+                let fw = g
+                    .profiles
+                    .fw(&xdp.fw)
+                    .with_context(|| format!("xdp `{name}` links missing fw `{}`", xdp.fw))?;
+                (
+                    g.root.clone(),
+                    g.profiles.build_root().to_owned(),
+                    xdp.clone(),
+                    abs_under_root(&g.root, &fw.artifact),
+                    abs_under_root(&g.root, &fw.partition_table),
+                    fw.xdp_image_capacity,
+                )
             };
-            let (summary, _) = flash_one_xdp(state, &root, &xdp, peer)?;
-            Ok(summary)
+            let snapshot = firmware_snapshot(&firmware, &partitions)?;
+            let image = resolve_xdp(&root, &build_root, &xdp, snapshot.sha256)?;
+            let message = flash_one_xdp(state, &image, &snapshot, image_capacity, peer)?;
+            Ok(OpReply {
+                message,
+                flash: Some(FlashIdentity {
+                    firmware_profile: xdp.fw,
+                    firmware_sha256: format_sha256(&snapshot.sha256),
+                    containers: vec![XdpFlashIdentity::from(&image)],
+                }),
+            })
         },
     )
 }
 
-/// Build + flash one XDP profile. Returns (summary, flash duration).
+fn prepare_and_flash<I, T>(
+    xdps: &[XdpProfile],
+    mut resolve: impl FnMut(&XdpProfile) -> Result<I>,
+    firmware: impl FnOnce() -> Result<()>,
+    clear: impl FnOnce() -> Result<()>,
+    mut install: impl FnMut(&I) -> Result<T>,
+) -> Result<Vec<T>> {
+    let images = xdps.iter().map(&mut resolve).collect::<Result<Vec<_>>>()?;
+    firmware()?;
+    if !images.is_empty() {
+        clear()?;
+    }
+    images.iter().map(&mut install).collect()
+}
+
+fn firmware_snapshot(path: &Path, partitions: &Path) -> Result<FirmwareExpectation> {
+    let elf = std::fs::read(path).with_context(|| format!("read firmware {}", path.display()))?;
+    let sha256 = Sha256::digest(&elf).into();
+    let partition_table = xpost_serial::client::flash::partition_table_bin(partitions)?;
+    Ok(FirmwareExpectation {
+        elf,
+        sha256,
+        partition_table,
+    })
+}
+
+fn resolve_xdp(
+    root: &Path,
+    build_root_rel: &str,
+    xdp: &XdpProfile,
+    firmware_sha: [u8; 32],
+) -> Result<FlashImage> {
+    let name = xdp.name.as_str();
+    if build_root_rel.trim().is_empty() {
+        bail!("xdp `{name}`: profiles have no build_root");
+    }
+    let build_root = abs_under_root(root, build_root_rel);
+    let mode = match xdp.mode.as_str() {
+        "aot" => xpost_artifact::XdpMode::Aot,
+        "jit" => xpost_artifact::XdpMode::Jit,
+        "rbpf" => xpost_artifact::XdpMode::Rbpf,
+        other => bail!("xdp `{name}`: unknown mode `{other}`"),
+    };
+    xpost_artifact::resolve_flash_image(
+        &build_root,
+        &root.join(".cache/xpost-artifact"),
+        root,
+        &xdp.program,
+        mode,
+        name,
+        firmware_sha,
+    )
+    .with_context(|| format!("resolve xdp `{name}`"))
+}
+
+fn cold_install_op(image: &FlashImage, firmware: &FirmwareExpectation) -> Result<FlashOp> {
+    if image.firmware_sha256() != &firmware.sha256 {
+        bail!(
+            "xdp `{}`: firmware snapshot does not match the resolved image",
+            image.profile_name()
+        );
+    }
+    Ok(FlashOp::Xdp {
+        name: image.profile_name().to_owned(),
+        bytes: image.bytes(),
+        expectation: firmware.clone(),
+    })
+}
+
+/// Install a verified image from the retained bytes.
 fn flash_one_xdp(
     state: &Mutex<AgentState>,
-    root: &Path,
-    xdp: &XdpProfile,
+    image: &FlashImage,
+    snapshot: &FirmwareExpectation,
+    image_capacity: Option<usize>,
     peer: &str,
-) -> Result<(String, Duration)> {
-    let name = xdp.name.as_str();
-    let image_capacity = lock(state)?.profiles.xdp_image_capacity(xdp)?;
-    let _build_dur = run_build(root, &xdp.build, &format!("xdp `{name}`"), peer)?;
+) -> Result<String> {
+    let name = image.profile_name();
+    let path = image.path().display();
+    let sz = image.len();
+    log_line(peer, &format!("[xdp] `{name}`: {path} ({})", fmt_bytes(sz)));
 
-    let path = abs_under_root(root, &xdp.artifact);
-    if !path.is_file() {
-        bail!(
-            "xdp artifact not found after build: {} (xdp `{name}`)",
-            path.display()
-        );
-    }
-    let elf_name = xdp_name_from_file(&path)
-        .with_context(|| format!("parse name from {}", path.display()))?;
-    if elf_name != name {
-        bail!(
-            "xdp profile name `{name}` != ELF-derived name `{elf_name}` ({})",
-            path.display()
-        );
-    }
-    let sz = file_size(&path).unwrap_or(0);
-    log_line(
-        peer,
-        &format!(
-            "[xdp] `{name}`: {} ({})",
-            path.display(),
-            fmt_bytes(sz)
-        ),
-    );
-
-    let t_flash = Instant::now();
+    let op = cold_install_op(image, snapshot)?;
     // Transient espflash bootloader errors after HAL↔XDP fw switches; retry once.
     let outcome = {
         const ATTEMPTS: usize = 2;
         let mut last = None;
         for attempt in 1..=ATTEMPTS {
             let g = lock(state)?;
-            match g.handler.flash_with_image_capacity(
-                FlashOp::Xdp {
-                    name: elf_name.clone(),
-                    path: path.display().to_string(),
-                },
-                image_capacity,
-            ) {
+            match g.handler.flash_with_image_capacity(op.clone(), image_capacity) {
                 Ok(o) => {
                     last = Some(Ok(o));
                     break;
@@ -334,11 +453,9 @@ fn flash_one_xdp(
                 }
             }
         }
-        last
-            .unwrap_or_else(|| Err(std::io::Error::other("flash xdp: no attempts")))
+        last.unwrap_or_else(|| Err(std::io::Error::other("flash xdp: no attempts")))
             .with_context(|| format!("flash xdp `{name}`"))?
     };
-    let flash_dur = t_flash.elapsed();
     let summary = match outcome {
         FlashResult::Install(xpost_serial::InstallOutcome::Overwritten { offset }) => {
             format!(
@@ -353,7 +470,7 @@ fn flash_one_xdp(
         FlashResult::Done => format!("done name={name} size={}", fmt_bytes(sz)),
         FlashResult::List(_) => bail!("unexpected list result from flash xdp"),
     };
-    Ok((summary, flash_dur))
+    Ok(summary)
 }
 
 fn run_build(root: &Path, build: &BuildSpec, label: &str, peer: &str) -> Result<Duration> {
@@ -372,9 +489,8 @@ fn run_build(root: &Path, build: &BuildSpec, label: &str, peer: &str) -> Result<
         ),
     );
     let t0 = Instant::now();
-    // Artifact paths in profiles.toml sit under the build cwd's own target/.
-    // An inherited CARGO_TARGET_DIR compiles somewhere else and the flash
-    // then sends the stale file at the profile path.
+    // Firmware builds write under their cwd. An inherited CARGO_TARGET_DIR
+    // would move the ELF away from the configured firmware artifact path.
     let status = ProcCommand::new(prog)
         .args(args)
         .current_dir(&cwd)
@@ -390,10 +506,7 @@ fn run_build(root: &Path, build: &BuildSpec, label: &str, peer: &str) -> Result<
             args.join(" ")
         );
     }
-    log_line(
-        peer,
-        &format!("build {label} ok in {}", fmt_dur(elapsed)),
-    );
+    log_line(peer, &format!("build {label} ok in {}", fmt_dur(elapsed)));
     Ok(elapsed)
 }
 
@@ -457,7 +570,13 @@ pub fn disable_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     })
 }
 
-pub fn flash_xdp_slot(state: &Mutex<AgentState>, name: &str, slot: u8, peer: &str) -> Result<String> {
+/// Copy an installed cold container into a hot slot.
+pub fn flash_xdp_slot(
+    state: &Mutex<AgentState>,
+    name: &str,
+    slot: u8,
+    peer: &str,
+) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
         bail!("empty xdp name");
@@ -726,14 +845,7 @@ pub fn update_map(
             for e in entries {
                 let key = e.key.as_bytes();
                 let value = e.value.as_bytes();
-                req(
-                    &g,
-                    &Command::UpdateMap {
-                        name,
-                        key,
-                        value,
-                    },
-                )?;
+                req(&g, &Command::UpdateMap { name, key, value })?;
                 n += 1;
             }
             Ok(format!("OK update map n={n}"))
@@ -787,10 +899,17 @@ pub fn perf_prepare(
 }
 
 pub fn perf_arm(state: &Mutex<AgentState>, epoch: u32, peer: &str) -> Result<String> {
-    with_log(peer, "PerfArm", &format!("epoch={epoch}"), false, state, || {
-        let g = lock(state)?;
-        format_perf_session(&req(&g, &Command::PerfArm { epoch })?)
-    })
+    with_log(
+        peer,
+        "PerfArm",
+        &format!("epoch={epoch}"),
+        false,
+        state,
+        || {
+            let g = lock(state)?;
+            format_perf_session(&req(&g, &Command::PerfArm { epoch })?)
+        },
+    )
 }
 
 pub fn perf_freeze(state: &Mutex<AgentState>, epoch: u32, peer: &str) -> Result<String> {
@@ -915,96 +1034,107 @@ pub fn run_cmd(state: &Mutex<AgentState>, cmd: &str, peer: &str) -> Result<Strin
         bail!("empty cmd");
     }
     let owned = cmd.to_string();
-    with_log(peer, "Run", &format!("`{owned}`"), false, state, move || {
-        let parsed = parse_app_command(&owned)?;
-        let g = lock(state)?;
-        match &parsed {
-            ParsedCmd::Ping => {
-                req(&g, &Command::Ping)?;
-                Ok("OK ping".into())
-            }
-            ParsedCmd::EnableXdp => {
-                req(&g, &Command::EnableXdp)?;
-                Ok("OK enable xdp".into())
-            }
-            ParsedCmd::DisableXdp => {
-                req(&g, &Command::DisableXdp)?;
-                Ok("OK disable xdp".into())
-            }
-            ParsedCmd::EnableExec => {
-                req(&g, &Command::EnableExec)?;
-                Ok("OK enable exec".into())
-            }
-            ParsedCmd::DisableExec => {
-                req(&g, &Command::DisableExec)?;
-                Ok("OK disable exec".into())
-            }
-            ParsedCmd::ClearMap { name } => {
-                req(&g, &Command::ClearMap { name })?;
-                Ok("OK clear map".into())
-            }
-            ParsedCmd::GetMap { name } => match req(&g, &Command::GetMap { name })? {
-                OkReply::GetMap { blob } => {
-                    Ok(format!("OK get map {} b64={}", blob.len(), base64_encode(blob)))
+    with_log(
+        peer,
+        "Run",
+        &format!("`{owned}`"),
+        false,
+        state,
+        move || {
+            let parsed = parse_app_command(&owned)?;
+            let g = lock(state)?;
+            match &parsed {
+                ParsedCmd::Ping => {
+                    req(&g, &Command::Ping)?;
+                    Ok("OK ping".into())
                 }
-                _ => bail!("unexpected get map reply"),
-            },
-            ParsedCmd::UpdateMap { name, key, value } => {
-                req(
+                ParsedCmd::EnableXdp => {
+                    req(&g, &Command::EnableXdp)?;
+                    Ok("OK enable xdp".into())
+                }
+                ParsedCmd::DisableXdp => {
+                    req(&g, &Command::DisableXdp)?;
+                    Ok("OK disable xdp".into())
+                }
+                ParsedCmd::EnableExec => {
+                    req(&g, &Command::EnableExec)?;
+                    Ok("OK enable exec".into())
+                }
+                ParsedCmd::DisableExec => {
+                    req(&g, &Command::DisableExec)?;
+                    Ok("OK disable exec".into())
+                }
+                ParsedCmd::ClearMap { name } => {
+                    req(&g, &Command::ClearMap { name })?;
+                    Ok("OK clear map".into())
+                }
+                ParsedCmd::GetMap { name } => match req(&g, &Command::GetMap { name })? {
+                    OkReply::GetMap { blob } => Ok(format!(
+                        "OK get map {} b64={}",
+                        blob.len(),
+                        base64_encode(blob)
+                    )),
+                    _ => bail!("unexpected get map reply"),
+                },
+                ParsedCmd::UpdateMap { name, key, value } => {
+                    req(
+                        &g,
+                        &Command::UpdateMap {
+                            name,
+                            key: key.as_bytes(),
+                            value: value.as_bytes(),
+                        },
+                    )?;
+                    Ok("OK update map".into())
+                }
+                ParsedCmd::ClearPerf => {
+                    req(&g, &Command::ClearPerf)?;
+                    Ok("OK clear perf".into())
+                }
+                ParsedCmd::GetPerf => match req(&g, &Command::GetPerf)? {
+                    OkReply::GetPerf { blob } => Ok(format!(
+                        "OK get perf {} b64={}",
+                        blob.len(),
+                        base64_encode(blob)
+                    )),
+                    _ => bail!("unexpected get perf reply"),
+                },
+                ParsedCmd::PerfPrepare {
+                    uuid,
+                    kind,
+                    profile,
+                } => format_perf_session(&req(
                     &g,
-                    &Command::UpdateMap {
-                        name,
-                        key: key.as_bytes(),
-                        value: value.as_bytes(),
+                    &Command::PerfPrepare {
+                        uuid: *uuid,
+                        kind: *kind,
+                        profile: *profile,
                     },
-                )?;
-                Ok("OK update map".into())
-            }
-            ParsedCmd::ClearPerf => {
-                req(&g, &Command::ClearPerf)?;
-                Ok("OK clear perf".into())
-            }
-            ParsedCmd::GetPerf => match req(&g, &Command::GetPerf)? {
-                OkReply::GetPerf { blob } => {
-                    Ok(format!("OK get perf {} b64={}", blob.len(), base64_encode(blob)))
+                )?),
+                ParsedCmd::PerfArm { epoch } => {
+                    format_perf_session(&req(&g, &Command::PerfArm { epoch: *epoch })?)
                 }
-                _ => bail!("unexpected get perf reply"),
-            },
-            ParsedCmd::PerfPrepare {
-                uuid,
-                kind,
-                profile,
-            } => format_perf_session(&req(
-                &g,
-                &Command::PerfPrepare {
-                    uuid: *uuid,
-                    kind: *kind,
-                    profile: *profile,
-                },
-            )?),
-            ParsedCmd::PerfArm { epoch } => {
-                format_perf_session(&req(&g, &Command::PerfArm { epoch: *epoch })?)
+                ParsedCmd::PerfFreeze { epoch } => {
+                    format_perf_session(&req(&g, &Command::PerfFreeze { epoch: *epoch })?)
+                }
+                ParsedCmd::PerfRead {
+                    epoch,
+                    offset,
+                    max_bytes,
+                } => format_perf_session(&req(
+                    &g,
+                    &Command::PerfRead {
+                        epoch: *epoch,
+                        offset: *offset,
+                        max_bytes: *max_bytes,
+                    },
+                )?),
+                ParsedCmd::PerfRelease { epoch } => {
+                    format_perf_session(&req(&g, &Command::PerfRelease { epoch: *epoch })?)
+                }
             }
-            ParsedCmd::PerfFreeze { epoch } => {
-                format_perf_session(&req(&g, &Command::PerfFreeze { epoch: *epoch })?)
-            }
-            ParsedCmd::PerfRead {
-                epoch,
-                offset,
-                max_bytes,
-            } => format_perf_session(&req(
-                &g,
-                &Command::PerfRead {
-                    epoch: *epoch,
-                    offset: *offset,
-                    max_bytes: *max_bytes,
-                },
-            )?),
-            ParsedCmd::PerfRelease { epoch } => {
-                format_perf_session(&req(&g, &Command::PerfRelease { epoch: *epoch })?)
-            }
-        }
-    })
+        },
+    )
 }
 
 enum ParsedCmd<'a> {
@@ -1013,8 +1143,12 @@ enum ParsedCmd<'a> {
     DisableXdp,
     EnableExec,
     DisableExec,
-    ClearMap { name: &'a str },
-    GetMap { name: &'a str },
+    ClearMap {
+        name: &'a str,
+    },
+    GetMap {
+        name: &'a str,
+    },
     UpdateMap {
         name: &'a str,
         key: &'a str,
@@ -1241,12 +1375,301 @@ fn base64_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn xdp(name: &str) -> XdpProfile {
+        XdpProfile {
+            name: name.into(),
+            fw: "owner".into(),
+            program: name.into(),
+            mode: "aot".into(),
+            target: None,
+        }
+    }
+
+    #[test]
+    fn preparation_guards_all_device_writes_and_preserves_order() {
+        use std::cell::RefCell;
+        let xdps = [xdp("first"), xdp("second")];
+        let writes = RefCell::new(Vec::new());
+        let result = prepare_and_flash(
+            &xdps,
+            |x| {
+                if x.name == "second" {
+                    bail!("resolver failure");
+                }
+                Ok(x.name.clone())
+            },
+            || {
+                writes.borrow_mut().push("fw".to_string());
+                Ok(())
+            },
+            || {
+                writes.borrow_mut().push("clear".to_string());
+                Ok(())
+            },
+            |x| {
+                writes.borrow_mut().push(x.clone());
+                Ok(x.clone())
+            },
+        );
+        assert!(result.is_err());
+        assert!(writes.borrow().is_empty());
+
+        prepare_and_flash(
+            &xdps,
+            |x| Ok(x.name.clone()),
+            || {
+                writes.borrow_mut().push("fw".to_string());
+                Ok(())
+            },
+            || {
+                writes.borrow_mut().push("clear".to_string());
+                Ok(())
+            },
+            |x| {
+                writes.borrow_mut().push(x.clone());
+                Ok(x.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(*writes.borrow(), ["fw", "clear", "first", "second"]);
+    }
+
+    #[test]
+    fn firmware_flash_failure_prevents_clear_and_install() {
+        let result = prepare_and_flash(
+            &[xdp("first")],
+            |x| Ok(x.name.clone()),
+            || bail!("firmware flash failed"),
+            || panic!("clear after failed firmware flash"),
+            |_| -> Result<String> { panic!("install after failed firmware flash") },
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hal_skips_resolver_and_clear() {
+        let writes = std::cell::RefCell::new(Vec::new());
+        prepare_and_flash::<String, ()>(
+            &[],
+            |_| panic!("resolver called"),
+            || {
+                writes.borrow_mut().push("fw");
+                Ok(())
+            },
+            || {
+                writes.borrow_mut().push("clear");
+                Ok(())
+            },
+            |_| panic!("install called"),
+        )
+        .unwrap();
+        assert_eq!(*writes.borrow(), ["fw"]);
+    }
+
+    #[test]
+    fn snapshot_hashes_the_bytes_kept_for_install() {
+        let dir = std::env::temp_dir().join(format!("xpost-agent-snapshot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let firmware = dir.join("fw");
+        let partitions = dir.join("partitions.csv");
+        std::fs::write(&firmware, b"first firmware").unwrap();
+        std::fs::write(
+            &partitions,
+            "factory,app,factory,0x10000,0x300000,\nxdp,0x40,0,0x310000,0x10000,\n",
+        )
+        .unwrap();
+        let snapshot = firmware_snapshot(&firmware, &partitions).unwrap();
+        std::fs::write(&firmware, b"changed firmware").unwrap();
+        assert_eq!(snapshot.elf, b"first firmware");
+        assert_eq!(
+            snapshot.sha256,
+            <[u8; 32]>::from(Sha256::digest(&snapshot.elf))
+        );
+        assert!(!snapshot.partition_table.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cold_install_keeps_verified_bytes_and_identity_after_cache_replacement() {
+        fn hash(data: &[u8]) -> String {
+            Sha256::digest(data)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        }
+        let dir = std::env::temp_dir().join(format!("xpost-agent-cache-{}", std::process::id()));
+        let mode_dir = dir.join("build/first/rv32");
+        std::fs::create_dir_all(&mode_dir).unwrap();
+        let firmware = dir.join("fw");
+        let partitions = dir.join("partitions.csv");
+        std::fs::write(&firmware, b"firmware A").unwrap();
+        std::fs::write(
+            &partitions,
+            "factory,app,factory,0x10000,0x300000,\nxdp,0x40,0,0x310000,0x10000,\n",
+        )
+        .unwrap();
+        let snapshot = firmware_snapshot(&firmware, &partitions).unwrap();
+        let meta = xpost_elf::ImageMetadataV0 {
+            slot_address: 0x40380000,
+            helper_address: 0x40381000,
+            machine: 1,
+            name: heapless::String::try_from("first_aot").unwrap(),
+            maps: heapless::Vec::new(),
+        };
+        let container = xpost_elf::build_container(b"\x01\x00\x82\x80\xff", &meta, None).unwrap();
+        let data = container.as_slice();
+        std::fs::write(mode_dir.join("image.elf"), data).unwrap();
+        std::fs::write(mode_dir.join("input"), b"input").unwrap();
+        let report = format!(
+            "schema = \"libbpf-mcu.report.v1\"\nprogram = \"first\"\nmode = \"rv32\"\nstatus = \"success\"\n[build]\nsource_id = \"source\"\ninput_set_id = \"input\"\n[verification]\nstatus = \"accepted\"\n[firmware]\nsha256 = \"{}\"\n[[input_artifact]]\nrole = \"gate_bpf\"\npath = \"input\"\nsha256 = \"{}\"\n[[artifact]]\nrole = \"xpost_container\"\npath = \"image.elf\"\nformat = \"xpost-compact-elf-v0\"\nsha256 = \"{}\"\nsize_bytes = {}\nprimary = true\n",
+            hash(&snapshot.elf),
+            hash(b"input"),
+            hash(data),
+            data.len()
+        );
+        std::fs::write(mode_dir.join("report.toml"), &report).unwrap();
+        let manifest = format!(
+            "schema = \"libbpf-mcu.program.v1\"\nprogram = \"first\"\n[[mode]]\nname = \"rv32\"\nreport = \"rv32/report.toml\"\nreport_sha256 = \"{}\"\n",
+            hash(report.as_bytes())
+        );
+        std::fs::write(dir.join("build/first/manifest.toml"), &manifest).unwrap();
+        let index = format!(
+            "schema = \"libbpf-mcu.artifacts.v1\"\n[[program]]\nname = \"first\"\nmanifest = \"first/manifest.toml\"\nmanifest_sha256 = \"{}\"\n",
+            hash(manifest.as_bytes())
+        );
+        std::fs::write(dir.join("build/index.toml"), index).unwrap();
+        let profile = XdpProfile {
+            name: "first_aot".into(),
+            ..xdp("first")
+        };
+        let image = resolve_xdp(&dir, "build", &profile, snapshot.sha256).unwrap();
+        assert_eq!(std::fs::read(image.path()).unwrap(), data);
+        assert!(
+            image
+                .path()
+                .starts_with(std::fs::canonicalize(dir.join(".cache/xpost-artifact")).unwrap())
+        );
+        assert!(
+            resolve_xdp(
+                &dir,
+                "build",
+                &profile,
+                Sha256::digest(b"firmware B").into()
+            )
+            .is_err()
+        );
+
+        let replacement = xpost_elf::build_container(b"\x01\x00\x82\x80\x00", &meta, None).unwrap();
+        assert_ne!(replacement.as_slice(), data);
+        std::fs::write(image.path(), replacement.as_slice()).unwrap();
+        let FlashOp::Xdp {
+            name,
+            bytes,
+            expectation,
+        } = cold_install_op(&image, &snapshot).unwrap()
+        else {
+            panic!("expected cold XDP install");
+        };
+        assert_eq!(bytes.as_ref(), data);
+        assert_eq!(expectation.sha256, snapshot.sha256);
+        assert_eq!(name, "first_aot");
+
+        let identity = serde_json::to_value(XdpFlashIdentity::from(&image)).unwrap();
+        assert_eq!(
+            identity,
+            serde_json::json!({
+                "program": "first",
+                "mode": "aot",
+                "profile": name,
+                "container_sha256": hash(&bytes)
+            })
+        );
+        assert_eq!(format_sha256(image.firmware_sha256()), hash(&snapshot.elf));
+        let mut wrong_firmware = snapshot;
+        wrong_firmware.sha256 = Sha256::digest(b"firmware B").into();
+        assert!(cold_install_op(&image, &wrong_firmware).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn standalone_snapshot_requires_existing_firmware_and_partitions() {
+        let dir = std::env::temp_dir().join(format!("xpost-agent-fw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let firmware = dir.join("fw");
+        let partitions = dir.join("partitions.csv");
+        assert!(firmware_snapshot(&firmware, &partitions).is_err());
+        std::fs::write(&firmware, b"abc").unwrap();
+        assert!(firmware_snapshot(&firmware, &partitions).is_err());
+        std::fs::write(&partitions, "invalid partition table").unwrap();
+        assert!(firmware_snapshot(&firmware, &partitions).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn firmware_hash_mismatch_prevents_device_writes() {
+        fn hex_hash(bytes: &[u8]) -> String {
+            Sha256::digest(bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        }
+        let dir = std::env::temp_dir().join(format!("xpost-agent-mismatch-{}", std::process::id()));
+        let build = dir.join("build");
+        std::fs::create_dir_all(build.join("first/rv32")).unwrap();
+        let report = format!(
+            "schema = \"libbpf-mcu.report.v1\"\nprogram = \"first\"\nmode = \"rv32\"\nstatus = \"success\"\n[build]\nsource_id = \"source\"\ninput_set_id = \"input\"\n[firmware]\nsha256 = \"{}\"\n",
+            hex_hash(b"other firmware")
+        );
+        std::fs::write(build.join("first/rv32/report.toml"), &report).unwrap();
+        let manifest = format!(
+            "schema = \"libbpf-mcu.program.v1\"\nprogram = \"first\"\n[[mode]]\nname = \"rv32\"\nreport = \"rv32/report.toml\"\nreport_sha256 = \"{}\"\n",
+            hex_hash(report.as_bytes())
+        );
+        std::fs::write(build.join("first/manifest.toml"), &manifest).unwrap();
+        let index = format!(
+            "schema = \"libbpf-mcu.artifacts.v1\"\n[[program]]\nname = \"first\"\nmanifest = \"first/manifest.toml\"\nmanifest_sha256 = \"{}\"\n",
+            hex_hash(manifest.as_bytes())
+        );
+        std::fs::write(build.join("index.toml"), index).unwrap();
+        let fw = dir.join("fw");
+        std::fs::write(&fw, b"current firmware").unwrap();
+        let hash = Sha256::digest(std::fs::read(&fw).unwrap()).into();
+        let writes = std::cell::Cell::new(0);
+        let result = prepare_and_flash(
+            &[xdp("first")],
+            |x| resolve_xdp(&dir, "build", x, hash),
+            || {
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+            || {
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+            |_| {
+                writes.set(writes.get() + 1);
+                Ok(String::new())
+            },
+        );
+        let error = result.unwrap_err();
+        assert!(error.chain().any(|e| matches!(
+            e.downcast_ref::<xpost_artifact::ResolveError>(),
+            Some(xpost_artifact::ResolveError::FirmwareMismatch)
+        )));
+        assert_eq!(writes.get(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn a_prepare_line_keeps_the_decoded_bytes() {
         let profile = "ab".repeat(32);
         let line = format!("perf prepare 00112233445566778899aabbccddeeff trace {profile}");
         match parse_app_command(&line).unwrap() {
-            ParsedCmd::PerfPrepare { uuid, kind, profile } => {
+            ParsedCmd::PerfPrepare {
+                uuid,
+                kind,
+                profile,
+            } => {
                 assert_eq!(uuid[0], 0x00);
                 assert_eq!(uuid[15], 0xff);
                 assert_eq!(kind, PerfVariant::Trace);

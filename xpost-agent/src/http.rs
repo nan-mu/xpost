@@ -10,8 +10,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Router, serve};
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService,
-    session::local::LocalSessionManager,
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::timeout::TimeoutLayer;
@@ -32,6 +31,8 @@ struct AppState {
 struct ApiResp {
     ok: bool,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flash: Option<ops::FlashIdentity>,
 }
 
 impl ApiResp {
@@ -39,12 +40,14 @@ impl ApiResp {
         Self {
             ok: true,
             message: message.into(),
+            flash: None,
         }
     }
     fn err(e: impl std::fmt::Display) -> Self {
         Self {
             ok: false,
             message: e.to_string(),
+            flash: None,
         }
     }
 }
@@ -194,12 +197,20 @@ async fn v1_get_init(State(st): State<AppState>) -> Json<ApiResp> {
     run_blocking(move || ops::get_init(shared.as_ref(), "http")).await
 }
 
-async fn run_blocking<F>(f: F) -> Json<ApiResp>
+async fn run_blocking<F, T>(f: F) -> Json<ApiResp>
 where
-    F: FnOnce() -> anyhow::Result<String> + Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    T: Into<ops::OpReply> + Send + 'static,
 {
     match tokio::task::spawn_blocking(f).await {
-        Ok(Ok(msg)) => Json(ApiResp::ok(msg)),
+        Ok(Ok(reply)) => {
+            let reply = reply.into();
+            Json(ApiResp {
+                ok: true,
+                message: reply.message,
+                flash: reply.flash,
+            })
+        }
         Ok(Err(e)) => Json(ApiResp::err(format!("{e:#}"))),
         Err(e) => Json(ApiResp::err(format!("join: {e}"))),
     }
@@ -214,10 +225,7 @@ async fn v1_flash_fw(
     run_blocking(move || ops::flash_fw(shared.as_ref(), &name, "http")).await
 }
 
-async fn v1_flash_xdp(
-    State(st): State<AppState>,
-    Json(body): Json<FlashXdpBody>,
-) -> Json<ApiResp> {
+async fn v1_flash_xdp(State(st): State<AppState>, Json(body): Json<FlashXdpBody>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     let name = body.name;
     let slot = body.slot;
@@ -244,7 +252,10 @@ fn clear_xdp_names(name: ClearXdpName) -> Result<Vec<String>, String> {
             if v.len() == 1 && v[0].trim() == "*" {
                 return Ok(Vec::new());
             }
-            Ok(v.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            Ok(v.into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect())
         }
     }
 }
@@ -298,10 +309,8 @@ async fn v1_xdp_switch(
         Err(e) => return Json(ApiResp::err(e.to_string())),
     };
     let shared = st.shared.clone();
-    run_blocking(move || {
-        ops::switch_xdp(shared.as_ref(), body.slot, body.generation, pass, "http")
-    })
-    .await
+    run_blocking(move || ops::switch_xdp(shared.as_ref(), body.slot, body.generation, pass, "http"))
+        .await
 }
 
 async fn v1_xdp_status(State(st): State<AppState>) -> Json<ApiResp> {

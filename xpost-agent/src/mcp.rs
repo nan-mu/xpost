@@ -92,18 +92,28 @@ impl XpostMcp {
         }
     }
 
-    async fn run_op<F>(&self, f: F) -> Result<CallToolResult, McpError>
+    async fn run_op<F, T>(&self, f: F) -> Result<CallToolResult, McpError>
     where
-        F: FnOnce() -> anyhow::Result<String> + Send + 'static,
+        F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+        T: Into<ops::OpReply> + Send + 'static,
     {
         match tokio::task::spawn_blocking(f).await {
-            Ok(Ok(msg)) => Ok(CallToolResult::success(vec![ContentBlock::text(msg)])),
+            Ok(Ok(reply)) => {
+                let reply = reply.into();
+                let mut result = CallToolResult::success(vec![ContentBlock::text(reply.message)]);
+                if let Some(identity) = reply.flash {
+                    result.structured_content = Some(serde_json::json!({ "flash": identity }));
+                }
+                Ok(result)
+            }
             Ok(Err(e)) => Err(McpError::internal_error(format!("{e:#}"), None)),
             Err(e) => Err(McpError::internal_error(format!("join: {e}"), None)),
         }
     }
 
-    #[tool(description = "Build + flash named firmware profile, then co-flash fw.xdp[]")]
+    #[tool(
+        description = "Build firmware. Validate linked XDP images before any write. Flash firmware. Install linked images. The `flash` field lists firmware and XDP identities."
+    )]
     async fn flash_fw(
         &self,
         Parameters(args): Parameters<FlashByNameArgs>,
@@ -114,7 +124,9 @@ impl XpostMcp {
             .await
     }
 
-    #[tool(description = "Build + write named XDP profile into the cold table")]
+    #[tool(
+        description = "Validate the XDP image. Validate device firmware. Install the image in the cold table. The `flash` field lists firmware and XDP identities."
+    )]
     async fn flash_xdp(
         &self,
         Parameters(args): Parameters<FlashByNameArgs>,
@@ -334,10 +346,7 @@ impl XpostMcp {
     }
 
     #[tool(description = "Debug: one App command line (not for get map/perf framing)")]
-    async fn run(
-        &self,
-        Parameters(args): Parameters<RunArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    async fn run(&self, Parameters(args): Parameters<RunArgs>) -> Result<CallToolResult, McpError> {
         let shared = self.shared.clone();
         let cmd = args.cmd;
         self.run_op(move || ops::run_cmd(shared.as_ref(), &cmd, "mcp"))
@@ -368,9 +377,8 @@ impl XpostMcp {
 #[tool_handler]
 impl ServerHandler for XpostMcp {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(
-                "xpost-agent: flash fw/xdp, clear/get xdp, enable/disable xdp, map/perf/serial, run.",
-            )
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "xpost-agent: flash fw/xdp, clear/get xdp, enable/disable xdp, map/perf/serial, run.",
+        )
     }
 }

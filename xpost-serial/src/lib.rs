@@ -31,7 +31,9 @@
 #![cfg_attr(not(feature = "client"), no_std)]
 
 #[cfg(all(feature = "client", feature = "server", not(feature = "dev")))]
-compile_error!("features `client` and `server` are mutually exclusive; enable `dev` to combine them");
+compile_error!(
+    "features `client` and `server` are mutually exclusive; enable `dev` to combine them"
+);
 
 pub mod r#type;
 
