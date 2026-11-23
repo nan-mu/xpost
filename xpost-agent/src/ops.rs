@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use xpost_artifact::FlashImage;
+use xpost_artifact::{FlashImage, format_sha256};
 use xpost_serial::client::{Command, FirmwareExpectation, FlashOp, FlashResult, OkReply};
 use xpost_serial::command::PerfVariant;
 
@@ -170,13 +170,9 @@ impl From<&FlashImage> for XdpFlashIdentity {
             program: image.program().to_owned(),
             mode: image.mode().as_db(),
             profile: image.profile_name().to_owned(),
-            container_sha256: hex_sha256(image.sha256()),
+            container_sha256: format_sha256(image.sha256()),
         }
     }
-}
-
-fn hex_sha256(digest: &[u8; 32]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub fn flash_fw(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<OpReply> {
@@ -250,8 +246,6 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<O
             let g = lock(state)?;
             g.handler
                 .flash(FlashOp::Fw {
-                    firmware: firmware.display().to_string(),
-                    partitions: partitions.display().to_string(),
                     snapshot: snapshot.clone(),
                 })
                 .with_context(|| format!("flash fw `{name}`"))?;
@@ -288,7 +282,7 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<O
         message: msg,
         flash: Some(FlashIdentity {
             firmware_profile: name.to_owned(),
-            firmware_sha256: hex_sha256(&firmware_sha),
+            firmware_sha256: format_sha256(&firmware_sha),
             containers,
         }),
     })
@@ -336,7 +330,7 @@ pub fn flash_xdp(
                 message,
                 flash: Some(FlashIdentity {
                     firmware_profile: xdp.fw,
-                    firmware_sha256: hex_sha256(&snapshot.sha256),
+                    firmware_sha256: format_sha256(&snapshot.sha256),
                     containers: vec![XdpFlashIdentity::from(&image)],
                 }),
             })
@@ -400,7 +394,7 @@ fn resolve_xdp(
 }
 
 fn cold_install_op(image: &FlashImage, firmware: &FirmwareExpectation) -> Result<FlashOp> {
-    if image.firmware_sha256() != hex_sha256(&firmware.sha256) {
+    if image.firmware_sha256() != &firmware.sha256 {
         bail!(
             "xdp `{}`: firmware snapshot does not match the resolved image",
             image.profile_name()
@@ -1588,7 +1582,7 @@ mod tests {
                 "container_sha256": hash(&bytes)
             })
         );
-        assert_eq!(image.firmware_sha256(), hash(&snapshot.elf));
+        assert_eq!(format_sha256(image.firmware_sha256()), hash(&snapshot.elf));
         let mut wrong_firmware = snapshot;
         wrong_firmware.sha256 = Sha256::digest(b"firmware B").into();
         assert!(cold_install_op(&image, &wrong_firmware).is_err());

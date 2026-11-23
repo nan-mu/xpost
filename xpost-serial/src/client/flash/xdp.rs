@@ -1,7 +1,5 @@
 //! XDP ELF table ops: list / install-by-name / clear (span from `partitions.csv`).
 
-use std::path::Path;
-
 use xpost_elf::{ScanOutcome, scan_at};
 
 use crate::client::FLASH_SECTOR;
@@ -33,12 +31,6 @@ pub struct XdpEntry {
 pub enum InstallOutcome {
     Overwritten { offset: u32 },
     Created { offset: u32 },
-}
-
-pub fn xdp_name_from_file(path: &Path) -> io::Result<String> {
-    let data = std::fs::read(path)
-        .map_err(|e| std::io::Error::other(format!("read {}: {e}", path.display())))?;
-    xdp_name_from_bytes(&data)
 }
 
 pub fn xdp_name_from_bytes(data: &[u8]) -> io::Result<String> {

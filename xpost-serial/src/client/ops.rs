@@ -19,10 +19,9 @@ pub struct FirmwareExpectation {
 }
 
 /// Flash worker inbox / lifecycle payload.
+#[derive(Clone)]
 pub enum FlashOp {
     Fw {
-        firmware: String,
-        partitions: String,
         snapshot: FirmwareExpectation,
     },
     Xdp {
@@ -51,35 +50,6 @@ impl FlashOp {
             Self::Clear { names } if names.is_empty() => "clear xdp *".into(),
             Self::Clear { names } => format!("clear xdp {}", names.join(",")),
             Self::List => "get xdp".into(),
-        }
-    }
-}
-
-impl Clone for FlashOp {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Fw {
-                firmware,
-                partitions,
-                snapshot,
-            } => Self::Fw {
-                firmware: firmware.clone(),
-                partitions: partitions.clone(),
-                snapshot: snapshot.clone(),
-            },
-            Self::Xdp {
-                name,
-                bytes,
-                expectation,
-            } => Self::Xdp {
-                name: name.clone(),
-                bytes: Arc::clone(bytes),
-                expectation: expectation.clone(),
-            },
-            Self::Clear { names } => Self::Clear {
-                names: names.clone(),
-            },
-            Self::List => Self::List,
         }
     }
 }
