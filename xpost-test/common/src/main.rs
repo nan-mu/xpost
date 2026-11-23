@@ -5,7 +5,6 @@
 //! `just_drop.toml` — see [`config`].
 //!
 #![doc = include_str!("overview.md")]
-
 #![deny(dead_code)]
 #![deny(unused_imports)]
 
@@ -22,6 +21,11 @@ use log::info;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cfg = FileConfig::embedded()?;
+    if cfg.run == ["medium"] {
+        anyhow::bail!(
+            "medium blocked: libbpf-mcu v0.1.0 has no deployment XDP ELFs. See xpost-test/procedures/medium.md."
+        );
+    }
     install_postgres(cfg.postgres.clone());
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
@@ -46,18 +50,7 @@ async fn main() -> Result<()> {
 
 async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
     match name {
-        "just_drop" => {
-            exam::run_just_drop_pps(
-                cfg,
-                exam::JustDropPpsOpts {
-                    formal: cfg.just_drop.formal,
-                    rates: None,
-                    lookup: false,
-                    skip_trace: false,
-                },
-            )
-            .await
-        }
+        "just_drop" => exam::run_just_drop_pps(cfg).await,
         "firewall" => {
             exam::run_firewall(
                 cfg,
@@ -95,16 +88,6 @@ async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
                     formal: true,
                     rates: Some(&[1400.0]),
                     lookup_pair: true,
-                    skip_trace: true,
-                },
-            )
-            .await?;
-            exam::run_just_drop_pps(
-                cfg,
-                exam::JustDropPpsOpts {
-                    formal: true,
-                    rates: Some(exam::LOOKUP_RATES),
-                    lookup: true,
                     skip_trace: true,
                 },
             )

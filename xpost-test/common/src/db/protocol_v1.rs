@@ -1,15 +1,10 @@
 //! DDL for the new protocol database.
 //!
-//! Apply [`SQL`] only to an empty database. Table creation is not idempotent.
-//! A second apply must fail. This file does not replace the older generator in
-//! [`super::schema`].
-
-/// Statements from the xpost-experiments-v1 design, unchanged.
-pub const SQL: &str = include_str!("../../../sql/protocol_v1.sql");
+//! PostgreSQL executes the DDL from `sql/protocol_v1.sql`.
 
 #[cfg(test)]
 mod tests {
-    use super::SQL;
+    const SQL: &str = include_str!("../../../sql/protocol_v1.sql");
 
     #[test]
     fn the_new_protocol_declares_five_schemas_and_132_tables() {

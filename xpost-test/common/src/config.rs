@@ -16,6 +16,7 @@
 //!
 //! | Name | What | Postgres tables |
 //! |------|------|-----------------|
+//! | `medium` | Medium readiness check | — |
 //! | `just_drop` | Formal XDP PPS grid + Trace | `exam` + `just_drop_*` + `xdp_*` / `trace_event` |
 //! | `just_tx` | Formal XDP pps grid RTT + Trace | `exam` + `just_tx_config`(sent/ok) / `just_tx_data` + perf |
 //! | `firewall` | Hash blacklist size×hit/miss PPS grid + Trace | `exam` + `firewall_*` + perf |
@@ -90,7 +91,7 @@ fn default_version() -> String {
 }
 
 fn default_run() -> Vec<String> {
-    vec!["dev".into()]
+    vec!["medium".into()]
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -316,12 +317,15 @@ impl FileConfig {
         if self.run.is_empty() {
             bail!("default.toml `run` must list at least one experiment");
         }
+        if self.run.len() != 1 && self.run.iter().any(|name| name == "medium") {
+            bail!("medium requires a run list with only `medium`");
+        }
         for name in &self.run {
             match name.as_str() {
-                "just_tx" | "just_drop" | "firewall" | "exec_bench" | "lookup" | "dev"
-                | "formal-clear" | "case" | "hot_swap" => {}
+                "medium" | "just_tx" | "just_drop" | "firewall" | "exec_bench" | "lookup"
+                | "dev" | "formal-clear" | "case" | "hot_swap" => {}
                 other => bail!(
-                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / firewall / exec_bench / lookup / dev / formal-clear / case / hot_swap"
+                    "unknown experiment {other:?} in default.toml `run`; use medium / just_tx / just_drop / firewall / exec_bench / lookup / dev / formal-clear / case / hot_swap"
                 ),
             }
         }

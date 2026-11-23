@@ -8,7 +8,8 @@ mod decode;
 pub mod legacy;
 mod names;
 mod pg;
-pub mod protocol_v1;
+#[cfg(test)]
+mod protocol_v1;
 pub mod schema;
 pub mod store;
 mod write;

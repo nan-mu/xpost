@@ -140,3 +140,10 @@ Unknown device identity must prevent installation.
 Process-local state cannot replace device validation.
 
 Reason: the user requested protection against stale sibling caches and mismatched device firmware in PR #24.
+
+## 2026-11-24 Medium experiment launch
+
+The user starts the full medium experiment from T3 after reviewing PR #23.
+Readiness checks precede that launch.
+
+Reason: the user reserved the full run for an explicit start after review.

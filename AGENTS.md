@@ -35,10 +35,15 @@ Firmware profiles retain their Cargo build commands.
 XDP profiles contain names, firmware links, programs, modes, and optional targets.
 Reject obsolete XDP build commands in configuration.
 
-`profiles.toml` sets `build_root = "../build"` for the producer's default output directory.
-Resolve containers through the index, program manifest, and mode report.
+The existing Agent installation path reads `build_root` from `profiles.toml`.
+It resolves containers through the v1 index, manifest, and report.
 Do not infer artifact paths from filenames.
 Use the upstream contract pinned by `xpost-artifact::CONTRACT_COMMIT`.
+
+The medium release check reads each archive's v3 program index.
+It compares indexed path, size, SHA-256, and deployment format.
+The v3 inventory check cannot establish firmware binding.
+See `xpost-test/procedures/medium.md` for the release and readiness status.
 
 | XPOST mode | Producer mode | Execution path |
 | --- | --- | --- |
@@ -140,6 +145,7 @@ Use meaningful tests for validation failures and device write ordering.
 Do not report device tests as passed unless they ran.
 
 Use the formal runner when the user requests a system experiment.
+The default medium selection exits before device or database access while readiness is blocked.
 Run this script from the repository root:
 
 ```sh

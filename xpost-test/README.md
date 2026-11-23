@@ -28,6 +28,9 @@ Host-only / no bpfel: `TEST_SKIP_EBPF=1 cargo build --release`.
 
 Sole runtime entry: bare `./xpost-test` (no flags). Experiments from `config/default.toml` `run`.
 
+The default `run = ["medium"]` stops at the release readiness check.
+See the [medium procedure](procedures/medium.md) for the release audit, planned matrix, and PostgreSQL queries.
+
 ## Profiles
 
 Firmware / XDP flash names live in repo-root `profiles.toml` (`[[fw]]` / `[[xdp]]`). Formal XDP-only: `just-*-cag|t`, `firewall-cag|t`.

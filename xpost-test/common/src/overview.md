@@ -24,6 +24,11 @@ cargo run --release --                  │                              ▲
                     RAW UDP stim (test-owned) ──► DUT ──► get/perf ────┘
 ```
 
+The default `run = ["medium"]` stops at the readiness check.
+See [the medium procedure](../../../procedures/medium.md) for its status and plan.
+
+For the explicit legacy experiments and HAL smoke:
+
 1. Mac: `cd xpost-agent && cargo run --release -- --bind 0.0.0.0:9240`
 2. Edit `config/default.toml` `run = ["just_drop"]` and/or `["just_tx"]` /
    `["firewall"]` / `["dev"]` / `["formal-clear"]` (steps fixed in Rust).

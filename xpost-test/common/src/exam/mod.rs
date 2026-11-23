@@ -16,7 +16,7 @@ pub use dev::run_dev;
 pub use exec_bench::{ExecBenchOpts, run_exec_bench};
 pub use firewall::{FirewallOpts, run_firewall};
 pub use hot_swap::run_hot_swap;
-pub use just_drop::{JustDropPpsOpts, run_just_drop_pps};
+pub use just_drop::run_just_drop_pps;
 pub use just_tx::{JustTxOpts, run_just_tx};
 
 /// Side-experiment rates for helper histograms. Not the main load grid.

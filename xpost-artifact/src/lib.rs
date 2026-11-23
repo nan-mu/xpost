@@ -3,9 +3,12 @@
 //! Pin: libbpf-mcu commit [`CONTRACT_COMMIT`] for the local v1 build layout.
 //! Release set selection is outside this resolver.
 //!
-//! The crate reads `index.toml`, `<program>/manifest.toml`, and
+//! The installation resolver reads `index.toml`, `<program>/manifest.toml`, and
 //! `<program>/<mode>/report.toml`. It does not read `profiles.toml`.
 //! It does not flash, and it does not talk to the serial worker.
+//! The [`published`] module checks the v3 release inventory.
+
+pub mod published;
 
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
