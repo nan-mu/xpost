@@ -1,8 +1,7 @@
 //! Flash resolution for one program and one XDP mode.
 //!
-//! Pin: libbpf-mcu commit [`CONTRACT_COMMIT`], pull request 4, provisional
-//! until merge. Do not add schema fields. Do not treat this pin as a frozen
-//! format.
+//! Pin: libbpf-mcu commit [`CONTRACT_COMMIT`] for the local v1 build layout.
+//! Release set selection is outside this resolver.
 //!
 //! The crate reads `index.toml`, `<program>/manifest.toml`, and
 //! `<program>/<mode>/report.toml`. It does not read `profiles.toml`.
@@ -10,11 +9,12 @@
 
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
-/// Producer commit this reader understands. Provisional.
+/// Producer commit used as the local v1 contract reference.
 pub const CONTRACT_COMMIT: &str = "30d8f071";
 
 const SCHEMA_INDEX: &str = "libbpf-mcu.artifacts.v1";
@@ -91,14 +91,17 @@ impl ProducerMode {
 
 /// One container the caller may hand to the existing serial flash.
 ///
-/// The embedded name already matches `profile_name`. The bytes already match
-/// the report hash and size. The caller does not open TOML.
+/// The snapshot has the verified digest, size, and embedded profile name.
+/// Its cache path is provenance. Install the retained bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlashImage {
     path: PathBuf,
-    len: u64,
+    bytes: Arc<[u8]>,
     sha256: [u8; 32],
+    program: String,
+    mode: XdpMode,
     profile_name: String,
+    firmware_sha256: String,
 }
 
 impl FlashImage {
@@ -107,15 +110,31 @@ impl FlashImage {
     }
 
     pub fn len(&self) -> u64 {
-        self.len
+        self.bytes.len() as u64
+    }
+
+    pub fn bytes(&self) -> Arc<[u8]> {
+        Arc::clone(&self.bytes)
     }
 
     pub fn sha256(&self) -> &[u8; 32] {
         &self.sha256
     }
 
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    pub fn mode(&self) -> XdpMode {
+        self.mode
+    }
+
     pub fn profile_name(&self) -> &str {
         &self.profile_name
+    }
+
+    pub fn firmware_sha256(&self) -> &str {
+        &self.firmware_sha256
     }
 }
 
@@ -272,6 +291,11 @@ pub fn resolve_flash_image(
 
     let manifest = parse_doc(&manifest_bytes, &manifest_path)?;
     require_schema(&manifest, SCHEMA_PROGRAM, &manifest_path)?;
+    if req_str(&manifest, "program", &manifest_path)? != program {
+        return Err(ResolveError::SchemaMismatch {
+            path: manifest_path,
+        });
+    }
     let producer = mode.producer();
     let mode_rows = tables(&manifest, "mode", &manifest_path)?;
     let mode_row = mode_rows
@@ -399,7 +423,7 @@ pub fn resolve_flash_image(
     let cache = cache_dir(workspace_root, cache_root, program, mode, profile_name)?;
     let identity = CacheIdentity {
         program,
-        mode: mode.as_db(),
+        mode,
         profile: profile_name,
         firmware: firmware_sha,
         source: source_id,
@@ -418,8 +442,11 @@ pub fn resolve_flash_image(
                 })?
                 .path();
             if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                let (result, fw, source, inputs) = read_cache(&cache, &path, &identity, false)?;
-                if fw == firmware_sha && source == source_id && inputs == input_set_id {
+                let (result, source, inputs) = read_cache(&cache, &path, &identity, false)?;
+                if result.firmware_sha256() == firmware_sha
+                    && source == source_id
+                    && inputs == input_set_id
+                {
                     candidates.push(result);
                 }
             }
@@ -475,13 +502,13 @@ pub fn resolve_flash_image(
             path: meta_path.clone(),
         })?;
     atomic_write(&meta_path, bytes.as_bytes())?;
-    let (cached, _, _, _) = read_cache(&cache, &meta_path, &identity, true)?;
+    let (cached, _, _) = read_cache(&cache, &meta_path, &identity, true)?;
     Ok(cached)
 }
 
 struct CacheIdentity<'a> {
     program: &'a str,
-    mode: &'a str,
+    mode: XdpMode,
     profile: &'a str,
     firmware: &'a str,
     source: &'a str,
@@ -546,7 +573,7 @@ fn read_cache(
     meta_path: &Path,
     id: &CacheIdentity<'_>,
     exact_source: bool,
-) -> Result<(FlashImage, String, String, String), ResolveError> {
+) -> Result<(FlashImage, String, String), ResolveError> {
     let invalid = || ResolveError::CacheInvalid {
         path: meta_path.to_path_buf(),
     };
@@ -561,7 +588,7 @@ fn read_cache(
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         || meta_path.file_name().and_then(|s| s.to_str()) != Some(&format!("{digest}.toml"))
         || get("program")? != id.program
-        || get("mode")? != id.mode
+        || get("mode")? != id.mode.as_db()
         || get("profile_name")? != id.profile
     {
         return Err(invalid());
@@ -604,11 +631,13 @@ fn read_cache(
     Ok((
         FlashImage {
             path,
-            len: size,
+            bytes: bytes.into(),
             sha256: sha,
+            program: id.program.to_owned(),
+            mode: id.mode,
             profile_name: id.profile.to_owned(),
+            firmware_sha256: firmware.to_owned(),
         },
-        firmware.to_owned(),
         source.to_owned(),
         inputs.to_owned(),
     ))
@@ -932,7 +961,10 @@ mod tests {
         let mut index = String::from("schema = \"libbpf-mcu.artifacts.v1\"\n\n");
         for prog in programs {
             let dir = root.join(prog.name);
-            let mut manifest = String::from("schema = \"libbpf-mcu.program.v1\"\n\n");
+            let mut manifest = format!(
+                "schema = \"libbpf-mcu.program.v1\"\nprogram = \"{}\"\n\n",
+                prog.name
+            );
             for mode in &prog.modes {
                 let mut body = String::new();
                 for art in &mode.artifacts {
@@ -1053,14 +1085,20 @@ mod tests {
         edit(&mut report);
         let bytes = toml::to_string(&report).unwrap();
         write(&path, bytes.as_bytes());
+        edit_manifest(root, program, |manifest| {
+            for row in manifest["mode"].as_array_mut().unwrap() {
+                if row["name"].as_str() == Some(mode) {
+                    row["report_sha256"] = hex_sha256(bytes.as_bytes()).into();
+                }
+            }
+        });
+    }
+
+    fn edit_manifest(root: &Path, program: &str, edit: impl FnOnce(&mut toml::Value)) {
         let manifest_path = root.join(program).join("manifest.toml");
         let mut manifest: toml::Value =
             toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
-        for row in manifest["mode"].as_array_mut().unwrap() {
-            if row["name"].as_str() == Some(mode) {
-                row["report_sha256"] = hex_sha256(bytes.as_bytes()).into();
-            }
-        }
+        edit(&mut manifest);
         let manifest_text = toml::to_string(&manifest).unwrap();
         write(&manifest_path, manifest_text.as_bytes());
         let index_path = root.join("index.toml");
@@ -1395,7 +1433,10 @@ mod tests {
         );
         for (mode, _, file) in cases {
             let image = resolve_flash_image(&root, "demo", mode, "demo").unwrap();
+            assert_eq!(image.program(), "demo");
+            assert_eq!(image.mode(), mode);
             assert_eq!(image.profile_name(), "demo");
+            assert_eq!(image.firmware_sha256(), hex_of(&FW));
             assert_eq!(
                 image.path().file_name().unwrap().to_str().unwrap(),
                 format!("{}.elf", hex_of(image.sha256()))
@@ -1403,10 +1444,26 @@ mod tests {
             let _ = file;
             assert!(image.path().is_absolute());
             let bytes = std::fs::read(image.path()).unwrap();
+            assert_eq!(image.bytes().as_ref(), bytes);
             assert_eq!(image.len(), bytes.len() as u64);
             assert_eq!(image.sha256(), &sha256_bytes(&bytes));
             assert!(!image.path().ends_with("side_bpf.o"));
         }
+    }
+
+    #[test]
+    fn rejects_manifest_for_another_program_even_with_a_matching_hash() {
+        let root = scratch("manifest-program");
+        publish(
+            &root,
+            &[prog("demo", vec![legal_mode("demo", "rv32", "demo")])],
+        );
+        edit_manifest(&root, "demo", |manifest| {
+            manifest["program"] = "other".into()
+        });
+
+        let err = resolve_flash_image(&root, "demo", XdpMode::Aot, "demo").unwrap_err();
+        assert!(matches!(err, ResolveError::SchemaMismatch { .. }), "{err}");
     }
 
     #[test]
@@ -1807,7 +1864,10 @@ mod tests {
             next_firmware,
         )
         .unwrap();
-        assert_eq!(refreshed, first);
+        assert_eq!(refreshed.path(), first.path());
+        assert_eq!(refreshed.sha256(), first.sha256());
+        assert_eq!(refreshed.firmware_sha256(), hex_of(&next_firmware));
+        assert_eq!(refreshed.bytes().as_ref(), original);
         assert_eq!(std::fs::read(refreshed.path()).unwrap(), original);
         let metadata = parse_doc(
             &std::fs::read(refreshed.path().with_extension("toml")).unwrap(),

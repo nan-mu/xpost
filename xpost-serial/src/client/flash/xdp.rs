@@ -135,12 +135,10 @@ pub(crate) fn install(
     port: &Port,
     cfg: &FlashConfig,
     name: &str,
-    path: &Path,
+    data: &[u8],
     expectation: &FirmwareExpectation,
 ) -> io::Result<InstallOutcome> {
     let xdp = cfg.xdp_table()?;
-    let data = std::fs::read(path)
-        .map_err(|e| std::io::Error::other(format!("read {}: {e}", path.display())))?;
     let cap = xdp.image_capacity;
     if data.len() > cap {
         return Err(std::io::Error::other(format!(
@@ -148,14 +146,14 @@ pub(crate) fn install(
             data.len()
         )));
     }
-    let file_name = xdp_name_from_bytes(&data)?;
-    if file_name != name {
+    let embedded_name = xdp_name_from_bytes(data)?;
+    if embedded_name != name {
         return Err(std::io::Error::other(format!(
-            "xdp name mismatch: arg `{name}`, file `{file_name}`"
+            "xdp name mismatch: arg `{name}`, image `{embedded_name}`"
         )));
     }
     let mut dl = port.open_download()?;
-    let result = install_verified(&mut *dl, xdp, &cfg.partition, name, &data, expectation);
+    let result = install_verified(&mut *dl, xdp, &cfg.partition, name, data, expectation);
     let reset = dl.reset_to_app();
     match result {
         Ok(outcome) => {
@@ -233,7 +231,7 @@ fn install_verified(
     if erase_len > 0 {
         io.erase_region(abs, erase_len)?;
     }
-    io.write_bin_verified(abs, &data)?;
+    io.write_bin_verified(abs, data)?;
     Ok(outcome)
 }
 

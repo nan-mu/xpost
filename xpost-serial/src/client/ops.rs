@@ -2,6 +2,7 @@
 //! [`crate::r#type::command::Command`].
 
 use std::fmt;
+use std::sync::Arc;
 
 /// Lifecycle markers written to the transcript around a flash op.
 pub enum FlashEvent {
@@ -26,7 +27,7 @@ pub enum FlashOp {
     },
     Xdp {
         name: String,
-        path: String,
+        bytes: Arc<[u8]>,
         expectation: FirmwareExpectation,
     },
     Clear {
@@ -68,11 +69,11 @@ impl Clone for FlashOp {
             },
             Self::Xdp {
                 name,
-                path,
+                bytes,
                 expectation,
             } => Self::Xdp {
                 name: name.clone(),
-                path: path.clone(),
+                bytes: Arc::clone(bytes),
                 expectation: expectation.clone(),
             },
             Self::Clear { names } => Self::Clear {

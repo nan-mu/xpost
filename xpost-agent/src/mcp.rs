@@ -92,12 +92,20 @@ impl XpostMcp {
         }
     }
 
-    async fn run_op<F>(&self, f: F) -> Result<CallToolResult, McpError>
+    async fn run_op<F, T>(&self, f: F) -> Result<CallToolResult, McpError>
     where
-        F: FnOnce() -> anyhow::Result<String> + Send + 'static,
+        F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+        T: Into<ops::OpReply> + Send + 'static,
     {
         match tokio::task::spawn_blocking(f).await {
-            Ok(Ok(msg)) => Ok(CallToolResult::success(vec![ContentBlock::text(msg)])),
+            Ok(Ok(reply)) => {
+                let reply = reply.into();
+                let mut result = CallToolResult::success(vec![ContentBlock::text(reply.message)]);
+                if let Some(identity) = reply.flash {
+                    result.structured_content = Some(serde_json::json!({ "flash": identity }));
+                }
+                Ok(result)
+            }
             Ok(Err(e)) => Err(McpError::internal_error(format!("{e:#}"), None)),
             Err(e) => Err(McpError::internal_error(format!("join: {e}"), None)),
         }
