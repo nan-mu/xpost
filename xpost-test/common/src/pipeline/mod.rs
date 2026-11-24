@@ -6,7 +6,7 @@ mod raw_tx;
 pub mod status;
 
 pub use harness::Harness;
-pub use raw_tx::{RawTx, iface_ipv4, iface_mac};
+pub use raw_tx::{RawTx, build_udp_frame, iface_ipv4, iface_mac};
 pub use status::{BudgetEta, READY_BUDGET, RoundUi};
 
 use anyhow::{Context, Result};

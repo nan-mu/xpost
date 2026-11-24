@@ -58,6 +58,7 @@ For a native deployment at the same address, it can reuse the published payload.
 For a local alias, it changes the container name and retains the payload and maps.
 For rBPF it can also change the slot metadata. The interpreter resolves map indexes at load.
 The pinned native release archives lack relocation records.
+Case AOT can use slot B when its payload digest and the actual layout match the direct-link evidence.
 For an unmatched native slot or helper, preparation fails with both addresses.
 
 The prepared image records the release and final container digests.

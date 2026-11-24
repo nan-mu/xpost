@@ -6,21 +6,24 @@ The default `run = ["medium"]` requests a read-only Agent preflight.
 The user starts the full run from T3 after review and readiness checks.
 TR3000 runs `./xpost-test` without arguments.
 The script for a formal run is `./xpost-test/scripts/xpost-test.fish`.
-The medium runner still needs EXB2 transport, firmware perf callbacks, embeprom, the scheduler, and the four-mode writer.
+The medium runner still needs EXB2 transport, network and EXB2 perf callbacks, embeprom, execution of all firmware groups, and four-mode reconciliation.
 
 ## Deployment preflight
 
 The Agent pins [libbpf-mcu v0.1.1](https://github.com/nan-mu/libbpf-mcu/releases/tag/v0.1.1) at `07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113`.
-The Agent checked 12 archives and 36 deployments. It prepared 37 of 39 slot targets.
+The independent inventory checked 36 deployments across 12 archives.
+Medium preflight checked 32 program/mode combinations and prepared 41 XDP ELF targets.
+The 41 targets include separate Metrics and Trace Firmware ELFs for the network programs.
+Medium preflight also checked four HAL Firmware ELFs.
 The [v0.1.0 ledger](libbpf-mcu-v0.1.0.sha256) records the earlier release with zero deployments.
 
 Run these checks from the repository root on the Mac.
 
 ```bash
 cargo run --manifest-path xpost-agent/Cargo.toml -- preflight
+cargo run --manifest-path xpost-agent/Cargo.toml -- preflight --inventory
 cargo run --manifest-path xpost-agent/Cargo.toml -- preflight --xdp just_tx
 cargo run --manifest-path xpost-agent/Cargo.toml -- preflight --xdp case_mark_idle
-cargo run --manifest-path xpost-agent/Cargo.toml -- preflight --xdp case_mark_idle_rbpf
 ```
 
 Preflight can fetch archives. It uses the Agent release cache.
@@ -32,54 +35,32 @@ The network and case carriers declare 3584-byte slots.
 Exec has a 12288-byte SRAM slot and a 16384-byte cold storage capacity.
 The released JIT payloads for `log2`, `bsort`, and `strcmp` are 9300, 10264, and 9348 B.
 The published native images link at `0x40380200` and use helper `0x40380000`.
-AOT and JIT need relocation information for another address.
-The Agent refuses a native slot mismatch before it passes an operation to the serial worker.
-The `case_mark_idle` and `case_mark_idle_jit` profiles need slot B at `0x40381000`.
-The pinned release provides these native payloads for slot A only.
-The `case_mark_idle_rbpf` profile passed host preparation for slot B with the original payload digest.
-The QEMU evidence for three relocated AOT samples used linked inputs with retained relocation records.
-It does not cover these published native payloads.
-The rBPF release uses map indexes. Its SRAM slot may change without rewriting its instructions.
+The pinned case AOT payloads also match direct links at B (`0x40381000`).
+The Agent checks the payload SHA-256, empty map list, helper, and both 3584-byte slots before it prepares B.
+Preparation changes the target address and alias. It keeps the payload bytes.
+The case JIT and rBPF profiles remain available for independent diagnostics.
+Other native slot changes require equivalent evidence or relocation data.
 
 ## Planned matrix and time budget
 
-Every family has HAL, AOT, JIT, and rBPF conditions.
-Metrics and Trace are separate collection variants.
+Set `run = ["medium-plan"]` to print the 29 cells and their firmware groups.
+Set `run = ["medium"]` for the formal selection.
 
-| Family | Required Metrics | Required Trace | Optional Trace | Medium density |
-| --- | --- | --- | --- | --- |
-| firewall | 4 | 4 | 0 | 400, 1400, 4000 pps, two 5 s repeats. One hit and one miss Trace per mode. |
-| just_drop | 4 | 4 | 0 | Same rates and window. One tagged Trace probe per mode. |
-| just_tx | 4 | 4 | 0 | Same rates and window. One JTX1 Trace probe per mode. |
-| exec_bench | 4 | 0 | 4 | All seven programs. One condition and two batches per program and mode. |
-| case | 4 | 4 | 0 | Check both policies. Then perform four Metrics switches and one Trace switch per mode. |
-| Total | 20 | 16 | 4 | 36 required combinations and 4 optional combinations |
+| Family | Metrics | Trace | Conditions |
+| --- | ---: | ---: | --- |
+| firewall | 4 | 4 | 400, 1400, 4000 pps, two 5 s repeats. Trace uses one hit and one miss. |
+| just_drop | 4 | 4 | Same rates and repeats. Trace uses one tagged probe. |
+| just_tx | 4 | 4 | Same rates and repeats. Trace uses one JTX1 probe. |
+| exec_bench | 4 | 0 | Seven programs. One condition and two batches per program and mode. |
+| case | 0 | 1 | AOT Trace. One measured A-to-B publish. |
+| Total | 16 | 13 | 29 required cells |
 
-The case family includes `case` and `hot_swap`.
-Both procedures use `experiment = 'case'`.
-Store the procedure in the condition parameters.
-Store hot-switch details in the mode's `case_switch` table.
-The two procedures contribute observations to the same matrix cell.
-Exclude `dev` and `lookup` from the matrix.
-Keep `formal-clear` outside the medium queue.
-
-The estimates assume one firmware per family for each of HAL, native, and interpreter.
-AOT and JIT share a native firmware when their identities match.
-Group work by firmware digest and process each group consecutively.
-Coincident firmware identities can reduce the number of writes.
-
-| Device action | Planned bound | Observed |
-| --- | ---: | ---: |
-| Firmware flash | 15 | 0 |
-| XDP ELF cold install | 36 | 0 |
-| SRAM preload | 36 | 0 |
-| Leased slot publish | 24 | 0 |
-
-The plan assumes one cold install and at most one preload for each required deployment.
-The case portion budgets eight policy selections per mode, including up to three setup selections and five measured switches.
-HAL can perform eight static selections. They use no XDP slots.
-Adding rates or batch repeats does not increase the firmware flash count.
-Count retries separately and check device identity before each retry.
+`lookup`, `dev`, and `case-smoke` run separately from the medium plan.
+AOT and JIT can share a native Firmware ELF.
+Group execution by firmware digest. Keep rates and repeats within the group.
+Count firmware flashes, cold installs, SRAM preloads, preparation publishes, and measured publishes.
+The case preparation plans one firmware flash, two cold installs, two preloads, and two publishes.
+The formal case window then measures one publish. These counts need device verification.
 
 | Work | Budget |
 | --- | ---: |
@@ -118,8 +99,8 @@ Use the same boot, epoch, profile, and series for Counter and Histogram deltas.
 Read Gauge snapshots directly.
 Keep one board-specific frozen histogram calibration per comparison boundary.
 Record the tick rate and clock domain for each clock.
-The five firmware callbacks and embeprom 0.3.0 integration remain open.
-Their RV32IMC atomic, interrupt, static memory, and epoch checks remain open.
+The case Trace firmware implements the five session callbacks.
+The network and EXB2 callback and embeprom 0.3.0 integration checks remain open.
 
 - **Firewall.** Bind once per mode. Before each window, reset known hit and miss keys.
   Pace mixed traffic for Metrics. Send one tagged hit or miss per Trace window.
@@ -145,15 +126,13 @@ Their RV32IMC atomic, interrupt, static memory, and epoch checks remain open.
   Check completed rounds, result, digest, input, and padding.
   Check every scratch byte for copy and bsort.
   Report ticks per round only for a correct batch measured on the DUT clock.
-- **Case.** Select each static HAL policy or activate each prepared slot in turn.
-  Check `case_swap` and `case_mark` against their separate expected output frames.
-  Disable the policy before you prepare a baseline. Arm, send tagged probes, drain, and freeze.
-  Count each probe identity once. Keep sent, correct, wrong-version, and missing counts per policy.
-- **Hot swap.** Prepare both policies once. Keep a tagged stimulus active across each measured switch.
-  Preload both XPOST slots before the timed switch loop. Check that preload failure leaves the current policy active.
-  Record DUT switch, quiesce, and publish ticks. Record host command and reply times separately.
-  Record the interval from the last old reply to the first new reply, old replies after a new reply, and missing probes.
-  HAL uses static selection and leaves slot and rebind fields null.
+- **Case.** Prepare A with `case_swap` and B with `case_mark_idle`.
+  Send 40-byte UDP probes with JTX1 tags and an eight-byte zero tail.
+  Check version 2 for A and version 1 for B. Check the complete reply frame.
+  Restore A as active and B as staged. Arm one Trace epoch and publish B once.
+  Keep the tcpdump capture tail after the first valid B reply.
+  Store the original pcap, Trace events, switch reply, and preparation under one run ID.
+  Plot packet capture times and device Trace ticks in their own clock domains.
 - **Lookup.** Use explicit diagnostics. Pair just_tx runs at 1400 pps with timing off and on.
   For firewall, capture separate hash hit and miss buckets at 400, 1400, and 4000 pps.
   Keep zero samples distinct from zero duration. The minimal DROP program makes no map lookup.
@@ -186,10 +165,13 @@ It still needs replacement in the runner and firmware.
 
 ## Database and review
 
-Set the medium PostgreSQL address and database name under `[postgres]` in `xpost-test/config/default.toml` after the writer supports the new schema.
+Set `[postgres].protocol_dbname` for the case writer in `xpost-test/config/default.toml`.
+Set `run = ["case-smoke"]` for an independently recorded qualification run.
+Build and upload the selected runner with `./xpost-test/scripts/xpost-test.fish`.
+If the case database write fails, the runner exports available evidence under `case-evidence/<run_id>`.
 Use a dedicated empty database with the [four-mode schema](../sql/protocol_v1.sql).
 The existing database holds earlier measurements.
-The current readiness check does not connect to either database.
+The case entry checks the protocol database before the firmware flash.
 
 ```bash
 psql -X -v ON_ERROR_STOP=1 -f xpost-test/sql/protocol_v1.sql <new-database>

@@ -71,6 +71,7 @@ esp-radio = { version = "0.18.0", path = "../../esp-radio", features = [
 ] }
 xpost = { path = "../..", features = ["esp-radio"] }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
+xpost-perf = { path = "../../xpost-perf", optional = true }
 critical-section = "1.2.0"
 portable-atomic = { version = "1", default-features = false }
 static_cell      = "2.1.1"
@@ -78,7 +79,7 @@ static_cell      = "2.1.1"
 [features]
 interp = ["xpost/interp"]
 perf-metrics = ["xpost/perf-counter", "xpost/perf-aggregate", "xpost/perf-gauge"]
-perf-trace = ["xpost/perf-counter", "xpost/perf-trace"]
+perf-trace = ["xpost/perf-counter", "xpost/perf-trace", "dep:xpost-perf"]
 
 [build-dependencies]
 xpost-build = { path = "../../xpost-build" }

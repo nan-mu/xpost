@@ -23,8 +23,8 @@ xdp = ["just_tx"]
 name = "just-tx-trace"
 target = "esp32c3"
 partition_table = "examples/just_xdp/partitions.csv"
-artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
-build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-trace"] }
+artifact = "examples/just_xdp/target/trace/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-trace", "--target-dir", "target/trace"] }
 xdp = ["just_tx"]
 
 # ---------------------------------------------------------------------------
@@ -43,8 +43,8 @@ xdp = ["just_drop"]
 name = "just-drop-trace"
 target = "esp32c3"
 partition_table = "examples/just_xdp/partitions.csv"
-artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
-build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-trace"] }
+artifact = "examples/just_xdp/target/trace/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-trace", "--target-dir", "target/trace"] }
 xdp = ["just_drop"]
 
 # ---------------------------------------------------------------------------
@@ -63,24 +63,24 @@ xdp = ["firewall"]
 name = "firewall-trace"
 target = "esp32c3"
 partition_table = "examples/firewall/partitions.csv"
-artifact = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
-build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-trace"] }
+artifact = "examples/firewall/target/trace/riscv32imc-unknown-none-elf/release/firewall"
+build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-trace", "--target-dir", "target/trace"] }
 xdp = ["firewall"]
 
 [[fw]]
 name = "just-tx-metrics-lookup"
 target = "esp32c3"
 partition_table = "examples/just_xdp/partitions.csv"
-artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
-build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-metrics,perf-lookup"] }
+artifact = "examples/just_xdp/target/lookup/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-metrics,perf-lookup", "--target-dir", "target/lookup"] }
 xdp = ["just_tx"]
 
 [[fw]]
 name = "firewall-metrics-lookup"
 target = "esp32c3"
 partition_table = "examples/firewall/partitions.csv"
-artifact = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
-build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-metrics,perf-lookup"] }
+artifact = "examples/firewall/target/lookup/riscv32imc-unknown-none-elf/release/firewall"
+build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-metrics,perf-lookup", "--target-dir", "target/lookup"] }
 xdp = ["firewall"]
 
 # ---------------------------------------------------------------------------
@@ -165,20 +165,17 @@ artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/e
 build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build", "--release"] }
 
 # ---------------------------------------------------------------------------
-# case_xdp — one firmware for both exams.
-# Cold `case` clears and reflashes one image, then reboots.
-# `hot_swap` installs case_swap and case_mark_idle, then publishes without reboot.
-# xdp is empty so flash/fw does not pin an image.
-# The shared case firmware has no per-packet collection features.
+# case_xdp — AOT Trace for one A-to-B publish.
+# The runner prepares case_swap and case_mark_idle before the trace window.
 # ---------------------------------------------------------------------------
 
 [[fw]]
 name = "case-xdp"
 target = "esp32c3"
 partition_table = "examples/case_xdp/partitions.csv"
-artifact = "examples/case_xdp/target/riscv32imc-unknown-none-elf/release/case_xdp"
-build = { cwd = "examples/case_xdp", command = ["cargo", "build", "--release"] }
-xdp = []
+artifact = "examples/case_xdp/target/trace/riscv32imc-unknown-none-elf/release/case_xdp"
+build = { cwd = "examples/case_xdp", command = ["cargo", "build", "--release", "--features", "perf-trace", "--target-dir", "target/trace"] }
+xdp = ["case_swap", "case_mark_idle"]
 
 [[xdp]]
 name = "case_swap"
@@ -221,6 +218,30 @@ target = "esp32c3"
 partition_table = "examples/firewall/partitions.csv"
 artifact = "examples/firewall/target/rbpf/riscv32imc-unknown-none-elf/release/firewall"
 build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-metrics,interp", "--target-dir", "target/rbpf"] }
+xdp = ["firewall_rbpf"]
+
+[[fw]]
+name = "just-tx-rbpf-trace"
+target = "esp32c3"
+partition_table = "examples/just_xdp/partitions.csv"
+artifact = "examples/just_xdp/target/rbpf-trace/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-trace,interp", "--target-dir", "target/rbpf-trace"] }
+xdp = ["just_tx_rbpf"]
+
+[[fw]]
+name = "just-drop-rbpf-trace"
+target = "esp32c3"
+partition_table = "examples/just_xdp/partitions.csv"
+artifact = "examples/just_xdp/target/rbpf-trace/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-trace,interp", "--target-dir", "target/rbpf-trace"] }
+xdp = ["just_drop_rbpf"]
+
+[[fw]]
+name = "firewall-rbpf-trace"
+target = "esp32c3"
+partition_table = "examples/firewall/partitions.csv"
+artifact = "examples/firewall/target/rbpf-trace/riscv32imc-unknown-none-elf/release/firewall"
+build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-trace,interp", "--target-dir", "target/rbpf-trace"] }
 xdp = ["firewall_rbpf"]
 
 [[fw]]

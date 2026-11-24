@@ -7,6 +7,9 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+#[cfg(feature = "perf-trace")]
+mod trace_capture;
+
 use core::convert::Infallible;
 use core::ptr::addr_of_mut;
 
@@ -100,7 +103,10 @@ async fn main(spawner: Spawner) -> ! {
     let map_heap: &'static mut [u8] = unsafe { &mut *addr_of_mut!(MAP_HEAP) };
     let mut maps = MapRt::init(map_heap).await.expect("MapRt::init");
 
-    xpost::xdp::set_boot_id(boot_entropy());
+    let boot_id = boot_entropy();
+    xpost::xdp::set_boot_id(boot_id);
+    #[cfg(feature = "perf-trace")]
+    trace_capture::init(boot_id);
     let slots = [unsafe { xdp_slot.as_xdp_slot(true) }, unsafe {
         xdp_slot_idle.as_xdp_slot(false)
     }];
@@ -274,7 +280,7 @@ serial_task! {
         rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
     ) {
         let mut rx = rx;
-        SerialHandler::builder(
+        let builder = SerialHandler::builder(
             move || match rx.read_byte() {
                 Ok(b) => Some(b),
                 Err(_) => None,
@@ -352,7 +358,12 @@ serial_task! {
             }
         })
         .on_xdp_switch(|slot: u8, generation: u32, pass: bool, reply: ReplyWriter<'_>| {
-            match app_ctrl::switch_xdp(slot, generation, pass) {
+            #[cfg(feature = "perf-trace")]
+            let begin = trace_capture::now();
+            let result = app_ctrl::switch_xdp(slot, generation, pass);
+            #[cfg(feature = "perf-trace")]
+            trace_capture::switch(begin, slot, generation, result.as_ref().ok());
+            match result {
                 Ok(report) => reply.ok(switch_reply(&report)),
                 Err(e) => reply_xdp_err(reply, e),
             }
@@ -360,8 +371,15 @@ serial_task! {
         .on_get_xdp_status(|reply: ReplyWriter<'_>| match app_ctrl::xdp_status() {
             Ok(status) => reply.ok(status_reply(&status)),
             Err(e) => reply_xdp_err(reply, e),
-        })
-        .build()
+        });
+        #[cfg(feature = "perf-trace")]
+        let builder = builder
+            .on_perf_prepare(trace_capture::prepare)
+            .on_perf_arm(trace_capture::arm)
+            .on_perf_freeze(trace_capture::freeze)
+            .on_perf_read(trace_capture::read)
+            .on_perf_release(trace_capture::release);
+        builder.build()
     }
 }
 

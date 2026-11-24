@@ -67,6 +67,20 @@ pub struct SwitchReport {
     /// `esp_hal` microseconds since boot, taken after the new entry is visible
     /// and before new flights are admitted. Zero when this reply did not publish.
     pub mcu_us: u32,
+    #[cfg(feature = "perf-trace")]
+    pub timing: Option<SwitchTiming>,
+}
+
+/// DUT microsecond timestamps for one successful publish.
+#[cfg(feature = "perf-trace")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SwitchTiming {
+    pub quiesce_begin: u64,
+    pub quiesce_end: u64,
+    pub rebind_begin: u64,
+    pub rebind_end: u64,
+    pub publish_begin: u64,
+    pub before_admission: u64,
 }
 
 /// Admission plus slot summary. Slot `None` means that role is empty.
@@ -354,10 +368,14 @@ impl XdpRt {
         let pass_before = QUIESCE_PASSES.load(Ordering::Relaxed);
         self.updating = true;
         QUIESCE_PASS.store(matches!(policy, QuiescePolicy::Pass), Ordering::SeqCst);
+        #[cfg(feature = "perf-trace")]
+        let quiesce_begin = now_us();
         PAUSE.store(true, Ordering::SeqCst);
         while IN_FLIGHT.load(Ordering::SeqCst) != 0 {
             core::hint::spin_loop();
         }
+        #[cfg(feature = "perf-trace")]
+        let quiesce_end = now_us();
         let Some(lock) = crate::map::MAP_RT.try_get() else {
             self.leave_quiesce();
             return Err(self.fail(XdpSwapError::MapsRequired));
@@ -369,6 +387,8 @@ impl XdpRt {
                 return Err(self.fail(XdpSwapError::Busy));
             }
         };
+        #[cfg(feature = "perf-trace")]
+        let rebind_begin = now_us();
         if let Err(e) = self.publish_binds(&mut maps, &pairs) {
             return match self.restore_binds(&maps, old_binds.as_slice()) {
                 Ok(()) => {
@@ -394,7 +414,11 @@ impl XdpRt {
                 }
             };
         }
+        #[cfg(feature = "perf-trace")]
+        let rebind_end = now_us();
         let entry = self.slots[slot].slot.base();
+        #[cfg(feature = "perf-trace")]
+        let publish_begin = now_us();
         PRIMARY_ENTRY.store(entry, Ordering::Release);
         if from_slot != slot
             && let Some(prev) = self.slots.get_mut(from_slot)
@@ -410,11 +434,11 @@ impl XdpRt {
         if let Some(image) = self.images.get_mut(id) {
             image.meta.set_location(XdpLocation::Slot { index: slot });
         }
-        let stamped = mcu_now();
+        let admitted = now_us();
         self.leave_quiesce();
         self.last_error = 0;
         let _ = ACTIVE.load(Ordering::Relaxed);
-        Ok(self.report(
+        let report = self.report(
             true,
             false,
             from_slot,
@@ -422,8 +446,21 @@ impl XdpRt {
             generation,
             drop_before,
             pass_before,
-            stamped,
-        ))
+            admitted as u32,
+        );
+        #[cfg(feature = "perf-trace")]
+        let report = SwitchReport {
+            timing: Some(SwitchTiming {
+                quiesce_begin,
+                quiesce_end,
+                rebind_begin,
+                rebind_end,
+                publish_begin,
+                before_admission: admitted,
+            }),
+            ..report
+        };
+        Ok(report)
     }
 
     fn leave_quiesce(&mut self) {
@@ -456,6 +493,8 @@ impl XdpRt {
                 .load(Ordering::Relaxed)
                 .saturating_sub(pass_before) as u32,
             mcu_us,
+            #[cfg(feature = "perf-trace")]
+            timing: None,
         }
     }
 
@@ -547,9 +586,13 @@ impl XdpRt {
 }
 
 pub(crate) fn mcu_now() -> u32 {
+    now_us() as u32
+}
+
+fn now_us() -> u64 {
     esp_hal::time::Instant::now()
         .duration_since_epoch()
-        .as_micros() as u32
+        .as_micros()
 }
 fn map_ready(result: Result<(), ReadyError>) -> Result<(), XdpSwapError> {
     result.map_err(|e| match e {

@@ -13,11 +13,13 @@ host = [
   "user",
   "dep:aya-log",
   "dep:anyhow",
+  "dep:base64",
   "dep:env_logger",
   "dep:libc",
   "dep:log",
   "dep:serde",
   "dep:serde_json",
+  "dep:sha2",
   "dep:reqwest",
   "dep:tokio",
   "dep:toml",
@@ -27,6 +29,8 @@ host = [
 ]
 
 [dependencies]
+base64 = { version = "0.22", optional = true }
+sha2 = { version = "0.11", optional = true }
 aya = { workspace = true, optional = true }
 aya-log = { workspace = true, optional = true }
 anyhow = { workspace = true, default-features = true, optional = true }

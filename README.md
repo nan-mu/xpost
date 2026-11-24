@@ -129,12 +129,6 @@ HAL is `examples/exec_bench_hal`. AOT is `examples/exec_bench` running the RV32I
 
 ![exec_bench on HAL, AOT, and the interpreter](docs/figures/exec-bench-sweeps.png)
 
-### case and hot_swap
+### case
 
-`case` loads two images into `examples/case_xdp`, one at a time. For the active image the host sends four UDP packets, `CASE0` through `CASE3`, and checks the board's transmit on a packet capture. `case_swap` is correct when the Ethernet addresses are exchanged, the IPv4 destination is `203.0.113.10`, and the payload is unchanged. `case_mark` is correct when the Ethernet addresses are exchanged, the IPv4 destination is `203.0.113.77`, and the payload is unchanged. `hot_swap` then switches between the two images. The image being left stays staged, so the switch does not copy it again.
-
-Each point on the figure is one stage. Its value is the number of milliseconds from the first command until the agent's reply for that stage. Cold replace stops the old image, overwrites the slot, and enables the new one. Hot switch only publishes an image that is already staged. The dashed segment crosses the stop and overwrite stages, which the hot path does not run.
-
-`xpost-test/common/src/exam/case.rs` and `xpost-test/common/src/exam/hot_swap.rs` drive the host.
-
-![cold replace and hot switch](docs/figures/update-latency.png)
+`case` checks both v0.1.1 policies in their SRAM slots. It restores A as active and B as staged before the timed window. The runner publishes B once and keeps the tcpdump capture and DUT Trace under the same run ID. See the [medium procedure](xpost-test/procedures/medium.md) for the packet and timing criteria.

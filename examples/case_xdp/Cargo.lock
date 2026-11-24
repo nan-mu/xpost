@@ -166,6 +166,7 @@ dependencies = [
  "static_cell",
  "xpost",
  "xpost-build",
+ "xpost-perf",
  "xpost-serial",
 ]
 
@@ -2263,6 +2264,10 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "xpost-perf"
+version = "0.1.0"
 
 [[package]]
 name = "xpost-serial"

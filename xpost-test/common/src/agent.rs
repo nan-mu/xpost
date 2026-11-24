@@ -6,6 +6,7 @@
 use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use tokio::time::Duration;
 
@@ -19,6 +20,7 @@ pub struct AgentClient {
 struct ApiResp {
     ok: bool,
     message: String,
+    flash: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +65,11 @@ impl AgentClient {
         Self { base, http }
     }
 
+    pub async fn health(&self) -> Result<()> {
+        self.get_message("/health").await?;
+        Ok(())
+    }
+
     pub async fn medium_preflight(&self) -> Result<()> {
         let response: MediumPreflight = self
             .http
@@ -88,7 +95,7 @@ impl AgentClient {
         Ok(())
     }
 
-    pub async fn preflight_xdp(&self, name: &str) -> Result<()> {
+    pub async fn preflight_xdp(&self, name: &str) -> Result<String> {
         let result: ApiResp = self
             .http
             .get(format!("{}/v1/preflight/xdp/{name}", self.base))
@@ -98,6 +105,75 @@ impl AgentClient {
             .json()
             .await?;
         anyhow::ensure!(result.ok, "{}", result.message);
+        Ok(result.message)
+    }
+
+    pub async fn trace_prepare(&self, run: uuid::Uuid, profile: &str) -> Result<(u32, u64)> {
+        let reply = self
+            .post_json(
+                "/v1/perf/prepare",
+                &serde_json::json!({
+                    "uuid": run.simple().to_string(), "profile": profile, "variant": "trace"
+                }),
+            )
+            .await?;
+        Ok((
+            perf_field(&reply, "epoch")?.parse()?,
+            perf_field(&reply, "boot_id")?.parse()?,
+        ))
+    }
+
+    pub async fn trace_arm(&self, epoch: u32) -> Result<u64> {
+        let reply = self
+            .post_json("/v1/perf/arm", &serde_json::json!({ "epoch": epoch }))
+            .await?;
+        Ok(perf_field(&reply, "tick")?.parse()?)
+    }
+
+    pub async fn trace_freeze_read(&self, epoch: u32) -> Result<Vec<u8>> {
+        let frozen = self
+            .post_json("/v1/perf/freeze", &serde_json::json!({ "epoch": epoch }))
+            .await?;
+        let total: usize = perf_field(&frozen, "len")?.parse()?;
+        let digest: u32 = perf_field(&frozen, "digest")?.parse()?;
+        anyhow::ensure!(
+            (57..=64 * 1024).contains(&total),
+            "invalid Trace export length {total}"
+        );
+        let mut bytes = Vec::with_capacity(total);
+        while bytes.len() < total {
+            let part = self
+                .post_json(
+                    "/v1/perf/read",
+                    &serde_json::json!({
+                        "epoch": epoch, "offset": bytes.len(), "max_bytes": 512
+                    }),
+                )
+                .await?;
+            anyhow::ensure!(
+                perf_field(&part, "total")?.parse::<usize>()? == total
+                    && perf_field(&part, "digest")?.parse::<u32>()? == digest,
+                "Trace identity changed during export"
+            );
+            let chunk = STANDARD.decode(perf_field(&part, "b64")?)?;
+            anyhow::ensure!(
+                !chunk.is_empty()
+                    && chunk.len() == perf_field(&part, "n")?.parse::<usize>()?
+                    && bytes.len() + chunk.len() <= total,
+                "invalid Trace export chunk"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        let observed_digest = bytes.iter().fold(0x811c9dc5_u32, |hash, byte| {
+            (hash ^ u32::from(*byte)).wrapping_mul(0x01000193)
+        });
+        anyhow::ensure!(observed_digest == digest, "Trace export digest mismatch");
+        Ok(bytes)
+    }
+
+    pub async fn trace_release(&self, epoch: u32) -> Result<()> {
+        self.post_json("/v1/perf/release", &serde_json::json!({ "epoch": epoch }))
+            .await?;
         Ok(())
     }
 
@@ -109,6 +185,13 @@ impl AgentClient {
         let msg = self.post_json("/v1/flash/fw", &body).await?;
         log::info!("flash_fw: {msg}");
         Ok(())
+    }
+
+    pub async fn flash_fw_evidence(&self, name: &str) -> Result<serde_json::Value> {
+        self.post_response("/v1/flash/fw", &serde_json::json!({ "name": name }))
+            .await?
+            .flash
+            .context("Agent did not return the flashed firmware identity")
     }
 
     /// Install an existing XDP artifact through `POST /v1/flash/xdp`.
@@ -319,6 +402,10 @@ impl AgentClient {
     }
 
     async fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<String> {
+        Ok(self.post_response(path, body).await?.message)
+    }
+
+    async fn post_response(&self, path: &str, body: &serde_json::Value) -> Result<ApiResp> {
         let url = format!("{}{path}", self.base);
         let resp = self
             .http
@@ -338,8 +425,16 @@ impl AgentClient {
         if !api.ok {
             bail!("{}", api.message);
         }
-        Ok(api.message)
+        Ok(api)
     }
+}
+
+fn perf_field<'a>(reply: &'a str, name: &str) -> Result<&'a str> {
+    reply
+        .split_whitespace()
+        .filter_map(|field| field.split_once('='))
+        .find_map(|(key, value)| (key == name).then_some(value))
+        .with_context(|| format!("missing {name} in perf reply"))
 }
 
 fn normalize_base(endpoint: &str) -> String {

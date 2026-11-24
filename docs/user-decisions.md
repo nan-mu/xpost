@@ -158,3 +158,15 @@ Remove the v1 resolver and sibling profile cache reuse.
 Keep the firmware and partition checks in each exclusive cold installation session.
 
 Reason: the new taskbook assigns release intake to the Agent. It keeps the verified-byte write contract from PR #24.
+
+## 2026-11-25 Formal case and medium scope
+
+The formal medium plan contains 29 cells.
+Run one AOT Trace case cell. It measures one A-to-B publish.
+Keep both policy probes, cold installation, and SRAM preload in preparation.
+Keep the qualification run outside the formal matrix.
+Save the raw packet capture and switch Trace with a shared run ID.
+Retire the cold case timing and separate `hot_swap` selection.
+Retain their historical results.
+
+Reason: the revised brief uses one observed switch to show the dataplane and control timeline.

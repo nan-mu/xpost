@@ -23,6 +23,8 @@ user = "nan"
 password = "22332233"
 dbname = "postgres"
 formal_schema = "formal"
+# Case uses a separate database initialized with sql/protocol_v1.sql.
+# protocol_dbname = "xpost_medium"
 
 [agent]
 endpoint = "192.168.110.96:9240"

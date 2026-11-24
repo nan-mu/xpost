@@ -179,13 +179,6 @@ pub fn expand(mode: &str) -> Vec<(String, Template, Option<String>)> {
             Some("exec_bench_config".to_string()),
         ));
     }
-    // case and hot_swap run on the AOT path only: the interpreter does not
-    // execute RV32IMC machine code, so the switch semantics have one mode.
-    if mode == "aot" {
-        out.push(("case_config".to_string(), Template::Config, None));
-        out.push(("case_latency".to_string(), Template::Config, None));
-        out.push(("hot_swap_config".to_string(), Template::Config, None));
-    }
     let _ = mode;
     out
 }
@@ -283,36 +276,6 @@ fn extra_for(table: &str) -> Extra {
             ("output", "bytea"),
             ("result_ok", "boolean"),
             ("command_ms", "double precision"),
-        ]);
-    }
-    if table == "case_config" {
-        return Extra(&[
-            ("image", "text"),
-            ("expect", "text"),
-            ("map_before", "bigint"),
-            ("map_after", "bigint"),
-            ("saw_reply", "boolean"),
-        ]);
-    }
-    if table == "case_latency" {
-        return Extra(&[
-            ("image", "text"),
-            ("stopped_ms", "double precision"),
-            ("copied_ms", "double precision"),
-            ("started_ms", "double precision"),
-            ("end_ms", "double precision"),
-            ("mcu_us", "bigint"),
-            ("disable_rx", "double precision"),
-            ("agent_rx", "double precision"),
-        ]);
-    }
-    if table == "hot_swap_config" {
-        return Extra(&[
-            ("image", "text"),
-            ("switched_ms", "double precision"),
-            ("end_ms", "double precision"),
-            ("mcu_us", "bigint"),
-            ("agent_rx", "double precision"),
         ]);
     }
     NO_EXTRA
@@ -605,15 +568,12 @@ mod tests {
     }
 
     #[test]
-    fn case_and_hot_swap_exist_only_where_they_can_run() {
-        // The interpreter does not execute RV32IMC machine code, so the switch
-        // path has one mode. Creating the tables elsewhere would invite a run
-        // that can never fill them.
-        assert!(tables_for("aot").iter().any(|n| n == "case_config"));
-        for mode in ["rbpf", "hal"] {
+    fn legacy_schema_skips_retired_case_tables() {
+        for mode in MODES {
             let names = tables_for(mode);
-            assert!(!names.iter().any(|n| n == "case_config"), "{mode}");
-            assert!(!names.iter().any(|n| n == "hot_swap_config"), "{mode}");
+            for retired in ["case_config", "case_latency", "hot_swap_config"] {
+                assert!(!names.iter().any(|name| name == retired), "{mode} {retired}");
+            }
         }
     }
 

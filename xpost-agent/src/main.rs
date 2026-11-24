@@ -193,6 +193,9 @@ enum Command {
         /// Prepare one named XDP profile against its existing Firmware ELF.
         #[arg(long)]
         xdp: Option<String>,
+        /// Check all 36 release deployments without checking target firmware.
+        #[arg(long, conflicts_with = "xdp")]
+        inventory: bool,
     },
 }
 
@@ -208,8 +211,14 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    if let Some(Command::Preflight { xdp }) = cli.command {
+    if let Some(Command::Preflight { xdp, inventory }) = cli.command {
         let root = state::workspace_root();
+        if inventory {
+            let report = preflight::inventory(&root);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            anyhow::ensure!(report.deployment_ready(), "release inventory failed");
+            return Ok(());
+        }
         let profiles = state::load_profiles(&root)?;
         if let Some(name) = xdp {
             let info = preflight::profile(&root, &profiles, &name)?;

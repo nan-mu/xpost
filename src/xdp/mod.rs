@@ -132,6 +132,8 @@ pub fn test_flight_split(buf: &mut [u8]) -> (u32, u32, u32, i32) {
 /// same entry through the engine seam; this wrapper installs no map windows.
 #[cfg(feature = "interp")]
 pub use interp::selftest_run;
+#[cfg(feature = "perf-trace")]
+pub use swap::SwitchTiming;
 pub use swap::{QuiescePolicy, StageReport, SwitchReport, XdpStatus};
 pub use crate::{RtMutex, RtMutexGuard};
 pub(crate) use image::XdpMeta;

@@ -14,7 +14,7 @@ mod db;
 mod exam;
 mod pipeline;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use config::{FileConfig, install_postgres};
 use log::info;
 
@@ -22,14 +22,10 @@ use log::info;
 async fn main() -> Result<()> {
     let cfg = FileConfig::embedded()?;
     if cfg.run == ["medium"] {
-        let endpoint = cfg
-            .agent
-            .resolved_endpoint()
-            .context("medium needs [agent].endpoint")?;
-        agent::AgentClient::new(endpoint).medium_preflight().await?;
-        anyhow::bail!(
-            "medium deployments are available. EXB2 transport, perf callbacks, embeprom, the scheduler, and the four-mode writer are pending."
-        );
+        return exam::medium::run(&cfg).await;
+    }
+    if cfg.run == ["medium-plan"] {
+        return exam::medium::preview();
     }
     install_postgres(cfg.postgres.clone());
 
@@ -108,8 +104,8 @@ async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
             )
             .await
         }
-        "case" => exam::run_case(cfg).await,
-        "hot_swap" => exam::run_hot_swap(cfg).await,
+        "case" => exam::run_case(cfg, "formal").await,
+        "case-smoke" => exam::run_case(cfg, "qualification").await,
         "exec_bench" => {
             exam::run_exec_bench(
                 cfg,

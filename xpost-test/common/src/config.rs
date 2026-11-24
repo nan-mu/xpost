@@ -103,6 +103,8 @@ pub struct PostgresConfig {
     pub password: String,
     #[serde(default = "default_pg_dbname")]
     pub dbname: String,
+    #[serde(default)]
+    pub protocol_dbname: Option<String>,
     #[serde(default = "default_formal_schema")]
     pub formal_schema: String,
 }
@@ -317,15 +319,20 @@ impl FileConfig {
         if self.run.is_empty() {
             bail!("default.toml `run` must list at least one experiment");
         }
-        if self.run.len() != 1 && self.run.iter().any(|name| name == "medium") {
-            bail!("medium requires a run list with only `medium`");
+        if self.run.len() != 1
+            && self
+                .run
+                .iter()
+                .any(|name| matches!(name.as_str(), "medium" | "medium-plan"))
+        {
+            bail!("medium and medium-plan each require a single-entry run list");
         }
         for name in &self.run {
             match name.as_str() {
-                "medium" | "just_tx" | "just_drop" | "firewall" | "exec_bench" | "lookup"
-                | "dev" | "formal-clear" | "case" | "hot_swap" => {}
+                "medium" | "medium-plan" | "just_tx" | "just_drop" | "firewall" | "exec_bench"
+                | "lookup" | "dev" | "formal-clear" | "case" | "case-smoke" => {}
                 other => bail!(
-                    "unknown experiment {other:?} in default.toml `run`; use medium / just_tx / just_drop / firewall / exec_bench / lookup / dev / formal-clear / case / hot_swap"
+                    "unknown experiment {other:?} in default.toml `run`; use medium / medium-plan / just_tx / just_drop / firewall / exec_bench / lookup / dev / formal-clear / case / case-smoke"
                 ),
             }
         }
@@ -369,4 +376,19 @@ fn parse_mac(s: &str) -> Result<[u8; 6]> {
         out[i] = u8::from_str_radix(p, 16).with_context(|| format!("MAC octet {p:?}"))?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn retired_hot_swap_is_rejected_by_config_validation() {
+        let mut cfg = super::FileConfig::embedded().unwrap();
+        cfg.run = vec!["hot_swap".into()];
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unknown experiment")
+        );
+    }
 }

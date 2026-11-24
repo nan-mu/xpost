@@ -35,8 +35,6 @@ pub enum Experiment {
     JustDrop,
     Firewall,
     ExecBench,
-    Case,
-    HotSwap,
 }
 
 impl Experiment {
@@ -46,8 +44,6 @@ impl Experiment {
             Self::JustDrop => "just_drop",
             Self::Firewall => "firewall",
             Self::ExecBench => "exec_bench",
-            Self::Case => "case",
-            Self::HotSwap => "hot_swap",
         }
     }
 }
