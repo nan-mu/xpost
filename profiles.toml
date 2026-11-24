@@ -208,6 +208,7 @@ mode = "aot"
 name = "exec-bench-rbpf"
 target = "esp32c3"
 partition_table = "examples/exec_bench/partitions.csv"
+xdp_image_capacity = 0x4000
 artifact = "examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench"
 build = { cwd = "examples/exec_bench", command = ["cargo", "build", "--release", "--features", "interp"] }
 xdp = ["incr_rbpf"]

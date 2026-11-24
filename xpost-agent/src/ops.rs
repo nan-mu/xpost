@@ -428,7 +428,10 @@ fn flash_one_xdp(
         let mut last = None;
         for attempt in 1..=ATTEMPTS {
             let g = lock(state)?;
-            match g.handler.flash_with_image_capacity(op.clone(), image_capacity) {
+            match g
+                .handler
+                .flash_with_image_capacity(op.clone(), image_capacity)
+            {
                 Ok(o) => {
                     last = Some(Ok(o));
                     break;

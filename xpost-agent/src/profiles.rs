@@ -120,14 +120,6 @@ impl Profiles {
             None => Ok(None),
         }
     }
-
-    /// Resolve the install limit from the firmware linked to this XDP profile.
-    pub fn xdp_image_capacity(&self, xdp: &XdpProfile) -> Result<Option<usize>> {
-        let fw = self
-            .fw(&xdp.fw)
-            .with_context(|| format!("xdp `{}` links missing fw `{}`", xdp.name, xdp.fw))?;
-        Ok(fw.xdp_image_capacity)
-    }
 }
 
 /// Parse + validate fw/xdp lists into a registry.
@@ -341,7 +333,7 @@ mode = "aot"
         assert_eq!(x.mode, "aot");
         assert_eq!(p.build_root(), "../build");
         assert_eq!(
-            p.partition_table_for_xdp("just_drop").unwrap(),
+            p.fw(&x.fw).unwrap().partition_table,
             "examples/just_xdp/partitions.csv"
         );
     }
@@ -350,18 +342,22 @@ mode = "aot"
     fn exec_bench_cold_install_uses_the_firmware_capacity() {
         let profiles = Profiles::parse(include_str!("../../profiles.toml")).unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let exec = profiles.xdp("bsort").unwrap();
-        let install_limit = profiles.xdp_image_capacity(exec).unwrap().unwrap();
         let board: toml::Table = include_str!("../../examples/exec_bench/Cargo.toml")
             .parse()
             .unwrap();
-        let capacity = board["package"]["metadata"]["xpost"]["xdp_table"]["image_capacity"]
+        let install_limit = board["package"]["metadata"]["xpost"]["xdp_table"]["image_capacity"]
             .as_integer()
-            .unwrap();
-        assert_eq!(install_limit, capacity as usize);
+            .unwrap() as usize;
         assert_eq!(install_limit, 16 * 1024);
+        for name in ["bsort", "bsort_rbpf"] {
+            let exec = profiles.xdp(name).unwrap();
+            assert_eq!(
+                profiles.fw(&exec.fw).unwrap().xdp_image_capacity,
+                Some(install_limit)
+            );
+        }
         let mut config = xpost_serial::FlashConfig::from_partitions_csv(
-            root.join(profiles.default_partition_table().unwrap()),
+            root.join(&profiles.fw("exec-bench-aot").unwrap().partition_table),
         )
         .unwrap();
         assert_eq!(config.xdp_table().unwrap().image_capacity, 4 * 1024);
@@ -370,7 +366,7 @@ mode = "aot"
         assert_eq!(table.image_capacity, install_limit);
         assert_eq!(table.len, 64 * 1024);
         let network = profiles.xdp("just_tx").unwrap();
-        assert_eq!(profiles.xdp_image_capacity(network).unwrap(), None);
+        assert_eq!(profiles.fw(&network.fw).unwrap().xdp_image_capacity, None);
     }
 
     #[test]

@@ -84,24 +84,20 @@ pub struct XdpStatus {
 }
 
 impl XdpRt {
-/// Copy `id` into `slot`.
-///
-/// The slot is filled and left `Staged`. This does not change `PRIMARY_ENTRY`,
-/// `ACTIVE`, or map aliases, and the returned `mcu_us` is 0 because nothing is
-/// published. A dropped lease can fill every slot, including the primary
-/// index. A slot that is `Active` is refused: replacing a running image means
-/// `disable`, copy, `enable`.
-pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapError> {
+    /// Copy `id` into `slot`.
+    ///
+    /// The slot is filled and left `Staged`. This does not change `PRIMARY_ENTRY`,
+    /// `ACTIVE`, or map aliases, and the returned `mcu_us` is 0 because nothing is
+    /// published. A dropped lease can fill every slot, including the primary
+    /// index. A slot that is `Active` is refused: replacing a running image means
+    /// `disable`, copy, `enable`.
+    pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapError> {
         if self.severe {
             return Err(self.fail(XdpSwapError::RollbackFailed));
         }
         self.preflight(id, slot, true)?;
         let (aot_abs, image_len, digest, dst, capacity) = {
-            let meta = &self
-                .images
-                .get(id)
-                .ok_or(XdpSwapError::UnknownImage)?
-                .meta;
+            let meta = &self.images.get(id).ok_or(XdpSwapError::UnknownImage)?.meta;
             let slot_state = self.slots.get(slot).ok_or(XdpSwapError::UnknownSlot)?;
             (
                 meta.aot_abs(),
@@ -119,11 +115,7 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
             heapless::Vec::new();
         #[cfg(feature = "interp")]
         {
-            let meta = &self
-                .images
-                .get(id)
-                .ok_or(XdpSwapError::UnknownImage)?
-                .meta;
+            let meta = &self.images.get(id).ok_or(XdpSwapError::UnknownImage)?.meta;
             for (_, addr) in meta.aot_binds.iter() {
                 let _ = binds.push(*addr);
             }
@@ -188,10 +180,7 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
                 return Err(self.fail(XdpSwapError::Arch));
             }
         }
-        let slot_state = self
-            .slots
-            .get_mut(slot)
-            .ok_or(XdpSwapError::UnknownSlot)?;
+        let slot_state = self.slots.get_mut(slot).ok_or(XdpSwapError::UnknownSlot)?;
         slot_state.loaded_len = image_len;
         slot_state.image = Some(id);
         slot_state.phase = SlotPhase::Staged { generation };
@@ -201,7 +190,10 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
             image.meta.set_location(XdpLocation::Slot { index: slot });
         }
         self.last_error = 0;
-        Ok(StageReport { generation, mcu_us: 0 })
+        Ok(StageReport {
+            generation,
+            mcu_us: 0,
+        })
     }
 
     /// Quiesce, publish `slot`'s staged image, or restore the previous entry.
@@ -217,11 +209,7 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
         if self.severe {
             return Err(self.fail(XdpSwapError::RollbackFailed));
         }
-        let phase = self
-            .slots
-            .get(slot)
-            .ok_or(XdpSwapError::UnknownSlot)?
-            .phase;
+        let phase = self.slots.get(slot).ok_or(XdpSwapError::UnknownSlot)?.phase;
         match phase {
             SlotPhase::Staged { generation: staged } if staged == generation => {}
             SlotPhase::Staged { .. } => return Err(self.fail(XdpSwapError::BadGeneration)),
@@ -461,8 +449,12 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
             from_slot,
             to_slot,
             generation,
-            quiesce_drop: QUIESCE_DROPS.load(Ordering::Relaxed).saturating_sub(drop_before) as u32,
-            quiesce_pass: QUIESCE_PASSES.load(Ordering::Relaxed).saturating_sub(pass_before) as u32,
+            quiesce_drop: QUIESCE_DROPS
+                .load(Ordering::Relaxed)
+                .saturating_sub(drop_before) as u32,
+            quiesce_pass: QUIESCE_PASSES
+                .load(Ordering::Relaxed)
+                .saturating_sub(pass_before) as u32,
             mcu_us,
         }
     }
@@ -555,7 +547,9 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
 }
 
 pub(crate) fn mcu_now() -> u32 {
-    esp_hal::time::Instant::now().duration_since_epoch().as_micros() as u32
+    esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_micros() as u32
 }
 fn map_ready(result: Result<(), ReadyError>) -> Result<(), XdpSwapError> {
     result.map_err(|e| match e {

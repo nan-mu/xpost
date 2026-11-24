@@ -490,4 +490,3 @@ pub fn selftest_run(prog: &[u8], frame: &mut [u8]) -> i32 {
     let mut ctx = XdpMd::from_buf(frame);
     unsafe { run(prog.as_ptr() as usize, prog.len(), &mut ctx as *mut XdpMd) }
 }
-

@@ -46,9 +46,10 @@ Run the release check from the repository root on the Mac.
 The command exits with code 1 and reports 0 of 36 required deployments for v0.1.0.
 In the required matrix, 27 combinations need these deployments and nine need HAL firmware.
 The Agent has no real released XDP ELF to check for slot placement.
-The source declares 3584-byte slots for the network and case carriers and an 8192-byte slot for exec.
+The source declares 3584-byte slots for the network and case carriers.
+PR #25 raises the exec slot to 12288 B and the exec XDP ELF capacity to 16384 B.
 The producer previously measured JIT images of 9300 B for `log2`, 10264 B for `bsort`, and 9348 B for `strcmp` against a synthetic slot.
-All three sizes exceed the current exec slot.
+All three recorded sizes are below the new slot capacity.
 Check actual linked capacities and image sizes when the deployments arrive.
 
 The [producer handoff](https://github.com/nan-mu/xpost/pull/23#issuecomment-7109173595) reports byte equality for three LLVM AOT samples and an A→B→A comparison.
