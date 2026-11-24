@@ -55,7 +55,11 @@ impl FlashWorker {
         block_on(self.call_async(op, config))
     }
 
-    async fn call_async(&self, op: FlashOp, config: Option<FlashConfig>) -> io::Result<FlashResult> {
+    async fn call_async(
+        &self,
+        op: FlashOp,
+        config: Option<FlashConfig>,
+    ) -> io::Result<FlashResult> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
             .send(FlashReq::Op {
