@@ -52,7 +52,7 @@ The HAL network examples are `examples/just_tx_hal`, `examples/just_drop_hal`, a
 
 ## Host agent
 
-`xpost-agent` owns the USB serial port. It serves HTTP `/health`, `/v1/*`, and MCP `/mcp` on one port. Startup only opens the USB session. `xpost-test` later asks the agent, over HTTP, to flash a firmware ELF or an XDP ELF.
+`xpost-agent` owns the USB connection and serves HTTP `/health` and `/v1/*`. Use its CLI to manage the daemon or send device commands. TR3000 continues to use HTTP directly. See [Agent operation](xpost-agent/README.md).
 
 The Agent resolves XDP ELFs from the pinned producer release. See [Deployment design](docs/deployment-design.md).
 
@@ -74,7 +74,7 @@ xpost-macros/    map derives and flash_layout!
 xpost-perf/      shared sweep sizes and the versioned perf report
 examples/        board firmware, one Cargo workspace each
 xpost-serial/    serial protocol library
-xpost-agent/     host daemon
+xpost-agent/     HTTP daemon and CLI
 xpost-build/     xpost-link and the XDP ELF packer
 xpost-test/      host experiment runner
 ```
