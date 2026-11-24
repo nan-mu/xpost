@@ -19,6 +19,7 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
+use exec_bench::mem_map::SLOT_LENS;
 use log::{error, info};
 use xpost::app_ctrl::{self, AppMapError, AppXdpError};
 use xpost::map::{BPF_ANY, HEAP_SIZE, MapRt};
@@ -48,7 +49,7 @@ static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 /// Primary RX slot. Loaded before lease; immutable while it is the entry.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".xdp.hotload_0")]
-static xdp_slot: Slot<0x2000> = Slot::new([0u8; 0x2000]);
+static xdp_slot: Slot<{ SLOT_LENS[0] }> = Slot::new([0u8; SLOT_LENS[0]]);
 
 static mut INVOKE_BUF: [u8; VALUE_LEN] = [0u8; VALUE_LEN];
 

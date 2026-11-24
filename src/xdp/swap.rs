@@ -12,7 +12,7 @@
 use core::sync::atomic::Ordering;
 
 /// Flash-read scratch for [`XdpRt::stage`]. Control path only.
-static mut STAGE_BUF: [u8; DEFAULT_IMAGE_CAPACITY] = [0; DEFAULT_IMAGE_CAPACITY];
+static mut STAGE_BUF: [u8; IMAGE_COPY_CAPACITY] = [0; IMAGE_COPY_CAPACITY];
 
 use crate::{
     error::{MapCheckError, XdpSwapError},
@@ -24,7 +24,7 @@ use crate::{
             ACTIVE, BOOT_ID, IN_FLIGHT, MAX_MAP_REFS, MAX_REQUIRED_MAPS, MAX_VMR_BINDS, PAUSE,
             PRIMARY_ENTRY, QUIESCE_DROPS, QUIESCE_PASS, QUIESCE_PASSES,
         },
-        table::storage::DEFAULT_IMAGE_CAPACITY,
+        table::storage::IMAGE_COPY_CAPACITY,
     },
 };
 
@@ -118,7 +118,7 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
         if image_len > capacity {
             return Err(self.fail(XdpSwapError::ImageTooLarge));
         }
-        if image_len > DEFAULT_IMAGE_CAPACITY {
+        if image_len > IMAGE_COPY_CAPACITY {
             return Err(self.fail(XdpSwapError::ScratchTooSmall));
         }
         // One control-path scratch. `stage` is not reentrant and must not run

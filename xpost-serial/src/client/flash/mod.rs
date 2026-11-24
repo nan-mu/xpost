@@ -30,6 +30,7 @@ pub const DEFAULT_XDP_PARTITION: &str = "xdp";
 enum FlashReq {
     Op {
         op: FlashOp,
+        config: Option<FlashConfig>,
         resp: oneshot::Sender<io::Result<FlashResult>>,
     },
     Shutdown,
@@ -50,14 +51,18 @@ pub(crate) struct FlashWorker {
 }
 
 impl FlashWorker {
-    pub(crate) fn call(&self, op: FlashOp) -> io::Result<FlashResult> {
-        block_on(self.call_async(op))
+    pub(crate) fn call(&self, op: FlashOp, config: Option<FlashConfig>) -> io::Result<FlashResult> {
+        block_on(self.call_async(op, config))
     }
 
-    async fn call_async(&self, op: FlashOp) -> io::Result<FlashResult> {
+    async fn call_async(&self, op: FlashOp, config: Option<FlashConfig>) -> io::Result<FlashResult> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
-            .send(FlashReq::Op { op, resp: resp_tx })
+            .send(FlashReq::Op {
+                op,
+                config,
+                resp: resp_tx,
+            })
             .map_err(|_| std::io::Error::other("flash task closed"))?;
         resp_rx
             .await
@@ -88,7 +93,7 @@ pub struct FlashConfig {
     pub partitions: PathBuf,
     /// Partition Name column (default [`DEFAULT_XDP_PARTITION`]).
     pub partition: String,
-    /// Host cap on a single XDP ELF (also min'd with CSV-derived capacity).
+    /// Host cap on a single XDP ELF.
     pub image_capacity: usize,
 }
 
@@ -116,7 +121,10 @@ impl FlashConfig {
     /// Resolve [`XdpTable`] from [`Self::partitions`] / [`Self::partition`].
     pub fn xdp_table(&self) -> io::Result<XdpTable> {
         let mut table = xdp_table_from_csv(&self.partitions, &self.partition)?;
-        table.image_capacity = table.image_capacity.min(self.image_capacity);
+        table.image_capacity = self
+            .image_capacity
+            .min(table.len as usize)
+            .min(xpost_elf::MAX_CONTAINER_SIZE);
         Ok(table)
     }
 }
@@ -140,8 +148,8 @@ async fn worker(
     while let Some(req) = rx.recv().await {
         match req {
             FlashReq::Shutdown => break,
-            FlashReq::Op { op, resp } => {
-                let cfg = cfg.clone();
+            FlashReq::Op { op, config, resp } => {
+                let cfg = config.unwrap_or_else(|| cfg.clone());
                 let port = Arc::clone(&port);
                 let record = Arc::clone(&record);
                 let result = tokio::task::spawn_blocking(move || run_op(&port, &cfg, &record, &op))

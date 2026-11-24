@@ -251,8 +251,6 @@ pub fn flash_xdp(
                     .xdp(name)
                     .cloned()
                     .with_context(|| format!("unknown xdp `{name}`"))?;
-                // Ensure linked fw / partition table resolve (validated on load).
-                let _ = g.profiles.partition_table_for_xdp(name)?;
                 (g.root.clone(), xdp)
             };
             let (summary, _) = flash_one_xdp(state, &root, &xdp, peer)?;
@@ -269,6 +267,7 @@ fn flash_one_xdp(
     peer: &str,
 ) -> Result<(String, Duration)> {
     let name = xdp.name.as_str();
+    let flash_config = lock(state)?.profiles.xdp_flash_config(root, xdp)?;
     let _build_dur = run_build(root, &xdp.build, &format!("xdp `{name}`"), peer)?;
 
     let path = abs_under_root(root, &xdp.artifact);
@@ -303,10 +302,13 @@ fn flash_one_xdp(
         let mut last = None;
         for attempt in 1..=ATTEMPTS {
             let g = lock(state)?;
-            match g.handler.flash(FlashOp::Xdp {
-                name: elf_name.clone(),
-                path: path.display().to_string(),
-            }) {
+            match g.handler.flash_with_config(
+                FlashOp::Xdp {
+                    name: elf_name.clone(),
+                    path: path.display().to_string(),
+                },
+                flash_config.clone(),
+            ) {
                 Ok(o) => {
                     last = Some(Ok(o));
                     break;

@@ -141,7 +141,7 @@ pub type XdpRtGuard<'a> = RtMutexGuard<'a, XdpRt>;
 pub use slot::{Slot, XdpSlot};
 pub use state::XDP_RT;
 pub use table::storage::ColdRegion;
-pub(crate) use table::storage::{DEFAULT_IMAGE_CAPACITY, EspFlashXdpTable, XdpTableStorage};
+pub(crate) use table::storage::{EspFlashXdpTable, IMAGE_COPY_CAPACITY, XdpTableStorage};
 
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::Ordering;
@@ -541,10 +541,8 @@ impl XdpRt {
             self.primary = prev_primary;
             return Err(XdpSwitchError::ImageTooLarge);
         }
-        // Static, not a stack array: the buffer is the full image ceiling, and
-        // an 8 KiB frame on the embassy stack is enough to fault the boot path
-        // that publishes the primary image.
-        static mut SWITCH_BUF: [u8; DEFAULT_IMAGE_CAPACITY] = [0; DEFAULT_IMAGE_CAPACITY];
+        // Keep the full-image buffer off the embassy stack during boot.
+        static mut SWITCH_BUF: [u8; IMAGE_COPY_CAPACITY] = [0; IMAGE_COPY_CAPACITY];
         let buf = unsafe { &mut *core::ptr::addr_of_mut!(SWITCH_BUF) };
         if image_len > buf.len() {
             self.primary = prev_primary;

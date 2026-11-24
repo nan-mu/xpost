@@ -138,10 +138,19 @@ impl SerialHandler {
 
     /// Run a download-mode [`FlashOp`] (not an App-mode wire reply).
     pub fn flash(&self, op: FlashOp) -> io::Result<FlashResult> {
+        self.flash_with_config(op, None)
+    }
+
+    /// Run one flash operation with an optional override of the worker's configuration.
+    pub fn flash_with_config(
+        &self,
+        op: FlashOp,
+        config: Option<FlashConfig>,
+    ) -> io::Result<FlashResult> {
         self.flash
             .as_ref()
             .ok_or_else(|| io::Error::other("flash worker not available on this link"))?
-            .call(op)
+            .call(op, config)
     }
 
     pub fn lines_in_range(&self, since: SystemTime, until: SystemTime) -> io::Result<Vec<String>> {

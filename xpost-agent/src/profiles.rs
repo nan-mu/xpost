@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use xpost_serial::FlashConfig;
 
 /// `{ cwd, command }` run before flash (paths relative to workspace root).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -24,6 +25,8 @@ pub struct FwProfile {
     pub partition_table: String,
     pub artifact: String,
     pub build: BuildSpec,
+    /// Install limit for one XDP ELF, in bytes.
+    pub xdp_image_capacity: Option<usize>,
     #[serde(default)]
     pub xdp: Vec<String>,
 }
@@ -108,15 +111,19 @@ impl Profiles {
         }
     }
 
-    /// Partition table for an XDP profile (from linked FW).
-    pub fn partition_table_for_xdp(&self, xdp_name: &str) -> Result<&str> {
-        let x = self
-            .xdp(xdp_name)
-            .with_context(|| format!("unknown xdp `{xdp_name}`"))?;
-        let f = self
-            .fw(&x.fw)
-            .with_context(|| format!("xdp `{xdp_name}` links missing fw `{}`", x.fw))?;
-        Ok(f.partition_table.as_str())
+    /// Resolve the install override from the firmware linked to this XDP profile.
+    pub fn xdp_flash_config(&self, root: &Path, xdp: &XdpProfile) -> Result<Option<FlashConfig>> {
+        let fw = self
+            .fw(&xdp.fw)
+            .with_context(|| format!("xdp `{}` links missing fw `{}`", xdp.name, xdp.fw))?;
+        let Some(capacity) = fw.xdp_image_capacity else {
+            return Ok(None);
+        };
+        let partitions = abs_under_root(root, &fw.partition_table);
+        let mut config = FlashConfig::from_partitions_csv(&partitions)
+            .with_context(|| format!("FlashConfig from {}", partitions.display()))?;
+        config.image_capacity = capacity;
+        Ok(Some(config))
     }
 }
 
@@ -277,10 +284,27 @@ build = { cwd = ".", command = ["pixi", "run", "build", "--firmware", "examples/
         let x = p.xdp("just_drop").unwrap();
         assert_eq!(x.fw, "board-cag");
         assert_eq!(x.build.command[0], "pixi");
-        assert_eq!(
-            p.partition_table_for_xdp("just_drop").unwrap(),
-            "examples/just_xdp/partitions.csv"
-        );
+        assert_eq!(fw.partition_table, "examples/just_xdp/partitions.csv");
+    }
+
+    #[test]
+    fn exec_bench_cold_install_uses_the_firmware_capacity() {
+        let profiles = Profiles::parse(include_str!("../../profiles.toml")).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let exec = profiles.xdp("bsort").unwrap();
+        let config = profiles.xdp_flash_config(root, exec).unwrap().unwrap();
+        let table = config.xdp_table().unwrap();
+        let board: toml::Table = include_str!("../../examples/exec_bench/Cargo.toml")
+            .parse()
+            .unwrap();
+        let capacity = board["package"]["metadata"]["xpost"]["xdp_table"]["image_capacity"]
+            .as_integer()
+            .unwrap();
+        assert_eq!(table.image_capacity, capacity as usize);
+        assert_eq!(table.image_capacity, 16 * 1024);
+        assert_eq!(table.len, 64 * 1024);
+        let network = profiles.xdp("just_tx").unwrap();
+        assert!(profiles.xdp_flash_config(root, network).unwrap().is_none());
     }
 
     #[test]
