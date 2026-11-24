@@ -114,7 +114,8 @@ The runner checks the scope of DUT counts before it attributes them to a stimulu
   Pace mixed traffic for Metrics. Send one tagged hit or miss per Trace window.
   After drain, compare unique legal tokens and blacklist deltas.
   Legal delivery divides matched legal tokens by successful legal sends.
-  Illegal hit ratio divides the blacklist delta by successful illegal sends.
+  Divide the targeted blacklist-key delta by successful illegal sends.
+  Record hits on other keys separately. Reject changed keys or decreasing counters.
   Keep ratios above one for investigation. Return NULL for a zero denominator.
   Mark a window inconclusive when the DUT observes neither traffic class.
 - **Just drop.** Bind the minimal DROP policy once. Check connectivity and pin the neighbor before enabling DROP.

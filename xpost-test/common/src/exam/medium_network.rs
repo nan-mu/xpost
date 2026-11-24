@@ -771,6 +771,7 @@ struct Analysis {
     illegal: u64,
     matched: Option<u64>,
     hits: Option<u64>,
+    off_target_hits: Option<u64>,
     fault: Option<u64>,
     drop_counts: DropCounts,
     device_ticks: Option<u64>,
@@ -887,6 +888,7 @@ impl Analysis {
             "offered_pps": self.offered_pps, "sender_limited": self.sender_limited,
             "sent_legal": self.legal, "sent_illegal": self.illegal,
             "matched_legal": self.matched, "blocked_hit_delta": self.hits,
+            "off_target_blacklist_hits": self.off_target_hits,
             "legal_delivery_ratio": self.matched.and_then(|n| ratio(n, self.legal)),
             "illegal_hit_ratio": self.hits.and_then(|n| ratio(n, self.illegal)),
             "token_refused": out.refused, "rxcnt_delta": rx_delta,
@@ -1028,17 +1030,14 @@ fn analyze_firewall(
     result: &mut Analysis,
 ) {
     if let Some((before, after)) = out.maps_before.as_ref().zip(out.maps_after.as_ref()) {
-        result.hits = before
-            .get(&link.hit)
-            .zip(after.get(&link.hit))
-            .and_then(|(b, a)| a.checked_sub(*b));
-        if !after.keys().copied().eq(rules.iter().copied())
-            || before
-                .iter()
-                .any(|(ip, value)| *ip != link.hit && after.get(ip) != Some(value))
-        {
-            out.issues
-                .push("blacklist changed or traffic hit an unstimulated key".into());
+        match blacklist_deltas(before, after, rules, link.hit) {
+            Some((hits, off_target)) => {
+                result.hits = Some(hits);
+                result.off_target_hits = Some(off_target);
+            }
+            None => out
+                .issues
+                .push("firewall fixture keys changed or a counter decreased".into()),
         }
     }
     if let Some(tokens) = &out.tokens {
@@ -1096,6 +1095,25 @@ fn analyze_firewall(
                 .push("firewall probe outcome differs from the fixture".into());
         }
     }
+}
+
+fn blacklist_deltas(
+    before: &Counters,
+    after: &Counters,
+    rules: &[Ipv4Addr],
+    hit: Ipv4Addr,
+) -> Option<(u64, u64)> {
+    if !before.keys().copied().eq(rules.iter().copied()) || !before.keys().eq(after.keys()) {
+        return None;
+    }
+    let target = after.get(&hit)?.checked_sub(*before.get(&hit)?)?;
+    let off_target = before
+        .iter()
+        .filter(|(ip, _)| **ip != hit)
+        .try_fold(0_u64, |sum, (ip, old)| {
+            sum.checked_add(after[ip].checked_sub(*old)?)
+        })?;
+    Some((target, off_target))
 }
 
 fn has_firewall_observation(result: &Analysis) -> bool {
@@ -1386,6 +1404,23 @@ impl DutTrace {
 #[cfg(test)]
 mod attribution_tests {
     use super::*;
+
+    #[test]
+    fn firewall_keeps_other_key_hits_separate_from_the_stimulus() {
+        let hit = Ipv4Addr::new(192, 0, 2, 10);
+        let other = Ipv4Addr::new(192, 0, 2, 20);
+        let rules = [hit, other];
+        let before = [(hit, 0), (other, 1)].into();
+        let mut after: Counters = [(hit, 1800), (other, 3)].into();
+        assert_eq!(
+            blacklist_deltas(&before, &after, &rules, hit),
+            Some((1800, 2))
+        );
+        after.insert(other, 0);
+        assert_eq!(blacklist_deltas(&before, &after, &rules, hit), None);
+        after.remove(&other);
+        assert_eq!(blacklist_deltas(&before, &after, &rules, hit), None);
+    }
 
     #[test]
     fn firewall_window_needs_dut_evidence_from_a_traffic_class() {
