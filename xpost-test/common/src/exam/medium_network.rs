@@ -1076,6 +1076,10 @@ fn analyze_firewall(
         out.issues
             .push("firewall token buffer refused entries".into());
     }
+    if matches!(stimulus, Stimulus::Rate(_)) && !has_firewall_observation(result) {
+        out.issues
+            .push("no DUT observation for either submitted firewall traffic class".into());
+    }
     if !matches!(stimulus, Stimulus::Rate(_)) {
         let proved = match stimulus {
             Stimulus::Hit => {
@@ -1092,6 +1096,10 @@ fn analyze_firewall(
                 .push("firewall probe outcome differs from the fixture".into());
         }
     }
+}
+
+fn has_firewall_observation(result: &Analysis) -> bool {
+    result.matched.is_some_and(|matched| matched > 0) || result.hits.is_some_and(|hits| hits > 0)
 }
 
 fn analyze_tx(
@@ -1378,6 +1386,24 @@ impl DutTrace {
 #[cfg(test)]
 mod attribution_tests {
     use super::*;
+
+    #[test]
+    fn firewall_window_needs_dut_evidence_from_a_traffic_class() {
+        let mut result = Analysis {
+            sent: 2000,
+            legal: 200,
+            illegal: 1800,
+            matched: Some(0),
+            hits: Some(0),
+            ..Analysis::default()
+        };
+        assert!(!has_firewall_observation(&result));
+        result.hits = Some(5);
+        assert!(has_firewall_observation(&result));
+        result.hits = Some(0);
+        result.matched = Some(1);
+        assert!(has_firewall_observation(&result));
+    }
 
     #[test]
     fn drop_windows_need_positive_tagged_ingress_and_normal_completion() {

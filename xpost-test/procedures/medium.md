@@ -17,6 +17,8 @@ The 41 targets include separate Metrics and Trace Firmware ELFs for the network 
 Medium preflight also checked four HAL Firmware ELFs.
 The [v0.1.0 ledger](libbpf-mcu-v0.1.0.sha256) records the earlier release with zero deployments.
 
+Provide the Wi-Fi build inputs for each network example before building its Firmware ELF.
+Use the local `.env` paths described in the [README](../../README.md).
 Run these checks from the repository root on the Mac.
 
 ```bash
@@ -114,6 +116,7 @@ The runner checks the scope of DUT counts before it attributes them to a stimulu
   Legal delivery divides matched legal tokens by successful legal sends.
   Illegal hit ratio divides the blacklist delta by successful illegal sends.
   Keep ratios above one for investigation. Return NULL for a zero denominator.
+  Mark a window inconclusive when the DUT observes neither traffic class.
 - **Just drop.** Bind the minimal DROP policy once. Check connectivity and pin the neighbor before enabling DROP.
   Send tagged probes. Freeze after drain. Separate normal DROP from runtime faults.
   Divide successful sends by the monotonic host send interval for offered pps.
