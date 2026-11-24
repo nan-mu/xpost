@@ -36,7 +36,7 @@ The root Cargo workspace contains the root package, `esp-radio`, `xpost-macros`,
 
 `examples/exec_bench` runs an XDP image through `exec_call` and does not start Wi-Fi. A build without `interp` executes the RV32IMC machine code in the XDP ELF. A build with `--features interp` executes the eBPF object through `rbpf`. `diag` is a Cargo feature. It turns on the scale sweep in the exec_bench figure under Experiments.
 
-On `exec_bench`, the hot slot and the cold-table cell are 8 KiB, and the XDP ELF encoder accepts a container up to 8 KiB. That is what lets the `bsort` bytecode image be staged. Other examples still declare the smaller slot in their own manifests.
+`exec_bench` reserves a 12 KiB SRAM slot for the image payload. Its cold storage accepts a complete XDP ELF of up to 16 KiB. The encoder uses the same complete file limit. The firmware manifest declares the slot and cold storage capacities.
 
 ## Build firmware
 
@@ -121,7 +121,7 @@ These two figures are the map lookups taken during the three network runs, not a
 
 Eight programs run as a function call, with no Wi-Fi. `incr` adds one to a word. `square` squares a word. `bitswap` reverses the bits of a word. `fib` loops. `buf` and `memcpy` copy bytes. `fletcher32` checksums bytes. `bsort` sorts up to six 32-bit words. The input's work-size field is the horizontal axis. `incr`, `square`, and `bitswap` ignore it and do a fixed amount of work, so their lines are flat. `fib` loops that many times, up to 47. `buf` copies that many bytes, up to 1024. `memcpy` copies at most 12 bytes, `fletcher32` checksums at most 20 bytes, and `bsort` sorts at most six words. For `fib` and `buf`, the horizontal axis is logarithmic with base 2. The vertical axis is microseconds for one call, from the board's microsecond clock. The line is a straight fit of time against the work size itself. On the logarithmic axis that line is not straight. The band is the 99% confidence interval of the fit.
 
-HAL is `examples/exec_bench_hal`. AOT is `examples/exec_bench` running the RV32IMC image. Interpreter is that same example built with `--features interp`, which runs the eBPF object in `rbpf`. `bsort`'s eBPF object is larger than 4 KiB, so this example's hot slot, cold-table cell, and XDP ELF encoder all accept 8 KiB. Other examples keep the smaller slot declared in their own manifests.
+HAL is `examples/exec_bench_hal`. AOT is `examples/exec_bench` running the RV32IMC image. Interpreter is that same example built with `--features interp`, which runs the eBPF object in `rbpf`.
 
 `xpost-test/common/src/exam/exec_bench.rs` is the host check for these workloads.
 

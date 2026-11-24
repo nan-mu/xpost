@@ -152,6 +152,7 @@ build = { cwd = "../libbpf-mcu", command = ["pixi", "run", "build", "--firmware"
 name = "exec-bench-ebpf"
 target = "esp32c3"
 partition_table = "examples/exec_bench/partitions.csv"
+xdp_image_capacity = 0x4000
 artifact = "examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench"
 build = { cwd = "examples/exec_bench", command = ["cargo", "build", "--release"] }
 xdp = ["incr"]

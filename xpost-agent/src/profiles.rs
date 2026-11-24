@@ -24,6 +24,8 @@ pub struct FwProfile {
     pub partition_table: String,
     pub artifact: String,
     pub build: BuildSpec,
+    /// Install limit for one XDP ELF, in bytes.
+    pub xdp_image_capacity: Option<usize>,
     #[serde(default)]
     pub xdp: Vec<String>,
 }
@@ -108,15 +110,12 @@ impl Profiles {
         }
     }
 
-    /// Partition table for an XDP profile (from linked FW).
-    pub fn partition_table_for_xdp(&self, xdp_name: &str) -> Result<&str> {
-        let x = self
-            .xdp(xdp_name)
-            .with_context(|| format!("unknown xdp `{xdp_name}`"))?;
-        let f = self
-            .fw(&x.fw)
-            .with_context(|| format!("xdp `{xdp_name}` links missing fw `{}`", x.fw))?;
-        Ok(f.partition_table.as_str())
+    /// Resolve the install limit from the firmware linked to this XDP profile.
+    pub fn xdp_image_capacity(&self, xdp: &XdpProfile) -> Result<Option<usize>> {
+        let fw = self
+            .fw(&xdp.fw)
+            .with_context(|| format!("xdp `{}` links missing fw `{}`", xdp.name, xdp.fw))?;
+        Ok(fw.xdp_image_capacity)
     }
 }
 
@@ -277,10 +276,34 @@ build = { cwd = ".", command = ["pixi", "run", "build", "--firmware", "examples/
         let x = p.xdp("just_drop").unwrap();
         assert_eq!(x.fw, "board-cag");
         assert_eq!(x.build.command[0], "pixi");
-        assert_eq!(
-            p.partition_table_for_xdp("just_drop").unwrap(),
-            "examples/just_xdp/partitions.csv"
-        );
+        assert_eq!(fw.partition_table, "examples/just_xdp/partitions.csv");
+    }
+
+    #[test]
+    fn exec_bench_cold_install_uses_the_firmware_capacity() {
+        let profiles = Profiles::parse(include_str!("../../profiles.toml")).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let exec = profiles.xdp("bsort").unwrap();
+        let install_limit = profiles.xdp_image_capacity(exec).unwrap().unwrap();
+        let board: toml::Table = include_str!("../../examples/exec_bench/Cargo.toml")
+            .parse()
+            .unwrap();
+        let capacity = board["package"]["metadata"]["xpost"]["xdp_table"]["image_capacity"]
+            .as_integer()
+            .unwrap();
+        assert_eq!(install_limit, capacity as usize);
+        assert_eq!(install_limit, 16 * 1024);
+        let mut config = xpost_serial::FlashConfig::from_partitions_csv(
+            root.join(profiles.default_partition_table().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(config.xdp_table().unwrap().image_capacity, 4 * 1024);
+        config.image_capacity = install_limit;
+        let table = config.xdp_table().unwrap();
+        assert_eq!(table.image_capacity, install_limit);
+        assert_eq!(table.len, 64 * 1024);
+        let network = profiles.xdp("just_tx").unwrap();
+        assert_eq!(profiles.xdp_image_capacity(network).unwrap(), None);
     }
 
     #[test]

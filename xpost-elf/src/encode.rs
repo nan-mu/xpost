@@ -5,12 +5,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{MAX_LAYOUT, MAX_MAPS, MAX_NAME, align4};
 
-/// Complete file size limit (ESP32-C3 profile).
-///
-/// 8 KiB covers a workload whose eBPF image is about 5 KiB (`bsort`). The
-/// exec_bench flash cell and hot slot use the same ceiling. Smaller images
-/// still pack; this is only the encoder's buffer.
-pub const MAX_CONTAINER_SIZE: usize = 8192;
+/// Complete XDP ELF size limit. The target slot and cold storage impose their own limits.
+pub const MAX_CONTAINER_SIZE: usize = 16 * 1024;
 /// `.xpost.meta` size limit.
 pub const MAX_META_SIZE: usize = 1024;
 /// Map capacity profile limit.
@@ -467,6 +463,25 @@ mod tests {
     }
 
     #[test]
+    fn large_image_round_trip() {
+        // Size of the largest reported exec_bench JIT image (bsort).
+        let image = [0xa5; 10_264];
+        let meta = example_meta();
+        let data = build_container(&image, &meta, Some(12 * 1024)).unwrap();
+        let mut source = data.as_slice();
+        let ScanOutcome::Ok(parsed) = scan_at(&mut source, 0) else {
+            panic!("scan failed");
+        };
+        assert_eq!(parsed.name.as_str(), meta.name.as_str());
+        assert_eq!(parsed.file_len, data.len());
+        assert_eq!(parsed.image_size, image.len());
+        assert_eq!(
+            &data[parsed.image_offset..parsed.image_offset + parsed.image_size],
+            &image
+        );
+    }
+
+    #[test]
     fn empty_image_rejected() {
         let meta = example_meta();
         assert_eq!(
@@ -491,12 +506,12 @@ mod tests {
         let mut meta = example_meta();
         meta.maps.clear();
         meta.name = name("x");
-        // Non-image overhead for this metadata is 292 bytes, so an image of
-        // `MAX_CONTAINER_SIZE - 292` fills the file exactly.
-        let data = build_container(&[0u8; 7900], &meta, None).unwrap();
-        assert_eq!(data.len(), 8192);
+        const FIXTURE_OVERHEAD: usize = 292;
+        const IMAGE_LEN: usize = MAX_CONTAINER_SIZE - FIXTURE_OVERHEAD;
+        let data = build_container(&[0u8; IMAGE_LEN], &meta, None).unwrap();
+        assert_eq!(data.len(), 16_384);
         assert_eq!(
-            build_container(&[0u8; 7901], &meta, None),
+            build_container(&[0u8; IMAGE_LEN + 1], &meta, None),
             Err(EncodeError::ContainerTooLarge)
         );
     }

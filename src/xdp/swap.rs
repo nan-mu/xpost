@@ -11,9 +11,6 @@
 
 use core::sync::atomic::Ordering;
 
-/// Flash-read scratch for [`XdpRt::stage`]. Control path only.
-static mut STAGE_BUF: [u8; DEFAULT_IMAGE_CAPACITY] = [0; DEFAULT_IMAGE_CAPACITY];
-
 use crate::{
     error::{MapCheckError, XdpSwapError},
     map::MapRtGuard,
@@ -24,7 +21,6 @@ use crate::{
             ACTIVE, BOOT_ID, IN_FLIGHT, MAX_MAP_REFS, MAX_REQUIRED_MAPS, MAX_VMR_BINDS, PAUSE,
             PRIMARY_ENTRY, QUIESCE_DROPS, QUIESCE_PASS, QUIESCE_PASSES,
         },
-        table::storage::DEFAULT_IMAGE_CAPACITY,
     },
 };
 
@@ -118,38 +114,35 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
         if image_len > capacity {
             return Err(self.fail(XdpSwapError::ImageTooLarge));
         }
-        if image_len > DEFAULT_IMAGE_CAPACITY {
+        let Some(buf) = self.copy_buffer.get_mut(..image_len) else {
             return Err(self.fail(XdpSwapError::ScratchTooSmall));
+        };
+        if let Err(e) = self.table.read(aot_abs, buf) {
+            return Err(self.fail(e.into()));
         }
-        // One control-path scratch. `stage` is not reentrant and must not run
-        // from the RX callback, which is also what keeps this core off the
-        // in-flight packet.
-        let buf = unsafe { &mut *core::ptr::addr_of_mut!(STAGE_BUF) };
-        self.table
-            .read(aot_abs, &mut buf[..image_len])
-            .map_err(|e| self.fail(e.into()))?;
         // Verify before publishing: the interpreter executes these bytes and
         // skips its own per-run scan, so the checks have to happen here.
         #[cfg(feature = "interp")]
         {
-            if !crate::xdp::interp::verify(&buf[..image_len]) {
+            if !crate::xdp::interp::verify(buf) {
                 return Err(self.fail(XdpSwapError::Arch));
             }
-            if crate::xdp::interp::rejects_ctx_writes(&buf[..image_len]) {
+            if crate::xdp::interp::rejects_ctx_writes(buf) {
                 return Err(self.fail(XdpSwapError::Arch));
             }
         }
-        if xpost_elf::sha256(&buf[..image_len]) != digest {
+        if xpost_elf::sha256(buf) != digest {
             return Err(self.fail(XdpSwapError::Digest));
         }
         let generation = self.alloc_generation();
+        let buf = &self.copy_buffer[..image_len];
         unsafe {
             core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, image_len);
             core::ptr::write_bytes(dst.add(image_len), 0, capacity - image_len);
         }
         Self::fence_instruction_cache();
         let copied = unsafe { core::slice::from_raw_parts(dst, image_len) };
-        if copied != &buf[..image_len] {
+        if copied != buf {
             return Err(self.fail(XdpSwapError::Digest));
         }
         let slot_state = self

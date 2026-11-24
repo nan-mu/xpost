@@ -30,6 +30,7 @@ pub const DEFAULT_XDP_PARTITION: &str = "xdp";
 enum FlashReq {
     Op {
         op: FlashOp,
+        image_capacity: Option<usize>,
         resp: oneshot::Sender<io::Result<FlashResult>>,
     },
     Shutdown,
@@ -50,14 +51,26 @@ pub(crate) struct FlashWorker {
 }
 
 impl FlashWorker {
-    pub(crate) fn call(&self, op: FlashOp) -> io::Result<FlashResult> {
-        block_on(self.call_async(op))
+    pub(crate) fn call(
+        &self,
+        op: FlashOp,
+        image_capacity: Option<usize>,
+    ) -> io::Result<FlashResult> {
+        block_on(self.call_async(op, image_capacity))
     }
 
-    async fn call_async(&self, op: FlashOp) -> io::Result<FlashResult> {
+    async fn call_async(
+        &self,
+        op: FlashOp,
+        image_capacity: Option<usize>,
+    ) -> io::Result<FlashResult> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
-            .send(FlashReq::Op { op, resp: resp_tx })
+            .send(FlashReq::Op {
+                op,
+                image_capacity,
+                resp: resp_tx,
+            })
             .map_err(|_| std::io::Error::other("flash task closed"))?;
         resp_rx
             .await
@@ -88,7 +101,7 @@ pub struct FlashConfig {
     pub partitions: PathBuf,
     /// Partition Name column (default [`DEFAULT_XDP_PARTITION`]).
     pub partition: String,
-    /// Host cap on a single XDP ELF (also min'd with CSV-derived capacity).
+    /// Host cap on a single XDP ELF. The CSV constructor defaults to 4 KiB.
     pub image_capacity: usize,
 }
 
@@ -116,7 +129,10 @@ impl FlashConfig {
     /// Resolve [`XdpTable`] from [`Self::partitions`] / [`Self::partition`].
     pub fn xdp_table(&self) -> io::Result<XdpTable> {
         let mut table = xdp_table_from_csv(&self.partitions, &self.partition)?;
-        table.image_capacity = table.image_capacity.min(self.image_capacity);
+        table.image_capacity = self
+            .image_capacity
+            .min(table.len as usize)
+            .min(xpost_elf::MAX_CONTAINER_SIZE);
         Ok(table)
     }
 }
@@ -140,8 +156,13 @@ async fn worker(
     while let Some(req) = rx.recv().await {
         match req {
             FlashReq::Shutdown => break,
-            FlashReq::Op { op, resp } => {
-                let cfg = cfg.clone();
+            FlashReq::Op {
+                op,
+                image_capacity,
+                resp,
+            } => {
+                let mut cfg = cfg.clone();
+                cfg.image_capacity = image_capacity.unwrap_or(cfg.image_capacity);
                 let port = Arc::clone(&port);
                 let record = Arc::clone(&record);
                 let result = tokio::task::spawn_blocking(move || run_op(&port, &cfg, &record, &op))

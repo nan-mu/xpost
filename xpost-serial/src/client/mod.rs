@@ -138,10 +138,19 @@ impl SerialHandler {
 
     /// Run a download-mode [`FlashOp`] (not an App-mode wire reply).
     pub fn flash(&self, op: FlashOp) -> io::Result<FlashResult> {
+        self.flash_with_image_capacity(op, None)
+    }
+
+    /// Run a flash operation with an optional XDP ELF size limit for this request.
+    pub fn flash_with_image_capacity(
+        &self,
+        op: FlashOp,
+        image_capacity: Option<usize>,
+    ) -> io::Result<FlashResult> {
         self.flash
             .as_ref()
             .ok_or_else(|| io::Error::other("flash worker not available on this link"))?
-            .call(op)
+            .call(op, image_capacity)
     }
 
     pub fn lines_in_range(&self, since: SystemTime, until: SystemTime) -> io::Result<Vec<String>> {
