@@ -25,7 +25,7 @@ use crate::config::{FileConfig, format_mac};
 use crate::db::{self, CaseObs, PgOpts};
 use crate::pipeline::{self, BudgetEta, READY_BUDGET, RoundUi, status};
 
-const FW: &str = "case-cag";
+const FW: &str = "case-xdp";
 pub(crate) const PORT: u16 = 8080;
 pub(crate) const SENT: usize = 4;
 const IPPROTO_UDP: u32 = 17;

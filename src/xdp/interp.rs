@@ -44,6 +44,7 @@ const MAX_STEPS: u32 = 200_000;
 
 /// The program's `r10` region.
 #[unsafe(link_section = ".bss")]
+#[unsafe(export_name = "xpost_rbpf_stack")]
 static mut EBPF_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
 /// Instructions left in the current flight.

@@ -185,7 +185,7 @@ pub fn workspace_root() -> PathBuf {
     PathBuf::from(".")
 }
 
-fn load_profiles(root: &Path) -> Result<Profiles> {
+pub fn load_profiles(root: &Path) -> Result<Profiles> {
     let path = std::env::var("XPOST_PROFILES")
         .map(PathBuf::from)
         .unwrap_or_else(|_| root.join("profiles.toml"));

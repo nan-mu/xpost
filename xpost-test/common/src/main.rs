@@ -14,7 +14,7 @@ mod db;
 mod exam;
 mod pipeline;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use config::{FileConfig, install_postgres};
 use log::info;
 
@@ -22,8 +22,13 @@ use log::info;
 async fn main() -> Result<()> {
     let cfg = FileConfig::embedded()?;
     if cfg.run == ["medium"] {
+        let endpoint = cfg
+            .agent
+            .resolved_endpoint()
+            .context("medium needs [agent].endpoint")?;
+        agent::AgentClient::new(endpoint).medium_preflight().await?;
         anyhow::bail!(
-            "medium blocked: libbpf-mcu v0.1.0 has no deployment XDP ELFs. See xpost-test/procedures/medium.md."
+            "medium deployments are available. EXB2 transport, perf callbacks, embeprom, the scheduler, and the four-mode writer are pending."
         );
     }
     install_postgres(cfg.postgres.clone());

@@ -1,34 +1,30 @@
 # xpost-agent profile registry (paths relative to XPOST_ROOT / repo root).
 #
-# Formal firmware tags (DB `firmware` enum — not Cargo feature names):
-#   xdp_cag → perf-cag (counter+aggregate+gauge)
-#   xdp_t   → perf-t   (counter+trace)
-#   hal     → examples/*_hal CAGT report (no xpost runtime; Trace ring is in hal_perf)
-#
+# Firmware build features select the collection variant.
 # Firmware builds use Cargo commands from each firmware profile.
-# XDP containers must already exist in the producer output directory.
+# The Agent fetches XDP ELFs from the pinned release.
 
-# Producer index for XDP containers. Each [[xdp]] names a program and a mode.
-build_root = "../build"
+# Pinned libbpf-mcu release. Each [[xdp]] names a program and a mode.
+xdp_release = "v0.1.1"
 
 # ---------------------------------------------------------------------------
 # just_tx (examples/just_xdp; co-flash uses the aot container)
 # ---------------------------------------------------------------------------
 
 [[fw]]
-name = "just-tx-cag"
+name = "just-tx-metrics"
 target = "esp32c3"
 partition_table = "examples/just_xdp/partitions.csv"
 artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
-build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-metrics"] }
 xdp = ["just_tx"]
 
 [[fw]]
-name = "just-tx-t"
+name = "just-tx-trace"
 target = "esp32c3"
 partition_table = "examples/just_xdp/partitions.csv"
 artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
-build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-t"] }
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-trace"] }
 xdp = ["just_tx"]
 
 # ---------------------------------------------------------------------------
@@ -36,19 +32,19 @@ xdp = ["just_tx"]
 # ---------------------------------------------------------------------------
 
 [[fw]]
-name = "just-drop-cag"
+name = "just-drop-metrics"
 target = "esp32c3"
 partition_table = "examples/just_xdp/partitions.csv"
 artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
-build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-metrics"] }
 xdp = ["just_drop"]
 
 [[fw]]
-name = "just-drop-t"
+name = "just-drop-trace"
 target = "esp32c3"
 partition_table = "examples/just_xdp/partitions.csv"
 artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
-build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-t"] }
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-trace"] }
 xdp = ["just_drop"]
 
 # ---------------------------------------------------------------------------
@@ -56,35 +52,35 @@ xdp = ["just_drop"]
 # ---------------------------------------------------------------------------
 
 [[fw]]
-name = "firewall-cag"
+name = "firewall-metrics"
 target = "esp32c3"
 partition_table = "examples/firewall/partitions.csv"
 artifact = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
-build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-cag"] }
+build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-metrics"] }
 xdp = ["firewall"]
 
 [[fw]]
-name = "firewall-t"
+name = "firewall-trace"
 target = "esp32c3"
 partition_table = "examples/firewall/partitions.csv"
 artifact = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
-build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-t"] }
+build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-trace"] }
 xdp = ["firewall"]
 
 [[fw]]
-name = "just-tx-cag-lookup"
+name = "just-tx-metrics-lookup"
 target = "esp32c3"
 partition_table = "examples/just_xdp/partitions.csv"
 artifact = "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp"
-build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-cag,perf-lookup"] }
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-metrics,perf-lookup"] }
 xdp = ["just_tx"]
 
 [[fw]]
-name = "firewall-cag-lookup"
+name = "firewall-metrics-lookup"
 target = "esp32c3"
 partition_table = "examples/firewall/partitions.csv"
 artifact = "examples/firewall/target/riscv32imc-unknown-none-elf/release/firewall"
-build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-cag,perf-lookup"] }
+build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-metrics,perf-lookup"] }
 xdp = ["firewall"]
 
 # ---------------------------------------------------------------------------
@@ -117,31 +113,30 @@ xdp = []
 
 # ---------------------------------------------------------------------------
 # XDP containers. `program` is the producer stem (`-c`); `mode` is aot, jit, or rbpf.
-# Flash reads build_root's index. It does not use a guessed `<stem>.elf` path.
-# Canonical fw = *-cag; *-t shares the same partition_table and may co-flash the same xdp.
+# The Agent selects the indexed deployment from the release archive.
+# Metrics and Trace firmware can co-install the same release program.
 # ---------------------------------------------------------------------------
 
 [[xdp]]
 name = "just_tx"
-fw = "just-tx-cag"
+fw = "just-tx-metrics"
 program = "just_tx"
 mode = "aot"
 
 [[xdp]]
 name = "just_drop"
-fw = "just-drop-cag"
+fw = "just-drop-metrics"
 program = "just_drop"
 mode = "aot"
 
 [[xdp]]
 name = "firewall"
-fw = "firewall-cag"
+fw = "firewall-metrics"
 program = "firewall"
 mode = "aot"
 
 # ---------------------------------------------------------------------------
-# exec_bench — function-call XDP (exec ingress; map input/output; CAGT on eBPF)
-# One libbpf-mcu tests/xdp/<name>.c per [[xdp]] name (same as just_tx).
+# EXB2 deployment profiles. Board-side EXB2 transport is pending.
 # ---------------------------------------------------------------------------
 
 [[fw]]
@@ -151,67 +146,16 @@ partition_table = "examples/exec_bench/partitions.csv"
 xdp_image_capacity = 0x4000
 artifact = "examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench"
 build = { cwd = "examples/exec_bench", command = ["cargo", "build", "--release"] }
-xdp = ["incr"]
+xdp = ["noop"]
 
-[[xdp]]
-name = "incr"
-fw = "exec-bench-aot"
-program = "incr"
-mode = "aot"
-
-[[xdp]]
-name = "square"
-fw = "exec-bench-aot"
-program = "square"
-mode = "aot"
-
-[[xdp]]
-name = "bitswap"
-fw = "exec-bench-aot"
-program = "bitswap"
-mode = "aot"
-
-[[xdp]]
-name = "fib"
-fw = "exec-bench-aot"
-program = "fib"
-mode = "aot"
-
-[[xdp]]
-name = "buf"
-fw = "exec-bench-aot"
-program = "buf"
-mode = "aot"
-
-[[xdp]]
-name = "memcpy"
-fw = "exec-bench-aot"
-program = "memcpy"
-mode = "aot"
-
-[[xdp]]
-name = "fletcher32"
-fw = "exec-bench-aot"
-program = "fletcher32"
-mode = "aot"
-
-[[xdp]]
-name = "bsort"
-fw = "exec-bench-aot"
-program = "bsort"
-mode = "aot"
-
-# exec_bench for the interpreter: the same example built with `interp`, whose
-# slot holds eBPF bytecode instead of machine code. The flashed file is the
-# bpf-xpost container.
 [[fw]]
 name = "exec-bench-rbpf"
 target = "esp32c3"
 partition_table = "examples/exec_bench/partitions.csv"
 xdp_image_capacity = 0x4000
-artifact = "examples/exec_bench/target/riscv32imc-unknown-none-elf/release/exec_bench"
-build = { cwd = "examples/exec_bench", command = ["cargo", "build", "--release", "--features", "interp"] }
-xdp = ["incr_rbpf"]
+artifact = "examples/exec_bench/target/rbpf/riscv32imc-unknown-none-elf/release/exec_bench"
+build = { cwd = "examples/exec_bench", command = ["cargo", "build", "--release", "--features", "interp", "--target-dir", "target/rbpf"] }
+xdp = ["noop_rbpf"]
 
 [[fw]]
 name = "exec-bench-hal"
@@ -225,11 +169,11 @@ build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build", "--relea
 # Cold `case` clears and reflashes one image, then reboots.
 # `hot_swap` installs case_swap and case_mark_idle, then publishes without reboot.
 # xdp is empty so flash/fw does not pin an image.
-# No perf-cag: packet counters, histograms, and gauges stay out of this build.
+# The shared case firmware has no per-packet collection features.
 # ---------------------------------------------------------------------------
 
 [[fw]]
-name = "case-cag"
+name = "case-xdp"
 target = "esp32c3"
 partition_table = "examples/case_xdp/partitions.csv"
 artifact = "examples/case_xdp/target/riscv32imc-unknown-none-elf/release/case_xdp"
@@ -238,57 +182,212 @@ xdp = []
 
 [[xdp]]
 name = "case_swap"
-fw = "case-cag"
+fw = "case-xdp"
 program = "case_swap"
 mode = "aot"
 
 [[xdp]]
 name = "case_mark"
-fw = "case-cag"
+fw = "case-xdp"
 program = "case_mark"
 mode = "aot"
 
 [[xdp]]
 name = "case_mark_idle"
-fw = "case-cag"
+fw = "case-xdp"
 program = "case_mark"
+mode = "aot"
+slot = 1
+
+[[fw]]
+name = "just-tx-rbpf"
+target = "esp32c3"
+partition_table = "examples/just_xdp/partitions.csv"
+artifact = "examples/just_xdp/target/rbpf/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-metrics,interp", "--target-dir", "target/rbpf"] }
+xdp = ["just_tx_rbpf"]
+
+[[fw]]
+name = "just-drop-rbpf"
+target = "esp32c3"
+partition_table = "examples/just_xdp/partitions.csv"
+artifact = "examples/just_xdp/target/rbpf/riscv32imc-unknown-none-elf/release/just_xdp"
+build = { cwd = "examples/just_xdp", command = ["cargo", "build", "--release", "--features", "perf-metrics,interp", "--target-dir", "target/rbpf"] }
+xdp = ["just_drop_rbpf"]
+
+[[fw]]
+name = "firewall-rbpf"
+target = "esp32c3"
+partition_table = "examples/firewall/partitions.csv"
+artifact = "examples/firewall/target/rbpf/riscv32imc-unknown-none-elf/release/firewall"
+build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "--features", "perf-metrics,interp", "--target-dir", "target/rbpf"] }
+xdp = ["firewall_rbpf"]
+
+[[fw]]
+name = "case-xdp-rbpf"
+target = "esp32c3"
+partition_table = "examples/case_xdp/partitions.csv"
+artifact = "examples/case_xdp/target/rbpf/riscv32imc-unknown-none-elf/release/case_xdp"
+build = { cwd = "examples/case_xdp", command = ["cargo", "build", "--release", "--features", "interp", "--target-dir", "target/rbpf"] }
+xdp = []
+
+[[xdp]]
+name = "just_tx_jit"
+fw = "just-tx-metrics"
+program = "just_tx"
+mode = "jit"
+
+[[xdp]]
+name = "just_tx_rbpf"
+fw = "just-tx-rbpf"
+program = "just_tx"
+mode = "rbpf"
+
+[[xdp]]
+name = "just_drop_jit"
+fw = "just-drop-metrics"
+program = "just_drop"
+mode = "jit"
+
+[[xdp]]
+name = "just_drop_rbpf"
+fw = "just-drop-rbpf"
+program = "just_drop"
+mode = "rbpf"
+
+[[xdp]]
+name = "firewall_jit"
+fw = "firewall-metrics"
+program = "firewall"
+mode = "jit"
+
+[[xdp]]
+name = "firewall_rbpf"
+fw = "firewall-rbpf"
+program = "firewall"
+mode = "rbpf"
+
+[[xdp]]
+name = "case_swap_jit"
+fw = "case-xdp"
+program = "case_swap"
+mode = "jit"
+
+[[xdp]]
+name = "case_swap_rbpf"
+fw = "case-xdp-rbpf"
+program = "case_swap"
+mode = "rbpf"
+
+[[xdp]]
+name = "case_mark_jit"
+fw = "case-xdp"
+program = "case_mark"
+mode = "jit"
+
+[[xdp]]
+name = "case_mark_rbpf"
+fw = "case-xdp-rbpf"
+program = "case_mark"
+mode = "rbpf"
+
+[[xdp]]
+name = "case_mark_idle_jit"
+fw = "case-xdp"
+program = "case_mark"
+mode = "jit"
+slot = 1
+
+[[xdp]]
+name = "case_mark_idle_rbpf"
+fw = "case-xdp-rbpf"
+program = "case_mark"
+mode = "rbpf"
+slot = 1
+
+[[xdp]]
+name = "noop"
+fw = "exec-bench-aot"
+program = "noop"
 mode = "aot"
 
 [[xdp]]
-name = "incr_rbpf"
+name = "noop_jit"
+fw = "exec-bench-aot"
+program = "noop"
+mode = "jit"
+
+[[xdp]]
+name = "noop_rbpf"
 fw = "exec-bench-rbpf"
-program = "incr"
+program = "noop"
 mode = "rbpf"
 
 [[xdp]]
-name = "square_rbpf"
+name = "prime"
+fw = "exec-bench-aot"
+program = "prime"
+mode = "aot"
+
+[[xdp]]
+name = "prime_jit"
+fw = "exec-bench-aot"
+program = "prime"
+mode = "jit"
+
+[[xdp]]
+name = "prime_rbpf"
 fw = "exec-bench-rbpf"
-program = "square"
+program = "prime"
 mode = "rbpf"
 
 [[xdp]]
-name = "bitswap_rbpf"
+name = "log2"
+fw = "exec-bench-aot"
+program = "log2"
+mode = "aot"
+
+[[xdp]]
+name = "log2_jit"
+fw = "exec-bench-aot"
+program = "log2"
+mode = "jit"
+
+[[xdp]]
+name = "log2_rbpf"
 fw = "exec-bench-rbpf"
-program = "bitswap"
+program = "log2"
 mode = "rbpf"
 
 [[xdp]]
-name = "fib_rbpf"
+name = "copy"
+fw = "exec-bench-aot"
+program = "copy"
+mode = "aot"
+
+[[xdp]]
+name = "copy_jit"
+fw = "exec-bench-aot"
+program = "copy"
+mode = "jit"
+
+[[xdp]]
+name = "copy_rbpf"
 fw = "exec-bench-rbpf"
-program = "fib"
+program = "copy"
 mode = "rbpf"
 
 [[xdp]]
-name = "buf_rbpf"
-fw = "exec-bench-rbpf"
-program = "buf"
-mode = "rbpf"
+name = "fletcher32"
+fw = "exec-bench-aot"
+program = "fletcher32"
+mode = "aot"
 
 [[xdp]]
-name = "memcpy_rbpf"
-fw = "exec-bench-rbpf"
-program = "memcpy"
-mode = "rbpf"
+name = "fletcher32_jit"
+fw = "exec-bench-aot"
+program = "fletcher32"
+mode = "jit"
 
 [[xdp]]
 name = "fletcher32_rbpf"
@@ -297,7 +396,37 @@ program = "fletcher32"
 mode = "rbpf"
 
 [[xdp]]
+name = "bsort"
+fw = "exec-bench-aot"
+program = "bsort"
+mode = "aot"
+
+[[xdp]]
+name = "bsort_jit"
+fw = "exec-bench-aot"
+program = "bsort"
+mode = "jit"
+
+[[xdp]]
 name = "bsort_rbpf"
 fw = "exec-bench-rbpf"
 program = "bsort"
+mode = "rbpf"
+
+[[xdp]]
+name = "strcmp"
+fw = "exec-bench-aot"
+program = "strcmp"
+mode = "aot"
+
+[[xdp]]
+name = "strcmp_jit"
+fw = "exec-bench-aot"
+program = "strcmp"
+mode = "jit"
+
+[[xdp]]
+name = "strcmp_rbpf"
+fw = "exec-bench-rbpf"
+program = "strcmp"
 mode = "rbpf"

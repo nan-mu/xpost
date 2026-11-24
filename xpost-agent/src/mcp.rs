@@ -16,6 +16,13 @@ struct FlashByNameArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct FlashXdpArgs {
+    name: String,
+    /// Copy an installed XDP ELF into this SRAM slot. Omit for cold installation.
+    slot: Option<u8>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ClearXdpArgs {
     /// `"*"` clears all; otherwise a program name (or comma-separated names).
     name: String,
@@ -112,6 +119,21 @@ impl XpostMcp {
     }
 
     #[tool(
+        description = "Check the pinned release deployments and medium firmware layouts. This tool does not write to the device."
+    )]
+    async fn preflight_medium(&self) -> Result<CallToolResult, McpError> {
+        let shared = self.shared.clone();
+        let report = tokio::task::spawn_blocking(move || ops::medium_preflight(shared.as_ref()))
+            .await
+            .map_err(|error| McpError::internal_error(format!("join: {error}"), None))?
+            .map_err(|error| McpError::internal_error(format!("{error:#}"), None))?;
+        let content = serde_json::json!({ "ok": report.deployment_ready(), "preflight": report });
+        let mut reply = CallToolResult::success(vec![ContentBlock::text(content.to_string())]);
+        reply.structured_content = Some(content);
+        Ok(reply)
+    }
+
+    #[tool(
         description = "Build firmware. Validate linked XDP images before any write. Flash firmware. Install linked images. The `flash` field lists firmware and XDP identities."
     )]
     async fn flash_fw(
@@ -125,15 +147,15 @@ impl XpostMcp {
     }
 
     #[tool(
-        description = "Validate the XDP image. Validate device firmware. Install the image in the cold table. The `flash` field lists firmware and XDP identities."
+        description = "Prepare and cold-install an XDP ELF after validating device firmware. With slot, preload an installed XDP ELF into SRAM."
     )]
     async fn flash_xdp(
         &self,
-        Parameters(args): Parameters<FlashByNameArgs>,
+        Parameters(args): Parameters<FlashXdpArgs>,
     ) -> Result<CallToolResult, McpError> {
         let shared = self.shared.clone();
         let name = args.name;
-        self.run_op(move || ops::flash_xdp(shared.as_ref(), &name, None, "mcp"))
+        self.run_op(move || ops::flash_xdp(shared.as_ref(), &name, args.slot, "mcp"))
             .await
     }
 

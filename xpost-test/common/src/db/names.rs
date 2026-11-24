@@ -3,16 +3,16 @@
 /// DB `firmware` enum — pipeline tag, not a Cargo feature name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Firmware {
-    XdpCag,
-    XdpT,
+    XdpMetrics,
+    XdpTrace,
     Hal,
 }
 
 impl Firmware {
     pub fn as_db(self) -> &'static str {
         match self {
-            Self::XdpCag => "xdp_cag",
-            Self::XdpT => "xdp_t",
+            Self::XdpMetrics => "xdp_cag",
+            Self::XdpTrace => "xdp_t",
             Self::Hal => "hal",
         }
     }
@@ -23,7 +23,7 @@ impl Firmware {
 
     #[allow(dead_code)]
     pub fn is_trace(self) -> bool {
-        matches!(self, Self::XdpT)
+        matches!(self, Self::XdpTrace)
     }
 }
 

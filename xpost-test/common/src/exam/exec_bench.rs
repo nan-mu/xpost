@@ -300,6 +300,10 @@ pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()>
     let formal = opts.formal;
     let arms = arms_from_cfg(&cfg.exec_bench.arms)?;
     let workloads = WORKLOADS;
+    anyhow::ensure!(
+        arms.iter().all(|arm| !arm.loads_images()),
+        "exec_bench XDP arms need EXB2 transport; the legacy 32-byte transport is incompatible with v0.1.1"
+    );
 
     RoundUi::banner(&format!(
         "exec_bench arms={:?} workloads={} formal={formal} agent={endpoint}",

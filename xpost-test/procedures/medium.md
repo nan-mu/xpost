@@ -1,60 +1,45 @@
 # Medium experiment
 
-**Blocked. The medium run is not ready. This round is incomplete.**
+**The medium experiment remains blocked before device writes.**
 
-The default `run = ["medium"]` reports the block before it opens the device or PostgreSQL.
+The default `run = ["medium"]` requests a read-only Agent preflight.
 The user starts the full run from T3 after review and readiness checks.
-Start that run with `./xpost-test/scripts/xpost-test.fish` from the repository root.
 TR3000 runs `./xpost-test` without arguments.
+The script for a formal run is `./xpost-test/scripts/xpost-test.fish`.
+The medium runner still needs EXB2 transport, firmware perf callbacks, embeprom, the scheduler, and the four-mode writer.
 
-## Published deployment inventory
+## Deployment preflight
 
-We checked the [libbpf-mcu v0.1.0 release](https://github.com/nan-mu/libbpf-mcu/releases/tag/v0.1.0) at commit `ef1771d9c949771c707b93fd9da5c3e2602efee0`.
-All 12 archives matched the SHA-256 values in [the release ledger](libbpf-mcu-v0.1.0.sha256).
-All 12 v3 indexes matched their source and original eBPF files.
-They have zero deployment rows and contain zero deployment XDP ELFs.
+The Agent pins [libbpf-mcu v0.1.1](https://github.com/nan-mu/libbpf-mcu/releases/tag/v0.1.1) at `07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113`.
+The Agent checked 12 archives and 36 deployments. It prepared 37 of 39 slot targets.
+The [v0.1.0 ledger](libbpf-mcu-v0.1.0.sha256) records the earlier release with zero deployments.
 
-| Programs | AOT | JIT | rBPF | HAL |
-| --- | --- | --- | --- | --- |
-| `firewall`, `just_drop`, `just_tx` | Missing | Missing | Missing | Firmware only |
-| `noop`, `prime`, `log2`, `copy`, `fletcher32`, `bsort`, `strcmp` | Missing | Missing | Missing | Firmware only |
-| `case_swap`, `case_mark` | Missing | Missing | Missing | Static firmware policies |
-
-Every missing cell needs a release asset with an indexed XDP ELF for that program and mode.
-Native deployments also need the relocation information for the target slot.
-The v3 index identifies published files by path, size, and SHA-256.
-Firmware binding still needs evidence for the actual firmware, helper address, and slot layout.
-The release inventory tool leaves all device writes to the existing Agent operations.
-
-Run the release check from the repository root on the Mac.
+Run these checks from the repository root on the Mac.
 
 ```bash
-(
-  set -e
-  release_dir=$(mktemp -d)
-  ledger="$PWD/xpost-test/procedures/libbpf-mcu-v0.1.0.sha256"
-  gh release download v0.1.0 -R nan-mu/libbpf-mcu --pattern '*.7z' --dir "$release_dir"
-  (cd "$release_dir" && shasum -a 256 -c "$ledger")
-  for archive in "$release_dir"/*.7z; do
-    7z x -o"${archive%.7z}" -- "$archive"
-  done
-  cargo run --manifest-path xpost-artifact/Cargo.toml --target aarch64-apple-darwin \
-    --bin verify-medium-release -- "$release_dir"
-)
+cargo run --manifest-path xpost-agent/Cargo.toml -- preflight
+cargo run --manifest-path xpost-agent/Cargo.toml -- preflight --xdp just_tx
+cargo run --manifest-path xpost-agent/Cargo.toml -- preflight --xdp case_mark_idle
+cargo run --manifest-path xpost-agent/Cargo.toml -- preflight --xdp case_mark_idle_rbpf
 ```
 
-The command exits with code 1 and reports 0 of 36 required deployments for v0.1.0.
-In the required matrix, 27 combinations need these deployments and nine need HAL firmware.
-The Agent has no real released XDP ELF to check for slot placement.
-The source declares 3584-byte slots for the network and case carriers.
-PR #25 raises the exec slot to 12288 B and the exec XDP ELF capacity to 16384 B.
-The producer previously measured JIT images of 9300 B for `log2`, 10264 B for `bsort`, and 9348 B for `strcmp` against a synthetic slot.
-All three recorded sizes are below the new slot capacity.
-Check actual linked capacities and image sizes when the deployments arrive.
+Preflight can fetch archives. It uses the Agent release cache.
+The command checks existing board builds and opens no device session.
+It lists each target that lacks a matching linked firmware or deployment.
+The output separates the release SHA-256, prepared XDP ELF SHA-256, and image payload SHA-256.
 
-The [producer handoff](https://github.com/nan-mu/xpost/pull/23#issuecomment-7109173595) reports byte equality for three LLVM AOT samples and an A→B→A comparison.
-That evidence covers local host samples.
-JIT placement, rBPF preparation, and ESP32-C3 hot switching still need device evidence.
+The network and case carriers declare 3584-byte slots.
+Exec has a 12288-byte SRAM slot and a 16384-byte cold storage capacity.
+The released JIT payloads for `log2`, `bsort`, and `strcmp` are 9300, 10264, and 9348 B.
+The published native images link at `0x40380200` and use helper `0x40380000`.
+AOT and JIT need relocation information for another address.
+The Agent refuses a native slot mismatch before it passes an operation to the serial worker.
+The `case_mark_idle` and `case_mark_idle_jit` profiles need slot B at `0x40381000`.
+The pinned release provides these native payloads for slot A only.
+The `case_mark_idle_rbpf` profile passed host preparation for slot B with the original payload digest.
+The QEMU evidence for three relocated AOT samples used linked inputs with retained relocation records.
+It does not cover these published native payloads.
+The rBPF release uses map indexes. Its SRAM slot may change without rewriting its instructions.
 
 ## Planned matrix and time budget
 

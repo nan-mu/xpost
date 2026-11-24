@@ -13,7 +13,7 @@
 version = "1"
 
 # Use a separate run list for older experiments or diagnostics.
-# Medium exits before it opens a device or database connection.
+# Medium checks Agent deployment readiness before device writes or database access.
 run = ["medium"]
 
 [postgres]

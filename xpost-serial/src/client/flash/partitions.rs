@@ -24,16 +24,25 @@ pub fn partition_table_bin(path: &Path) -> io::Result<Vec<u8>> {
 /// Resolve an [`XdpTable`] span from a named row in `partitions.csv`.
 pub fn xdp_table_from_csv(path: &Path, partition: &str) -> io::Result<XdpTable> {
     let table = load_partition_table(path)?;
-    let part = table.find(partition).ok_or_else(|| {
-        std::io::Error::other(format!(
-            "partitions.csv {}: no row named `{partition}`",
-            path.display()
-        ))
-    })?;
+    xdp_table(&table, partition)
+        .map_err(|e| io::Error::other(format!("partitions.csv {}: {e}", path.display())))
+}
+
+/// Resolve the XDP span from the partition table bytes prepared for flashing.
+pub fn xdp_table_from_bin(bytes: &[u8], partition: &str) -> io::Result<XdpTable> {
+    let table = PartitionTable::try_from_bytes(bytes)
+        .map_err(|e| io::Error::other(format!("decode binary partition table: {e}")))?;
+    xdp_table(&table, partition)
+}
+
+fn xdp_table(table: &PartitionTable, partition: &str) -> io::Result<XdpTable> {
+    let part = table
+        .find(partition)
+        .ok_or_else(|| io::Error::other(format!("no partition named `{partition}`")))?;
     let len = part.size();
     if len == 0 {
         return Err(std::io::Error::other(format!(
-            "partitions.csv `{partition}` Size must be > 0"
+            "partition `{partition}` Size must be > 0"
         )));
     }
     Ok(XdpTable {
@@ -74,6 +83,8 @@ mod tests {
         )
         .unwrap();
         let table = xdp_table_from_csv(&path, "xdp").unwrap();
+        let snapshot = partition_table_bin(&path).unwrap();
+        assert_eq!(xdp_table_from_bin(&snapshot, "xdp").unwrap(), table);
         assert_eq!(table.base, 0x310000);
         assert_eq!(table.len, 0x10000);
         let _ = fs::remove_dir_all(&dir);

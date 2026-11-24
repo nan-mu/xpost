@@ -16,7 +16,7 @@ use crate::db::{self, CaseObs, PgOpts};
 use crate::exam::case::{self, MARK_DST, PAYLOAD_LEN, SENT};
 use crate::pipeline::{BudgetEta, READY_BUDGET, RoundUi, status};
 
-const FW: &str = "case-cag";
+const FW: &str = "case-xdp";
 const SWAP: &str = "case_swap";
 const MARK: &str = "case_mark_idle";
 const REPEATS: usize = 100;
@@ -40,6 +40,8 @@ pub async fn run_hot_swap(cfg: &FileConfig) -> Result<()> {
         .resolved_endpoint()
         .context("hot_swap needs [agent].endpoint")?;
     let agent = AgentClient::new(endpoint);
+    agent.preflight_xdp(SWAP).await.context("prepare Slot A")?;
+    agent.preflight_xdp(MARK).await.context("prepare Slot B")?;
     let client = db::connect_and_ensure(PgOpts { formal: true }).await?;
     let exam_id = db::insert_exam(&client, Some("hot_swap")).await?;
     eprintln!("hot_swap exam={exam_id} firmware={FW}");

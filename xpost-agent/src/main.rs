@@ -32,6 +32,9 @@
 //! Each container has `program`, `mode`, `profile`, and `container_sha256`.
 //! SHA-256 values use lowercase hex. A HAL flash returns an empty container list.
 //! Hot slot copies keep their existing reply.
+//! `GET /v1/preflight/medium` returns the release inventory and target readiness.
+//! `GET /v1/preflight/xdp/{name}` returns the prepared container SHA-256.
+//! Both preflight paths perform host checks only.
 //!
 //! ## Route table (frozen)
 //!
@@ -146,18 +149,21 @@
 //!   map/perf framing.
 //! - Map seeding via agent serial `update/map`, not UDP MapCrud.
 
+mod deployment;
 mod http;
 mod mcp;
 mod ops;
+mod preflight;
 mod profiles;
+mod release;
 mod state;
 mod util;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::Result;
-use clap::Parser;
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
 
 /// Default rotating serial transcript directory (passed to xpost-serial).
 const DEFAULT_LOG_DIR: &str = "target/xpost-agent";
@@ -170,11 +176,24 @@ const DEFAULT_LOG_DIR: &str = "target/xpost-agent";
 struct Cli {
     /// Bind address for `/health`, `/v1/*`, and `/mcp`.
     #[arg(long)]
-    bind: String,
+    bind: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
 
     /// Directory for rotating `serial.log` (xpost-serial transcript).
     #[arg(long, default_value = DEFAULT_LOG_DIR)]
     log_dir: PathBuf,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Check the release inventory and target layouts without opening USB.
+    Preflight {
+        /// Prepare one named XDP profile against its existing Firmware ELF.
+        #[arg(long)]
+        xdp: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -189,5 +208,28 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    http::serve_http(&cli.bind, &cli.log_dir)
+    if let Some(Command::Preflight { xdp }) = cli.command {
+        let root = state::workspace_root();
+        let profiles = state::load_profiles(&root)?;
+        if let Some(name) = xdp {
+            let info = preflight::profile(&root, &profiles, &name)?;
+            println!("{}", serde_json::to_string_pretty(&info)?);
+            return Ok(());
+        }
+        let report = preflight::medium(&root, &profiles);
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        anyhow::ensure!(
+            report.deployment_ready(),
+            "medium deployment preflight failed: {}/{} verified release deployments, {} target layouts, {} issues",
+            report.deployments.len(),
+            report.required,
+            report.prepared.len(),
+            report.issues.len()
+        );
+        return Ok(());
+    }
+    http::serve_http(
+        &cli.bind.context("--bind is required to serve requests")?,
+        &cli.log_dir,
+    )
 }

@@ -76,8 +76,9 @@ portable-atomic = { version = "1", default-features = false }
 static_cell      = "2.1.1"
 
 [features]
-perf-cag = ["xpost/perf-counter", "xpost/perf-aggregate", "xpost/perf-gauge"]
-perf-t = ["xpost/perf-counter", "xpost/perf-trace"]
+interp = ["xpost/interp"]
+perf-metrics = ["xpost/perf-counter", "xpost/perf-aggregate", "xpost/perf-gauge"]
+perf-trace = ["xpost/perf-counter", "xpost/perf-trace"]
 
 [build-dependencies]
 xpost-build = { path = "../../xpost-build" }

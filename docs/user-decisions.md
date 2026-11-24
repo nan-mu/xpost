@@ -123,7 +123,7 @@ Reason: the design uses HAL as a static policy control, not as another ELF loade
 ## 2026-11-18 XDP artifact ownership
 
 `libbpf-mcu` generates XDP artifacts.
-`xpost-artifact` validates and caches them.
+`xpost-artifact` validates and caches them. This ownership is superseded by the 2026-11-25 release intake entry.
 `xpost-agent` consumes existing artifacts and does not rebuild XDP.
 Firmware builds remain the Agent's responsibility.
 
@@ -134,6 +134,7 @@ Firmware SHA-256 binding and verified cache snapshots prevent installation of ar
 
 Sibling profile cache reuse requires matching `source_id`, `input_set_id`, and firmware SHA-256.
 Profile-specific `configuration_id` values need not match.
+The 2026-11-25 release intake entry supersedes these two cache rules.
 Validate all producer input artifacts before cache use.
 Cold XDP installation requires device application and partition-table validation in the installation session.
 Unknown device identity must prevent installation.
@@ -147,3 +148,13 @@ The user starts the full medium experiment from T3 after reviewing PR #23.
 Readiness checks precede that launch.
 
 Reason: the user reserved the full run for an explicit start after review.
+
+## 2026-11-25 Release intake and deployment identity
+
+The Agent fetches and validates `libbpf-mcu v0.1.1` release archives.
+Use the v3 program index and pinned asset digests.
+Switch artifact validation and caching from `xpost-artifact` to `xpost-agent`.
+Remove the v1 resolver and sibling profile cache reuse.
+Keep the firmware and partition checks in each exclusive cold installation session.
+
+Reason: the new taskbook assigns release intake to the Agent. It keeps the verified-byte write contract from PR #24.

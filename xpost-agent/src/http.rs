@@ -133,6 +133,8 @@ async fn serve_async(addr: &str, log_dir: &Path) -> Result<()> {
     let v1 = Router::new()
         .route("/status", get(v1_status))
         .route("/dut_status", get(v1_dut_status))
+        .route("/preflight/medium", get(v1_medium_preflight))
+        .route("/preflight/xdp/{name}", get(v1_xdp_preflight))
         .route("/get/init", get(v1_get_init))
         .route("/flash/fw", post(v1_flash_fw))
         .route("/flash/xdp", post(v1_flash_xdp))
@@ -187,9 +189,27 @@ async fn v1_status() -> Json<ApiResp> {
     Json(ApiResp::ok(ops::get_status()))
 }
 
+async fn v1_medium_preflight(State(st): State<AppState>) -> Json<serde_json::Value> {
+    match tokio::task::spawn_blocking(move || ops::medium_preflight(st.shared.as_ref())).await {
+        Ok(Ok(report)) => Json(serde_json::json!({
+            "ok": report.deployment_ready(),
+            "preflight": report,
+        })),
+        Ok(Err(error)) => Json(serde_json::json!({ "ok": false, "message": format!("{error:#}") })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "message": format!("join: {error}") })),
+    }
+}
+
 async fn v1_dut_status(State(st): State<AppState>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     run_blocking(move || ops::dut_status(shared.as_ref())).await
+}
+
+async fn v1_xdp_preflight(
+    State(st): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Json<ApiResp> {
+    run_blocking(move || ops::xdp_preflight(st.shared.as_ref(), &name)).await
 }
 
 async fn v1_get_init(State(st): State<AppState>) -> Json<ApiResp> {

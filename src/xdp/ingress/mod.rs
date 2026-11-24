@@ -163,13 +163,14 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
     // wider interval that includes the counter and trace hooks on both sides,
     // and those hooks cost more than a small program does, so a figure taken
     // between them describes the hooks rather than the work.
+    #[cfg(feature = "perf-aggregate")]
     let t0 = crate::ext::perf::aggregate::AggregateSet::now_ticks();
     let action = unsafe { super::engine::flight(engine, entry, ctx_ptr) };
-    let engine_us = crate::ext::perf::aggregate::AggregateSet::now_ticks().wrapping_sub(t0);
     #[cfg(feature = "perf-aggregate")]
-    crate::ext::perf::aggregate::record_engine(engine_us);
-    #[cfg(not(feature = "perf-aggregate"))]
-    let _ = engine_us;
+    {
+        let engine_us = crate::ext::perf::aggregate::AggregateSet::now_ticks().wrapping_sub(t0);
+        crate::ext::perf::aggregate::record_engine(engine_us);
+    }
     IN_FLIGHT.store(0, Ordering::Release);
 
     let data = ctx_md.data;

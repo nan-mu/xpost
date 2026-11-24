@@ -101,7 +101,7 @@ fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
     let mut out = Vec::new();
     for a in arms {
         match PpsPath::parse(a)? {
-            PpsPath::Xdp => out.push(Firmware::XdpCag),
+            PpsPath::Xdp => out.push(Firmware::XdpMetrics),
             PpsPath::Hal => out.push(Firmware::Hal),
         }
     }
@@ -114,8 +114,8 @@ fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
 
 fn profile_for(fw: Firmware) -> &'static str {
     match fw {
-        Firmware::XdpCag => "just-drop-cag",
-        Firmware::XdpT => "just-drop-t",
+        Firmware::XdpMetrics => "just-drop-metrics",
+        Firmware::XdpTrace => "just-drop-trace",
         Firmware::Hal => "just-drop-hal",
     }
 }
@@ -158,6 +158,10 @@ pub async fn run_just_drop_pps(cfg: &FileConfig) -> Result<()> {
     let grid = SWEEP_PPS;
     let source_seed = SOURCE_SEED_DEFAULT;
     let arms = arms_from_cfg(&cfg.just_drop.arms)?;
+    anyhow::ensure!(
+        !arms.contains(&Firmware::XdpMetrics),
+        "just_drop v0.1.1 has no counter map; the legacy XDP Metrics collector requires it"
+    );
 
     RoundUi::banner(&format!(
         "just_drop array arms={:?} +xdp_t grid={:?} window={}s seed={source_seed:#x} formal={formal} agent={endpoint} esp={esp_s} pg=true",
@@ -278,7 +282,7 @@ pub async fn run_just_drop_pps(cfg: &FileConfig) -> Result<()> {
     }
 
     {
-        let fw = Firmware::XdpT;
+        let fw = Firmware::XdpTrace;
         let profile = profile_for(fw);
         flash_and_arm(cfg, &agent, &ui, &mut eta, PpsPath::Xdp, profile).await?;
         agent.clear_perf().await.context("clear/perf")?;

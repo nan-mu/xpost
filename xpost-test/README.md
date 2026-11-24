@@ -33,4 +33,4 @@ See the [medium procedure](procedures/medium.md) for the release audit, planned 
 
 ## Profiles
 
-Firmware / XDP flash names live in repo-root `profiles.toml` (`[[fw]]` / `[[xdp]]`). Formal XDP-only: `just-*-cag|t`, `firewall-cag|t`.
+Firmware / XDP flash names live in repo-root `profiles.toml` (`[[fw]]` / `[[xdp]]`). Formal XDP-only: `just-*-cag|t`, `firewall-metrics|t`.

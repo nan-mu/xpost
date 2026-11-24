@@ -9,11 +9,10 @@ The target is ESP32-C3 with RV32IMC.
 - `esp-radio` owns the radio driver and its ingress hooks.
 - `xpost-type` owns shared actions and traits.
 - `xpost-elf` owns XDP ELF encoding and the XPM1 memory contract.
-- `xpost-serial` owns the wire protocol and serial transport.
-- `xpost-agent` owns firmware builds, device flashing, and serial control.
+- `xpost-serial` owns the wire protocol, transport, and device identity check.
+- `xpost-agent` builds firmware and prepares deployment bytes.
 - `xpost-test` owns experiment procedures, measurements, and database records.
 - `libbpf-mcu` produces XDP artifacts and their reports.
-- `xpost-artifact` reads, validates, caches, and resolves those artifacts.
 
 The host tools and firmware examples have separate Cargo workspaces.
 Read each workspace's Cargo configuration before building it.
@@ -27,72 +26,25 @@ Do not record ordinary code facts as user decisions.
 
 ## Artifact Contract
 
-`libbpf-mcu` is the only producer of XDP artifacts.
-`xpost-artifact` is the only entry for artifact parsing and validation.
-Do not duplicate the upstream manifest or report schema in XPOST.
-Do not build XDP from `xpost-agent` or `xpost-test`.
-Firmware profiles retain their Cargo build commands.
-XDP profiles contain names, firmware links, programs, modes, and optional targets.
-Reject obsolete XDP build commands in configuration.
+Read [Deployment design](docs/deployment-design.md) when changing release selection, firmware binding, cold installation, or SRAM preload.
 
-The existing Agent installation path reads `build_root` from `profiles.toml`.
-It resolves containers through the v1 index, manifest, and report.
-Do not infer artifact paths from filenames.
-Use the upstream contract pinned by `xpost-artifact::CONTRACT_COMMIT`.
+The Agent uses `libbpf-mcu v0.1.1` and the pinned asset digests.
+Use the v3 index to select deployment members.
+The Agent does not build XDP.
+Use `fw.artifact` for the linked Firmware ELF.
+Check all linked images before the first device write.
+Send the same retained bytes to the serial worker.
+For cold installation, check the device firmware and partition table on every attempt.
+Keep those checks and the XDP write in one exclusive download session.
 
-The medium release check reads each archive's v3 program index.
-It compares indexed path, size, SHA-256, and deployment format.
-The v3 inventory check cannot establish firmware binding.
-See `xpost-test/procedures/medium.md` for the release and readiness status.
-
-| XPOST mode | Producer mode | Execution path |
-| --- | --- | --- |
-| `aot` | `rv32` | C source compiled directly to RV32IMC |
-| `jit` | `jit` | eBPF bytecode compiled to RV32IMC |
-| `rbpf` | `bpf-xpost` | eBPF interpreter |
-| `hal` | None | Native firmware without an XDP container |
-
-Only one verified primary `xpost_container` can supply a flash image.
-Raw BPF objects and debug ELFs are not flash containers.
-The report's firmware SHA-256 must match the firmware ELF used for the operation.
-Standalone XDP installation uses the existing linked firmware ELF.
-It does not build firmware or XDP.
-Validate the device application and partition table against that firmware before cold installation.
-Keep validation and installation in one exclusive download session.
-Reject unknown device identity, read failures, and mismatches before XDP writes.
-Validate firmware on every cold installation attempt.
-Do not use process memory as device identity proof.
-
-The local cache is `.cache/xpost-artifact/`.
-It stores verified, unchanged container bytes and source metadata.
-Separate entries by program, mode, profile name, and artifact SHA-256.
-Publish cache files atomically.
-Validate cached identity, size, embedded name, firmware SHA-256, and artifact SHA-256 before use.
-Do not track cache contents in Git.
-
-Read and validate upstream metadata before cache use.
-Validate report program and producer mode against the request.
-Validate every reported input artifact's role, path, and SHA-256.
-Resolve input paths within the current program directory, including valid references to sibling mode directories.
-Require cached `source_id` and `input_set_id` to match the current report for sibling profile reuse.
-Do not require matching `configuration_id` for sibling profile reuse.
-A valid source with another embedded profile name can use a matching cached profile.
-Missing target profiles require generation through `libbpf-mcu`.
-Failed or stale upstream reports cannot use cached replacements.
-Hash mismatches and corrupt caches must fail.
-
-Complete all linked XDP validation and cache preparation before the first device write.
-Then flash firmware, clear the cold table, and install linked containers in order.
-HAL profiles skip XDP resolution and installation.
-Validate real input paths against their allowed roots.
-Reject symlink escapes and invalid program or profile path segments.
-Keep the canonical cache root and its directory components inside the canonical XPOST workspace.
+Use `xpost-agent preflight` to check the medium inventory and target layouts.
+See [Medium experiment](xpost-test/procedures/medium.md) for device readiness and experiment limits.
 
 ## Agent Operations
 
 Direct device operations must use `xpost-agent` MCP tools.
 Read each tool's description and input schema before calling it.
-Validate each returned result.
+Check each returned result.
 If MCP is unavailable, stop the affected device operation.
 Do not substitute HTTP requests or direct serial access.
 Do not start the daemon automatically.
@@ -124,7 +76,6 @@ Select the host target for the current machine.
 The following commands use `aarch64-apple-darwin` as a Mac example.
 
 ```sh
-cargo test --manifest-path xpost-artifact/Cargo.toml --target aarch64-apple-darwin
 cargo test --manifest-path xpost-agent/Cargo.toml --target aarch64-apple-darwin
 cargo test --manifest-path xpost-serial/Cargo.toml --target aarch64-apple-darwin --features dev,client,server
 bash xpost-test/docker-toolchain-resolve.sh
@@ -140,12 +91,13 @@ Repeat this command after dispatcher changes.
 Each worktree uses its own shim through the shared dispatcher.
 Do not copy the toolchain configuration between worktrees.
 
-Validate formatting with rustfmt for changed Rust workspaces.
+Check formatting with rustfmt for changed Rust workspaces.
 Use meaningful tests for validation failures and device write ordering.
 Do not report device tests as passed unless they ran.
 
 Use the formal runner when the user requests a system experiment.
-The default medium selection exits before device or database access while readiness is blocked.
+The default medium selection requests a read-only preflight from the Agent.
+It exits before device writes or database access if preflight finds a blocker.
 Run this script from the repository root:
 
 ```sh

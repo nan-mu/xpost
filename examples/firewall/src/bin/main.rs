@@ -26,7 +26,7 @@ use xpost::app_ctrl::{self, AppMapError, AppXdpError};
 use xpost::map::dump::{array_blob_len, write_array_blob};
 use xpost::map::{BPF_ANY, HEAP_SIZE, MapRt, MapUseError};
 use xpost::xdp::{ReportItem, Slot, XdpRt};
-#[allow(unused_imports)] // PerfError only when neither perf-cag nor perf-t
+#[allow(unused_imports)] // PerfError only when neither perf-metrics nor perf-trace
 use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
@@ -442,25 +442,25 @@ serial_task! {
             },
         )
         .on_clear_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(any(feature = "perf-cag", feature = "perf-t"))]
+            #[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
             {
                 xpost::ext::perf::clear_perf();
                 reply.ok(OkReply::ClearPerf);
             }
-            #[cfg(not(any(feature = "perf-cag", feature = "perf-t")))]
+            #[cfg(not(any(feature = "perf-metrics", feature = "perf-trace")))]
             {
                 reply.error(&PerfError::Unavailable);
             }
         })
         .on_get_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(any(feature = "perf-cag", feature = "perf-t"))]
+            #[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
             {
                 let n = xpost::ext::perf::report_payload_len();
                 reply.get_perf(n, |write| {
                     xpost::ext::perf::report_perf(write);
                 });
             }
-            #[cfg(not(any(feature = "perf-cag", feature = "perf-t")))]
+            #[cfg(not(any(feature = "perf-metrics", feature = "perf-trace")))]
             {
                 reply.error(&PerfError::Unavailable);
             }

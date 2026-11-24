@@ -21,6 +21,21 @@ struct ApiResp {
     message: String,
 }
 
+#[derive(Deserialize)]
+struct MediumPreflight {
+    ok: bool,
+    preflight: Option<DeploymentReport>,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeploymentReport {
+    release: String,
+    required: usize,
+    deployments: Vec<serde_json::Value>,
+    issues: Vec<String>,
+}
+
 /// `GET /v1/get/map/{name}` frozen JSON body (fields we read).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MapGetResp {
@@ -48,9 +63,47 @@ impl AgentClient {
         Self { base, http }
     }
 
+    pub async fn medium_preflight(&self) -> Result<()> {
+        let response: MediumPreflight = self
+            .http
+            .get(format!("{}/v1/preflight/medium", self.base))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let report = response.preflight.with_context(|| {
+            response
+                .message
+                .unwrap_or_else(|| "Agent returned no deployment preflight report".into())
+        })?;
+        anyhow::ensure!(
+            response.ok,
+            "libbpf-mcu {}: {}/{} deployments verified; {}",
+            report.release,
+            report.deployments.len(),
+            report.required,
+            report.issues.join("\n")
+        );
+        Ok(())
+    }
+
+    pub async fn preflight_xdp(&self, name: &str) -> Result<()> {
+        let result: ApiResp = self
+            .http
+            .get(format!("{}/v1/preflight/xdp/{name}", self.base))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        anyhow::ensure!(result.ok, "{}", result.message);
+        Ok(())
+    }
+
     /// Build firmware and preflight all linked XDP artifacts before any device write.
     /// Then flash firmware and install the verified cached containers.
-    /// The caller must generate XDP artifacts through libbpf-mcu beforehand.
+    /// The Agent selects XDP ELFs from its pinned libbpf-mcu release.
     pub async fn flash_fw(&self, name: &str) -> Result<()> {
         let body = serde_json::json!({ "name": name });
         let msg = self.post_json("/v1/flash/fw", &body).await?;

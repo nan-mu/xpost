@@ -29,12 +29,13 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 toml = "0.8"
 tower-http = { version = "0.6", features = ["timeout"] }
-xpost-artifact = { path = "../xpost-artifact" }
+object = { version = "0.36", default-features = false, features = ["read", "elf"] }
+tempfile = "3"
+xpost-elf = { path = "../xpost-elf" }
 xpost-serial = { path = "../xpost-serial", default-features = false, features = ["client"] }
 
 [dev-dependencies]
 heapless = "0.9"
-xpost-elf = { path = "../xpost-elf" }
 
 [profile.release]
 lto = false

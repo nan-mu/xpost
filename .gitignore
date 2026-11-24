@@ -37,4 +37,4 @@ examples/*/config.toml
 /.audit/
 
 # Verified local artifact snapshots
-/.cache/xpost-artifact/
+/.cache/xpost-agent/

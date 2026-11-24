@@ -4,7 +4,6 @@ use xpost_elf::{ScanOutcome, scan_at};
 
 use crate::client::FLASH_SECTOR;
 use crate::client::FirmwareExpectation;
-use crate::client::flash::FlashConfig;
 use crate::client::port::download::PART_TABLE_OFFSET;
 use crate::client::port::{Downloader, Port};
 use sha2::{Digest, Sha256};
@@ -125,12 +124,12 @@ pub fn plan_install(
 
 pub(crate) fn install(
     port: &Port,
-    cfg: &FlashConfig,
+    xdp: XdpTable,
+    partition: &str,
     name: &str,
     data: &[u8],
     expectation: &FirmwareExpectation,
 ) -> io::Result<InstallOutcome> {
-    let xdp = cfg.xdp_table()?;
     let cap = xdp.image_capacity;
     if data.len() > cap {
         return Err(std::io::Error::other(format!(
@@ -145,7 +144,7 @@ pub(crate) fn install(
         )));
     }
     let mut dl = port.open_download()?;
-    let result = install_verified(&mut *dl, xdp, &cfg.partition, name, data, expectation);
+    let result = install_verified(&mut *dl, xdp, partition, name, data, expectation);
     let reset = dl.reset_to_app();
     match result {
         Ok(outcome) => {
@@ -307,8 +306,7 @@ fn verify_firmware(
 }
 
 /// `names` empty ⇒ erase the entire XDP table.
-pub(crate) fn clear(port: &Port, cfg: &FlashConfig, names: &[String]) -> io::Result<()> {
-    let xdp = cfg.xdp_table()?;
+pub(crate) fn clear(port: &Port, xdp: XdpTable, names: &[String]) -> io::Result<()> {
     let mut dl = port.open_download()?;
     if !names.is_empty() {
         let table = dl.read_flash(xdp.base, xdp.len)?;
@@ -339,8 +337,7 @@ pub(crate) fn clear(port: &Port, cfg: &FlashConfig, names: &[String]) -> io::Res
     Ok(())
 }
 
-pub(crate) fn list(port: &Port, cfg: &FlashConfig) -> io::Result<Vec<XdpEntry>> {
-    let xdp = cfg.xdp_table()?;
+pub(crate) fn list(port: &Port, xdp: XdpTable) -> io::Result<Vec<XdpEntry>> {
     let mut dl = port.open_download()?;
     let table = dl.read_flash(xdp.base, xdp.len)?;
     let entries = list_entries(&table)?;

@@ -4,7 +4,7 @@ mod fw;
 mod partitions;
 mod xdp;
 
-pub use partitions::{partition_table_bin, xdp_table_from_csv};
+pub use partitions::{partition_table_bin, xdp_table_from_bin, xdp_table_from_csv};
 pub use xdp::{
     InstallOutcome, XdpEntry, XdpTable, list_entries, plan_install, xdp_name_from_bytes,
 };
@@ -29,7 +29,7 @@ pub const DEFAULT_XDP_PARTITION: &str = "xdp";
 enum FlashReq {
     Op {
         op: FlashOp,
-        image_capacity: Option<usize>,
+        target: Option<XdpTable>,
         resp: oneshot::Sender<io::Result<FlashResult>>,
     },
     Shutdown,
@@ -50,24 +50,16 @@ pub(crate) struct FlashWorker {
 }
 
 impl FlashWorker {
-    pub(crate) fn call(
-        &self,
-        op: FlashOp,
-        image_capacity: Option<usize>,
-    ) -> io::Result<FlashResult> {
-        block_on(self.call_async(op, image_capacity))
+    pub(crate) fn call(&self, op: FlashOp, target: Option<XdpTable>) -> io::Result<FlashResult> {
+        block_on(self.call_async(op, target))
     }
 
-    async fn call_async(
-        &self,
-        op: FlashOp,
-        image_capacity: Option<usize>,
-    ) -> io::Result<FlashResult> {
+    async fn call_async(&self, op: FlashOp, target: Option<XdpTable>) -> io::Result<FlashResult> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
             .send(FlashReq::Op {
                 op,
-                image_capacity,
+                target,
                 resp: resp_tx,
             })
             .map_err(|_| std::io::Error::other("flash task closed"))?;
@@ -128,10 +120,7 @@ impl FlashConfig {
     /// Resolve [`XdpTable`] from [`Self::partitions`] / [`Self::partition`].
     pub fn xdp_table(&self) -> io::Result<XdpTable> {
         let mut table = xdp_table_from_csv(&self.partitions, &self.partition)?;
-        table.image_capacity = self
-            .image_capacity
-            .min(table.len as usize)
-            .min(xpost_elf::MAX_CONTAINER_SIZE);
+        table.image_capacity = self.image_capacity.min(table.len as usize);
         Ok(table)
     }
 }
@@ -155,22 +144,18 @@ async fn worker(
     while let Some(req) = rx.recv().await {
         match req {
             FlashReq::Shutdown => break,
-            FlashReq::Op {
-                op,
-                image_capacity,
-                resp,
-            } => {
-                let mut cfg = cfg.clone();
-                cfg.image_capacity = image_capacity.unwrap_or(cfg.image_capacity);
+            FlashReq::Op { op, target, resp } => {
+                let cfg = cfg.clone();
                 let port = Arc::clone(&port);
                 let record = Arc::clone(&record);
-                let result = tokio::task::spawn_blocking(move || run_op(&port, &cfg, &record, &op))
-                    .map(|join| {
-                        join.unwrap_or_else(|e| {
-                            Err(std::io::Error::other(format!("flash join: {e}")))
+                let result =
+                    tokio::task::spawn_blocking(move || run_op(&port, &cfg, target, &record, &op))
+                        .map(|join| {
+                            join.unwrap_or_else(|e| {
+                                Err(std::io::Error::other(format!("flash join: {e}")))
+                            })
                         })
-                    })
-                    .await;
+                        .await;
                 let _ = resp.send(result);
             }
         }
@@ -180,6 +165,7 @@ async fn worker(
 fn run_op(
     port: &Port,
     cfg: &FlashConfig,
+    target: Option<XdpTable>,
     record: &SharedRecord,
     op: &FlashOp,
 ) -> io::Result<FlashResult> {
@@ -191,15 +177,27 @@ fn run_op(
         FlashEvent::Begin(op.clone()).write_to(&mut rec);
     }
     record.mark_init_after(SystemTime::now());
+    let table = || target.map_or_else(|| cfg.xdp_table(), Ok);
+    let partition = if target.is_some() {
+        DEFAULT_XDP_PARTITION
+    } else {
+        cfg.partition.as_str()
+    };
     let result = match op {
         FlashOp::Fw { snapshot } => fw::flash_fw(port, snapshot).map(|_| FlashResult::Done),
         FlashOp::Xdp {
             name,
             bytes,
             expectation,
-        } => xdp::install(port, cfg, name, bytes, expectation).map(FlashResult::Install),
-        FlashOp::Clear { names } => xdp::clear(port, cfg, names).map(|_| FlashResult::Done),
-        FlashOp::List => xdp::list(port, cfg).map(FlashResult::List),
+        } => table()
+            .and_then(|table| xdp::install(port, table, partition, name, bytes, expectation))
+            .map(FlashResult::Install),
+        FlashOp::Clear { names } => table()
+            .and_then(|table| xdp::clear(port, table, names))
+            .map(|_| FlashResult::Done),
+        FlashOp::List => table()
+            .and_then(|table| xdp::list(port, table))
+            .map(FlashResult::List),
     };
     // Download held the USB fd through reset; a fast App `OK init` would be lost
     // unless we reopen UART before GetInit. Re-mark so only this boot counts.
