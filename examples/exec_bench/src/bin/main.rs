@@ -19,7 +19,7 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
-use exec_bench::mem_map::SLOT_LENS;
+use exec_bench::mem_map::SLOT_A_LEN;
 use log::{error, info};
 use xpost::app_ctrl::{self, AppMapError, AppXdpError};
 use xpost::map::{BPF_ANY, HEAP_SIZE, MapRt};
@@ -49,7 +49,9 @@ static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 /// Primary RX slot. Loaded before lease; immutable while it is the entry.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".xdp.hotload_0")]
-static xdp_slot: Slot<{ SLOT_LENS[0] }> = Slot::new([0u8; SLOT_LENS[0]]);
+static xdp_slot: Slot<SLOT_A_LEN> = Slot::new([0u8; SLOT_A_LEN]);
+
+static mut XDP_COPY_BUFFER: [u8; SLOT_A_LEN] = [0; SLOT_A_LEN];
 
 static mut INVOKE_BUF: [u8; VALUE_LEN] = [0u8; VALUE_LEN];
 
@@ -83,12 +85,14 @@ async fn main(spawner: Spawner) -> ! {
     let map_heap: &'static mut [u8] = unsafe { &mut *addr_of_mut!(MAP_HEAP) };
     let mut maps = MapRt::init(map_heap).await.expect("MapRt::init");
     let slots = [unsafe { xdp_slot.as_xdp_slot(true) }];
-    let (mut rt, report) = XdpRt::init(
+    let copy_buffer = unsafe { &mut *addr_of_mut!(XDP_COPY_BUFFER) };
+    let (mut rt, report) = XdpRt::init_with_copy_buffer(
         flash,
         &slots,
         exec_bench::mem_map::TABLE,
         &mut maps,
         exec_bench::mem_map::HELPER_DISPATCHER_BASE,
+        copy_buffer,
     )
     .await
     .expect("XdpRt::init");

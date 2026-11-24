@@ -506,11 +506,12 @@ mod tests {
         let mut meta = example_meta();
         meta.maps.clear();
         meta.name = name("x");
-        // This metadata adds 292 bytes to an aligned image.
-        let data = build_container(&[0u8; 16_092], &meta, None).unwrap();
+        const FIXTURE_OVERHEAD: usize = 292;
+        const IMAGE_LEN: usize = MAX_CONTAINER_SIZE - FIXTURE_OVERHEAD;
+        let data = build_container(&[0u8; IMAGE_LEN], &meta, None).unwrap();
         assert_eq!(data.len(), 16_384);
         assert_eq!(
-            build_container(&[0u8; 16_093], &meta, None),
+            build_container(&[0u8; IMAGE_LEN + 1], &meta, None),
             Err(EncodeError::ContainerTooLarge)
         );
     }

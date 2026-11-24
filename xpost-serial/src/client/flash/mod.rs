@@ -30,7 +30,7 @@ pub const DEFAULT_XDP_PARTITION: &str = "xdp";
 enum FlashReq {
     Op {
         op: FlashOp,
-        config: Option<FlashConfig>,
+        image_capacity: Option<usize>,
         resp: oneshot::Sender<io::Result<FlashResult>>,
     },
     Shutdown,
@@ -51,20 +51,24 @@ pub(crate) struct FlashWorker {
 }
 
 impl FlashWorker {
-    pub(crate) fn call(&self, op: FlashOp, config: Option<FlashConfig>) -> io::Result<FlashResult> {
-        block_on(self.call_async(op, config))
+    pub(crate) fn call(
+        &self,
+        op: FlashOp,
+        image_capacity: Option<usize>,
+    ) -> io::Result<FlashResult> {
+        block_on(self.call_async(op, image_capacity))
     }
 
     async fn call_async(
         &self,
         op: FlashOp,
-        config: Option<FlashConfig>,
+        image_capacity: Option<usize>,
     ) -> io::Result<FlashResult> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
             .send(FlashReq::Op {
                 op,
-                config,
+                image_capacity,
                 resp: resp_tx,
             })
             .map_err(|_| std::io::Error::other("flash task closed"))?;
@@ -97,7 +101,7 @@ pub struct FlashConfig {
     pub partitions: PathBuf,
     /// Partition Name column (default [`DEFAULT_XDP_PARTITION`]).
     pub partition: String,
-    /// Host cap on a single XDP ELF.
+    /// Host cap on a single XDP ELF. The CSV constructor defaults to 4 KiB.
     pub image_capacity: usize,
 }
 
@@ -152,8 +156,13 @@ async fn worker(
     while let Some(req) = rx.recv().await {
         match req {
             FlashReq::Shutdown => break,
-            FlashReq::Op { op, config, resp } => {
-                let cfg = config.unwrap_or_else(|| cfg.clone());
+            FlashReq::Op {
+                op,
+                image_capacity,
+                resp,
+            } => {
+                let mut cfg = cfg.clone();
+                cfg.image_capacity = image_capacity.unwrap_or(cfg.image_capacity);
                 let port = Arc::clone(&port);
                 let record = Arc::clone(&record);
                 let result = tokio::task::spawn_blocking(move || run_op(&port, &cfg, &record, &op))

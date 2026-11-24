@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use xpost_serial::FlashConfig;
 
 /// `{ cwd, command }` run before flash (paths relative to workspace root).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -111,19 +110,12 @@ impl Profiles {
         }
     }
 
-    /// Resolve the install override from the firmware linked to this XDP profile.
-    pub fn xdp_flash_config(&self, root: &Path, xdp: &XdpProfile) -> Result<Option<FlashConfig>> {
+    /// Resolve the install limit from the firmware linked to this XDP profile.
+    pub fn xdp_image_capacity(&self, xdp: &XdpProfile) -> Result<Option<usize>> {
         let fw = self
             .fw(&xdp.fw)
             .with_context(|| format!("xdp `{}` links missing fw `{}`", xdp.name, xdp.fw))?;
-        let Some(capacity) = fw.xdp_image_capacity else {
-            return Ok(None);
-        };
-        let partitions = abs_under_root(root, &fw.partition_table);
-        let mut config = FlashConfig::from_partitions_csv(&partitions)
-            .with_context(|| format!("FlashConfig from {}", partitions.display()))?;
-        config.image_capacity = capacity;
-        Ok(Some(config))
+        Ok(fw.xdp_image_capacity)
     }
 }
 
@@ -292,19 +284,26 @@ build = { cwd = ".", command = ["pixi", "run", "build", "--firmware", "examples/
         let profiles = Profiles::parse(include_str!("../../profiles.toml")).unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let exec = profiles.xdp("bsort").unwrap();
-        let config = profiles.xdp_flash_config(root, exec).unwrap().unwrap();
-        let table = config.xdp_table().unwrap();
+        let install_limit = profiles.xdp_image_capacity(exec).unwrap().unwrap();
         let board: toml::Table = include_str!("../../examples/exec_bench/Cargo.toml")
             .parse()
             .unwrap();
         let capacity = board["package"]["metadata"]["xpost"]["xdp_table"]["image_capacity"]
             .as_integer()
             .unwrap();
-        assert_eq!(table.image_capacity, capacity as usize);
-        assert_eq!(table.image_capacity, 16 * 1024);
+        assert_eq!(install_limit, capacity as usize);
+        assert_eq!(install_limit, 16 * 1024);
+        let mut config = xpost_serial::FlashConfig::from_partitions_csv(
+            root.join(profiles.default_partition_table().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(config.xdp_table().unwrap().image_capacity, 4 * 1024);
+        config.image_capacity = install_limit;
+        let table = config.xdp_table().unwrap();
+        assert_eq!(table.image_capacity, install_limit);
         assert_eq!(table.len, 64 * 1024);
         let network = profiles.xdp("just_tx").unwrap();
-        assert!(profiles.xdp_flash_config(root, network).unwrap().is_none());
+        assert_eq!(profiles.xdp_image_capacity(network).unwrap(), None);
     }
 
     #[test]

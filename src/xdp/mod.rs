@@ -141,7 +141,7 @@ pub type XdpRtGuard<'a> = RtMutexGuard<'a, XdpRt>;
 pub use slot::{Slot, XdpSlot};
 pub use state::XDP_RT;
 pub use table::storage::ColdRegion;
-pub(crate) use table::storage::{EspFlashXdpTable, IMAGE_COPY_CAPACITY, XdpTableStorage};
+pub(crate) use table::storage::{EspFlashXdpTable, XdpTableStorage};
 
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::Ordering;
@@ -179,6 +179,7 @@ pub(crate) struct ImageRecord {
 
 pub struct XdpRt {
     pub(crate) table: &'static mut dyn XdpTableStorage,
+    copy_buffer: &'static mut [u8],
     pub(crate) slots: heapless::Vec<SlotState, MAX_SLOTS>,
     pub(crate) images: heapless::Vec<ImageRecord, MAX_IMAGES>,
     pub(crate) primary: usize,
@@ -211,6 +212,23 @@ impl XdpRt {
         maps: &mut MapRtGuard<'_>,
         helper_expected: usize,
     ) -> Result<(XdpRtGuard<'static>, Vec<ReportItem>), XdpInitError> {
+        // A full-image stack frame can fault the Embassy boot task.
+        static mut COPY_BUFFER: [u8; 8 * 1024] = [0; 8 * 1024];
+        // The unique FLASH peripheral permits one initializer.
+        let copy_buffer = unsafe { &mut *core::ptr::addr_of_mut!(COPY_BUFFER) };
+        Self::init_with_copy_buffer(flash, slots, cold, maps, helper_expected, copy_buffer).await
+    }
+
+    /// Initialize as in [`Self::init`] with a board-provided static image buffer.
+    /// Size the buffer for the largest image that can run in a slot.
+    pub async fn init_with_copy_buffer(
+        flash: esp_hal::peripherals::FLASH<'static>,
+        slots: &[XdpSlot],
+        cold: impl Into<ColdRegion>,
+        maps: &mut MapRtGuard<'_>,
+        helper_expected: usize,
+        copy_buffer: &'static mut [u8],
+    ) -> Result<(XdpRtGuard<'static>, Vec<ReportItem>), XdpInitError> {
         Self::check_helper_address(helper_expected)?;
         let cold = cold.into();
         let table = EspFlashXdpTable::try_new(
@@ -227,6 +245,7 @@ impl XdpRt {
         };
         let mut rt = Self {
             table: storage,
+            copy_buffer,
             slots: heapless::Vec::new(),
             images: heapless::Vec::new(),
             primary: usize::MAX,
@@ -541,15 +560,12 @@ impl XdpRt {
             self.primary = prev_primary;
             return Err(XdpSwitchError::ImageTooLarge);
         }
-        // Keep the full-image buffer off the embassy stack during boot.
-        static mut SWITCH_BUF: [u8; IMAGE_COPY_CAPACITY] = [0; IMAGE_COPY_CAPACITY];
-        let buf = unsafe { &mut *core::ptr::addr_of_mut!(SWITCH_BUF) };
-        if image_len > buf.len() {
+        let Some(buf) = self.copy_buffer.get_mut(..image_len) else {
             self.primary = prev_primary;
             return Err(XdpSwitchError::ScratchTooSmall);
-        }
+        };
         // Unaligned image_len is fine: EspFlashXdpTable::read pads like visit_bytes.
-        if let Err(e) = self.table.read(aot_abs, &mut buf[..image_len]) {
+        if let Err(e) = self.table.read(aot_abs, buf) {
             self.primary = prev_primary;
             return Err(e.into());
         }

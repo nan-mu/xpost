@@ -12,14 +12,6 @@ pub(crate) trait XdpTableStorage: Send {
     fn read(&mut self, offset: usize, out: &mut [u8]) -> Result<(), FlashError>;
 }
 
-/// Scratch space for copying an image from flash into SRAM.
-/// The exec_bench firmware uses a 12 KiB slot for larger JIT images.
-pub(crate) const IMAGE_COPY_CAPACITY: usize = if cfg!(feature = "exec-call") {
-    12 * 1024
-} else {
-    8 * 1024
-};
-
 /// Packed Compact ELF region in Flash (`espflash write-bin` target).
 #[derive(Clone, Copy, Debug)]
 pub struct ColdRegion {
