@@ -8,6 +8,7 @@
 use winnow::{Parser, ascii::space1, combinator::opt, error::EmptyError};
 
 use crate::client::error::ParseError;
+use crate::r#type::command::EXEC_BATCH_READ_MAX_BYTES;
 use crate::r#type::reply::OkReply;
 
 // —— fixed OK ————————————————————————————————————————————————————————————————
@@ -47,6 +48,10 @@ fixed_ok! {
     parse_enable_exec_reply => EnableExec: [b"enable", b"exec"];
     /// `OK disable exec`
     parse_disable_exec_reply => DisableExec: [b"disable", b"exec"];
+    /// `OK exec batch reset`
+    parse_exec_batch_reset_reply => ExecBatchReset: [b"exec", b"batch", b"reset"];
+    /// `OK exec batch write`
+    parse_exec_batch_write_reply => ExecBatchWrite: [b"exec", b"batch", b"write"];
     /// `OK clear map`
     parse_clear_map_reply => ClearMap: [b"clear", b"map"];
     /// `OK clear perf`
@@ -220,6 +225,48 @@ pub fn parse_get_xdp_status_reply(input: &[u8]) -> Result<OkReply<'_>, ParseErro
 
 fn one_space(input: &[u8]) -> Result<&[u8], ParseError> {
     input.strip_prefix(b" ").ok_or(ParseError::InvalidSyntax)
+}
+
+/// `OK exec batch invoke <boot_id> <begin_tick> <end_tick> <action>`.
+pub fn parse_exec_batch_invoke_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let line = input.strip_suffix(b"\n").unwrap_or(input);
+    let rest = line
+        .strip_prefix(b"OK exec batch invoke")
+        .ok_or(ParseError::InvalidSyntax)?;
+    let (boot_id, rest) = take_u32(one_space(rest)?)?;
+    let (begin_tick, rest) = take_u64(one_space(rest)?)?;
+    let (end_tick, rest) = take_u64(one_space(rest)?)?;
+    let (action, rest) = take_u32(one_space(rest)?)?;
+    if !rest.is_empty() {
+        return Err(ParseError::InvalidSyntax);
+    }
+    Ok(OkReply::ExecBatchInvoke {
+        boot_id,
+        begin_tick,
+        end_tick,
+        action,
+    })
+}
+
+/// Declared payload length from an `OK exec batch read` header line.
+pub fn parse_exec_batch_read_len(line: &[u8]) -> Option<usize> {
+    let (_, nums) = parse_u32_line(line, b"OK exec batch read", 1).ok()?;
+    let len = nums[0] as usize;
+    (len <= EXEC_BATCH_READ_MAX_BYTES).then_some(len)
+}
+
+/// `OK exec batch read <n>\n` + exactly `n` payload bytes.
+pub fn parse_exec_batch_read_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let nl = input
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .ok_or(ParseError::InvalidSyntax)?;
+    let n = parse_exec_batch_read_len(&input[..nl]).ok_or(ParseError::InvalidSyntax)?;
+    let blob = &input[nl + 1..];
+    if blob.len() != n {
+        return Err(ParseError::BadShape("exec-batch-read"));
+    }
+    Ok(OkReply::ExecBatchRead { blob })
 }
 
 /// `OK perf prepare <epoch> <boot_id>`.

@@ -93,6 +93,9 @@ impl<R, W, H: RequestHandler, const N: usize> SerialHandlerBuilder<R, W, H, N> {
         on_enable_exec() => Command::EnableExec);
     register!(/// Register function-call exec disable and reply generation.
         on_disable_exec() => Command::DisableExec);
+    register!(/// Register all batch commands on one owner of the staging buffer.
+        on_exec_batch(command: Command<'_>) => command @ (Command::ExecBatchReset
+            | Command::ExecBatchWrite { .. } | Command::ExecBatchInvoke | Command::ExecBatchRead { .. }));
     register!(/// Register map clearing by name.
         on_clear_map(name: &str) => Command::ClearMap { name });
     register!(/// Register map reporting; `ReplyWriter::get_map` streams its payload.

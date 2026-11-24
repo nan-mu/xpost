@@ -32,6 +32,7 @@ where
     let req_timeout = match cmd {
         Command::GetInit => GET_INIT_TIMEOUT,
         Command::GetFinish => GET_FINISH_TIMEOUT,
+        Command::ExecBatchInvoke => GET_FINISH_TIMEOUT,
         Command::GetMap { .. } => GET_MAP_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     };
@@ -79,6 +80,10 @@ pub(crate) fn ok_label(ok: &crate::r#type::reply::OkReply<'_>) -> &'static str {
         OkReply::DisableXdp => "OK disable xdp",
         OkReply::EnableExec => "OK enable exec",
         OkReply::DisableExec => "OK disable exec",
+        OkReply::ExecBatchReset => "OK exec batch reset",
+        OkReply::ExecBatchWrite => "OK exec batch write",
+        OkReply::ExecBatchInvoke { .. } => "OK exec batch invoke",
+        OkReply::ExecBatchRead { .. } => "OK exec batch read",
         OkReply::ClearMap => "OK clear map",
         OkReply::ClearPerf => "OK clear perf",
         OkReply::GetMap { .. } => "OK get map",

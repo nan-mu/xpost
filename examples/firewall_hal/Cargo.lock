@@ -573,6 +573,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "embeprom"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "730589f1d8c5d546aa7c8cdf490e0377c1c4749f050099395dc304532a3cb692"
+dependencies = [
+ "critical-section",
+ "heapless 0.9.3",
+ "portable-atomic",
+]
+
+[[package]]
 name = "enumset"
 version = "1.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1108,6 +1119,7 @@ dependencies = [
  "esp-hal",
  "heapless 0.8.0",
  "portable-atomic",
+ "xpost-network-perf",
 ]
 
 [[package]]
@@ -1919,6 +1931,22 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "xpost-network-perf"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "embeprom",
+ "esp-hal",
+ "xpost-perf",
+ "xpost-serial",
+ "xpost-type",
+]
+
+[[package]]
+name = "xpost-perf"
+version = "0.1.0"
 
 [[package]]
 name = "xpost-serial"

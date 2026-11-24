@@ -24,13 +24,21 @@ use super::{
     case_capture::{Capture, POST, PRE},
     case_store::{self, Attempt, Observation, Switch},
     case_trace,
+    medium::Actions,
 };
 
 const FIRMWARE: &str = "case-xdp";
 const SLOT_A: &str = "case_swap";
 const SLOT_B: &str = "case_mark_idle";
 
-pub async fn run_case(cfg: &FileConfig, phase: &str) -> Result<()> {
+pub(super) async fn run_case(
+    cfg: &FileConfig,
+    expected_fw: &str,
+    medium_id: Uuid,
+    retry_of: Option<Uuid>,
+    order: i32,
+    actions: &mut Actions,
+) -> Result<()> {
     let endpoint = cfg
         .agent
         .resolved_endpoint()
@@ -48,8 +56,32 @@ pub async fn run_case(cfg: &FileConfig, phase: &str) -> Result<()> {
     let mut client = case_store::connect(&cfg.postgres).await?;
     let run = Uuid::new_v4();
     let profile = case_store::hex(&Sha256::digest(b"case-aot-trace-v0.1.1"));
-    let attempt = Attempt::start(&mut client, run, phase, &profile).await?;
-    eprintln!("case AOT Trace run_id={run} phase={phase}");
+    let attempt = match Attempt::start(
+        &mut client,
+        run,
+        "formal",
+        &profile,
+        Some(medium_id),
+        retry_of,
+        order,
+    )
+    .await
+    {
+        Ok(attempt) => attempt,
+        Err(error) => {
+            let state = crate::db::protocol::run_status(&cfg.postgres, run).await;
+            emit_result(
+                run,
+                "blocked",
+                &Observation::default(),
+                &state,
+                Some(format!("{error:#}")),
+                None,
+            );
+            return Err(error).context("register case attempt before device writes");
+        }
+    };
+    eprintln!("case AOT Trace run_id={run} phase=formal");
     let mut observation = Observation::default();
     if let Err(error) = perform(
         cfg,
@@ -57,28 +89,62 @@ pub async fn run_case(cfg: &FileConfig, phase: &str) -> Result<()> {
         run,
         &profile,
         [&digest_a, &digest_b],
+        expected_fw,
+        &mut client,
+        actions,
         &mut observation,
     )
     .await
     {
         observation.issues.push(format!("{error:#}"));
     }
+    let status = if observation.qualified() {
+        "complete"
+    } else {
+        "failed"
+    };
+    let mut write_error = None;
     if let Err(error) = attempt
         .finish(&mut client, &observation, &cfg.probe.iface)
         .await
     {
-        let saved = observation
-            .preserve(run)
-            .map(|path| path.display().to_string());
-        return Err(error).with_context(|| match saved {
-            Ok(path) => {
-                format!("case run_id={run} database write failed. Evidence saved at {path}")
+        let mut state = crate::db::protocol::run_status(&cfg.postgres, run).await;
+        let mut detail = format!("{error:#}");
+        if state == "running" {
+            let retry = async {
+                let mut database = crate::db::protocol::connect(&cfg.postgres).await?;
+                attempt
+                    .finish(&mut database, &observation, &cfg.probe.iface)
+                    .await
             }
-            Err(save) => format!(
-                "case run_id={run} database write failed. Local evidence export failed: {save:#}"
-            ),
-        });
+            .await;
+            state = if let Err(retry_error) = retry {
+                detail.push_str(&format!(". Same-run write retry: {retry_error:#}"));
+                crate::db::protocol::run_status(&cfg.postgres, run).await
+            } else {
+                status.to_owned()
+            };
+        }
+        if state != status {
+            let saved = observation
+                .preserve(run)
+                .map(|path| path.display().to_string());
+            emit_result(
+                run,
+                "write_failed",
+                &observation,
+                &state,
+                Some(detail),
+                saved.as_ref().ok().map(String::as_str),
+            );
+            return Err(error).with_context(|| match saved {
+                Ok(path) => format!("case run_id={run} database write failed. Evidence saved at {path}"),
+                Err(save) => format!("case run_id={run} database write failed. Local evidence export failed: {save:#}"),
+            });
+        }
+        write_error = Some(detail);
     }
+    emit_result(run, status, &observation, status, write_error, None);
     ensure!(
         observation.qualified(),
         "case run_id={run}: {}",
@@ -88,18 +154,49 @@ pub async fn run_case(cfg: &FileConfig, phase: &str) -> Result<()> {
     Ok(())
 }
 
+fn emit_result(
+    run: Uuid,
+    status: &str,
+    observation: &Observation,
+    database_status: &str,
+    write_error: Option<String>,
+    evidence: Option<&str>,
+) {
+    let switch = observation.switch.as_ref();
+    let trace = observation.trace.as_ref();
+    let (last_a, first_b, late) = observation.transitions();
+    println!(
+        "XPOST_RESULT {}",
+        serde_json::json!({
+            "run_id": run.to_string(), "experiment": "case", "mode": "aot", "variant": "trace",
+            "input": { "direction": "A-to-B", "pps": super::case_capture::PPS },
+            "repeat": 1, "status": status, "database_status": database_status, "write_error": write_error,
+            "publish": switch.map(|reply| if reply.command_ok { "confirmed" } else { "unconfirmed" }),
+            "trace_exported": observation.trace_bytes.is_some(), "freeze_receipt": observation.freeze_receipt, "pcap_exported": observation.capture.is_some(),
+            "host_command_ns": switch.map(|reply| reply.end_ns - reply.begin_ns),
+            "dut_control_us": trace.and_then(|value| value.events.last()?.tick.checked_sub(value.events.first()?.tick)),
+            "last_a_seq": last_a.map(|packet| packet.seq), "first_b_seq": first_b.map(|packet| packet.seq),
+            "old_after_new": late, "evidence": evidence, "issues": observation.issues,
+        })
+    );
+}
+
 async fn perform(
     cfg: &FileConfig,
     agent: &AgentClient,
     run: Uuid,
     profile: &str,
     digests: [&str; 2],
+    expected_fw: &str,
+    client: &mut tokio_postgres::Client,
+    actions: &mut Actions,
     result: &mut Observation,
 ) -> Result<()> {
     let ui = RoundUi::new();
     ui.begin_round();
     ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
-    let identity = agent.flash_fw_evidence(FIRMWARE).await?;
+    let identity = agent.flash_fw_evidence(FIRMWARE, Some(expected_fw)).await?;
+    actions.note_flash(&identity);
     let checked = check_flashed(&identity, digests);
     result.flash = Some(identity);
     result
@@ -109,7 +206,9 @@ async fn perform(
     status::settle_checklist(&ui, agent, READY_BUDGET).await?;
     agent.disable_xdp().await?;
     let gen_a = stage(agent, SLOT_A, 0).await?;
+    actions.sram_preload_confirmed += 1;
     let gen_b = stage(agent, SLOT_B, 1).await?;
+    actions.sram_preload_confirmed += 1;
     result.preparation.push(format!(
         "preload A generation {gen_a}; preload B generation {gen_b}"
     ));
@@ -138,10 +237,12 @@ async fn perform(
     qualification.observe(2).await?;
     let b = agent.switch_xdp(1, gen_b, "drop").await?;
     check_published(&b, 0, 1, gen_b)?;
+    actions.preparation_publish_confirmed += 1;
     qualification.observe(1).await?;
     board(agent).await?.require(1, 0, gen_a, initial.boot)?;
     let a = agent.switch_xdp(0, gen_a, "drop").await?;
     check_published(&a, 1, 0, gen_a)?;
+    actions.preparation_publish_confirmed += 1;
     qualification.stop().await?;
     result
         .preparation
@@ -152,7 +253,7 @@ async fn perform(
     let capture = Capture::start(cfg, run)?;
     capture.observe(2).await?;
     tokio::time::sleep(PRE).await;
-    let (epoch, boot) = agent.trace_prepare(run, profile).await?;
+    let (epoch, boot) = agent.perf_prepare(run, profile, "trace").await?;
     result
         .preparation
         .push(format!("Trace epoch {epoch} boot {boot}"));
@@ -160,7 +261,14 @@ async fn perform(
         boot == u64::from(initial.boot),
         "DUT boot changed before Trace prepare"
     );
-    agent.trace_arm(epoch).await?;
+    agent.perf_arm(epoch).await?;
+    let intent = serde_json::to_vec(&serde_json::json!({
+        "run_id": run, "epoch": epoch, "boot_id": boot,
+        "source_slot": 0, "target_slot": 1, "target_generation": gen_b,
+    }))?;
+    let tx = client.transaction().await?;
+    crate::db::protocol::artifact(&tx, run, "case_publish_intent", &intent).await?;
+    tx.commit().await.context("persist case publish intent")?;
     let begin_ns = capture_start.elapsed().as_nanos();
     let reply = tokio::time::timeout(Duration::from_secs(5), agent.switch_xdp(1, gen_b, "drop"))
         .await
@@ -176,9 +284,22 @@ async fn perform(
         tokio::time::sleep(POST).await;
     }
     let captured = capture.stop().await;
-    let frozen = agent.trace_freeze_read(epoch).await;
+    let frozen = match agent.perf_freeze(epoch).await {
+        Ok(receipt) => {
+            result.freeze_receipt =
+                Some(serde_json::json!({ "epoch": epoch, "boot_id": boot, "freeze": receipt }));
+            match agent.perf_read(epoch, receipt).await {
+                Ok(bytes) => Ok(bytes),
+                Err(error) => agent
+                    .perf_read(epoch, receipt)
+                    .await
+                    .with_context(|| format!("retry original case Trace export after {error:#}")),
+            }
+        }
+        Err(error) => Err(error).context("freeze original case Trace epoch"),
+    };
     let released = if frozen.is_ok() {
-        agent.trace_release(epoch).await
+        agent.perf_release(epoch).await
     } else {
         Err(anyhow::anyhow!(
             "Trace export failed for epoch {epoch}. Check this epoch before a new publish"
@@ -190,6 +311,9 @@ async fn perform(
         .as_ref()
         .map_err(|e| anyhow::anyhow!("read post-publish status: {e:#}"))
         .and_then(|now| now.require(1, 0, gen_a, initial.boot));
+    if confirmed.is_ok() {
+        actions.measured_publish_confirmed += 1;
+    }
     result.switch = Some(Switch {
         generation_a: gen_a,
         generation_b: gen_b,

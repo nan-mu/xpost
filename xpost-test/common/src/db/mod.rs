@@ -6,8 +6,10 @@
 
 mod decode;
 pub mod legacy;
+pub mod metrics;
 mod names;
 mod pg;
+pub mod protocol;
 #[cfg(test)]
 mod protocol_v1;
 pub mod schema;
@@ -23,14 +25,12 @@ use crate::config;
 pub use names::Firmware;
 pub use pg::{PgOpts, connect};
 pub use write::{
-    CellRepeat, PerfExperiment, SendSpan, TxSample, insert_exam,
-    insert_firewall_config, insert_firewall_data, insert_firewall_ident, insert_just_drop_config,
-    insert_just_drop_data,
+    CellRepeat, PerfExperiment, SendSpan, TxSample, insert_exam, insert_firewall_config,
+    insert_firewall_data, insert_firewall_ident, insert_just_drop_config, insert_just_drop_data,
     insert_just_tx_config, insert_just_tx_data, stop_exam, write_perf,
 };
 
-pub use decode::{decode_report_msg, DecodedReport};
-pub use legacy::MASK_T;
+pub use decode::decode_report_msg;
 
 const FORMAL_SQL: &str = include_str!("../../../sql/formal.sql");
 const JUST_DROP_SQL: &str = include_str!("../../../sql/just_drop.sql");

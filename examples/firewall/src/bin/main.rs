@@ -40,6 +40,29 @@ fn panic(panic_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
+#[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
+use xpost::ext::perf::network;
+#[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
+use xpost_network_perf as session;
+
+#[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
+static NETWORK_PERF: session::NetworkPerf<
+    {
+        if cfg!(feature = "perf-trace") {
+            session::TRACE_CAPACITY
+        } else {
+            0
+        }
+    },
+    {
+        if cfg!(feature = "perf-metrics") {
+            session::METRICS_BYTES
+        } else {
+            0
+        }
+    },
+> = session::NetworkPerf::new(network::XDP_POINTS);
+
 extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -90,6 +113,14 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     let flash = peripherals.FLASH;
+    #[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
+    {
+        xpost::xdp::set_boot_id(NETWORK_PERF.init());
+        network::install(
+            |frame| NETWORK_PERF.driver_rx(frame, 2),
+            |tag, point, detail| NETWORK_PERF.driver_event(tag, point, detail),
+        );
+    }
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
     esp_alloc::heap_allocator!(size: 64 * 1024);
@@ -377,7 +408,7 @@ serial_task! {
         rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
     ) {
         let mut rx = rx;
-        SerialHandler::builder(
+        let builder = SerialHandler::builder(
             move || match rx.read_byte() {
                 Ok(b) => Some(b),
                 Err(_) => None,
@@ -464,8 +495,10 @@ serial_task! {
             {
                 reply.error(&PerfError::Unavailable);
             }
-        })
-        .build()
+        });
+        #[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
+        let builder = session::register!(builder, NETWORK_PERF);
+        builder.build()
     }
 }
 

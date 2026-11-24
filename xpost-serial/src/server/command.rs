@@ -9,7 +9,7 @@ use winnow::{
 };
 
 use crate::r#type::{
-    command::{Command, PerfVariant},
+    command::{Command, PerfVariant, is_exec_batch_hex},
     reply::ErrReply,
 };
 
@@ -99,6 +99,49 @@ fn parse_hex_fixed<const N: usize>(token: &[u8]) -> Result<[u8; N], ParseCommand
     Ok(out)
 }
 
+/// Decode a hex token into an equally sized destination without partial writes.
+pub(super) fn decode_hex(token: &[u8], out: &mut [u8]) -> Result<(), ParseCommandError> {
+    if token.len() / 2 != out.len() || !is_exec_batch_hex(token) {
+        return Err(ParseCommandError::BadArity);
+    }
+    for (pair, byte) in token.chunks_exact(2).zip(out) {
+        *byte = (parse_hex_nibble(pair[0])? << 4) | parse_hex_nibble(pair[1])?;
+    }
+    Ok(())
+}
+
+fn parse_exec_batch(mut line: &[u8]) -> Result<Command<'_>, ParseCommandError> {
+    let action = token(&mut line).map_err(|_| ParseCommandError::BadArity)?;
+    if keyword(action, b"reset") {
+        no_args(&mut line)?;
+        Ok(Command::ExecBatchReset)
+    } else if keyword(action, b"write") {
+        let (offset, data, _) = (token, token, eof::<_, EmptyError>)
+            .parse_next(&mut line)
+            .map_err(|_| ParseCommandError::BadArity)?;
+        if !is_exec_batch_hex(data) {
+            return Err(ParseCommandError::BadArity);
+        }
+        Ok(Command::ExecBatchWrite {
+            offset: parse_u32(offset)?,
+            data,
+        })
+    } else if keyword(action, b"invoke") {
+        no_args(&mut line)?;
+        Ok(Command::ExecBatchInvoke)
+    } else if keyword(action, b"read") {
+        let (offset, max_bytes, _) = (token, token, eof::<_, EmptyError>)
+            .parse_next(&mut line)
+            .map_err(|_| ParseCommandError::BadArity)?;
+        Ok(Command::ExecBatchRead {
+            offset: parse_u32(offset)?,
+            max_bytes: parse_u32(max_bytes)?,
+        })
+    } else {
+        Err(ParseCommandError::Unknown)
+    }
+}
+
 fn parse_perf_variant(token: &[u8]) -> Result<PerfVariant, ParseCommandError> {
     if keyword(token, b"metrics") {
         Ok(PerfVariant::Metrics)
@@ -162,6 +205,8 @@ pub fn parse_command(mut line: &[u8]) -> Result<Command<'_>, ParseCommandError> 
     } else if keyword(verb, b"disable") && keyword(target, b"exec") {
         no_args(&mut line)?;
         Ok(Command::DisableExec)
+    } else if keyword(verb, b"exec") && keyword(target, b"batch") {
+        parse_exec_batch(line)
     } else if keyword(verb, b"clear") && keyword(target, b"perf") {
         no_args(&mut line)?;
         Ok(Command::ClearPerf)

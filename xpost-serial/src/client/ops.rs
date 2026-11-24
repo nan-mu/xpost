@@ -28,6 +28,7 @@ pub enum FlashOp {
         name: String,
         bytes: Arc<[u8]>,
         expectation: FirmwareExpectation,
+        replace_single: bool,
     },
     Clear {
         /// Empty = clear all (`*`).

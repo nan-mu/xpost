@@ -15,6 +15,7 @@ version = "1"
 # Use a separate run list for older experiments or diagnostics.
 # Medium checks Agent deployment readiness before device writes or database access.
 run = ["medium"]
+# medium_resume_id = "<original campaign UUID>"
 
 [postgres]
 host = "192.168.110.96"
@@ -23,8 +24,8 @@ user = "nan"
 password = "22332233"
 dbname = "postgres"
 formal_schema = "formal"
-# Case uses a separate database initialized with sql/protocol_v1.sql.
-# protocol_dbname = "xpost_medium"
+# Medium uses a separate database initialized with sql/protocol_v1.sql.
+protocol_dbname = "xpost_medium"
 
 [agent]
 endpoint = "192.168.110.96:9240"

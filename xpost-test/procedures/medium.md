@@ -1,12 +1,12 @@
 # Medium experiment
 
-**The medium experiment remains blocked before device writes.**
-
-The default `run = ["medium"]` requests a read-only Agent preflight.
-The user starts the full run from T3 after review and readiness checks.
+The default `run = ["medium"]` starts with read-only readiness checks.
+The maintainer authorizes the start after implementation and preflight pass.
+The 29-cell run includes the device acceptance checks.
 TR3000 runs `./xpost-test` without arguments.
 The script for a formal run is `./xpost-test/scripts/xpost-test.fish`.
-The medium runner still needs EXB2 transport, network and EXB2 perf callbacks, embeprom, execution of all firmware groups, and four-mode reconciliation.
+The runner stops before device writes if a readiness check fails.
+Network attribution must qualify each planned Trace and DROP Metrics cell.
 
 ## Deployment preflight
 
@@ -44,7 +44,11 @@ Other native slot changes require equivalent evidence or relocation data.
 ## Planned matrix and time budget
 
 Set `run = ["medium-plan"]` to print the 29 cells and their firmware groups.
+Set `run = ["medium-preflight"]` for the read-only readiness check on TR3000.
+It checks Agent health, deployment identities, protocol tables, and collector availability.
 Set `run = ["medium"]` for the formal selection.
+Set `medium_resume_id` to the original campaign UUID to resume that campaign.
+The runner skips completed attempts and holds case when publish evidence needs recovery.
 
 | Family | Metrics | Trace | Conditions |
 | --- | ---: | ---: | --- |
@@ -55,7 +59,7 @@ Set `run = ["medium"]` for the formal selection.
 | case | 0 | 1 | AOT Trace. One measured A-to-B publish. |
 | Total | 16 | 13 | 29 required cells |
 
-`lookup`, `dev`, and `case-smoke` run separately from the medium plan.
+`lookup` and `dev` run separately from the medium plan.
 AOT and JIT can share a native Firmware ELF.
 Group execution by firmware digest. Keep rates and repeats within the group.
 Count firmware flashes, cold installs, SRAM preloads, preparation publishes, and measured publishes.
@@ -86,8 +90,8 @@ for each firmware group:
   check device identity and flash only when it differs
   run all modes and collection variants served by the firmware
   keep installs outside the sample loop except when the sample measures them
-  prepare: obtain baseline S0
-  arm: open the observation window
+  prepare: reserve a collection epoch
+  arm: obtain baseline S0 and open the observation window
   run the stimulus, then drain
   freeze: wait for observations in flight and obtain S1
   read: export the selected variant
@@ -100,7 +104,9 @@ Read Gauge snapshots directly.
 Keep one board-specific frozen histogram calibration per comparison boundary.
 Record the tick rate and clock domain for each clock.
 The case Trace firmware implements the five session callbacks.
-The network and EXB2 callback and embeprom 0.3.0 integration checks remain open.
+The network and EXB2 carriers use embeprom 0.3.0 counters.
+Network Trace records probe identity when the firmware can read the tag.
+The runner checks the scope of DUT counts before it attributes them to a stimulus.
 
 - **Firewall.** Bind once per mode. Before each window, reset known hit and miss keys.
   Pace mixed traffic for Metrics. Send one tagged hit or miss per Trace window.
@@ -165,11 +171,11 @@ It still needs replacement in the runner and firmware.
 
 ## Database and review
 
-Set `[postgres].protocol_dbname` for the case writer in `xpost-test/config/default.toml`.
-Set `run = ["case-smoke"]` for an independently recorded qualification run.
+Set `[postgres].protocol_dbname` in `xpost-test/config/default.toml`.
 Build and upload the selected runner with `./xpost-test/scripts/xpost-test.fish`.
 If the case database write fails, the runner exports available evidence under `case-evidence/<run_id>`.
-Use a dedicated empty database with the [four-mode schema](../sql/protocol_v1.sql).
+Use a dedicated database with the [four-mode schema](../sql/protocol_v1.sql).
+Apply the schema once to an empty database.
 The existing database holds earlier measurements.
 The case entry checks the protocol database before the firmware flash.
 
@@ -186,7 +192,9 @@ The check also exercised the network and case query paths with blocked fixture r
 A second DDL apply rejected the existing objects.
 These checks used a disposable PostgreSQL instance.
 
-After each hardware attempt, analyze its run ID before advancing the queue.
+Read each `XPOST_RESULT` line as an attempt ends.
+Query its run ID and update the English PR while independent attempts continue.
+On a database write failure, query the original run ID before attempting recovery.
 Preserve failed attempts. Give each retry its own run ID.
 Update PR #23 in English with the analysis, fixture scope, and retry evidence.
 Use actual runs for the PR figures. Report missing and unqualified samples explicitly.

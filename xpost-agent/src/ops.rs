@@ -9,7 +9,9 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use xpost_serial::client::flash::{InstallOutcome, XdpEntry, XdpTable, plan_install};
 use xpost_serial::client::{Command, FirmwareExpectation, FlashOp, FlashResult, OkReply};
-use xpost_serial::command::PerfVariant;
+use xpost_serial::command::{
+    EXEC_BATCH_BYTES, EXEC_BATCH_READ_MAX_BYTES, EXEC_BATCH_WRITE_MAX_BYTES, PerfVariant,
+};
 
 use crate::deployment::{self, PreparedImage, PreparedInfo, Target, firmware_snapshot};
 use crate::profiles::{BuildSpec, XdpProfile, abs_under_root};
@@ -175,17 +177,31 @@ pub struct FlashIdentity {
 }
 
 pub fn flash_fw(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<OpReply> {
+    flash_fw_checked(state, name, None, peer)
+}
+
+pub fn flash_fw_checked(
+    state: &Mutex<AgentState>,
+    name: &str,
+    expected_sha256: Option<&str>,
+    peer: &str,
+) -> Result<OpReply> {
     with_log(
         peer,
         "FlashFw",
         &format!("name=`{name}`"),
         false,
         state,
-        || flash_fw_inner(state, name, peer),
+        || flash_fw_inner(state, name, expected_sha256, peer),
     )
 }
 
-fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<OpReply> {
+fn flash_fw_inner(
+    state: &Mutex<AgentState>,
+    name: &str,
+    expected_sha256: Option<&str>,
+    peer: &str,
+) -> Result<OpReply> {
     let (root, fw, linked_xdps) = {
         let g = lock(state)?;
         let fw = g
@@ -240,6 +256,13 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<O
         None => firmware_snapshot(&firmware, &partitions)?,
     };
     let firmware_sha = snapshot.sha256;
+    if let Some(expected) = expected_sha256 {
+        let actual = format_sha256(&firmware_sha);
+        anyhow::ensure!(
+            actual == expected,
+            "Firmware ELF for `{name}` changed after preflight: expected {expected}, got {actual}"
+        );
+    }
     let t_flash = Instant::now();
     let mut cold_entries = Vec::new();
     let installed = prepare_and_flash(
@@ -279,8 +302,14 @@ fn flash_fw_inner(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<O
             Ok(())
         },
         |g, image| {
-            let message =
-                flash_one_xdp(g, &image, &snapshot, target.as_ref().unwrap().table, peer)?;
+            let message = flash_one_xdp(
+                g,
+                &image,
+                &snapshot,
+                target.as_ref().unwrap().table,
+                false,
+                peer,
+            )?;
             Ok((message, image.info))
         },
     )?;
@@ -314,7 +343,27 @@ pub fn flash_xdp(
     slot: Option<u8>,
     peer: &str,
 ) -> Result<OpReply> {
+    flash_xdp_checked(state, name, slot, None, peer)
+}
+
+/// A verified network or exec target from the experiment plan.
+pub struct XdpTarget<'a> {
+    pub firmware: &'a str,
+    pub sha256: &'a str,
+}
+
+pub fn flash_xdp_checked(
+    state: &Mutex<AgentState>,
+    name: &str,
+    slot: Option<u8>,
+    planned: Option<XdpTarget<'_>>,
+    peer: &str,
+) -> Result<OpReply> {
     if let Some(slot) = slot {
+        anyhow::ensure!(
+            planned.is_none(),
+            "firmware binding applies to cold installs"
+        );
         return flash_xdp_slot(state, name, slot, peer).map(OpReply::from);
     }
     with_log(
@@ -331,11 +380,14 @@ pub fn flash_xdp(
                     .xdp(name)
                     .cloned()
                     .with_context(|| format!("unknown xdp `{name}`"))?;
+                let firmware = planned
+                    .as_ref()
+                    .map_or(xdp.fw.as_str(), |target| target.firmware);
                 let fw = g
                     .profiles
-                    .fw(&xdp.fw)
+                    .fw(firmware)
                     .cloned()
-                    .with_context(|| format!("xdp `{name}` links missing fw `{}`", xdp.fw))?;
+                    .with_context(|| format!("unknown Firmware ELF profile `{firmware}`"))?;
                 (g.root.clone(), xdp, fw)
             };
             let target = Target::read(&root, &fw).with_context(|| {
@@ -347,13 +399,29 @@ pub fn flash_xdp(
                     fw.name
                 )
             })?;
+            if let Some(planned) = &planned {
+                let actual = format_sha256(&target.snapshot.sha256);
+                anyhow::ensure!(
+                    actual == planned.sha256,
+                    "Firmware ELF for `{}` changed after preflight: expected {}, got {actual}",
+                    fw.name,
+                    planned.sha256
+                );
+            }
             let image = deployment::prepare(&root, &target, &xdp)?;
             let g = lock(state)?;
-            let message = flash_one_xdp(&g, &image, &target.snapshot, target.table, peer)?;
+            let message = flash_one_xdp(
+                &g,
+                &image,
+                &target.snapshot,
+                target.table,
+                planned.is_some(),
+                peer,
+            )?;
             Ok(OpReply {
                 message,
                 flash: Some(FlashIdentity {
-                    firmware_profile: xdp.fw,
+                    firmware_profile: fw.name,
                     firmware_sha256: format_sha256(&target.snapshot.sha256),
                     containers: vec![image.info],
                 }),
@@ -380,7 +448,11 @@ fn prepare_and_flash<G, I, T>(
         .collect()
 }
 
-fn cold_install_op(image: &PreparedImage, firmware: &FirmwareExpectation) -> Result<FlashOp> {
+fn cold_install_op(
+    image: &PreparedImage,
+    firmware: &FirmwareExpectation,
+    replace_single: bool,
+) -> Result<FlashOp> {
     if image.info.firmware_sha256 != format_sha256(&firmware.sha256) {
         bail!(
             "xdp `{}`: firmware snapshot does not match the prepared image",
@@ -391,6 +463,7 @@ fn cold_install_op(image: &PreparedImage, firmware: &FirmwareExpectation) -> Res
         name: image.info.profile.clone(),
         bytes: image.bytes.clone(),
         expectation: firmware.clone(),
+        replace_single,
     })
 }
 
@@ -400,6 +473,7 @@ fn flash_one_xdp(
     image: &PreparedImage,
     snapshot: &FirmwareExpectation,
     table: XdpTable,
+    replace_single: bool,
     peer: &str,
 ) -> Result<String> {
     let name = &image.info.profile;
@@ -407,7 +481,7 @@ fn flash_one_xdp(
     let sz = image.bytes.len() as u64;
     log_line(peer, &format!("[xdp] `{name}`: {path} ({})", fmt_bytes(sz)));
 
-    let op = cold_install_op(image, snapshot)?;
+    let op = cold_install_op(image, snapshot, replace_single)?;
     // Transient espflash bootloader errors after HAL↔XDP fw switches; retry once.
     let outcome = {
         const ATTEMPTS: usize = 2;
@@ -662,6 +736,80 @@ pub fn disable_exec(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
         let g = lock(state)?;
         req(&g, &Command::DisableExec)?;
         Ok("OK disable exec".into())
+    })
+}
+
+#[derive(Serialize)]
+pub struct BatchReply {
+    boot_id: u32,
+    begin_tick: u64,
+    end_tick: u64,
+    execution_return: u32,
+    output: String,
+}
+
+/// Upload, invoke, and read one EXB2 buffer under the same device lock.
+pub fn exec_batch(state: &Mutex<AgentState>, input_hex: &str) -> Result<BatchReply> {
+    let input = decode_hex::<EXEC_BATCH_BYTES>(input_hex).context("decode EXB2 input")?;
+    anyhow::ensure!(
+        input.starts_with(b"EXB2\x02\0\x40\0"),
+        "invalid EXB2 header"
+    );
+    let g = lock(state)?;
+    anyhow::ensure!(
+        matches!(req(&g, &Command::ExecBatchReset)?, OkReply::ExecBatchReset),
+        "unexpected EXB2 reset reply"
+    );
+    for (chunk, data) in input_hex
+        .as_bytes()
+        .chunks(EXEC_BATCH_WRITE_MAX_BYTES * 2)
+        .enumerate()
+    {
+        let offset = (chunk * EXEC_BATCH_WRITE_MAX_BYTES) as u32;
+        let reply = req(&g, &Command::ExecBatchWrite { offset, data })
+            .with_context(|| format!("upload EXB2 offset {offset}"))?;
+        anyhow::ensure!(
+            matches!(reply, OkReply::ExecBatchWrite),
+            "unexpected EXB2 write reply"
+        );
+    }
+    let OkReply::ExecBatchInvoke {
+        boot_id,
+        begin_tick,
+        end_tick,
+        action,
+    } = req(&g, &Command::ExecBatchInvoke).context("EXB2 invocation outcome unknown")?
+    else {
+        bail!("unexpected EXB2 invoke reply");
+    };
+    anyhow::ensure!(
+        boot_id != 0 && begin_tick <= end_tick,
+        "invalid EXB2 execution clock"
+    );
+    let mut output = Vec::with_capacity(EXEC_BATCH_BYTES);
+    while output.len() < EXEC_BATCH_BYTES {
+        let count = EXEC_BATCH_READ_MAX_BYTES.min(EXEC_BATCH_BYTES - output.len());
+        let offset = output.len() as u32;
+        let OkReply::ExecBatchRead { blob } = req(
+            &g,
+            &Command::ExecBatchRead {
+                offset,
+                max_bytes: count as u32,
+            },
+        )
+        .with_context(|| format!("read EXB2 result at offset {offset} after invoke"))?
+        else {
+            bail!("unexpected EXB2 read reply");
+        };
+        anyhow::ensure!(blob.len() == count, "short EXB2 result at offset {offset}");
+        output.extend_from_slice(blob);
+    }
+    Ok(BatchReply {
+        boot_id,
+        begin_tick,
+        end_tick,
+        execution_return: action,
+        output: base64_encode(&output),
     })
 }
 

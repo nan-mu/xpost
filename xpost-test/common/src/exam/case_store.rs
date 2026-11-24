@@ -1,12 +1,14 @@
 //! Persist one case attempt and its evidence in the protocol database.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio_postgres::{Client, NoTls, Transaction};
+#[cfg(test)]
+use tokio_postgres::NoTls;
+use tokio_postgres::{Client, Transaction};
 use uuid::Uuid;
 
-use crate::config::PostgresConfig;
+use crate::{config::PostgresConfig, db::protocol};
 
 use super::case_capture::{Evidence, POST, PPS, PRE, Packet};
 use super::case_trace::Trace;
@@ -18,37 +20,23 @@ pub(super) fn hex(bytes: &[u8]) -> String {
 }
 
 pub(super) async fn connect(cfg: &PostgresConfig) -> Result<Client> {
-    let database = cfg
-        .protocol_dbname
-        .as_deref()
-        .context("case needs [postgres].protocol_dbname")?;
-    ensure!(
-        !database.is_empty() && database != cfg.dbname,
-        "case requires a separate protocol database"
-    );
-    let (client, connection) = tokio_postgres::Config::new()
-        .host(&cfg.host)
-        .port(cfg.port)
-        .dbname(database)
-        .user(&cfg.user)
-        .password(&cfg.password)
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .connect(NoTls)
-        .await
-        .context("connect case protocol database")?;
-    tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            log::warn!("case protocol database: {error}");
-        }
-    });
-    let row = client.query_one(
-        "SELECT to_regclass('bench.run') IS NOT NULL AND to_regclass('aot.case_switch') IS NOT NULL AND to_regclass('aot.case_trace_data') IS NOT NULL",
-        &[],
-    ).await?;
-    ensure!(
-        row.get::<_, bool>(0),
-        "case protocol database needs sql/protocol_v1.sql"
-    );
+    let mut client = protocol::connect(cfg).await?;
+    let tables = [
+        "bench.run",
+        "bench.condition",
+        "bench.artifact",
+        "bench.run_artifact",
+        "bench.clock",
+        "bench.capture",
+        "bench.packet_fact",
+        "bench.event_definition",
+        "aot.case_config",
+        "aot.case_switch",
+        "aot.case_trace_data",
+        "aot.case_event",
+    ]
+    .map(str::to_owned);
+    protocol::check(&mut client, &tables).await?;
     Ok(client)
 }
 
@@ -58,17 +46,24 @@ pub(super) struct Attempt {
 }
 
 impl Attempt {
-    pub async fn start(client: &mut Client, run: Uuid, phase: &str, profile: &str) -> Result<Self> {
+    pub async fn start(
+        client: &mut Client,
+        run: Uuid,
+        phase: &str,
+        profile: &str,
+        medium_id: Option<Uuid>,
+        retry_of: Option<Uuid>,
+        order: i32,
+    ) -> Result<Self> {
         let condition = Uuid::new_v4();
         let config = Uuid::new_v4();
         let tx = client.transaction().await?;
-        let parameters =
-            json!({ "port": 8080, "pps": PPS, "slots": [0,1], "versions": [2,1], "switches": 1 });
+        let parameters = json!({ "port": 8080, "pps": PPS, "slots": [0,1], "versions": [2,1], "switches": 1, "medium_id": medium_id, "retry_of": retry_of });
         tx.execute("INSERT INTO bench.condition(condition_id,experiment,protocol_version,parameters,planned_modes) VALUES($1,'case','1',$2,ARRAY['aot'])", &[&condition,&parameters]).await?;
         let pre = PRE.as_nanos().to_string();
         let post = POST.as_nanos().to_string();
         tx.execute("INSERT INTO aot.case_config(config_id,condition_id,instrumentation,profile_hash,target_pps,switch_count,switch_kind,quiesce_policy,pre_window_ns,post_window_ns,payload_bytes,source_mode,target_mode) VALUES($1,$2,'trace',$3,$4,1,'hot_publish','drop',$5::text::bench.u64,$6::text::bench.u64,40,'aot','aot')", &[&config,&condition,&profile,&PPS,&pre,&post]).await?;
-        tx.execute("INSERT INTO bench.run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit) VALUES($1,$2,$3,'aot','case','trace',$4,1,0,0,'running',$1,$5)", &[&run,&condition,&config,&phase,&RELEASE_COMMIT]).await?;
+        tx.execute("INSERT INTO bench.run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit) VALUES($1,$2,$3,'aot','case','trace',$4,1,0,$6,'running',$1,$5)", &[&run,&condition,&config,&phase,&RELEASE_COMMIT,&order]).await?;
         tx.commit().await?;
         Ok(Self { run, config })
     }
@@ -82,7 +77,12 @@ impl Attempt {
         let tx = client.transaction().await?;
         let issues = json!(result.issues);
         let boot = result.boot.map(|n| n.to_string());
-        tx.execute("UPDATE bench.run SET status=$2, issues=$3, boot_id=$4::text::bench.u64 WHERE run_id=$1 AND status='running'", &[&self.run,&if result.qualified() { "complete" } else { "failed" },&issues,&boot]).await?;
+        let updated = tx.execute("UPDATE bench.run SET status=$2, issues=$3, boot_id=$4::text::bench.u64 WHERE run_id=$1 AND status='running'", &[&self.run,&if result.qualified() { "complete" } else { "failed" },&issues,&boot]).await?;
+        ensure!(
+            updated == 1,
+            "case attempt {} has no running record to complete",
+            self.run
+        );
         if !result.preparation.is_empty() {
             self.artifact(
                 &tx,
@@ -107,6 +107,16 @@ impl Attempt {
             Some(data) => Some(self.capture(&tx, iface, data).await?),
             None => None,
         };
+        if let Some(receipt) = &result.freeze_receipt {
+            self.artifact(
+                &tx,
+                "case_freeze_receipt",
+                "application/json",
+                &serde_json::to_vec(receipt)?,
+                &json!({}),
+            )
+            .await?;
+        }
         if let Some(bytes) = &result.trace_bytes {
             let id = self
                 .artifact(
@@ -280,6 +290,7 @@ pub(super) struct Observation {
     pub boot: Option<u64>,
     pub capture: Option<Evidence>,
     pub trace_bytes: Option<Vec<u8>>,
+    pub freeze_receipt: Option<Value>,
     pub trace: Option<Trace>,
     pub switch: Option<Switch>,
     pub issues: Vec<String>,
@@ -311,6 +322,7 @@ impl Observation {
             serde_json::to_vec_pretty(&json!({
                 "run_id": run.to_string(), "boot_id": self.boot, "preparation": self.preparation,
                 "loaded_images": self.flash, "switch": self.switch, "issues": self.issues,
+                "freeze_receipt": self.freeze_receipt,
             }))?,
         )?;
         Ok(path)
@@ -364,7 +376,16 @@ mod tests {
         let (mut client, connection) = tokio_postgres::connect(&dsn, NoTls).await?;
         tokio::spawn(connection);
         let run = Uuid::new_v4();
-        let attempt = Attempt::start(&mut client, run, "qualification", &"a".repeat(64)).await?;
+        let attempt = Attempt::start(
+            &mut client,
+            run,
+            "qualification",
+            &"a".repeat(64),
+            None,
+            None,
+            0,
+        )
+        .await?;
         let packet = |index, version| Packet {
             index,
             offset: 24 + index * 98,
@@ -389,6 +410,7 @@ mod tests {
                 hz: 1_000_000,
                 packets: vec![packet(0, 2), packet(1, 1)],
             }),
+            freeze_receipt: None,
             trace_bytes: Some(vec![9, 8, 7]),
             trace: Some(Trace {
                 epoch: 2,
@@ -423,6 +445,11 @@ mod tests {
             flash: None,
         };
         attempt.finish(&mut client, &result, "fixture").await?;
+        let duplicate = attempt
+            .finish(&mut client, &result, "fixture")
+            .await
+            .unwrap_err();
+        assert!(duplicate.to_string().contains("no running record"));
         for (role, bytes) in [("tcpdump", vec![1, 2, 3]), ("dut_trace", vec![9, 8, 7])] {
             let row = client.query_one("SELECT a.original_bytes FROM bench.run_artifact r JOIN bench.artifact a USING(artifact_id) WHERE r.run_id=$1 AND r.role=$2", &[&run,&role]).await?;
             assert_eq!(row.get::<_, Vec<u8>>(0), bytes);

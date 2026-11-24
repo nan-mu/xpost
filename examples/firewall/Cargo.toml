@@ -64,6 +64,7 @@ esp-radio = { version = "0.18.0", path = "../../esp-radio", features = [
   "xdp",
 ] }
 xpost = { path = "../..", features = ["esp-radio"] }
+xpost-network-perf = { path = "../../xpost-perf/firmware", optional = true }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
 critical-section = "1.2.0"
 heapless = "0.8"
@@ -72,9 +73,8 @@ static_cell      = "2.1.1"
 
 [features]
 interp = ["xpost/interp"]
-# Formal firmware tags: xdp_cag → perf-metrics; xdp_t → perf-trace.
-perf-metrics = ["xpost/perf-counter", "xpost/perf-aggregate", "xpost/perf-gauge"]
-perf-trace = ["xpost/perf-counter", "xpost/perf-trace"]
+perf-metrics = ["dep:xpost-network-perf", "xpost/perf-report", "xpost/perf-counter", "xpost/perf-aggregate", "xpost/perf-gauge"]
+perf-trace = ["dep:xpost-network-perf", "xpost/perf-report", "xpost/perf-counter", "xpost/perf-trace"]
 perf-lookup = ["xpost/perf-lookup"]
 
 [build-dependencies]

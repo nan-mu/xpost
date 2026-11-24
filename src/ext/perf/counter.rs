@@ -162,12 +162,9 @@ impl Counter {
         let t = esp_hal::time::Instant::now()
             .duration_since_epoch()
             .as_micros() as u32;
-        let _ = self.block_since_us.compare_exchange(
-            0,
-            t.max(1),
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        );
+        let _ =
+            self.block_since_us
+                .compare_exchange(0, t.max(1), Ordering::Relaxed, Ordering::Relaxed);
     }
 
     #[inline]
@@ -255,30 +252,40 @@ impl Counter {
 
     #[inline]
     pub(crate) fn inc_inactive_skip(&self) {
+        #[cfg(feature = "perf-report")]
+        super::network::observe(super::network::Point::XdpFault, 1);
         self.bump_inactive_skip_raw();
         self.bump_runtime_error();
     }
 
     #[inline]
     pub(crate) fn inc_reentry(&self) {
+        #[cfg(feature = "perf-report")]
+        super::network::observe(super::network::Point::XdpFault, 2);
         self.bump_reentry_raw();
         self.bump_runtime_error();
     }
 
     #[inline]
     pub(crate) fn inc_stack_misalign(&self) {
+        #[cfg(feature = "perf-report")]
+        super::network::observe(super::network::Point::XdpFault, 3);
         self.bump_stack_misalign_raw();
         self.bump_runtime_error();
     }
 
     #[inline]
     pub(crate) fn inc_bad_md(&self) {
+        #[cfg(feature = "perf-report")]
+        super::network::observe(super::network::Point::XdpFault, 4);
         self.bump_bad_md_raw();
         self.bump_runtime_error();
     }
 
     #[inline]
     pub(crate) fn inc_helper_unresolved(&self) {
+        #[cfg(feature = "perf-report")]
+        super::network::observe(super::network::Point::XdpFault, 5);
         self.bump_helper_unresolved_raw();
         self.bump_runtime_error();
     }
@@ -314,7 +321,9 @@ pub(crate) fn inc_bad_md() {
 }
 #[inline]
 pub(crate) fn inc_helper_unresolved() {
-    crate::xdp::ingress::XDP_PROG.counter.inc_helper_unresolved();
+    crate::xdp::ingress::XDP_PROG
+        .counter
+        .inc_helper_unresolved();
 }
 #[inline]
 pub(crate) fn inc_helper_map() {
@@ -322,5 +331,7 @@ pub(crate) fn inc_helper_map() {
 }
 #[inline]
 pub(crate) fn inc_pool_drop_misalign() {
-    crate::xdp::ingress::XDP_PROG.counter.inc_pool_drop_misalign();
+    crate::xdp::ingress::XDP_PROG
+        .counter
+        .inc_pool_drop_misalign();
 }

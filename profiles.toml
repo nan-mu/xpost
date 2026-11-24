@@ -84,7 +84,7 @@ build = { cwd = "examples/firewall", command = ["cargo", "build", "--release", "
 xdp = ["firewall"]
 
 # ---------------------------------------------------------------------------
-# HAL CAGT arms (no cold XDP; app-layer policy + local CAGT wire report)
+# HAL network carriers (app-layer policy; Metrics and Trace sessions)
 # ---------------------------------------------------------------------------
 
 [[fw]]

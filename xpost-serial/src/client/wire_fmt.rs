@@ -12,16 +12,17 @@ use crate::{
         reply::{
             parse_clear_map_reply, parse_clear_perf_reply, parse_disable_exec_reply,
             parse_disable_xdp_reply, parse_enable_exec_reply, parse_enable_xdp_reply,
-            parse_err_reply, parse_finish_reply, parse_get_map_reply, parse_get_perf_reply,
-            parse_get_xdp_status_reply, parse_init_reply, parse_map_err_reply,
-            parse_perf_arm_reply, parse_perf_err_reply, parse_perf_freeze_reply,
-            parse_perf_prepare_reply, parse_perf_read_reply, parse_perf_release_reply,
-            parse_ping_reply, parse_syntax_err_reply, parse_update_map_reply,
-            parse_xdp_flash_reply, parse_xdp_switch_reply,
+            parse_err_reply, parse_exec_batch_invoke_reply, parse_exec_batch_read_reply,
+            parse_exec_batch_reset_reply, parse_exec_batch_write_reply, parse_finish_reply,
+            parse_get_map_reply, parse_get_perf_reply, parse_get_xdp_status_reply,
+            parse_init_reply, parse_map_err_reply, parse_perf_arm_reply, parse_perf_err_reply,
+            parse_perf_freeze_reply, parse_perf_prepare_reply, parse_perf_read_reply,
+            parse_perf_release_reply, parse_ping_reply, parse_syntax_err_reply,
+            parse_update_map_reply, parse_xdp_flash_reply, parse_xdp_switch_reply,
         },
     },
     r#type::{
-        command::{Command, PerfVariant},
+        command::{Command, PerfVariant, is_exec_batch_hex},
         reply::{MapError, OkReply, PerfError, ServerError, SyntaxError},
     },
 };
@@ -34,6 +35,19 @@ impl fmt::Display for Command<'_> {
             Self::DisableXdp => f.write_str("disable xdp"),
             Self::EnableExec => f.write_str("enable exec"),
             Self::DisableExec => f.write_str("disable exec"),
+            Self::ExecBatchReset => f.write_str("exec batch reset"),
+            Self::ExecBatchWrite { offset, data } => {
+                write!(f, "exec batch write {offset} ")?;
+                if is_exec_batch_hex(data) {
+                    write_bytes(f, data)
+                } else {
+                    f.write_str("-")
+                }
+            }
+            Self::ExecBatchInvoke => f.write_str("exec batch invoke"),
+            Self::ExecBatchRead { offset, max_bytes } => {
+                write!(f, "exec batch read {offset} {max_bytes}")
+            }
             Self::ClearMap { name } => {
                 f.write_str("clear map ")?;
                 f.write_str(name)
@@ -99,6 +113,10 @@ impl<'a> TryFrom<(&'a [u8], &Command<'_>)> for OkReply<'a> {
             Command::DisableXdp => parse_disable_xdp_reply(raw),
             Command::EnableExec => parse_enable_exec_reply(raw),
             Command::DisableExec => parse_disable_exec_reply(raw),
+            Command::ExecBatchReset => parse_exec_batch_reset_reply(raw),
+            Command::ExecBatchWrite { .. } => parse_exec_batch_write_reply(raw),
+            Command::ExecBatchInvoke => parse_exec_batch_invoke_reply(raw),
+            Command::ExecBatchRead { .. } => parse_exec_batch_read_reply(raw),
             Command::ClearMap { .. } => parse_clear_map_reply(raw),
             Command::ClearPerf => parse_clear_perf_reply(raw),
             Command::UpdateMap { .. } => parse_update_map_reply(raw),

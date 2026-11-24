@@ -44,14 +44,15 @@
 //! | GET | `/v1/status` | — | `idle` |
 //! | GET | `/v1/dut_status` | — | UART `ready` / `booting` (uses `ping`) |
 //! | GET | `/v1/get/init` | — | host wait for unsolicited `OK init` |
-//! | POST | `/v1/flash/fw` | `{"name"}` | build firmware, preflight existing `fw.xdp[]` artifacts, then flash and install cached containers |
-//! | POST | `/v1/flash/xdp` | `{"name","slot"?}` | no slot: validate an existing artifact, verify device firmware, install the cached container, and reset. `slot`: copy an installed image without reset |
+//! | POST | `/v1/flash/fw` | `{"name","expected_sha256"?}` | Build and verify firmware and linked containers. Flash the retained bytes. |
+//! | POST | `/v1/flash/xdp` | `{"name","slot"?,"firmware"?,"expected_sha256"?}` | Check identity and install. Provide both firmware fields to replace the only cold image. Provide a slot to preload. |
 //! | POST | `/v1/clear/xdp` | `{"name": "*"\|"prog"\|["a","b"]}` | remove image(s); `*`=all; missing name → err |
 //! | GET | `/v1/get/xdp` | — | list installed XDP images |
 //! | POST | `/v1/enable/xdp` | `{}` | App `EnableXdp` |
 //! | POST | `/v1/disable/xdp` | `{}` | App `DisableXdp` |
 //! | POST | `/v1/xdp/switch` | `{"slot","generation","policy"}` | App `xdp switch`; policy `drop` or `pass` |
 //! | GET | `/v1/xdp/status` | — | App `get xdp` boot id and slot roles |
+//! | POST | `/v1/exec/batch` | `{"input_hex"}` | Upload, invoke, and read one 8258 B EXB2 buffer. |
 //! | POST | `/v1/enable/exec` | `{}` | App `EnableExec` |
 //! | POST | `/v1/disable/exec` | `{}` | App `DisableExec` |
 //! | POST | `/v1/get/finish` | `{}` | host-only wait for `OK finish` |

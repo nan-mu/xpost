@@ -16,7 +16,7 @@
 //!
 //! | Name | What | Postgres tables |
 //! |------|------|-----------------|
-//! | `medium` | Medium readiness check | — |
+//! | `medium` | 29-cell campaign after preflight | Dedicated protocol database |
 //! | `just_drop` | Formal XDP PPS grid + Trace | `exam` + `just_drop_*` + `xdp_*` / `trace_event` |
 //! | `just_tx` | Formal XDP pps grid RTT + Trace | `exam` + `just_tx_config`(sent/ok) / `just_tx_data` + perf |
 //! | `firewall` | Hash blacklist size×hit/miss PPS grid + Trace | `exam` + `firewall_*` + perf |
@@ -70,6 +70,8 @@ pub struct FileConfig {
     /// Ordered experiments for bare `./xpost-test`.
     #[serde(default = "default_run")]
     pub run: Vec<String>,
+    #[serde(default)]
+    pub medium_resume_id: Option<uuid::Uuid>,
     pub postgres: PostgresConfig,
     pub probe: ProbeConfig,
     #[serde(rename = "dut")]
@@ -197,24 +199,21 @@ impl Default for FirewallConfig {
     }
 }
 
-/// Knobs for exec_bench formal (`exec_bench.toml`).
+/// EXB2 modes. Legacy `arms` remains a read alias.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExecBenchConfig {
-    #[serde(default = "default_true")]
-    pub formal: bool,
-    #[serde(default = "default_exec_arms")]
-    pub arms: Vec<String>,
+    #[serde(default = "default_exec_modes", alias = "arms")]
+    pub modes: Vec<String>,
 }
 
-fn default_exec_arms() -> Vec<String> {
-    vec!["ebpf".into(), "hal".into()]
+fn default_exec_modes() -> Vec<String> {
+    ["hal", "aot", "jit", "rbpf"].map(str::to_owned).to_vec()
 }
 
 impl Default for ExecBenchConfig {
     fn default() -> Self {
         Self {
-            formal: true,
-            arms: default_exec_arms(),
+            modes: default_exec_modes(),
         }
     }
 }
@@ -255,6 +254,8 @@ struct DefaultFile {
     version: String,
     #[serde(default = "default_run")]
     run: Vec<String>,
+    #[serde(default)]
+    medium_resume_id: Option<uuid::Uuid>,
     postgres: PostgresConfig,
     probe: ProbeConfig,
     #[serde(rename = "dut")]
@@ -302,6 +303,7 @@ impl FileConfig {
         let cfg = Self {
             version: def.version,
             run: def.run,
+            medium_resume_id: def.medium_resume_id,
             postgres: def.postgres,
             probe: def.probe,
             target: def.target,
@@ -323,16 +325,16 @@ impl FileConfig {
             && self
                 .run
                 .iter()
-                .any(|name| matches!(name.as_str(), "medium" | "medium-plan"))
+                .any(|name| matches!(name.as_str(), "medium" | "medium-plan" | "medium-preflight"))
         {
-            bail!("medium and medium-plan each require a single-entry run list");
+            bail!("medium selections require a single-entry run list");
         }
         for name in &self.run {
             match name.as_str() {
-                "medium" | "medium-plan" | "just_tx" | "just_drop" | "firewall" | "exec_bench"
-                | "lookup" | "dev" | "formal-clear" | "case" | "case-smoke" => {}
+                "medium" | "medium-plan" | "medium-preflight" | "just_tx" | "just_drop"
+                | "firewall" | "exec_bench" | "lookup" | "dev" | "formal-clear" => {}
                 other => bail!(
-                    "unknown experiment {other:?} in default.toml `run`; use medium / medium-plan / just_tx / just_drop / firewall / exec_bench / lookup / dev / formal-clear / case / case-smoke"
+                    "unknown experiment {other:?} in default.toml `run`; use medium / medium-plan / medium-preflight / just_tx / just_drop / firewall / exec_bench / lookup / dev / formal-clear"
                 ),
             }
         }
@@ -381,14 +383,16 @@ fn parse_mac(s: &str) -> Result<[u8; 6]> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn retired_hot_swap_is_rejected_by_config_validation() {
-        let mut cfg = super::FileConfig::embedded().unwrap();
-        cfg.run = vec!["hot_swap".into()];
-        assert!(
-            cfg.validate()
-                .unwrap_err()
-                .to_string()
-                .contains("unknown experiment")
-        );
+    fn retired_case_selections_are_rejected_before_dispatch() {
+        for selection in ["hot_swap", "case-smoke"] {
+            let mut cfg = super::FileConfig::embedded().unwrap();
+            cfg.run = vec![selection.into()];
+            assert!(
+                cfg.validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unknown experiment")
+            );
+        }
     }
 }

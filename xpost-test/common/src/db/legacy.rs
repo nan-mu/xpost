@@ -46,6 +46,7 @@ pub struct TraceSnap {
     pub events: Vec<TraceEvent>,
     /// Ring overflow the firmware reported. Non-zero means the timeline is
     /// short, so a flame graph built from it understates the run.
+    #[cfg(test)]
     pub dropped: u32,
 }
 
@@ -131,6 +132,7 @@ pub fn project(report: &DecodedReport) -> LegacyReport {
             .collect();
         out.trace = Some(TraceSnap {
             events,
+            #[cfg(test)]
             dropped: report.events_dropped.min(u32::MAX as u64) as u32,
         });
     }

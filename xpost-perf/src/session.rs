@@ -7,10 +7,8 @@
 //! An end event from an older epoch therefore cannot close a span in the new
 //! one.
 
-use crate::trace::{
-    FLAG_INCOMPLETE, TRACE_EVENT_LEN, TRACE_HEADER_LEN, TraceEvent, TraceHeader, TraceKind,
-    TraceLog,
-};
+use crate::snapshot::{self, Boundary, Snapshot};
+use crate::trace::{TRACE_EVENT_LEN, TRACE_HEADER_LEN, TraceEvent, TraceHeader, TraceLog};
 
 /// Raw SHA-256 bytes. The database stores the same value as 64 hex characters.
 pub const PROFILE_HASH_LEN: usize = 32;
@@ -42,6 +40,10 @@ pub enum PerfError {
     OffsetOutOfRange,
     /// The epoch counter cannot advance without wrapping.
     EpochExhausted,
+    /// The firmware does not have storage for the requested variant.
+    Unsupported,
+    /// A complete counter snapshot could not be encoded.
+    InvalidSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,7 +88,7 @@ pub struct FreezeReport {
 
 /// The run currently installed on one device.
 #[derive(Clone, Debug)]
-pub struct PerfSession<const N: usize> {
+pub struct PerfSession<const N: usize, const M: usize = 0> {
     phase: Phase,
     epoch: u32,
     boot_id: u64,
@@ -97,11 +99,13 @@ pub struct PerfSession<const N: usize> {
     profile_hash: [u8; PROFILE_HASH_LEN],
     variant: Variant,
     arm_tick: u64,
-    freeze_tick: u64,
     log: TraceLog<N>,
+    metrics: [u8; M],
+    metrics_len: usize,
+    frozen_digest: u32,
 }
 
-impl<const N: usize> PerfSession<N> {
+impl<const N: usize, const M: usize> PerfSession<N, M> {
     pub const fn new(boot_id: u64, tick_hz: u64, tick_bits: u8, dictionary_version: u16) -> Self {
         Self {
             phase: Phase::Idle,
@@ -114,8 +118,10 @@ impl<const N: usize> PerfSession<N> {
             profile_hash: [0; PROFILE_HASH_LEN],
             variant: Variant::Metrics,
             arm_tick: 0,
-            freeze_tick: 0,
             log: TraceLog::new(),
+            metrics: [0; M],
+            metrics_len: 0,
+            frozen_digest: 0,
         }
     }
 
@@ -125,6 +131,30 @@ impl<const N: usize> PerfSession<N> {
 
     pub const fn boot_id(&self) -> u64 {
         self.boot_id
+    }
+
+    /// Set a boot identity before the first prepare.
+    pub fn set_boot_id(&mut self, boot_id: u64) -> Result<(), PerfError> {
+        if self.epoch != 0 || self.boot_id != 0 || boot_id == 0 {
+            return Err(PerfError::WrongPhase);
+        }
+        self.boot_id = boot_id;
+        Ok(())
+    }
+
+    /// The current Trace identity while recording.
+    pub fn active_trace(&self) -> Option<(u32, &[u8; 16])> {
+        (self.phase == Phase::Armed && self.variant == Variant::Trace)
+            .then_some((self.epoch, &self.run_uuid))
+    }
+
+    /// The current run identity while either variant records.
+    pub fn active_run(&self) -> Option<(u32, &[u8; 16])> {
+        (self.phase == Phase::Armed).then_some((self.epoch, &self.run_uuid))
+    }
+
+    pub const fn variant(&self) -> Variant {
+        self.variant
     }
 
     /// Stamp of the open run. `None` after `release` and before the next `prepare`.
@@ -150,24 +180,46 @@ impl<const N: usize> PerfSession<N> {
         if self.phase != Phase::Idle {
             return Err(PerfError::Busy);
         }
+        if (variant == Variant::Metrics && M == 0) || (variant == Variant::Trace && N == 0) {
+            return Err(PerfError::Unsupported);
+        }
         let epoch = self.epoch.checked_add(1).ok_or(PerfError::EpochExhausted)?;
         self.epoch = epoch;
         self.run_uuid = run_uuid;
         self.profile_hash = profile_hash;
         self.variant = variant;
         self.arm_tick = 0;
-        self.freeze_tick = 0;
         self.log = TraceLog::new();
+        self.metrics_len = 0;
         self.phase = Phase::Prepared;
         Ok((epoch, self.boot_id))
     }
 
-    /// Open recording for `epoch`. Returns the device tick that was stored.
+    /// Open Trace recording for `epoch`.
     pub fn arm(&mut self, epoch: u32, tick: u64) -> Result<u64, PerfError> {
         self.gate(Phase::Prepared, epoch)?;
+        if self.variant != Variant::Trace {
+            return Err(PerfError::WrongPhase);
+        }
+        Ok(self.open(tick))
+    }
+
+    /// Capture the Metrics baseline and open the window.
+    pub fn arm_metrics<'a>(
+        &mut self,
+        epoch: u32,
+        tick: u64,
+        counters: impl ExactSizeIterator<Item = (&'a str, u64)>,
+    ) -> Result<u64, PerfError> {
+        self.gate(Phase::Prepared, epoch)?;
+        self.capture_metrics(Boundary::Arm, tick, counters)?;
+        Ok(self.open(tick))
+    }
+
+    fn open(&mut self, tick: u64) -> u64 {
         self.arm_tick = tick;
         self.phase = Phase::Armed;
-        Ok(tick)
+        tick
     }
 
     /// Store one trace event. A mismatched epoch stores nothing.
@@ -180,20 +232,64 @@ impl<const N: usize> PerfSession<N> {
         Ok(())
     }
 
-    /// Close recording and hold the export until `release`.
+    /// Close Trace recording and hold the export until `release`.
     pub fn freeze(&mut self, epoch: u32, tick: u64) -> Result<FreezeReport, PerfError> {
         self.gate(Phase::Armed, epoch)?;
-        if self.variant == Variant::Trace {
-            self.log.freeze();
+        if self.variant != Variant::Trace {
+            return Err(PerfError::WrongPhase);
         }
-        self.freeze_tick = tick;
+        self.log.freeze();
+        Ok(self.close(tick))
+    }
+
+    /// Capture the final Metrics counters and hold both snapshots.
+    pub fn freeze_metrics<'a>(
+        &mut self,
+        epoch: u32,
+        tick: u64,
+        counters: impl ExactSizeIterator<Item = (&'a str, u64)>,
+    ) -> Result<FreezeReport, PerfError> {
+        self.gate(Phase::Armed, epoch)?;
+        if tick < self.arm_tick {
+            return Err(PerfError::InvalidSnapshot);
+        }
+        self.capture_metrics(Boundary::Freeze, tick, counters)?;
+        Ok(self.close(tick))
+    }
+
+    fn capture_metrics<'a>(
+        &mut self,
+        boundary: Boundary,
+        tick: u64,
+        counters: impl ExactSizeIterator<Item = (&'a str, u64)>,
+    ) -> Result<(), PerfError> {
+        if self.variant != Variant::Metrics {
+            return Err(PerfError::WrongPhase);
+        }
+        let snapshot = Snapshot {
+            boundary,
+            run_uuid: self.run_uuid,
+            stamp: self.stamp().expect("a Metrics epoch is installed"),
+            tick,
+            tick_hz: u32::try_from(self.tick_hz).map_err(|_| PerfError::InvalidSnapshot)?,
+            tick_bits: self.tick_bits,
+            pfr: &[],
+        };
+        let len = snapshot::encode(&mut self.metrics[self.metrics_len..], snapshot, counters)
+            .ok_or(PerfError::InvalidSnapshot)?;
+        self.metrics_len += len;
+        Ok(())
+    }
+
+    fn close(&mut self, tick: u64) -> FreezeReport {
         self.phase = Phase::Frozen;
-        Ok(FreezeReport {
+        self.frozen_digest = self.digest();
+        FreezeReport {
             freeze_tick: tick,
             flags: self.log.flags(),
             len: self.export_len(),
-            digest: self.digest(),
-        })
+            digest: self.frozen_digest,
+        }
     }
 
     /// Copy one chunk of the frozen export. The same offset returns the same bytes.
@@ -219,7 +315,7 @@ impl<const N: usize> PerfSession<N> {
         Ok(ReadChunk {
             copied,
             total,
-            digest: self.digest(),
+            digest: self.frozen_digest,
         })
     }
 
@@ -245,10 +341,12 @@ impl<const N: usize> PerfSession<N> {
     }
 
     fn export_len(&self) -> u32 {
-        if self.variant != Variant::Trace {
-            return 0;
+        match self.variant {
+            Variant::Metrics => self.metrics_len as u32,
+            Variant::Trace => {
+                (TRACE_HEADER_LEN + self.log.written() as usize * TRACE_EVENT_LEN) as u32
+            }
         }
-        (TRACE_HEADER_LEN + self.log.written() as usize * TRACE_EVENT_LEN) as u32
     }
 
     fn header_bytes(&self) -> [u8; TRACE_HEADER_LEN] {
@@ -272,8 +370,11 @@ impl<const N: usize> PerfSession<N> {
 
     fn digest(&self) -> u32 {
         let mut hash = FNV_OFFSET;
-        if self.variant != Variant::Trace {
-            return hash;
+        if self.variant == Variant::Metrics {
+            return self.metrics[..self.metrics_len]
+                .iter()
+                .copied()
+                .fold(hash, fnv_byte);
         }
         for byte in self.header_bytes() {
             hash = fnv_byte(hash, byte);
@@ -290,6 +391,11 @@ impl<const N: usize> PerfSession<N> {
     }
 
     fn copy_export(&self, offset: u32, out: &mut [u8]) {
+        if self.variant == Variant::Metrics {
+            let offset = offset as usize;
+            out.copy_from_slice(&self.metrics[offset..offset + out.len()]);
+            return;
+        }
         let header = self.header_bytes();
         let mut filled = 0usize;
         let offset = offset as usize;
@@ -324,6 +430,7 @@ fn fnv_byte(hash: u32, byte: u8) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::{FLAG_INCOMPLETE, TraceKind};
 
     fn session() -> PerfSession<16> {
         PerfSession::new(0xB007, 16_000_000, 54, 1)
@@ -346,7 +453,11 @@ mod tests {
 
     fn arm_trace(session: &mut PerfSession<16>, epoch_hint: u32) -> u32 {
         let (epoch, boot) = session
-            .prepare([9; 16], Variant::Trace, [epoch_hint as u8; PROFILE_HASH_LEN])
+            .prepare(
+                [9; 16],
+                Variant::Trace,
+                [epoch_hint as u8; PROFILE_HASH_LEN],
+            )
             .unwrap();
         assert_eq!(boot, 0xB007);
         assert_eq!(session.arm(epoch, 100).unwrap(), 100);
@@ -378,7 +489,7 @@ mod tests {
         );
         session.release(epoch).unwrap();
         let (next, _) = session
-            .prepare([1; 16], Variant::Metrics, [2; PROFILE_HASH_LEN])
+            .prepare([1; 16], Variant::Trace, [2; PROFILE_HASH_LEN])
             .unwrap();
         assert_eq!(next, epoch + 1);
     }

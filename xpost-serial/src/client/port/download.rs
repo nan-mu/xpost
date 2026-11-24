@@ -48,6 +48,7 @@ pub struct Downloader {
     usb: UsbPortInfo,
     chip: Chip,
     baud: u32,
+    after_write: ResetAfterOperation,
 }
 
 impl Downloader {
@@ -56,14 +57,21 @@ impl Downloader {
         usb: &UsbPortInfo,
         chip: Chip,
         baud: u32,
+        keep_stub: bool,
     ) -> io::Result<Self> {
-        let flasher = connect_flasher(name, usb, chip, baud)?;
+        let after_write = if keep_stub {
+            ResetAfterOperation::NoResetNoStub
+        } else {
+            ResetAfterOperation::HardReset
+        };
+        let flasher = connect_flasher(name, usb, chip, baud, after_write)?;
         Ok(Self {
             flasher: Some(flasher),
             name: name.to_string(),
             usb: usb.clone(),
             chip,
             baud,
+            after_write,
         })
     }
 
@@ -79,7 +87,11 @@ impl Downloader {
         // still held → EBUSY on macOS USB-JTAG.
         self.flasher = None;
         self.flasher = Some(connect_flasher(
-            &self.name, &self.usb, self.chip, self.baud,
+            &self.name,
+            &self.usb,
+            self.chip,
+            self.baud,
+            self.after_write,
         )?);
         Ok(())
     }
@@ -117,6 +129,18 @@ impl Downloader {
 
         self.reconnect()?;
         self.write_bin_verified(PART_TABLE_OFFSET, part_bin)?;
+        Ok(())
+    }
+
+    /// Write and read back an XDP image on the attested download connection.
+    pub(crate) fn write_xdp_verified(&mut self, addr: u32, data: &[u8]) -> io::Result<()> {
+        self.flasher()?
+            .write_bin_to_flash(addr, data, &mut DefaultProgressCallback)
+            .map_err(ext)?;
+        let read = self.read_flash(addr, data.len() as u32)?;
+        if read != data {
+            return Err(io::Error::other("XDP image differs on readback"));
+        }
         Ok(())
     }
 
@@ -174,8 +198,7 @@ impl Downloader {
     /// Hard-reset to app and release the port.
     pub fn reset_to_app(mut self) -> io::Result<()> {
         let result = if let Some(mut flasher) = self.flasher.take() {
-            let chip = flasher.chip();
-            flasher.connection().reset_after(true, chip).map_err(ext)
+            flasher.connection().reset().map_err(ext)
         } else {
             Ok(())
         };
@@ -184,7 +207,13 @@ impl Downloader {
     }
 }
 
-fn connect_flasher(name: &str, usb: &UsbPortInfo, chip: Chip, baud: u32) -> io::Result<Flasher> {
+fn connect_flasher(
+    name: &str,
+    usb: &UsbPortInfo,
+    chip: Chip,
+    baud: u32,
+    after_write: ResetAfterOperation,
+) -> io::Result<Flasher> {
     debug!("opening serial {name} for download");
     let serial = serialport::new(name, BAUD)
         .flow_control(serialport::FlowControl::None)
@@ -195,13 +224,7 @@ fn connect_flasher(name: &str, usb: &UsbPortInfo, chip: Chip, baud: u32) -> io::
     let before = match chip {
         Chip::Esp32c3 => ResetBeforeOperation::UsbReset,
     };
-    let connection = Connection::new(
-        serial,
-        usb.clone(),
-        ResetAfterOperation::HardReset,
-        before,
-        baud,
-    );
+    let connection = Connection::new(serial, usb.clone(), after_write, before, baud);
     let flasher = Flasher::connect(
         connection,
         true,

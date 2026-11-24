@@ -138,11 +138,20 @@ impl Port {
     /// Blocks on the gate until any App [`UartSession`] is dropped (after
     /// interrupt/timeout abort).
     pub(crate) fn open_download(&self) -> io::Result<DownloadSession<'_>> {
+        self.open_download_mode(false)
+    }
+
+    /// Retain the bootloader and exclusive USB handle through write and readback.
+    pub(crate) fn open_download_for_install(&self) -> io::Result<DownloadSession<'_>> {
+        self.open_download_mode(true)
+    }
+
+    fn open_download_mode(&self, keep_stub: bool) -> io::Result<DownloadSession<'_>> {
         let gate = self
             .gate
             .lock()
             .map_err(|_| std::io::Error::other("port gate poisoned"))?;
-        let dl = Downloader::connect(&self.name, &self.usb, self.chip, self.baud)?;
+        let dl = Downloader::connect(&self.name, &self.usb, self.chip, self.baud, keep_stub)?;
         Ok(DownloadSession { _gate: gate, dl })
     }
 }

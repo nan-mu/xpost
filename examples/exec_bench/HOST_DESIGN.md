@@ -1,5 +1,8 @@
 # exec_bench — host-side design
 
+Historical design for the 32-byte workload carrier. See [EXB2 firmware](README.md)
+for current builds and supported diagnostics.
+
 Firmware is an **opaque carrier**: `SerialHandler` + map/perf/exec verbs.
 Workload opcodes and buffer layouts are **not** App/serial types — they are
 interpreted by the XDP image (or HAL `run_hal`) and by **xpost-test parsing**

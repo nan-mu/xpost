@@ -31,11 +31,63 @@ struct MediumPreflight {
 }
 
 #[derive(Deserialize)]
-struct DeploymentReport {
-    release: String,
+pub struct DeploymentReport {
+    pub release: String,
     required: usize,
     deployments: Vec<serde_json::Value>,
     issues: Vec<String>,
+    #[serde(default)]
+    pub prepared: Vec<PreparedDeployment>,
+    #[serde(default)]
+    pub hal_firmware: Vec<FirmwareIdentity>,
+}
+
+#[derive(Deserialize)]
+pub struct PreparedDeployment {
+    pub program: String,
+    pub mode: String,
+    pub profile: String,
+    pub slot: u8,
+    #[serde(flatten)]
+    pub firmware: FirmwareIdentity,
+}
+
+#[derive(Deserialize)]
+pub struct FirmwareIdentity {
+    pub firmware_profile: String,
+    pub firmware_sha256: String,
+}
+
+#[derive(Deserialize)]
+struct ExecBatchResponse {
+    ok: bool,
+    result: Option<ExecBatchWire>,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExecBatchWire {
+    boot_id: u32,
+    begin_tick: u64,
+    end_tick: u64,
+    execution_return: u32,
+    output: String,
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+pub struct PerfFreeze {
+    pub tick: u64,
+    pub flags: u32,
+    total: usize,
+    digest: u32,
+}
+
+pub struct ExecBatch {
+    pub boot_id: u32,
+    pub begin_tick: u64,
+    pub end_tick: u64,
+    pub execution_return: u32,
+    pub output: Vec<u8>,
 }
 
 /// `GET /v1/get/map/{name}` frozen JSON body (fields we read).
@@ -70,7 +122,7 @@ impl AgentClient {
         Ok(())
     }
 
-    pub async fn medium_preflight(&self) -> Result<()> {
+    pub async fn medium_preflight(&self) -> Result<DeploymentReport> {
         let response: MediumPreflight = self
             .http
             .get(format!("{}/v1/preflight/medium", self.base))
@@ -92,7 +144,7 @@ impl AgentClient {
             report.required,
             report.issues.join("\n")
         );
-        Ok(())
+        Ok(report)
     }
 
     pub async fn preflight_xdp(&self, name: &str) -> Result<String> {
@@ -108,12 +160,44 @@ impl AgentClient {
         Ok(result.message)
     }
 
-    pub async fn trace_prepare(&self, run: uuid::Uuid, profile: &str) -> Result<(u32, u64)> {
+    pub async fn exb2(&self, input_hex: &str) -> Result<ExecBatch> {
+        let response: ExecBatchResponse = self
+            .http
+            .post(format!("{}/v1/exec/batch", self.base))
+            .json(&serde_json::json!({ "input_hex": input_hex }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        anyhow::ensure!(
+            response.ok,
+            "{}",
+            response.message.as_deref().unwrap_or("EXB2 request failed")
+        );
+        let wire = response
+            .result
+            .context("Agent EXB2 response lacks a result")?;
+        Ok(ExecBatch {
+            boot_id: wire.boot_id,
+            begin_tick: wire.begin_tick,
+            end_tick: wire.end_tick,
+            execution_return: wire.execution_return,
+            output: STANDARD.decode(wire.output)?,
+        })
+    }
+
+    pub async fn perf_prepare(
+        &self,
+        run: uuid::Uuid,
+        profile: &str,
+        variant: &str,
+    ) -> Result<(u32, u64)> {
         let reply = self
             .post_json(
                 "/v1/perf/prepare",
                 &serde_json::json!({
-                    "uuid": run.simple().to_string(), "profile": profile, "variant": "trace"
+                    "uuid": run.simple().to_string(), "profile": profile, "variant": variant
                 }),
             )
             .await?;
@@ -123,22 +207,30 @@ impl AgentClient {
         ))
     }
 
-    pub async fn trace_arm(&self, epoch: u32) -> Result<u64> {
+    pub async fn perf_arm(&self, epoch: u32) -> Result<u64> {
         let reply = self
             .post_json("/v1/perf/arm", &serde_json::json!({ "epoch": epoch }))
             .await?;
         Ok(perf_field(&reply, "tick")?.parse()?)
     }
 
-    pub async fn trace_freeze_read(&self, epoch: u32) -> Result<Vec<u8>> {
+    pub async fn perf_freeze(&self, epoch: u32) -> Result<PerfFreeze> {
         let frozen = self
             .post_json("/v1/perf/freeze", &serde_json::json!({ "epoch": epoch }))
             .await?;
-        let total: usize = perf_field(&frozen, "len")?.parse()?;
-        let digest: u32 = perf_field(&frozen, "digest")?.parse()?;
+        Ok(PerfFreeze {
+            tick: perf_field(&frozen, "tick")?.parse()?,
+            flags: perf_field(&frozen, "flags")?.parse()?,
+            total: perf_field(&frozen, "len")?.parse()?,
+            digest: perf_field(&frozen, "digest")?.parse()?,
+        })
+    }
+
+    pub async fn perf_read(&self, epoch: u32, frozen: PerfFreeze) -> Result<Vec<u8>> {
+        let PerfFreeze { total, digest, .. } = frozen;
         anyhow::ensure!(
             (57..=64 * 1024).contains(&total),
-            "invalid Trace export length {total}"
+            "invalid perf export length {total}"
         );
         let mut bytes = Vec::with_capacity(total);
         while bytes.len() < total {
@@ -153,25 +245,25 @@ impl AgentClient {
             anyhow::ensure!(
                 perf_field(&part, "total")?.parse::<usize>()? == total
                     && perf_field(&part, "digest")?.parse::<u32>()? == digest,
-                "Trace identity changed during export"
+                "perf identity changed during export"
             );
             let chunk = STANDARD.decode(perf_field(&part, "b64")?)?;
             anyhow::ensure!(
                 !chunk.is_empty()
                     && chunk.len() == perf_field(&part, "n")?.parse::<usize>()?
                     && bytes.len() + chunk.len() <= total,
-                "invalid Trace export chunk"
+                "invalid perf export chunk"
             );
             bytes.extend_from_slice(&chunk);
         }
         let observed_digest = bytes.iter().fold(0x811c9dc5_u32, |hash, byte| {
             (hash ^ u32::from(*byte)).wrapping_mul(0x01000193)
         });
-        anyhow::ensure!(observed_digest == digest, "Trace export digest mismatch");
+        anyhow::ensure!(observed_digest == digest, "perf export digest mismatch");
         Ok(bytes)
     }
 
-    pub async fn trace_release(&self, epoch: u32) -> Result<()> {
+    pub async fn perf_release(&self, epoch: u32) -> Result<()> {
         self.post_json("/v1/perf/release", &serde_json::json!({ "epoch": epoch }))
             .await?;
         Ok(())
@@ -187,21 +279,26 @@ impl AgentClient {
         Ok(())
     }
 
-    pub async fn flash_fw_evidence(&self, name: &str) -> Result<serde_json::Value> {
-        self.post_response("/v1/flash/fw", &serde_json::json!({ "name": name }))
-            .await?
-            .flash
-            .context("Agent did not return the flashed firmware identity")
+    pub async fn flash_fw_evidence(
+        &self,
+        name: &str,
+        expected_sha256: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        self.post_response(
+            "/v1/flash/fw",
+            &serde_json::json!({ "name": name, "expected_sha256": expected_sha256 }),
+        )
+        .await?
+        .flash
+        .context("Agent did not return the flashed firmware identity")
     }
 
-    /// Install an existing XDP artifact through `POST /v1/flash/xdp`.
-    /// The Agent validates it against the existing linked firmware and caches it.
-    /// This operation does not build firmware or XDP.
-    /// The device resets.
-    pub async fn flash_xdp(&self, name: &str) -> Result<()> {
-        let body = serde_json::json!({ "name": name });
-        let msg = self.post_json("/v1/flash/xdp", &body).await?;
-        log::info!("flash_xdp: {msg}");
+    /// Replace a single installed image using its checked Firmware ELF and partition.
+    pub async fn bind_xdp(&self, name: &str, firmware: &str, sha256: &str) -> Result<()> {
+        let body =
+            serde_json::json!({ "name": name, "firmware": firmware, "expected_sha256": sha256 });
+        let message = self.post_json("/v1/flash/xdp", &body).await?;
+        log::info!("bind_xdp: {message}");
         Ok(())
     }
 
@@ -216,32 +313,6 @@ impl AgentClient {
     }
 
     /// `POST /v1/clear/xdp` — `name` `"*"` clears the whole cold table.
-    pub async fn clear_xdp(&self, name: &str) -> Result<()> {
-        let body = serde_json::json!({ "name": name });
-        let msg = self.post_json("/v1/clear/xdp", &body).await?;
-        log::info!("clear_xdp: {msg}");
-        Ok(())
-    }
-
-    /// `POST /v1/enable/exec`.
-    pub async fn enable_exec(&self) -> Result<String> {
-        self.post_json("/v1/enable/exec", &serde_json::json!({}))
-            .await
-    }
-
-    /// `POST /v1/disable/exec`.
-    pub async fn disable_exec(&self) -> Result<String> {
-        self.post_json("/v1/disable/exec", &serde_json::json!({}))
-            .await
-    }
-
-    /// `POST /v1/get/finish` — host-only wait for UART `OK finish`.
-    pub async fn get_finish(&self) -> Result<String> {
-        self.post_json("/v1/get/finish", &serde_json::json!({}))
-            .await
-    }
-
-    /// `POST /v1/enable/xdp`.
     pub async fn enable_xdp(&self) -> Result<String> {
         self.post_json("/v1/enable/xdp", &serde_json::json!({}))
             .await
@@ -443,5 +514,41 @@ fn normalize_base(endpoint: &str) -> String {
         e.to_string()
     } else {
         format!("http://{e}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    #[tokio::test]
+    async fn medium_http_200_failure_preserves_the_preflight_issue() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let agent = super::AgentClient::new(listener.local_addr().unwrap().to_string());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 1024];
+            let n = socket.read(&mut bytes).await.unwrap();
+            assert!(bytes[..n].starts_with(b"GET /v1/preflight/medium HTTP/1.1\r\n"));
+            let body = r#"{"ok":false,"preflight":{"release":"v0.1.1","required":32,"deployments":[],"issues":["case_mark_idle slot B layout mismatch"]}}"#;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        });
+        let err = agent
+            .medium_preflight()
+            .await
+            .err()
+            .expect("business failure must block");
+        assert!(
+            err.to_string()
+                .contains("case_mark_idle slot B layout mismatch")
+        );
+        server.await.unwrap();
     }
 }

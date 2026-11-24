@@ -16,6 +16,10 @@
 //! | [`DisableXdp`](command::Command::DisableXdp) | `disable xdp` |
 //! | [`EnableExec`](command::Command::EnableExec) | `enable exec` |
 //! | [`DisableExec`](command::Command::DisableExec) | `disable exec` |
+//! | [`ExecBatchReset`](command::Command::ExecBatchReset) | `exec batch reset` |
+//! | [`ExecBatchWrite`](command::Command::ExecBatchWrite) | `exec batch write <offset> <hex>` |
+//! | [`ExecBatchInvoke`](command::Command::ExecBatchInvoke) | `exec batch invoke` |
+//! | [`ExecBatchRead`](command::Command::ExecBatchRead) | `exec batch read <offset> <max_bytes>` |
 //! | [`ClearMap`](command::Command::ClearMap) | `clear map <name>` |
 //! | [`GetMap`](command::Command::GetMap) | `get map <name>` |
 //! | [`UpdateMap`](command::Command::UpdateMap) | `update map <name> <key> <value>` |
@@ -54,6 +58,10 @@
 //! | [`DisableXdp`](reply::OkReply::DisableXdp) | `OK disable xdp` |
 //! | [`EnableExec`](reply::OkReply::EnableExec) | `OK enable exec` |
 //! | [`DisableExec`](reply::OkReply::DisableExec) | `OK disable exec` |
+//! | [`ExecBatchReset`](reply::OkReply::ExecBatchReset) | `OK exec batch reset` |
+//! | [`ExecBatchWrite`](reply::OkReply::ExecBatchWrite) | `OK exec batch write` |
+//! | [`ExecBatchInvoke`](reply::OkReply::ExecBatchInvoke) | `OK exec batch invoke <boot_id> <begin_tick> <end_tick> <action>` |
+//! | [`ExecBatchRead`](reply::OkReply::ExecBatchRead) | `OK exec batch read <n>` + `n` blob bytes |
 //! | [`ClearMap`](reply::OkReply::ClearMap) | `OK clear map` |
 //! | [`ClearPerf`](reply::OkReply::ClearPerf) | `OK clear perf` |
 //! | [`UpdateMap`](reply::OkReply::UpdateMap) | `OK update map` |

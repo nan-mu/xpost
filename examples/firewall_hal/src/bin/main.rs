@@ -39,6 +39,18 @@ fn panic(panic_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
+use cag::session::{self, HalPerf, Point};
+
+static NETWORK_PERF: HalPerf = HalPerf::new(&[
+    Point::TaggedSocketRx,
+    Point::TaggedSocketDiscarded,
+    Point::TaggedSocketFault,
+    Point::SocketRx,
+    Point::SocketDiscarded,
+    Point::SocketDelivered,
+    Point::SocketAddressRejected,
+]);
+
 extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -83,6 +95,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    NETWORK_PERF.init();
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
     esp_alloc::heap_allocator!(size: 64 * 1024);
@@ -192,6 +205,7 @@ async fn udp_task(
         let Ok((n, meta)) = socket.recv_from(&mut buf).await else {
             continue;
         };
+        let trace = NETWORK_PERF.socket_rx(&buf[..n], 2);
         let t0 = cag::now_ticks();
         {
             cag::bump_rx_packets();
@@ -201,6 +215,7 @@ async fn udp_task(
         let t_dispatch_end = cag::now_ticks();
         cag::record_dispatch(t_dispatch_end.saturating_sub(t0));
         let Some(key) = ip_key_from_addr(meta.endpoint.addr) else {
+            NETWORK_PERF.socket_event(Point::SocketAddressRejected, trace);
             {
                 cag::bump_bad_md();
                 cag::bump_xdp_aborted();
@@ -220,6 +235,7 @@ async fn udp_task(
         }
         if blocked {
             DROP.fetch_add(1, Ordering::Relaxed);
+            NETWORK_PERF.socket_event(Point::SocketDiscarded, trace);
             {
                 cag::bump_xdp_drop();
                 cag::bump_rx_discarded();
@@ -235,6 +251,7 @@ async fn udp_task(
             note_legal(token);
         }
         {
+            NETWORK_PERF.socket_event(Point::SocketDelivered, trace);
             cag::bump_xdp_pass();
             cag::bump_rx_delivered();
             cag::set_rx_queue_depth(0);
@@ -392,7 +409,7 @@ serial_task! {
         rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
     ) {
         let mut rx = rx;
-        SerialHandler::builder(
+        let builder = SerialHandler::builder(
             move || match rx.read_byte() {
                 Ok(b) => Some(b),
                 Err(_) => None,
@@ -493,8 +510,8 @@ serial_task! {
             reply.get_perf(n, |write| {
                 cag::report_perf(write);
             });
-        })
-        .build()
+        });
+        session::register!(builder, NETWORK_PERF).build()
     }
 }
 

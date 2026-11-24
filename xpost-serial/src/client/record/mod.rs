@@ -413,6 +413,22 @@ impl Record {
             Found::DisableXdp => OkReply::DisableXdp,
             Found::EnableExec => OkReply::EnableExec,
             Found::DisableExec => OkReply::DisableExec,
+            Found::ExecBatchReset => OkReply::ExecBatchReset,
+            Found::ExecBatchWrite => OkReply::ExecBatchWrite,
+            Found::ExecBatchInvoke {
+                boot_id,
+                begin_tick,
+                end_tick,
+                action,
+            } => OkReply::ExecBatchInvoke {
+                boot_id: *boot_id,
+                begin_tick: *begin_tick,
+                end_tick: *end_tick,
+                action: *action,
+            },
+            Found::ExecBatchRead { blob_idx } => OkReply::ExecBatchRead {
+                blob: self.blob_at(*blob_idx)?,
+            },
             Found::ClearMap => OkReply::ClearMap,
             Found::ClearPerf => OkReply::ClearPerf,
             Found::UpdateMap => OkReply::UpdateMap,

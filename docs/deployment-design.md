@@ -63,12 +63,17 @@ For an unmatched native slot or helper, preparation fails with both addresses.
 
 The prepared image records the release and final container digests.
 It binds the final bytes to the firmware digest, mode, helper, and target slot.
+Record the release digest and prepared container digest separately.
 The serial worker receives the retained bytes.
 The Agent resolves the flash span from the retained partition table bytes.
 Firmware co-flash prepares all linked XDP ELFs before it writes firmware or clears the cold table.
 The Agent keeps its device lock through firmware flash, clear, and linked installs.
 Standalone install checks the application segment and partition table on each attempt.
 The check and write share an exclusive device session.
+A planned install may replace the only image in a cold table.
+That operation rejects a table with multiple images before erase.
+The runner supplies the preflight Firmware ELF digest for each planned write.
+The Agent compares that digest with the retained Firmware ELF before any write.
 
 Use the slot form of `flash_xdp` to preload an installed image.
 The runtime verifies the image before it changes the slot state.
@@ -86,5 +91,8 @@ A successful preflight establishes host preparation only.
 Place each experimental rate and repeat inside its firmware group.
 Count firmware flash, cold install, SRAM preload, and entry publish separately.
 Keep host and DUT clocks separate.
+Document the stimulus, timing boundaries, and metric denominators in each collector module.
 Use the run ID to trace inputs, images, measurements, and the result query.
+Check all callers before removing a legacy execution path.
+Retain historical records while retiring their writers.
 Report missing or unqualified observations with their recorded causes.

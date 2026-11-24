@@ -148,6 +148,7 @@ The user starts the full medium experiment from T3 after reviewing PR #23.
 Readiness checks precede that launch.
 
 Reason: the user reserved the full run for an explicit start after review.
+The 2026-11-25 execution authorization supersedes this entry.
 
 ## 2026-11-25 Release intake and deployment identity
 
@@ -170,3 +171,13 @@ Retire the cold case timing and separate `hot_swap` selection.
 Retain their historical results.
 
 Reason: the revised brief uses one observed switch to show the dataplane and control timeline.
+
+## 2026-11-25 Medium execution authorization
+
+The maintainer authorizes the 29-cell run after implementation and read-only preflight pass.
+Run device qualification within the medium plan.
+Keep case preparation outside its timed window.
+Publish each terminal attempt to PR #23 after its measurement window.
+Use the original run ID to recover a missing write or export.
+
+Reason: the revised taskbook combines device acceptance and the formal run.

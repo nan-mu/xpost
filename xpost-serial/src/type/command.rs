@@ -14,6 +14,18 @@ pub const GET_INIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// [`Command::GetFinish`]. Not a UART deadline for a request line.
 pub const GET_FINISH_TIMEOUT: Duration = Duration::from_secs(30);
 
+pub const EXEC_BATCH_BYTES: usize = 8258;
+pub const EXEC_BATCH_WRITE_MAX_BYTES: usize = 256;
+pub const EXEC_BATCH_READ_MAX_BYTES: usize = 512;
+
+#[cfg(any(feature = "client", feature = "server"))]
+pub(crate) fn is_exec_batch_hex(data: &[u8]) -> bool {
+    !data.is_empty()
+        && data.len() <= 2 * EXEC_BATCH_WRITE_MAX_BYTES
+        && data.len() % 2 == 0
+        && data.iter().all(u8::is_ascii_hexdigit)
+}
+
 /// Capture installed by `perf prepare`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PerfVariant {
@@ -33,6 +45,20 @@ pub enum Command<'a> {
     DisableXdp,
     EnableExec,
     DisableExec,
+    /// `exec batch reset`
+    ExecBatchReset,
+    /// `exec batch write <offset> <hex>`. `data` borrows the ASCII hex token.
+    ExecBatchWrite {
+        offset: u32,
+        data: &'a [u8],
+    },
+    /// `exec batch invoke`
+    ExecBatchInvoke,
+    /// `exec batch read <offset> <max_bytes>`.
+    ExecBatchRead {
+        offset: u32,
+        max_bytes: u32,
+    },
     ClearMap {
         name: &'a str,
     },

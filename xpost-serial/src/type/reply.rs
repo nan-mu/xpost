@@ -18,6 +18,21 @@ pub enum OkReply<'a> {
     DisableXdp,
     EnableExec,
     DisableExec,
+    ExecBatchReset,
+    ExecBatchWrite,
+    /// `OK exec batch invoke <boot_id> <begin_tick> <end_tick> <action>`.
+    /// Ticks are DUT microseconds. `action` is an XDP action code.
+    ExecBatchInvoke {
+        boot_id: u32,
+        begin_tick: u64,
+        end_tick: u64,
+        /// XDP action on an XPOST carrier, or the direct entry status on HAL.
+        action: u32,
+    },
+    /// `OK exec batch read <n>` + exactly `n` payload bytes.
+    ExecBatchRead {
+        blob: &'a [u8],
+    },
     ClearMap,
     ClearPerf,
     /// `OK get map <n>` + `n` blob bytes (same framing as [`Self::GetPerf`]).

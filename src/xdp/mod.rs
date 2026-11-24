@@ -1,8 +1,8 @@
 //! XDP execution runtime. Control-plane mutation is serialized by `XDP_RT`;
 //! RX sees only the atomically published entry in `state`.
 
-pub(crate) mod image;
 pub(crate) mod engine;
+pub(crate) mod image;
 pub(crate) mod ingress;
 #[cfg(feature = "interp")]
 pub(crate) mod interp;
@@ -48,7 +48,7 @@ pub unsafe fn test_flight_bare(ctx: *mut ingress::ctx::XdpMd) -> Option<i32> {
     let engine = engine::Engine::Interp {
         len: state::PRIMARY_LEN.load(Ordering::Relaxed),
     };
-    Some(unsafe { engine::flight(engine, entry, ctx) })
+    unsafe { engine::flight(engine, entry, ctx) }
 }
 
 /// Run the sequence `[vm construction, engine call]` with the construction
@@ -116,7 +116,11 @@ pub fn test_prog() -> &'static ingress::XdpProg {
 pub fn test_flight_split(buf: &mut [u8]) -> (u32, u32, u32, i32) {
     use xpost_type::EspRadioTrace;
     let prog = test_prog();
-    let now = || esp_hal::time::Instant::now().duration_since_epoch().as_micros() as u32;
+    let now = || {
+        esp_hal::time::Instant::now()
+            .duration_since_epoch()
+            .as_micros() as u32
+    };
     let t0 = now();
     prog.xdp_invocations();
     let t1 = now();
@@ -124,8 +128,16 @@ pub fn test_flight_split(buf: &mut [u8]) -> (u32, u32, u32, i32) {
     let t2 = now();
     prog.xdp_action(act);
     let t3 = now();
-    (t1.wrapping_sub(t0), t2.wrapping_sub(t1), t3.wrapping_sub(t2), act as i32)
+    (
+        t1.wrapping_sub(t0),
+        t2.wrapping_sub(t1),
+        t3.wrapping_sub(t2),
+        act as i32,
+    )
 }
+pub use crate::{RtMutex, RtMutexGuard};
+pub(crate) use image::XdpMeta;
+pub use image::{Complete, Incomplete, XdpBuilder, XdpLocation, XdpMaps};
 /// Run one eBPF program outside a lease, for a firmware self-check.
 ///
 /// Only available with the `interp` feature. The leased datapath reaches the
@@ -135,9 +147,6 @@ pub use interp::selftest_run;
 #[cfg(feature = "perf-trace")]
 pub use swap::SwitchTiming;
 pub use swap::{QuiescePolicy, StageReport, SwitchReport, XdpStatus};
-pub use crate::{RtMutex, RtMutexGuard};
-pub(crate) use image::XdpMeta;
-pub use image::{Complete, Incomplete, XdpBuilder, XdpLocation, XdpMaps};
 /// Locked [`XdpRt`].
 pub type XdpRtGuard<'a> = RtMutexGuard<'a, XdpRt>;
 pub use slot::{Slot, XdpSlot};
@@ -154,7 +163,10 @@ use crate::{
     xdp::{
         map::MapLease,
         ready::ReadyError,
-        state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PAUSE, PRIMARY_ENGINE, PRIMARY_ENTRY, PRIMARY_LEN},
+        state::{
+            ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PAUSE, PRIMARY_ENGINE, PRIMARY_ENTRY,
+            PRIMARY_LEN,
+        },
     },
 };
 pub type XdpId = usize;
@@ -605,7 +617,6 @@ impl XdpRt {
         self.images.get(id).map(|img| img.meta.name.as_str())
     }
 
-
     /// Enable the datapath: [`Self::pre_lease`], install VMR aliases / map users, publish entry.
     ///
     /// Closes `MapRt` control-plane access before `ACTIVE` is stored.
@@ -696,8 +707,8 @@ impl XdpRt {
                         // The whole allocation, not the `size` estimate: the
                         // estimate is a heap-budget figure and may exceed what
                         // the map actually owns.
-                        let _ = ranges
-                            .push((meta.storage.ptr as usize, meta.storage.layout.size()));
+                        let _ =
+                            ranges.push((meta.storage.ptr as usize, meta.storage.layout.size()));
                     }
                 }
                 crate::xdp::interp::set_ranges(ranges.as_slice());

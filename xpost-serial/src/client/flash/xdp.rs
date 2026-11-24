@@ -129,6 +129,7 @@ pub(crate) fn install(
     name: &str,
     data: &[u8],
     expectation: &FirmwareExpectation,
+    replace_single: bool,
 ) -> io::Result<InstallOutcome> {
     let cap = xdp.image_capacity;
     if data.len() > cap {
@@ -143,8 +144,16 @@ pub(crate) fn install(
             "xdp name mismatch: arg `{name}`, image `{embedded_name}`"
         )));
     }
-    let mut dl = port.open_download()?;
-    let result = install_verified(&mut *dl, xdp, partition, name, data, expectation);
+    let mut dl = port.open_download_for_install()?;
+    let result = install_verified(
+        &mut *dl,
+        xdp,
+        partition,
+        name,
+        data,
+        expectation,
+        replace_single,
+    );
     let reset = dl.reset_to_app();
     match result {
         Ok(outcome) => {
@@ -158,7 +167,6 @@ pub(crate) fn install(
 trait FlashIo {
     fn application_segment(&mut self, elf: &[u8]) -> io::Result<(u32, Vec<u8>)>;
     fn read_flash(&mut self, addr: u32, len: u32) -> io::Result<Vec<u8>>;
-    fn reconnect(&mut self) -> io::Result<()>;
     fn erase_region(&mut self, addr: u32, len: u32) -> io::Result<()>;
     fn write_bin_verified(&mut self, addr: u32, data: &[u8]) -> io::Result<()>;
 }
@@ -169,14 +177,11 @@ impl FlashIo for Downloader {
     fn read_flash(&mut self, addr: u32, len: u32) -> io::Result<Vec<u8>> {
         Downloader::read_flash(self, addr, len)
     }
-    fn reconnect(&mut self) -> io::Result<()> {
-        Downloader::reconnect(self)
-    }
     fn erase_region(&mut self, addr: u32, len: u32) -> io::Result<()> {
         Downloader::erase_region(self, addr, len)
     }
     fn write_bin_verified(&mut self, addr: u32, data: &[u8]) -> io::Result<()> {
-        Downloader::write_bin_verified(self, addr, data)
+        self.write_xdp_verified(addr, data)
     }
 }
 
@@ -187,6 +192,7 @@ fn install_verified(
     name: &str,
     data: &[u8],
     expectation: &FirmwareExpectation,
+    replace_single: bool,
 ) -> io::Result<InstallOutcome> {
     let new_len = data.len() as u32;
     let segment = io.application_segment(&expectation.elf)?;
@@ -195,7 +201,24 @@ fn install_verified(
     })?;
     let table = io.read_flash(xdp.base, xdp.len)?;
     let entries = list_entries(&table)?;
-    let outcome = plan_install(&entries, name, new_len, xdp.len)?;
+    let outcome = match (replace_single, entries.as_slice()) {
+        (true, [only])
+            if only.offset == 0
+                && new_len <= xdp.len
+                && table[only.len as usize..].iter().all(|byte| *byte == 0xff) =>
+        {
+            InstallOutcome::Overwritten { offset: 0 }
+        }
+        (true, []) if table.iter().all(|byte| *byte == 0xff) => {
+            plan_install(&entries, name, new_len, xdp.len)?
+        }
+        (true, _) => {
+            return Err(io::Error::other(
+                "single-image replacement requires a fully erased table or one valid image at offset zero",
+            ));
+        }
+        (false, _) => plan_install(&entries, name, new_len, xdp.len)?,
+    };
     let (rel, old_len) = match outcome {
         InstallOutcome::Overwritten { offset } => {
             let old = entries
@@ -214,7 +237,6 @@ fn install_verified(
              (clear the cold table before appending a different name)"
         )));
     }
-    io.reconnect()?;
     let erase_len = {
         let need = old_len.max(new_len);
         need.saturating_add(FLASH_SECTOR - 1) / FLASH_SECTOR * FLASH_SECTOR
@@ -354,9 +376,9 @@ mod attestation_tests {
     struct Fake {
         table: Vec<u8>,
         app: Vec<u8>,
+        cold: Option<Vec<u8>>,
         events: Vec<&'static str>,
         fail_read: Option<&'static str>,
-        fail_reconnect: bool,
         fail_write: bool,
     }
     impl FlashIo for Fake {
@@ -385,15 +407,10 @@ mod attestation_tests {
             } else if addr == 0x10000 {
                 self.app.clone()
             } else {
-                vec![0xff; len as usize]
+                self.cold
+                    .clone()
+                    .unwrap_or_else(|| vec![0xff; len as usize])
             })
-        }
-        fn reconnect(&mut self) -> io::Result<()> {
-            self.events.push("reconnect");
-            if self.fail_reconnect {
-                return Err(io::Error::other("reconnect failed"));
-            }
-            Ok(())
         }
         fn erase_region(&mut self, _: u32, _: u32) -> io::Result<()> {
             self.events.push("erase");
@@ -433,9 +450,9 @@ mod attestation_tests {
             Fake {
                 table,
                 app,
+                cold: None,
                 events: Vec::new(),
                 fail_read: None,
-                fail_reconnect: false,
                 fail_write: false,
             },
         )
@@ -444,7 +461,7 @@ mod attestation_tests {
     fn matching_firmware_precedes_cold_read_and_write_on_every_attempt() {
         let (expectation, xdp, mut io) = fixture();
         for _ in 0..2 {
-            install_verified(&mut io, xdp, "xdp", "test", &[7], &expectation).unwrap();
+            install_verified(&mut io, xdp, "xdp", "test", &[7], &expectation, false).unwrap();
         }
         assert_eq!(
             io.events,
@@ -452,27 +469,68 @@ mod attestation_tests {
                 "partition",
                 "app",
                 "cold",
-                "reconnect",
                 "erase",
                 "write",
                 "partition",
                 "app",
                 "cold",
-                "reconnect",
                 "erase",
                 "write"
             ]
         );
     }
     #[test]
+    fn single_replacement_checks_identity_and_rejects_multiple_images() {
+        let (expectation, xdp, mut io) = fixture();
+        let old = xpost_elf::build_container(
+            &[0x67, 0x80, 0, 0],
+            &xpost_elf::ImageMetadataV0 {
+                slot_address: 0x40380200,
+                helper_address: 0x40380000,
+                machine: 1,
+                name: "old".try_into().unwrap(),
+                maps: Default::default(),
+            },
+            None,
+        )
+        .unwrap();
+        let mut table = vec![0xff; xdp.len as usize];
+        table[..old.len()].copy_from_slice(&old);
+        io.cold = Some(table.clone());
+        let outcome =
+            install_verified(&mut io, xdp, "xdp", "new", &[7], &expectation, true).unwrap();
+        assert_eq!(outcome, InstallOutcome::Overwritten { offset: 0 });
+        assert_eq!(io.events, ["partition", "app", "cold", "erase", "write"]);
+
+        let second = FLASH_SECTOR as usize;
+        table[second..second + old.len()].copy_from_slice(&old);
+        io.cold = Some(table);
+        io.events.clear();
+        assert!(install_verified(&mut io, xdp, "xdp", "new", &[7], &expectation, true).is_err());
+        assert_eq!(io.events, ["partition", "app", "cold"]);
+
+        // A damaged first sector can hide the later image from the table scanner.
+        let table = io.cold.as_mut().unwrap();
+        table[0] = 0;
+        io.events.clear();
+        assert!(install_verified(&mut io, xdp, "xdp", "new", &[7], &expectation, true).is_err());
+        assert_eq!(io.events, ["partition", "app", "cold"]);
+
+        io.app[0] ^= 1;
+        io.events.clear();
+        assert!(install_verified(&mut io, xdp, "xdp", "new", &[7], &expectation, true).is_err());
+        assert_eq!(io.events, ["partition", "app"]);
+    }
+
+    #[test]
     fn failed_write_does_not_skip_verification_on_retry() {
         let (expectation, xdp, mut io) = fixture();
         io.fail_write = true;
-        assert!(install_verified(&mut io, xdp, "xdp", "test", &[7], &expectation).is_err());
+        assert!(install_verified(&mut io, xdp, "xdp", "test", &[7], &expectation, false).is_err());
         io.fail_write = false;
         io.app[0] ^= 1;
         io.events.clear();
-        assert!(install_verified(&mut io, xdp, "xdp", "test", &[7], &expectation).is_err());
+        assert!(install_verified(&mut io, xdp, "xdp", "test", &[7], &expectation, false).is_err());
         assert_eq!(io.events, ["partition", "app"]);
     }
 
@@ -489,7 +547,9 @@ mod attestation_tests {
                 5 => xdp.base += 0x1000,
                 _ => expectation.elf.clear(),
             }
-            assert!(install_verified(&mut io, xdp, "xdp", "test", &[7], &expectation).is_err());
+            assert!(
+                install_verified(&mut io, xdp, "xdp", "test", &[7], &expectation, false).is_err()
+            );
             assert!(
                 !io.events
                     .iter()
@@ -498,34 +558,33 @@ mod attestation_tests {
         }
     }
     #[test]
-    fn read_reconnect_and_layout_failures_never_write_cold_flash() {
-        for kind in 0..7 {
+    fn read_and_layout_failures_never_write_cold_flash() {
+        for kind in 0..6 {
             let (mut expectation, xdp, mut io) = fixture();
             match kind {
                 0 => io.fail_read = Some("app"),
-                1 => io.fail_reconnect = true,
                 // OTA app subtype, duplicate factory, overlapping XDP, duplicate XDP,
                 // or an application too large for the factory partition.
-                2 => expectation.partition_table[32 + 3] = 0x10,
-                3 => {
+                1 => expectation.partition_table[32 + 3] = 0x10,
+                2 => {
                     let row = expectation.partition_table[32..64].to_vec();
                     expectation.partition_table[96..128].copy_from_slice(&row);
                     expectation.partition_table[100..104]
                         .copy_from_slice(&0x320000u32.to_le_bytes());
                 }
-                4 => expectation.partition_table[8..12].copy_from_slice(&0x8000u32.to_le_bytes()),
-                5 => {
+                3 => expectation.partition_table[8..12].copy_from_slice(&0x8000u32.to_le_bytes()),
+                4 => {
                     let row = expectation.partition_table[64..96].to_vec();
                     expectation.partition_table[96..128].copy_from_slice(&row);
                 }
                 _ => expectation.partition_table[32 + 8..32 + 12]
                     .copy_from_slice(&1u32.to_le_bytes()),
             }
-            if kind >= 2 {
-                let end = if kind == 3 || kind == 5 { 128 } else { 96 };
+            if kind >= 1 {
+                let end = if kind == 2 || kind == 4 { 128 } else { 96 };
                 expectation.partition_table[end..].fill(0xff);
                 io.table = expectation.partition_table.clone();
-                if [2, 6].contains(&kind) {
+                if [1, 5].contains(&kind) {
                     assert!(
                         esp_idf_part::PartitionTable::try_from_bytes(
                             expectation.partition_table.clone()
@@ -536,7 +595,7 @@ mod attestation_tests {
                 }
             }
             assert!(
-                install_verified(&mut io, xdp, "xdp", "test", &[7], &expectation).is_err(),
+                install_verified(&mut io, xdp, "xdp", "test", &[7], &expectation, false).is_err(),
                 "case {kind}"
             );
             assert!(
@@ -545,9 +604,6 @@ mod attestation_tests {
             );
             if kind == 0 {
                 assert_eq!(io.events, ["partition", "app"]);
-            }
-            if kind == 1 {
-                assert_eq!(io.events, ["partition", "app", "cold", "reconnect"]);
             }
         }
     }

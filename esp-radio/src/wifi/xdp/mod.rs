@@ -62,8 +62,7 @@ pub(crate) fn map_xdp_action(
     frame_len: usize,
     window: &[u8],
 ) -> Action {
-    let valid = (window.as_ptr() == frame_ptr) & (window.len() <= frame_len);
-    if !valid {
+    if !valid_window(frame_ptr, frame_len, window) {
         return Action::Drop;
     }
     match xdp {
@@ -71,6 +70,11 @@ pub(crate) fn map_xdp_action(
         XdpAction::Pass => Action::Pass,
         XdpAction::Tx => Action::Tx,
     }
+}
+
+#[inline]
+pub(super) fn valid_window(frame_ptr: *const u8, frame_len: usize, window: &[u8]) -> bool {
+    (window.as_ptr() == frame_ptr) & (window.len() <= frame_len)
 }
 
 /// Default prog: always Pass the full frame; EspRadioTrace hooks are no-ops.

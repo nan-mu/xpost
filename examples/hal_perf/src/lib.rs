@@ -86,6 +86,8 @@
 
 #![no_std]
 
+pub use xpost_network_perf as session;
+
 use core::cell::RefCell;
 use core::convert::Infallible;
 use core::sync::atomic::Ordering;

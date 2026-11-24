@@ -189,8 +189,19 @@ fn run_op(
             name,
             bytes,
             expectation,
+            replace_single,
         } => table()
-            .and_then(|table| xdp::install(port, table, partition, name, bytes, expectation))
+            .and_then(|table| {
+                xdp::install(
+                    port,
+                    table,
+                    partition,
+                    name,
+                    bytes,
+                    expectation,
+                    *replace_single,
+                )
+            })
             .map(FlashResult::Install),
         FlashOp::Clear { names } => table()
             .and_then(|table| xdp::clear(port, table, names))

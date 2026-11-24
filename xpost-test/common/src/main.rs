@@ -27,6 +27,9 @@ async fn main() -> Result<()> {
     if cfg.run == ["medium-plan"] {
         return exam::medium::preview();
     }
+    if cfg.run == ["medium-preflight"] {
+        return exam::medium::check(&cfg).await;
+    }
     install_postgres(cfg.postgres.clone());
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
@@ -104,17 +107,7 @@ async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
             )
             .await
         }
-        "case" => exam::run_case(cfg, "formal").await,
-        "case-smoke" => exam::run_case(cfg, "qualification").await,
-        "exec_bench" => {
-            exam::run_exec_bench(
-                cfg,
-                exam::ExecBenchOpts {
-                    formal: cfg.exec_bench.formal,
-                },
-            )
-            .await
-        }
+        "exec_bench" => exam::run_exec_bench(cfg).await,
         "dev" => {
             let mut harness = pipeline::open_harness(cfg).await?;
             exam::run_dev(cfg, &mut harness).await

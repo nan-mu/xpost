@@ -63,6 +63,41 @@ pub trait XdpProg: Send + Sync {
     fn run<'a>(&self, frame: &'a mut [u8]) -> (XdpAction, &'a mut [u8]);
 }
 
+/// Packet identity for synchronous receive hooks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RxTag {
+    pub epoch: u32,
+    pub sequence: u64,
+}
+
+/// Provenance of the result returned by the receive runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RxVerdict {
+    /// The observation hook cannot identify the runtime path.
+    Unknown,
+    /// The runtime skipped the policy.
+    Bypass,
+    /// The policy returned a valid action and packet window.
+    Policy,
+    /// The runtime rejected the packet or the policy aborted.
+    Fault,
+}
+
+/// A synchronous boundary in one receive dispatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RxEvent {
+    RunEnter,
+    Action(XdpAction),
+    PolicyReturned,
+    Fault,
+    StackQueued(usize),
+    StackFull(usize),
+    Discarded { normal: bool },
+    TxQueued,
+    TxQueueFailed,
+    End,
+}
+
 /// Named sites for Trace nest events (`SpanBegin`/`SpanEnd`.arg0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -115,6 +150,22 @@ impl ProfSite {
 /// `xdp-observe` is enabled); Counter / Aggregate / Gauge / Trace / Span / PcHit
 /// storage is owned by the xpost implementor.
 pub trait EspRadioTrace: XdpProg {
+    /// Observe the input frame before policy execution.
+    fn rx_start(&self, _frame: &[u8]) -> Option<RxTag> {
+        None
+    }
+    /// Run the policy and report its result provenance when available.
+    fn rx_run<'a>(
+        &self,
+        frame: &'a mut [u8],
+        _tag: Option<RxTag>,
+    ) -> (XdpAction, &'a mut [u8], RxVerdict) {
+        let (action, window) = self.run(frame);
+        (action, window, RxVerdict::Unknown)
+    }
+    /// Observe a boundary with the tag returned for this frame.
+    fn rx_event(&self, _tag: Option<RxTag>, _event: RxEvent) {}
+
     /// `rx_packets` — RX software entry (`len` = frame length).
     fn rx_packets(&self, _len: usize) {}
     /// `xdp_invocations` — about to call [`XdpProg::run`].

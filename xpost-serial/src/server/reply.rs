@@ -128,6 +128,28 @@ pub fn write_ok<E>(
         OkReply::DisableXdp => b"OK disable xdp\n",
         OkReply::EnableExec => b"OK enable exec\n",
         OkReply::DisableExec => b"OK disable exec\n",
+        OkReply::ExecBatchReset => b"OK exec batch reset\n",
+        OkReply::ExecBatchWrite => b"OK exec batch write\n",
+        OkReply::ExecBatchInvoke {
+            boot_id,
+            begin_tick,
+            end_tick,
+            action,
+        } => {
+            return write_nums_mixed(
+                b"OK exec batch invoke",
+                &[
+                    Num::U32(*boot_id),
+                    Num::U64(*begin_tick),
+                    Num::U64(*end_tick),
+                    Num::U32(*action),
+                ],
+                write_all,
+            );
+        }
+        OkReply::ExecBatchRead { blob } => {
+            return write_blob(b"OK exec batch read ", blob, write_all);
+        }
         OkReply::ClearMap => b"OK clear map\n",
         OkReply::ClearPerf => b"OK clear perf\n",
         OkReply::UpdateMap => b"OK update map\n",

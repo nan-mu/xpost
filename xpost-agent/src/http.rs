@@ -55,6 +55,7 @@ impl ApiResp {
 #[derive(Deserialize)]
 struct FlashByNameBody {
     name: String,
+    expected_sha256: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -62,6 +63,8 @@ struct FlashXdpBody {
     name: String,
     #[serde(default)]
     slot: Option<u8>,
+    firmware: Option<String>,
+    expected_sha256: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -145,6 +148,7 @@ async fn serve_async(addr: &str, log_dir: &Path) -> Result<()> {
         .route("/xdp/switch", post(v1_xdp_switch))
         .route("/xdp/status", get(v1_xdp_status))
         .route("/enable/exec", post(v1_enable_exec))
+        .route("/exec/batch", post(v1_exec_batch))
         .route("/disable/exec", post(v1_disable_exec))
         .route("/get/finish", post(v1_get_finish))
         .route("/clear/map/{map_name}", post(v1_clear_map))
@@ -187,6 +191,24 @@ async fn health() -> Json<ApiResp> {
 
 async fn v1_status() -> Json<ApiResp> {
     Json(ApiResp::ok(ops::get_status()))
+}
+
+#[derive(Deserialize)]
+struct ExecBatchBody {
+    input_hex: String,
+}
+
+async fn v1_exec_batch(
+    State(st): State<AppState>,
+    Json(body): Json<ExecBatchBody>,
+) -> Json<serde_json::Value> {
+    match tokio::task::spawn_blocking(move || ops::exec_batch(st.shared.as_ref(), &body.input_hex))
+        .await
+    {
+        Ok(Ok(result)) => Json(serde_json::json!({ "ok": true, "result": result })),
+        Ok(Err(error)) => Json(serde_json::json!({ "ok": false, "message": format!("{error:#}") })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "message": format!("join: {error}") })),
+    }
 }
 
 async fn v1_medium_preflight(State(st): State<AppState>) -> Json<serde_json::Value> {
@@ -242,14 +264,30 @@ async fn v1_flash_fw(
 ) -> Json<ApiResp> {
     let shared = st.shared.clone();
     let name = body.name;
-    run_blocking(move || ops::flash_fw(shared.as_ref(), &name, "http")).await
+    run_blocking(move || {
+        ops::flash_fw_checked(
+            shared.as_ref(),
+            &name,
+            body.expected_sha256.as_deref(),
+            "http",
+        )
+    })
+    .await
 }
 
 async fn v1_flash_xdp(State(st): State<AppState>, Json(body): Json<FlashXdpBody>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     let name = body.name;
     let slot = body.slot;
-    run_blocking(move || ops::flash_xdp(shared.as_ref(), &name, slot, "http")).await
+    run_blocking(move || {
+        let planned = match (body.firmware.as_deref(), body.expected_sha256.as_deref()) {
+            (Some(firmware), Some(sha256)) => Some(ops::XdpTarget { firmware, sha256 }),
+            (None, None) => None,
+            _ => bail!("firmware and expected_sha256 must be provided together"),
+        };
+        ops::flash_xdp_checked(shared.as_ref(), &name, slot, planned, "http")
+    })
+    .await
 }
 
 fn clear_xdp_names(name: ClearXdpName) -> Result<Vec<String>, String> {

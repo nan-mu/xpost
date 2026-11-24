@@ -44,14 +44,8 @@ esp-println = { version = "0.17.0", features = ["esp32c3", "log-04"] }
 embassy-executor = { version = "0.10.0", features = ["log"] }
 embassy-time = { version = "0.5.0", features = ["log"] }
 critical-section = "1.2.0"
-xpost = { path = "../..", features = [
-  "exec-call",
-  "perf-counter",
-  "perf-aggregate",
-  "perf-gauge",
-  "perf-trace",
-  "perf-report",
-] }
+embeprom = { version = "=0.3.0", default-features = false }
+xpost = { path = "../..", features = ["exec-call"] }
 xpost-type = { path = "../../xpost-type" }
 xpost-perf = { path = "../../xpost-perf" }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
@@ -60,13 +54,16 @@ xpost-serial = { path = "../../xpost-serial", default-features = false, features
 xpost-build = { path = "../../xpost-build" }
 
 [features]
-# Build-time variants. `interp` selects the eBPF interpreter as the engine; a
-# build without it runs AOT machine code. Both report through `perf-report`, so
-# the two arms produce comparable bytes.
+# `interp` adds the eBPF interpreter to the native carrier.
 interp = ["xpost/interp"]
-# Firmware self-checks that print segment timings and run the scale sweep.
-# Independent of `interp`: the same sweep must run on the AOT build to compare.
-diag = []
+# Legacy workload scripts use the 32-byte carrier and its performance report.
+diag = [
+  "xpost/perf-counter",
+  "xpost/perf-aggregate",
+  "xpost/perf-gauge",
+  "xpost/perf-trace",
+  "xpost/perf-report",
+]
 
 [profile.dev]
 opt-level = "s"

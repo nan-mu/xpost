@@ -82,6 +82,7 @@ pub struct Metric {
     pub buckets: Vec<u64>,
 }
 
+#[cfg(test)]
 impl Metric {
     /// Whether this metric carries no samples.
     ///
@@ -116,10 +117,12 @@ pub struct DecodedReport {
 }
 
 impl DecodedReport {
+    #[cfg(test)]
     pub fn metric(&self, name: &str) -> Option<&Metric> {
         self.metrics.iter().find(|m| m.name == name)
     }
 
+    #[cfg(test)]
     pub fn counter(&self, name: &str) -> Option<u64> {
         self.metric(name)
             .filter(|m| m.kind == Kind::Counter)

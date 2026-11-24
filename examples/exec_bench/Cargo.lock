@@ -678,6 +678,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "embeprom"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "730589f1d8c5d546aa7c8cdf490e0377c1c4749f050099395dc304532a3cb692"
+dependencies = [
+ "critical-section",
+ "heapless 0.9.3",
+ "portable-atomic",
+]
+
+[[package]]
 name = "enumset"
 version = "1.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1056,6 +1067,7 @@ dependencies = [
  "critical-section",
  "embassy-executor",
  "embassy-time",
+ "embeprom",
  "esp-alloc",
  "esp-bootloader-esp-idf",
  "esp-hal",

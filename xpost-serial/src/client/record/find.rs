@@ -18,6 +18,17 @@ pub(crate) enum Found {
     DisableXdp,
     EnableExec,
     DisableExec,
+    ExecBatchReset,
+    ExecBatchWrite,
+    ExecBatchInvoke {
+        boot_id: u32,
+        begin_tick: u64,
+        end_tick: u64,
+        action: u32,
+    },
+    ExecBatchRead {
+        blob_idx: usize,
+    },
     ClearMap,
     ClearPerf,
     UpdateMap,
@@ -118,6 +129,13 @@ where
             })
         }
         Command::PerfRead { .. } => scan_perf_read::<E>(&guard, cmd, after),
+        Command::ExecBatchRead { .. } => scan_blob_framed::<E>(
+            &guard,
+            cmd,
+            after,
+            reply::parse_exec_batch_read_len,
+            |blob_idx| Found::ExecBatchRead { blob_idx },
+        ),
         other => scan_simple::<E>(&guard, other, after),
     }
 }
@@ -290,6 +308,19 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
         OkReply::DisableXdp => Some(Found::DisableXdp),
         OkReply::EnableExec => Some(Found::EnableExec),
         OkReply::DisableExec => Some(Found::DisableExec),
+        OkReply::ExecBatchReset => Some(Found::ExecBatchReset),
+        OkReply::ExecBatchWrite => Some(Found::ExecBatchWrite),
+        OkReply::ExecBatchInvoke {
+            boot_id,
+            begin_tick,
+            end_tick,
+            action,
+        } => Some(Found::ExecBatchInvoke {
+            boot_id,
+            begin_tick,
+            end_tick,
+            action,
+        }),
         OkReply::ClearMap => Some(Found::ClearMap),
         OkReply::ClearPerf => Some(Found::ClearPerf),
         OkReply::UpdateMap => Some(Found::UpdateMap),
@@ -360,6 +391,9 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
             digest,
         }),
         OkReply::PerfRelease => Some(Found::PerfRelease),
-        OkReply::GetMap { .. } | OkReply::GetPerf { .. } | OkReply::PerfRead { .. } => None,
+        OkReply::GetMap { .. }
+        | OkReply::GetPerf { .. }
+        | OkReply::PerfRead { .. }
+        | OkReply::ExecBatchRead { .. } => None,
     }
 }

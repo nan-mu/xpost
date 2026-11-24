@@ -31,6 +31,15 @@ fn panic(panic_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
+use cag::session::{self, HalPerf, Point};
+
+static NETWORK_PERF: HalPerf = HalPerf::new(&[
+    Point::TaggedSocketRx,
+    Point::SocketRx,
+    Point::SocketSendQueued,
+    Point::SocketSendFailed,
+]);
+
 extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -65,6 +74,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    NETWORK_PERF.init();
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
     // Wi-Fi dynamic RX/TX buffers; align with just_drop / just_drop_hal.
@@ -162,6 +172,7 @@ async fn udp_task(
         let Ok((n, meta)) = socket.recv_from(&mut buf).await else {
             continue;
         };
+        let trace = NETWORK_PERF.socket_rx(&buf[..n], 0);
         let t0 = cag::now_ticks();
         {
             cag::bump_rx_packets();
@@ -187,7 +198,16 @@ async fn udp_task(
             cag::note_block_start();
         }
         let t_tx = cag::now_ticks();
+        NETWORK_PERF.socket_event(Point::SocketSendBegin, trace);
         let send_ok = socket.send_to(&buf[..n], dest).await.is_ok();
+        NETWORK_PERF.socket_event(
+            if send_ok {
+                Point::SocketSendQueued
+            } else {
+                Point::SocketSendFailed
+            },
+            trace,
+        );
         {
             let _ = cag::note_block_end();
             let now = cag::now_ticks();
@@ -216,7 +236,7 @@ serial_task! {
         rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
     ) {
         let mut rx = rx;
-        SerialHandler::builder(
+        let builder = SerialHandler::builder(
             move || match rx.read_byte() {
                 Ok(b) => Some(b),
                 Err(_) => None,
@@ -289,8 +309,8 @@ serial_task! {
             reply.get_perf(n, |write| {
                 cag::report_perf(write);
             });
-        })
-        .build()
+        });
+        session::register!(builder, NETWORK_PERF).build()
     }
 }
 
