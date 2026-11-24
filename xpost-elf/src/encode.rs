@@ -5,8 +5,16 @@ use sha2::{Digest, Sha256};
 
 use crate::{MAX_LAYOUT, MAX_MAPS, MAX_NAME, align4};
 
-/// Complete XDP ELF size limit. The target slot and cold storage impose their own limits.
+#[cfg(not(target_os = "none"))]
+extern crate alloc;
+
+/// Fixed storage budget used by embedded encoding and the deployment protocol.
 pub const MAX_CONTAINER_SIZE: usize = 16 * 1024;
+
+#[cfg(target_os = "none")]
+type ContainerBytes = heapless::Vec<u8, MAX_CONTAINER_SIZE>;
+#[cfg(not(target_os = "none"))]
+type ContainerBytes = alloc::vec::Vec<u8>;
 /// `.xpost.meta` size limit.
 pub const MAX_META_SIZE: usize = 1024;
 /// Map capacity profile limit.
@@ -70,39 +78,48 @@ pub enum EncodeError {
 
 /// Encode a Compact ELF V0 container.
 ///
+/// On the host, the output allocation tracks the encoded length.
+/// Bare-metal callers use the fixed embedded buffer.
+///
 /// When `max_image_len` is `Some(n)`, fails if `image.len() > n` (slot fit check).
 pub fn build_container(
     image: &[u8],
     metadata: &ImageMetadataV0,
     max_image_len: Option<u32>,
-) -> Result<heapless::Vec<u8, MAX_CONTAINER_SIZE>, EncodeError> {
+) -> Result<ContainerBytes, EncodeError> {
     if image.is_empty() {
         return Err(EncodeError::EmptyImage);
     }
-    if let Some(max) = max_image_len
-        && (image.len() as u32) > max
-    {
+    let image_len = u32::try_from(image.len()).map_err(|_| EncodeError::ImageExtentOverflow)?;
+    if max_image_len.is_some_and(|max| image_len > max) {
         return Err(EncodeError::ImageExceedsSlot);
+    }
+    if u64::from(metadata.slot_address) + u64::from(image_len) > 0x1_0000_0000 {
+        return Err(EncodeError::ImageExtentOverflow);
     }
 
     let meta = encode_metadata(metadata)?;
     let image_off = META_OFFSET + meta.len();
-    let names_off = image_off + image.len();
-    let digest_off = align4(names_off + SECTION_NAMES.len());
-    let file_len = digest_off
-        .checked_add(IMAGE_DIGEST_SIZE)
+    let names_off = image_off
+        .checked_add(image.len())
         .ok_or(EncodeError::ContainerTooLarge)?;
+    let names_offset = u32::try_from(names_off).map_err(|_| EncodeError::ContainerTooLarge)?;
+    let names_end = names_off
+        .checked_add(SECTION_NAMES.len())
+        .ok_or(EncodeError::ContainerTooLarge)?;
+    let pad_len = (4 - names_end % 4) % 4;
+    let file_len = names_end
+        .checked_add(pad_len + IMAGE_DIGEST_SIZE)
+        .ok_or(EncodeError::ContainerTooLarge)?;
+
+    #[cfg(target_os = "none")]
     if file_len > MAX_CONTAINER_SIZE {
         return Err(EncodeError::ContainerTooLarge);
     }
-    let slot_end = (metadata.slot_address as u64)
-        .checked_add(image.len() as u64)
-        .ok_or(EncodeError::ImageExtentOverflow)?;
-    if slot_end > 0x1_0000_0000 {
-        return Err(EncodeError::ImageExtentOverflow);
-    }
-
-    let mut out = heapless::Vec::<u8, MAX_CONTAINER_SIZE>::new();
+    let mut out = ContainerBytes::new();
+    #[cfg(not(target_os = "none"))]
+    out.try_reserve_exact(file_len)
+        .map_err(|_| EncodeError::BufferFull)?;
     push_ehdr(&mut out)?;
     push_shdr(&mut out, [0; 10])?;
     push_shdr(
@@ -128,21 +145,19 @@ pub fn build_container(
             6,
             metadata.slot_address,
             image_off as u32,
-            image.len() as u32,
+            image_len,
             0,
             0,
             4,
             0,
         ],
     )?;
-    push_shdr(&mut out, [26, 3, 0, 0, names_off as u32, 36, 0, 0, 1, 0])?;
+    push_shdr(&mut out, [26, 3, 0, 0, names_offset, 36, 0, 0, 1, 0])?;
 
     extend(&mut out, &meta)?;
     extend(&mut out, image)?;
     extend(&mut out, SECTION_NAMES)?;
-    while !out.len().is_multiple_of(4) {
-        out.push(0).map_err(|_| EncodeError::BufferFull)?;
-    }
+    extend(&mut out, &[0; 3][..pad_len])?;
     let digest = Sha256::digest(image);
     extend(&mut out, &digest)?;
     debug_assert_eq!(out.len(), file_len);
@@ -286,7 +301,7 @@ fn push_cstring4(
     Ok(())
 }
 
-fn push_ehdr(out: &mut heapless::Vec<u8, MAX_CONTAINER_SIZE>) -> Result<(), EncodeError> {
+fn push_ehdr(out: &mut ContainerBytes) -> Result<(), EncodeError> {
     // IDENT(16) + type=1 + machine=243 + version=1 + entry=0 + phoff=0
     // + shoff=52 + flags=1 + ehsize=52 + phentsize=0 + phnum=0
     // + shentsize=40 + shnum=4 + shstrndx=3
@@ -307,21 +322,18 @@ fn push_ehdr(out: &mut heapless::Vec<u8, MAX_CONTAINER_SIZE>) -> Result<(), Enco
     Ok(())
 }
 
-fn push_shdr(
-    out: &mut heapless::Vec<u8, MAX_CONTAINER_SIZE>,
-    fields: [u32; 10],
-) -> Result<(), EncodeError> {
+fn push_shdr(out: &mut ContainerBytes, fields: [u32; 10]) -> Result<(), EncodeError> {
     for f in fields {
         push_u32(out, f)?;
     }
     Ok(())
 }
 
-fn push_u16(out: &mut heapless::Vec<u8, MAX_CONTAINER_SIZE>, v: u16) -> Result<(), EncodeError> {
+fn push_u16(out: &mut ContainerBytes, v: u16) -> Result<(), EncodeError> {
     extend(out, &v.to_le_bytes())
 }
 
-fn push_u32(out: &mut heapless::Vec<u8, MAX_CONTAINER_SIZE>, v: u32) -> Result<(), EncodeError> {
+fn push_u32(out: &mut ContainerBytes, v: u32) -> Result<(), EncodeError> {
     extend(out, &v.to_le_bytes())
 }
 
@@ -346,12 +358,16 @@ fn push_u24le(out: &mut heapless::Vec<u8, MAX_META_SIZE>, v: u32) -> Result<(), 
     Ok(())
 }
 
-fn extend(
-    out: &mut heapless::Vec<u8, MAX_CONTAINER_SIZE>,
-    bytes: &[u8],
-) -> Result<(), EncodeError> {
+#[cfg(target_os = "none")]
+fn extend(out: &mut ContainerBytes, bytes: &[u8]) -> Result<(), EncodeError> {
     out.extend_from_slice(bytes)
         .map_err(|_| EncodeError::BufferFull)
+}
+
+#[cfg(not(target_os = "none"))]
+fn extend(out: &mut ContainerBytes, bytes: &[u8]) -> Result<(), EncodeError> {
+    out.extend_from_slice(bytes);
+    Ok(())
 }
 
 fn extend_meta(
@@ -501,18 +517,22 @@ mod tests {
         assert!(build_container(image, &meta, Some(5)).is_ok());
     }
 
+    #[cfg(not(target_os = "none"))]
     #[test]
-    fn exact_container_limit() {
-        let mut meta = example_meta();
-        meta.maps.clear();
-        meta.name = name("x");
-        const FIXTURE_OVERHEAD: usize = 292;
-        const IMAGE_LEN: usize = MAX_CONTAINER_SIZE - FIXTURE_OVERHEAD;
-        let data = build_container(&[0u8; IMAGE_LEN], &meta, None).unwrap();
-        assert_eq!(data.len(), 16_384);
+    fn host_round_trips_large_container() {
+        let image = [0xa5; 17_001];
+        let meta = example_meta();
+        let data = build_container(&image, &meta, None).unwrap();
+        let mut source = data.as_slice();
+        let ScanOutcome::Ok(parsed) = scan_at(&mut source, 0) else {
+            panic!("scan failed");
+        };
+        assert_eq!(parsed.name.as_str(), meta.name.as_str());
+        assert_eq!(parsed.file_len, data.len());
+        assert_eq!(parsed.image_size, image.len());
         assert_eq!(
-            build_container(&[0u8; IMAGE_LEN + 1], &meta, None),
-            Err(EncodeError::ContainerTooLarge)
+            &data[parsed.image_offset..parsed.image_offset + parsed.image_size],
+            &image
         );
     }
 }
