@@ -43,9 +43,9 @@ def plot(experiment, events, data, out):
     full = data.get("volume") == "all"
     if experiment == "exec_bench":
         categories = WORKLOADS
-        mean = "Mean " if full else ""
-        panels = (("batch_us", f"{mean}DUT time per batch (µs)"),
-                  ("us_per_round", f"{mean}DUT time per round (µs)"))
+        batch_label = "DUT batch mean (µs)" if full else "DUT time per batch (µs)"
+        round_label = "DUT round mean (µs)" if full else "DUT time per round (µs)"
+        panels = (("batch_us", batch_label), ("us_per_round", round_label))
     else:
         categories = data.get("rates", RATES)
         per_experiment = {
@@ -59,10 +59,13 @@ def plot(experiment, events, data, out):
     fig, axs = plt.subplots(len(panels), 1, figsize=(10.4 if full else 8.2, 2.05 * len(panels) + .9),
                             sharex=True, layout="constrained")
     counts = []
+    mode_spacing = .36 if full else .13
+    repeat_spacing = .065 if full else .045
+    marker_size = 23 if full else 32
     for i, mode in enumerate(modes):
         color, marker = STYLES[mode]
         entries = [e for e in events if e["mode"] == mode]
-        xoffset = (i - (len(modes) - 1) / 2) * .13
+        xoffset = (i - (len(modes) - 1) / 2) * mode_spacing
         per_condition = []
         for category in categories:
             observations = [e for e in entries if (
@@ -74,8 +77,8 @@ def plot(experiment, events, data, out):
                 for repeat, event in enumerate(observations):
                     fields = event if experiment == "exec_bench" else network_fields(event)
                     if fields.get(field) is not None:
-                        ax.scatter(x + (repeat - (len(observations) - 1) / 2) * .045, fields[field],
-                                   color=color, marker=marker, s=32)
+                        ax.scatter(x + (repeat - (len(observations) - 1) / 2) * repeat_spacing,
+                                   fields[field], color=color, marker=marker, s=marker_size)
         counts.append(f"{mode.upper()}  " + " · ".join(str(value) for value in per_condition))
     for ax, (_, label) in zip(axs, panels):
         ax.set_ylabel(label)
