@@ -3,8 +3,8 @@
 #   ./xpost-test
 # No env vars, no CLI flags. Edit `run` to choose which experiments run.
 #
-# Mac side: cd xpost-agent && cargo run --release -- --bind 0.0.0.0:9240
-# Agent HTTP: /health, /v1/* (harness), /mcp (Cursor MCP). endpoint = host:port (http:// inferred).
+# On the Mac, run cargo run --release --locked -- serve --bind 0.0.0.0:9240 from xpost-agent/.
+# The runner connects via HTTP. Set endpoint to host:port or a URL.
 #
 # Medium status and release audit: see procedures/medium.md.
 # Debug: run = ["dev"] — HAL smoke for just_tx/just_drop/firewall (no XDP, no DB).

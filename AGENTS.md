@@ -42,14 +42,15 @@ See [Medium experiment](xpost-test/procedures/medium.md) for device readiness an
 
 ## Agent Operations
 
-Direct device operations must use `xpost-agent` MCP tools.
-Read each tool's description and input schema before calling it.
-Check each returned result.
-If MCP is unavailable, stop the affected device operation.
-Do not substitute HTTP requests or direct serial access.
-Do not start the daemon automatically.
-These rules include cold-table operations.
-The `xpost-test` program may use its existing HTTP client internally.
+Use the `xpost-agent` CLI for direct device operations.
+Read `xpost-agent --help` before you send a command.
+Check the exit code.
+Keep the foreground service in its execution session.
+After the experiment, press Ctrl+C to release the device.
+Use `--bind 0.0.0.0:9240` only on the trusted experiment network.
+The `xpost-test` program uses the existing HTTP client.
+
+See [Agent operation](xpost-agent/README.md) for startup and device commands.
 
 ## Runtime Invariants
 

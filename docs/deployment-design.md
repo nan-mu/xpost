@@ -83,9 +83,9 @@ The runtime retains the current entry when preload fails.
 
 ## Entry points and measurements
 
-The Agent shares operations between HTTP and MCP.
+The Agent CLI sends typed requests to the HTTP service.
 The CLI `preflight` command checks the release inventory and existing firmware layouts without USB.
-The `preflight_medium` MCP tool and `GET /v1/preflight/medium` use the same checks.
+Use `preflight --remote` to query `GET /v1/preflight/medium`.
 A successful preflight establishes host preparation only.
 
 Place each experimental rate and repeat inside its firmware group.

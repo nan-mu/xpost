@@ -110,6 +110,16 @@ impl SerialHandler {
         self.record.lock().all_lines()
     }
 
+    /// Read espflash Board Info once and restore App mode.
+    pub fn board_info(&self) -> io::Result<espflash::flasher::DeviceInfo> {
+        let mut download = self.port().open_download()?;
+        let info = download.board_info();
+        let reset = download.reset_to_app();
+        let info = info?;
+        reset?;
+        Ok(info)
+    }
+
     /// Stop the flash worker (if any) and release this handler.
     pub fn shutdown(self) {
         if let Some(flash) = self.flash {

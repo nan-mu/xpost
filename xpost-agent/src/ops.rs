@@ -1,4 +1,4 @@
-//! Synchronous USB operations shared by HTTP and MCP.
+//! Synchronous USB operations used by HTTP.
 
 use std::path::Path;
 use std::process::Command as ProcCommand;
@@ -87,9 +87,7 @@ fn lock(state: &Mutex<AgentState>) -> Result<std::sync::MutexGuard<'_, AgentStat
 }
 
 fn req<'a>(g: &'a AgentState, cmd: &Command<'_>) -> Result<OkReply<'a>> {
-    g.handler
-        .request::<AgentError>(cmd)
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    g.handler.request(cmd).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// [`req`] plus the instant the UART reader read the reply line.
@@ -98,32 +96,10 @@ fn req_at<'a>(
     cmd: &Command<'_>,
 ) -> Result<(OkReply<'a>, std::time::SystemTime)> {
     g.handler
-        .request_at::<AgentError>(cmd)
+        .request_at(cmd)
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-pub fn medium_preflight(state: &Mutex<AgentState>) -> Result<crate::preflight::Medium> {
-    let (root, profiles) = {
-        let g = lock(state)?;
-        (g.root.clone(), g.profiles.clone())
-    };
-    Ok(crate::preflight::medium(&root, &profiles))
-}
-
-pub fn xdp_preflight(state: &Mutex<AgentState>, name: &str) -> Result<String> {
-    let (root, profiles) = {
-        let g = lock(state)?;
-        (g.root.clone(), g.profiles.clone())
-    };
-    let report = crate::preflight::profile(&root, &profiles, name)?;
-    Ok(report.container_sha256)
-}
-
-pub fn get_status() -> String {
-    "idle".into()
-}
-
-/// Host wait for unsolicited `OK init` (firmware finished App init).
 pub fn get_init(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
     with_log(peer, "GetInit", "", false, state, || {
         let g = lock(state)?;
@@ -174,10 +150,6 @@ pub struct FlashIdentity {
     firmware_profile: String,
     firmware_sha256: String,
     containers: Vec<PreparedInfo>,
-}
-
-pub fn flash_fw(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<OpReply> {
-    flash_fw_checked(state, name, None, peer)
 }
 
 pub fn flash_fw_checked(
@@ -335,15 +307,6 @@ fn flash_fw_inner(
             containers,
         }),
     })
-}
-
-pub fn flash_xdp(
-    state: &Mutex<AgentState>,
-    name: &str,
-    slot: Option<u8>,
-    peer: &str,
-) -> Result<OpReply> {
-    flash_xdp_checked(state, name, slot, None, peer)
 }
 
 /// A verified network or exec target from the experiment plan.
@@ -669,14 +632,18 @@ pub fn switch_xdp(
 ) -> Result<String> {
     with_log(peer, "XdpSwitch", "", false, state, || {
         let g = lock(state)?;
-        match req_at(
-            &g,
-            &Command::XdpSwitch {
+        let reply = g
+            .handler
+            .request_at(&Command::XdpSwitch {
                 slot,
                 generation,
                 pass,
-            },
-        )? {
+            })
+            .map_err(|error| match error {
+                AgentError::Server(_) | AgentError::Syntax(_) => anyhow::anyhow!("{error}"),
+                _ => anyhow::anyhow!("{error}").context("XDP switch outcome unknown"),
+            })?;
+        match reply {
             (
                 OkReply::XdpSwitch {
                     ok,
@@ -692,9 +659,11 @@ pub fn switch_xdp(
                 at,
             ) => {
                 let agent_rx = agent_rx_unix(at);
-                Ok(format!(
+                let reply = format!(
                     "OK xdp switch {ok} {rollback} {severe} {from_slot} {to_slot} {generation} {quiesce_drop} {quiesce_pass} {mcu_us} agent_rx={agent_rx:.6}"
-                ))
+                );
+                anyhow::ensure!(ok == 1, "{reply}");
+                Ok(reply)
             }
             _ => bail!("unexpected xdp switch reply"),
         }
@@ -831,23 +800,6 @@ pub fn clear_map(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<St
         let g = lock(state)?;
         req(&g, &Command::ClearMap { name })?;
         Ok("OK clear map".into())
-    })
-}
-
-pub fn get_map(state: &Mutex<AgentState>, name: &str, peer: &str) -> Result<String> {
-    let name = name.trim();
-    if name.is_empty() {
-        bail!("empty map name");
-    }
-    with_log(peer, "GetMap", name, true, state, || {
-        let g = lock(state)?;
-        match req(&g, &Command::GetMap { name })? {
-            OkReply::GetMap { blob } => {
-                let b64 = base64_encode(blob);
-                Ok(format!("OK get map {} b64={b64}", blob.len()))
-            }
-            _ => bail!("unexpected reply for get map"),
-        }
     })
 }
 
@@ -1142,7 +1094,7 @@ pub fn get_serial(
         || {
             let g = lock(state)?;
             // Touch UART briefly so late lines land in the transcript.
-            let _ = g.handler.request::<AgentError>(&Command::Ping);
+            let _ = g.handler.request(&Command::Ping);
             let since = UNIX_EPOCH + Duration::from_millis(since_unix_ms);
             let until = UNIX_EPOCH + Duration::from_millis(until_unix_ms);
             let lines = g

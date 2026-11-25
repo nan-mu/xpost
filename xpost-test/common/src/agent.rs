@@ -1,7 +1,6 @@
 //! Mac flash / DUT agent HTTP client — frozen `/v1/*` contract on xpost-agent.
 //!
-//! Source of truth: `xpost-agent/src/main.rs` rustdoc
-//! ("HTTP / MCP control-plane contract (frozen)").
+//! The daemon route table is in `xpost-agent/src/http.rs`.
 
 use std::net::Ipv4Addr;
 
