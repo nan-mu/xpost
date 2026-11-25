@@ -309,6 +309,44 @@ fn flash_fw_inner(
     })
 }
 
+#[derive(Serialize)]
+pub struct InstalledDeployment {
+    pub firmware_matches: bool,
+    pub container_sha256: Option<String>,
+}
+
+pub fn attest_deployment(
+    state: &Mutex<AgentState>,
+    firmware: &str,
+    expected_sha256: &str,
+) -> Result<InstalledDeployment> {
+    let g = lock(state)?;
+    let profile = g
+        .profiles
+        .fw(firmware)
+        .with_context(|| format!("unknown firmware {firmware}"))?;
+    let target = Target::read(&g.root, profile)?;
+    anyhow::ensure!(
+        format_sha256(&target.snapshot.sha256) == expected_sha256,
+        "Firmware ELF changed since preflight"
+    );
+    match g.handler.flash_with_table(
+        FlashOp::Attest {
+            expectation: target.snapshot,
+        },
+        Some(target.table),
+    )? {
+        FlashResult::Attested {
+            firmware_matches,
+            image_sha256,
+        } => Ok(InstalledDeployment {
+            firmware_matches,
+            container_sha256: image_sha256.as_ref().map(format_sha256),
+        }),
+        _ => bail!("unexpected deployment attestation result"),
+    }
+}
+
 /// A verified network or exec target from the experiment plan.
 pub struct XdpTarget<'a> {
     pub firmware: &'a str,
@@ -489,7 +527,9 @@ fn flash_one_xdp(
             fmt_bytes(sz)
         ),
         FlashResult::Done => format!("done name={name} size={}", fmt_bytes(sz)),
-        FlashResult::List(_) => bail!("unexpected list result from flash xdp"),
+        FlashResult::List(_) | FlashResult::Attested { .. } => {
+            bail!("unexpected result from flash xdp")
+        }
     };
     Ok(summary)
 }
@@ -562,7 +602,7 @@ pub fn get_xdp(state: &Mutex<AgentState>, peer: &str) -> Result<String> {
                 }
                 Ok(lines.join("\n"))
             }
-            FlashResult::Done | FlashResult::Install(_) => {
+            FlashResult::Done | FlashResult::Install(_) | FlashResult::Attested { .. } => {
                 bail!("unexpected flash result from get xdp")
             }
         }

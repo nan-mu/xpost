@@ -260,6 +260,8 @@ async fn serve_async(
         .route("/status", get(v1_status))
         .route("/dut_status", get(v1_dut_status))
         .route("/preflight/medium", get(v1_medium_preflight))
+        .route("/preflight/medium/{stage}", get(v1_stage_preflight))
+        .route("/deployment/attest", post(v1_attest_deployment))
         .route("/preflight/xdp/{name}", get(v1_xdp_preflight))
         .route("/get/init", get(v1_get_init))
         .route("/flash/fw", post(v1_flash_fw))
@@ -383,15 +385,48 @@ async fn v1_exec_batch(
 }
 
 async fn v1_medium_preflight(State(st): State<AppState>) -> Json<serde_json::Value> {
+    medium_preflight(st, crate::preflight::Scope::All).await
+}
+
+async fn v1_stage_preflight(
+    State(st): State<AppState>,
+    AxumPath(stage): AxumPath<crate::preflight::Scope>,
+) -> Json<serde_json::Value> {
+    medium_preflight(st, stage).await
+}
+
+async fn medium_preflight(st: AppState, scope: crate::preflight::Scope) -> Json<serde_json::Value> {
     let host = st.host;
-    match tokio::task::spawn_blocking(move || crate::preflight::medium(&host.root, &host.profiles))
-        .await
+    match tokio::task::spawn_blocking(move || {
+        crate::preflight::medium_scope(&host.root, &host.profiles, scope)
+    })
+    .await
     {
         Ok(report) => Json(serde_json::json!({
             "ok": report.deployment_ready(),
             "preflight": report,
         })),
         Err(error) => Json(serde_json::json!({ "ok": false, "message": format!("join: {error}") })),
+    }
+}
+
+#[derive(Deserialize)]
+struct AttestBody {
+    firmware: String,
+    expected_sha256: String,
+}
+
+async fn v1_attest_deployment(
+    State(st): State<AppState>,
+    Json(body): Json<AttestBody>,
+) -> Json<serde_json::Value> {
+    let shared = st.shared.clone();
+    match st
+        .execute(move || ops::attest_deployment(&shared, &body.firmware, &body.expected_sha256))
+        .await
+    {
+        Ok(result) => Json(serde_json::json!({ "ok": true, "result": result })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "message": format!("{error:#}") })),
     }
 }
 

@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
         return exam::medium::run(&cfg).await;
     }
     if cfg.run == ["medium-plan"] {
-        return exam::medium::preview();
+        return exam::medium::preview(cfg.medium_stage);
     }
     if cfg.run == ["medium-preflight"] {
         return exam::medium::check(&cfg).await;

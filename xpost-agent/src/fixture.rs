@@ -79,6 +79,10 @@ impl Fixture {
                 self.event("flash container")?;
                 Ok(FlashResult::Install(InstallOutcome::Created { offset: 0 }))
             }
+            FlashOp::Attest { .. } => Ok(FlashResult::Attested {
+                firmware_matches: false,
+                image_sha256: None,
+            }),
             FlashOp::List => Ok(FlashResult::List(Vec::new())),
         }
     }

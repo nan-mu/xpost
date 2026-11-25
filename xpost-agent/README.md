@@ -44,6 +44,8 @@ Use `preflight`, `preflight --inventory`, and `preflight --xdp NAME` for
 offline checks. Use `preflight --remote` or `preflight --remote --xdp NAME`
 to use the service's configuration. Use command help for deployment bindings,
 Perf epochs and chunks, and EXB2 batch inputs.
+The runner uses `GET /v1/preflight/medium/hal-aot` or `GET /v1/preflight/medium/jit-rbpf`.
+The runner attests the installed deployment when it resumes a campaign.
 
 Set `XPOST_ROOT` to override the build root. Set `XPOST_PROFILES` to choose
 a profiles file. Relative overrides and `--log-dir` use the invoking directory.

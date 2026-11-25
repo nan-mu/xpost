@@ -88,9 +88,13 @@ static CTRL_TX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
 static CTRL_RX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 static CTRL_TX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 
+#[path = "../../../medium-wifi.rs"]
+mod medium_wifi;
+
 #[allow(clippy::large_stack_frames, reason = "main allocates sockets / wifi")]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
+    medium_wifi::retain_marker();
     esp_println::logger::init_logger(log::LevelFilter::Error);
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -205,6 +209,10 @@ async fn udp_task(
         let Ok((n, meta)) = socket.recv_from(&mut buf).await else {
             continue;
         };
+        if &buf[..n] == b"READY" {
+            let _ = socket.send_to(b"ACK\n", meta.endpoint).await;
+            continue;
+        }
         let trace = NETWORK_PERF.socket_rx(&buf[..n], 2);
         let t0 = cag::now_ticks();
         {

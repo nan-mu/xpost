@@ -182,6 +182,12 @@ pub(super) async fn run_mode(
             expected,
             profile,
             medium_id,
+            medium_identity: formal
+                .as_ref()
+                .and_then(|(resume, _, _)| {
+                    resume.identity("exec_bench", mode.as_str(), "metrics", program, repeats[0])
+                })
+                .cloned(),
         };
         for repeat in repeats {
             let index = *order;
@@ -216,6 +222,7 @@ struct Sample {
     expected: Vec<u8>,
     profile: [u8; 32],
     medium_id: Option<Uuid>,
+    medium_identity: Option<Value>,
 }
 
 struct Attempt {
@@ -421,7 +428,7 @@ fn result_event(
         None
     };
     json!({ "run_id": attempt.id.to_string(), "experiment": "exec_bench", "mode": sample.mode.as_str(),
-        "variant": "metrics", "phase": phase(sample.medium_id), "medium_id": sample.medium_id, "retry_of": attempt.retry_of, "input": { "program": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED },
+        "variant": "metrics", "phase": phase(sample.medium_id), "medium_id": sample.medium_id, "stage": sample.medium_id.map(|_| crate::config::MediumStage::for_mode(sample.mode.as_str())), "retry_of": attempt.retry_of, "input": { "program": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED },
         "repeat": attempt.repeat, "status": status, "database_status": database_status, "issues": issues,
         "batch_us": batch_us, "us_per_round": us_per_round,
         "execution_return": reply.map(|r| r.execution_return),
@@ -485,13 +492,13 @@ async fn start(db: &mut Client, attempt: &Attempt, sample: &Sample) -> Result<()
     let condition = Uuid::new_v4();
     let config = attempt.config;
     let tx = db.transaction().await?;
-    let parameters = json!({ "workload": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED, "medium_id": sample.medium_id, "retry_of": attempt.retry_of });
+    let parameters = json!({ "workload": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED, "medium_id": sample.medium_id, "stage": sample.medium_id.map(|_| crate::config::MediumStage::for_mode(mode)), "medium_identity": sample.medium_identity, "retry_of": attempt.retry_of });
     tx.execute("INSERT INTO bench.condition(condition_id,experiment,protocol_version,parameters,planned_modes) VALUES($1,'exec_bench','1',$2,ARRAY[$3]::text[])", &[&condition,&parameters,&mode]).await?;
     let request = artifact(&tx, "exb2_input", &sample.input).await?;
     let expected = artifact(&tx, "exb2_expected", &sample.expected).await?;
     let digest = protocol::hex(&sample.profile);
     tx.execute(&format!("INSERT INTO {mode}.exec_bench_config(config_id,condition_id,instrumentation,profile_hash,workload,work_param,batch_count,samples_per_run,input_bytes,input_protocol,wifi_enabled,fixture_artifact_id) VALUES($1,$2,'counter_only',$3,$4,$5,$6,1,8258,'EXB2',false,$7)"), &[&config,&condition,&digest,&sample.program,&(sample.n as i32),&i64::from(ROUNDS),&request]).await?;
-    tx.execute("INSERT INTO bench.run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit) VALUES($1,$2,$3,$4,'exec_bench','metrics',$5,$6,$7::text::bench.u64,$8,'running',$1,'07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113')", &[&attempt.id,&condition,&config,&mode,&phase(sample.medium_id),&attempt.repeat,&SEED.to_string(),&attempt.order]).await?;
+    tx.execute("INSERT INTO bench.run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit) VALUES($1,$2,$3,$4,'exec_bench','metrics',$5,$6,$7::text::bench.u64,$8,'running',$1,'07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113',$9)", &[&attempt.id,&condition,&config,&mode,&phase(sample.medium_id),&attempt.repeat,&SEED.to_string(),&attempt.order,&super::medium::revision()]).await?;
     link(&tx, attempt.id, "exb2_input", request).await?;
     link(&tx, attempt.id, "exb2_expected", expected).await?;
     tx.commit().await?;
@@ -607,6 +614,7 @@ mod tests {
                 expected,
                 profile: [0x2a; 32],
                 medium_id: None,
+                medium_identity: None,
             };
             let attempt = Attempt {
                 id: Uuid::new_v4(),

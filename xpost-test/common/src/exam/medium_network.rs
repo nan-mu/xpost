@@ -110,6 +110,28 @@ impl Cell<'_> {
     }
 }
 
+pub(super) fn planned_input(
+    cfg: &FileConfig,
+    experiment: &str,
+    condition: &str,
+) -> Result<serde_json::Value> {
+    let link = Link::from_config(cfg)?;
+    let rules = if experiment == "firewall" {
+        link.rules(cfg.firewall.blacklist_size, cfg.target.vip_ip)?
+    } else {
+        Vec::new()
+    };
+    Ok(json!({
+        "condition": condition,
+        "window_ns": WINDOW.as_nanos() as u64,
+        "drain_ns": DRAIN.as_nanos() as u64,
+        "source_ip": link.src, "dut_ip": link.dut, "interface": link.iface,
+        "source_mac": link.src_mac, "dut_mac": link.dut_mac,
+        "port": link.port, "stimulus_source_port": link.sport,
+        "firewall_hit": link.hit, "blacklist": rules,
+    }))
+}
+
 /// Run a cell for the firmware and XDP image already prepared by the scheduler.
 /// Individual attempts print their run ID and terminal status.
 pub(super) async fn run_cell(
@@ -172,6 +194,8 @@ pub(super) async fn run_cell(
         *plan_order = order.checked_add(1).context("medium plan order overflow")?;
         let parameters = json!({
             "medium_id": campaign.to_string(),
+            "stage": crate::config::MediumStage::for_mode(mode),
+            "medium_identity": resume.identity(experiment.name(), mode, variant, &condition, repeat),
             "retry_of": retry_of.map(|run| run.to_string()),
             "firmware": firmware,
             "firmware_sha256": firmware_sha256,
@@ -632,29 +656,43 @@ async fn capture_window(
     window
 }
 
+pub(super) async fn qualify_group(cfg: &FileConfig, agent: &AgentClient, mode: &str) -> Result<()> {
+    let link = Link::from_config(cfg)?;
+    if mode != "hal" {
+        agent
+            .disable_xdp()
+            .await
+            .context("disable policy for dataplane readiness")?;
+    }
+    link.open()?
+        .announce_neighbor(link.src)
+        .context("prime DUT neighbor")?;
+    qualify_drop_path(&link).await
+}
+
 async fn qualify_drop_path(link: &Link) -> Result<()> {
     let socket = tokio::net::UdpSocket::bind((link.src, 0))
         .await
-        .context("bind DROP readiness socket")?;
+        .context("bind dataplane readiness socket")?;
     socket.connect((link.dut, link.port)).await?;
-    timeout(Duration::from_secs(2), async {
+    timeout(Duration::from_secs(8), async {
         let mut bytes = [0u8; 32];
-        for _ in 0..4 {
+        for _ in 0..16 {
             socket.send(b"READY").await?;
             if let Ok(received) = timeout(Duration::from_millis(400), socket.recv(&mut bytes)).await
             {
                 let size = received?;
                 ensure!(
                     &bytes[..size] == b"ACK\n",
-                    "unexpected DROP readiness reply"
+                    "unexpected dataplane readiness reply"
                 );
                 return Ok(());
             }
         }
-        bail!("no ACK from the disabled DROP path")
+        bail!("no DUT dataplane readiness ACK")
     })
     .await
-    .context("DROP readiness deadline")?
+    .context("DUT dataplane readiness deadline")?
 }
 
 async fn blacklist(agent: &AgentClient) -> Result<Counters> {
@@ -987,6 +1025,18 @@ fn analyze(
                             .is_some_and(|count| count > 0)
                     {
                         out.issues.push("tagged packet failed in XDP".into());
+                    }
+                    let ingress_name = if cell.hal() {
+                        "tagged_socket_rx"
+                    } else {
+                        "tagged_driver_rx"
+                    };
+                    if cell.experiment == Workload::Tx
+                        && result.tx.as_ref().is_some_and(|tx| tx.returned == 0)
+                        && pair.delta(ingress_name).is_none_or(|count| count == 0)
+                    {
+                        out.issues
+                            .push("no tagged DUT ingress or qualified reply".into());
                     }
                     if cell.experiment == Workload::Drop {
                         result.drop_counts = DropCounts::from_metrics(&pair, cell.hal());

@@ -41,6 +41,10 @@ pub enum FlashResult {
     Done,
     Install(InstallOutcome),
     List(Vec<XdpEntry>),
+    Attested {
+        firmware_matches: bool,
+        image_sha256: Option<[u8; 32]>,
+    },
 }
 
 /// Internal flash worker handle (owned by [`crate::client::SerialHandler`]).
@@ -206,6 +210,12 @@ fn run_op(
         FlashOp::Clear { names } => table()
             .and_then(|table| xdp::clear(port, table, names))
             .map(|_| FlashResult::Done),
+        FlashOp::Attest { expectation } => table()
+            .and_then(|table| xdp::attest(port, table, partition, expectation))
+            .map(|(firmware_matches, image_sha256)| FlashResult::Attested {
+                firmware_matches,
+                image_sha256,
+            }),
         FlashOp::List => table()
             .and_then(|table| xdp::list(port, table))
             .map(FlashResult::List),
@@ -215,7 +225,10 @@ fn run_op(
     if result.is_ok()
         && matches!(
             op,
-            FlashOp::Fw { .. } | FlashOp::Xdp { .. } | FlashOp::Clear { .. }
+            FlashOp::Fw { .. }
+                | FlashOp::Xdp { .. }
+                | FlashOp::Clear { .. }
+                | FlashOp::Attest { .. }
         )
     {
         record.mark_init_after(SystemTime::now());
@@ -241,7 +254,9 @@ fn run_op(
                 rec.flash(&format!("FLASH install {o:?}"));
                 FlashEvent::End(op.clone()).write_to(&mut rec);
             }
-            Ok(FlashResult::Done) => FlashEvent::End(op.clone()).write_to(&mut rec),
+            Ok(FlashResult::Done | FlashResult::Attested { .. }) => {
+                FlashEvent::End(op.clone()).write_to(&mut rec)
+            }
             Err(e) => FlashEvent::Failed {
                 op: op.clone(),
                 msg: e.to_string(),

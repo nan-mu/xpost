@@ -181,3 +181,14 @@ Publish each terminal attempt to PR #23 after its measurement window.
 Use the original run ID to recover a missing write or export.
 
 Reason: the revised taskbook combines device acceptance and the formal run.
+
+## 2026-11-25 Phased medium retest
+
+Run HAL and AOT first. Run JIT and rBPF after publication of the first phase.
+Each phase covers 14 cells and 72 planned attempts.
+Order the experiments as exec_bench, firewall, just_tx, and just_drop.
+Defer case, lookup, and dev for this retest.
+Use a new campaign for the retest. Retain earlier runs as diagnostic evidence.
+
+Reason. The updated PR #23 brief requires HAL and AOT results before the second phase.
+The earlier 29-cell scope still records the original campaign.

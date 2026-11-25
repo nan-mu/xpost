@@ -2,7 +2,7 @@
 
 The default `run = ["medium"]` starts with read-only readiness checks.
 The maintainer authorizes the start after implementation and preflight pass.
-The 29-cell run includes the device acceptance checks.
+The selected phase includes the device acceptance checks.
 TR3000 runs `./xpost-test` without arguments.
 The script for a formal run is `./xpost-test/scripts/xpost-test.fish`.
 The runner stops before device writes if a readiness check fails.
@@ -12,13 +12,14 @@ Network attribution must qualify each planned Trace and DROP Metrics cell.
 
 The Agent pins [libbpf-mcu v0.1.1](https://github.com/nan-mu/libbpf-mcu/releases/tag/v0.1.1) at `07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113`.
 The independent inventory checked 36 deployments across 12 archives.
-Medium preflight checked 32 program/mode combinations and prepared 41 XDP ELF targets.
+The earlier 29-cell preflight checked 32 program/mode combinations and prepared 41 XDP ELF targets.
 The 41 targets include separate Metrics and Trace Firmware ELFs for the network programs.
-Medium preflight also checked four HAL Firmware ELFs.
+The phased endpoint checks only the deployments and HAL Firmware ELFs needed by the selected phase.
 The [v0.1.0 ledger](libbpf-mcu-v0.1.0.sha256) records the earlier release with zero deployments.
 
 Provide the Wi-Fi build inputs for each network example before building its Firmware ELF.
 Use the local `.env` paths described in the [README](../../README.md).
+The phased preflight checks the linked Wi-Fi input marker before any device write.
 Run these checks from the repository root on the Mac.
 
 ```bash
@@ -57,41 +58,39 @@ See [Agent operation](../../xpost-agent/README.md) for the HTTP endpoint and sta
 
 ## Planned matrix and time budget
 
-Set `run = ["medium-plan"]` to print the 29 cells and their firmware groups.
-Set `run = ["medium-preflight"]` for the read-only readiness check on TR3000.
-It checks Agent health, deployment identities, protocol tables, and collector availability.
-Set `run = ["medium"]` for the formal selection.
-Set `medium_resume_id` to the original campaign UUID to resume that campaign.
-The runner skips completed attempts and holds case when publish evidence needs recovery.
+Set `medium_stage = "hal-aot"` for phase one.
+Set `run = ["medium-plan"]` to print the selected plan.
+Set `run = ["medium-preflight"]` to check readiness on TR3000.
+The check uses the matching Agent HTTP endpoint and verifies the protocol database.
+Set `run = ["medium"]` for formal execution.
 
-| Family | Metrics | Trace | Conditions |
-| --- | ---: | ---: | --- |
-| firewall | 4 | 4 | 400, 1400, 4000 pps, two 5 s repeats. Trace uses one hit and one miss. |
-| just_drop | 4 | 4 | Same rates and repeats. Trace uses one tagged probe. |
-| just_tx | 4 | 4 | Same rates and repeats. Trace uses one JTX1 probe. |
-| exec_bench | 4 | 0 | Seven programs. One condition and two batches per program and mode. |
-| case | 0 | 1 | AOT Trace. One measured A-to-B publish. |
-| Total | 16 | 13 | 29 required cells |
+| Phase | Modes | Metrics | Trace | Attempts |
+| --- | --- | ---: | ---: | ---: |
+| One | HAL, AOT | 8 | 6 | 72 |
+| Two | JIT, rBPF | 8 | 6 | 72 |
+| Total | Four modes | 16 | 12 | 144 |
 
-`lookup` and `dev` run separately from the medium plan.
-AOT and JIT can share a native Firmware ELF.
-Group execution by firmware digest. Keep rates and repeats within the group.
-Count firmware flashes, cold installs, SRAM preloads, preparation publishes, and measured publishes.
-The case preparation plans one firmware flash, two cold installs, two preloads, and two publishes.
-The formal case window then measures one publish. These counts need device verification.
+Run `exec_bench`, `firewall`, `just_tx`, and `just_drop` in that order.
+Group Firmware ELFs by digest within each experiment.
+Keep rates and repeats within each firmware group.
+Each phase uses 36 five-second network Metrics windows.
+Each phase uses one tagged Just TX and Just DROP Trace probe per mode.
+Firewall Trace uses one hit and one miss per mode.
+EXB2 measures two batches for each of seven workloads per mode.
 
-| Work | Budget |
-| --- | ---: |
-| Normal deployment, waits, and state checks | 18 min |
-| Network stimuli, drain, and export | 12 min |
-| EXB2 invocation and export | 8 min |
-| Case stimuli, switches, and export | 8 min |
-| Per-experiment PostgreSQL checks and analysis | 10 min |
-| Reconciliation and reporting | 4 min |
-| Total | 60 min |
+Publish phase one results and figures before phase two.
+Set `medium_stage = "jit-rbpf"` for phase two.
+Set `medium_resume_id` to the same campaign UUID.
+The runner checks for valid Metrics in each phase one experiment and mode.
+The runner resumes with compatible qualified attempts from the selected phase.
+An explicit replacement analysis identifies its predecessor in `supersedes_analysis_id`.
+Both analyses must use the same raw evidence digest.
+The terminal audit identifies the accepted run IDs for plotting.
 
-The network plan contains 72 Metrics windows and 6 minutes of paced sends.
-These are budget allocations. A device run must check the total wall time and operation counts.
+Defer `case`, `lookup`, and `dev` during these phases.
+Count firmware flashes and cold installations across both phases and resumes.
+Record diagnostics, pauses, and retries separately.
+The combined execution target is 60 minutes.
 
 ## Procedure and result criteria
 
@@ -101,7 +100,9 @@ before any device write:
   check the dedicated PostgreSQL database and its four-mode schema
   check target identity and support for required callbacks
 for each firmware group:
-  check device identity and flash only when it differs
+  check the installed identity when resuming
+  reuse an attested matching Firmware ELF and XDP ELF
+  verify the network dataplane before the first acquisition window
   run all modes and collection variants served by the firmware
   keep installs outside the sample loop except when the sample measures them
   prepare: reserve a collection epoch
@@ -140,6 +141,7 @@ The runner checks the scope of DUT counts before it attributes them to a stimulu
   Send JTX1 with run UUID and sequence. Wait for bounded drain and freeze.
   Compare the full returned frame. Count unique valid replies, duplicates, late replies, and corrupt replies.
   Use successful sends for the loss denominator. Qualify loss only with valid capture and clock evidence.
+  Mark zero replies without tagged DUT ingress as inconclusive.
   Use unique TX and first valid RX timestamps on the same clock for RTT.
 - **EXB2.** Select the static HAL entry or install the required XDP ELF once per program and mode.
   Prepare one 8258-byte buffer per sample. Call the program once with the full buffer.

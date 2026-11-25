@@ -15,6 +15,7 @@ version = "1"
 # Use a separate run list for older experiments or diagnostics.
 # Medium checks Agent deployment readiness before device writes or database access.
 run = ["medium"]
+medium_stage = "hal-aot"
 # medium_resume_id = "<original campaign UUID>"
 
 [postgres]

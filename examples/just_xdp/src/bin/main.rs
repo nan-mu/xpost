@@ -87,12 +87,16 @@ static UDP_TX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
 static UDP_RX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 static UDP_TX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 
+#[path = "../../../medium-wifi.rs"]
+mod medium_wifi;
+
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
+    medium_wifi::retain_marker();
     // Quiet USB: info/trace during XDP_TX stress contends with the agent session
     // and shows up as host send gaps (formal: 80–145 ms) that poison loss medians.
     esp_println::logger::init_logger(log::LevelFilter::Error);

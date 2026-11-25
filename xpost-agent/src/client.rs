@@ -470,10 +470,15 @@ pub fn run(command: DeviceCommand, endpoint: Option<&str>) -> Result<()> {
     send(command.request()?, endpoint)
 }
 
-pub fn preflight(name: Option<String>, endpoint: Option<&str>) -> Result<()> {
-    let request = match name {
-        Some(name) => Request::get("/v1/preflight/xdp").map(name),
-        None => Request::get("/v1/preflight/medium"),
+pub fn preflight(
+    name: Option<String>,
+    stage: Option<crate::preflight::Scope>,
+    endpoint: Option<&str>,
+) -> Result<()> {
+    let request = match (name, stage) {
+        (Some(name), _) => Request::get("/v1/preflight/xdp").map(name),
+        (None, Some(stage)) => Request::get("/v1/preflight/medium").map(stage.as_str().into()),
+        (None, None) => Request::get("/v1/preflight/medium"),
     };
     send(request, endpoint)
 }

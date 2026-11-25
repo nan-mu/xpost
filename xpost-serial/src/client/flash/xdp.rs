@@ -248,6 +248,48 @@ fn install_verified(
     Ok(outcome)
 }
 
+pub(super) fn attest(
+    port: &Port,
+    xdp: XdpTable,
+    partition: &str,
+    expectation: &FirmwareExpectation,
+) -> io::Result<(bool, Option<[u8; 32]>)> {
+    let mut dl = port.open_download_for_install()?;
+    let observation = (|| {
+        let segment = dl.application_segment(&expectation.elf)?;
+        if let Err(error) = verify_firmware(expectation, xdp, partition, &segment, |addr, len| {
+            dl.read_flash(addr, len)
+        }) {
+            return if error.kind() == io::ErrorKind::InvalidData {
+                Ok((false, None))
+            } else {
+                Err(error)
+            };
+        }
+        let table = dl.read_flash(xdp.base, xdp.len)?;
+        let entries = list_entries(&table)?;
+        let image = match entries.as_slice() {
+            [only]
+                if only.offset == 0
+                    && table[only.len as usize..].iter().all(|byte| *byte == 0xff) =>
+            {
+                Some(Sha256::digest(&table[..only.len as usize]).into())
+            }
+            [] if table.iter().all(|byte| *byte == 0xff) => None,
+            _ => {
+                return Err(io::Error::other(
+                    "cannot attest a dirty or multi-image cold table",
+                ));
+            }
+        };
+        Ok((true, image))
+    })();
+    let reset = dl.reset_to_app();
+    let attested = observation?;
+    reset?;
+    Ok(attested)
+}
+
 fn verify_firmware(
     expectation: &FirmwareExpectation,
     xdp: XdpTable,
@@ -319,10 +361,16 @@ fn verify_firmware(
         return Err(fail());
     }
     if read(PART_TABLE_OFFSET, bytes.len() as u32)? != *bytes {
-        return Err(io::Error::other("firmware partition table mismatch"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "firmware partition table mismatch",
+        ));
     }
     if read(app.0, app.1.len() as u32)? != app.1 {
-        return Err(io::Error::other("firmware application mismatch"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "firmware application mismatch",
+        ));
     }
     Ok(())
 }

@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use object::Object;
-use serde::Serialize;
+use object::{Object, ObjectSection, ObjectSymbol};
+use serde::{Deserialize, Serialize};
 
 use crate::deployment::{self, PreparedInfo, Target};
 use crate::profiles::{Profiles, XdpProfile, abs_under_root};
@@ -61,10 +61,34 @@ impl Medium {
     }
 }
 
-pub fn medium(root: &Path, profiles: &Profiles) -> Medium {
-    let mut report = inspect(root, Some(profiles));
-    for name in HAL_FIRMWARE {
-        match check_hal(root, profiles, name) {
+#[derive(Clone, Copy, Default, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Scope {
+    #[default]
+    All,
+    HalAot,
+    JitRbpf,
+}
+
+impl Scope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::HalAot => "hal-aot",
+            Self::JitRbpf => "jit-rbpf",
+        }
+    }
+}
+
+pub fn medium_scope(root: &Path, profiles: &Profiles, scope: Scope) -> Medium {
+    let mut report = inspect(root, Some(profiles), scope);
+    let hal_firmware = if matches!(scope, Scope::JitRbpf) {
+        &[][..]
+    } else {
+        &HAL_FIRMWARE[..]
+    };
+    for &name in hal_firmware {
+        match check_hal(root, profiles, name, !matches!(scope, Scope::All)) {
             Ok(firmware) => report.hal_firmware.push(firmware),
             Err(error) => report.issues.push(format!("HAL {name}: {error:#}")),
         }
@@ -73,14 +97,17 @@ pub fn medium(root: &Path, profiles: &Profiles) -> Medium {
 }
 
 pub fn inventory(root: &Path) -> Medium {
-    inspect(root, None)
+    inspect(root, None, Scope::All)
 }
 
-fn modes(program: &str, medium: bool) -> &'static [Mode] {
-    if medium && matches!(program, "case_swap" | "case_mark") {
-        &[Mode::Aot]
-    } else {
-        &Mode::ALL
+fn modes(program: &str, medium: bool, scope: Scope) -> &'static [Mode] {
+    let case = matches!(program, "case_swap" | "case_mark");
+    match (scope, case, medium) {
+        (Scope::All, true, true) => &[Mode::Aot],
+        (Scope::All, _, _) => &Mode::ALL,
+        (_, true, _) => &[],
+        (Scope::HalAot, false, _) => &[Mode::Aot],
+        (Scope::JitRbpf, false, _) => &[Mode::Jit, Mode::Rbpf],
     }
 }
 
@@ -95,14 +122,14 @@ fn trace_carrier(program: &str, mode: Mode) -> Option<String> {
     Some(format!("{family}{engine}-trace"))
 }
 
-fn inspect(root: &Path, profiles: Option<&Profiles>) -> Medium {
+fn inspect(root: &Path, profiles: Option<&Profiles>, scope: Scope) -> Medium {
     let medium = profiles.is_some();
     let mut report = Medium {
         release: TAG,
         commit: COMMIT,
         required: PROGRAMS
             .iter()
-            .map(|program| modes(program, medium).len())
+            .map(|program| modes(program, medium, scope).len())
             .sum(),
         required_targets: 0,
         deployments: Vec::new(),
@@ -111,7 +138,10 @@ fn inspect(root: &Path, profiles: Option<&Profiles>) -> Medium {
         issues: Vec::new(),
     };
     for program in PROGRAMS {
-        let modes = modes(program, medium);
+        let modes = modes(program, medium, scope);
+        if modes.is_empty() {
+            continue;
+        }
         if medium {
             report.required_targets += modes
                 .iter()
@@ -150,6 +180,7 @@ fn inspect(root: &Path, profiles: Option<&Profiles>) -> Medium {
                 mode,
                 slot,
                 None,
+                !matches!(scope, Scope::All) && trace_carrier(program, mode).is_some(),
                 &mut report,
             );
             if let Some(firmware) = trace_carrier(program, mode) {
@@ -162,6 +193,7 @@ fn inspect(root: &Path, profiles: Option<&Profiles>) -> Medium {
                     mode,
                     slot,
                     Some(&firmware),
+                    !matches!(scope, Scope::All),
                     &mut report,
                 );
             }
@@ -170,7 +202,12 @@ fn inspect(root: &Path, profiles: Option<&Profiles>) -> Medium {
     report
 }
 
-fn check_hal(root: &Path, profiles: &Profiles, name: &'static str) -> Result<HalFirmware> {
+fn check_hal(
+    root: &Path,
+    profiles: &Profiles,
+    name: &'static str,
+    require_network: bool,
+) -> Result<HalFirmware> {
     let profile = profiles.fw(name).context("missing HAL firmware profile")?;
     anyhow::ensure!(profile.xdp.is_empty(), "HAL profile lists XDP images");
     let firmware = abs_under_root(root, &profile.artifact);
@@ -184,6 +221,9 @@ fn check_hal(root: &Path, profiles: &Profiles, name: &'static str) -> Result<Hal
             && elf.section_by_name(xpost_elf::SECTION_NAME).is_none(),
         "invalid HAL Firmware ELF"
     );
+    if require_network && name != "exec-bench-hal" {
+        check_wifi(&elf)?;
+    }
     Ok(HalFirmware {
         firmware_profile: name,
         firmware_sha256: format_sha256(&snapshot.sha256),
@@ -206,6 +246,7 @@ fn check_target(
     mode: Mode,
     slot: u8,
     firmware: Option<&str>,
+    require_network: bool,
     report: &mut Medium,
 ) {
     let result: Result<PreparedInfo> = (|| {
@@ -220,6 +261,10 @@ fn check_target(
             .fw(profile)
             .with_context(|| format!("missing firmware profile {profile}"))?;
         let target = Target::read(root, fw).with_context(|| format!("target {}", fw.name))?;
+        if require_network {
+            let elf = object::File::parse(target.snapshot.elf.as_slice())?;
+            check_wifi(&elf).with_context(|| format!("target {profile}"))?;
+        }
         Ok(target
             .prepare(archive.deployment(mode)?, xdp)
             .with_context(|| format!("target {profile}"))?
@@ -231,4 +276,22 @@ fn check_target(
             .issues
             .push(format!("{TAG} {program}/{}: {error:#}", mode.as_str())),
     }
+}
+
+fn check_wifi(elf: &object::File<'_>) -> Result<()> {
+    let marker = elf
+        .symbols()
+        .find(|symbol| {
+            symbol.is_definition()
+                && symbol
+                    .name()
+                    .is_ok_and(|name| name == "xpost_medium_wifi_inputs")
+        })
+        .context("Firmware ELF lacks the Wi-Fi input marker. Rebuild the network carrier")?;
+    let section = elf.section_by_index(marker.section_index().context("Wi-Fi marker section")?)?;
+    anyhow::ensure!(
+        section.data_range(marker.address(), 1)? == Some(&[1][..]),
+        "Firmware ELF was built without Wi-Fi inputs"
+    );
+    Ok(())
 }

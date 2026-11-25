@@ -170,7 +170,7 @@ async fn tr3000_reads_deployment_perf_and_exb2_from_typed_routes() {
         listener,
         vec![
             (
-                "GET /v1/preflight/medium HTTP/1.1",
+                "GET /v1/preflight/medium/hal-aot HTTP/1.1",
                 None,
                 json!({"ok": true, "preflight": report}),
             ),
@@ -235,7 +235,7 @@ async fn tr3000_reads_deployment_perf_and_exb2_from_typed_routes() {
                 }}),
             ),
             (
-                "GET /v1/preflight/medium HTTP/1.1",
+                "GET /v1/preflight/medium/hal-aot HTTP/1.1",
                 None,
                 json!({"ok": false, "preflight": {
                    "release": "v0.1.1", "required": 1, "deployments": [], "issues": ["missing layout"],
@@ -244,7 +244,7 @@ async fn tr3000_reads_deployment_perf_and_exb2_from_typed_routes() {
         ],
     ));
     tokio::time::timeout(Duration::from_secs(5), async {
-        let preflight = client.medium_preflight().await.unwrap();
+        let preflight = client.medium_preflight(Some("hal-aot")).await.unwrap();
         assert_eq!(
             (
                 preflight.prepared[0].slot,
@@ -286,7 +286,7 @@ async fn tr3000_reads_deployment_perf_and_exb2_from_typed_routes() {
         );
         assert_eq!(result.output, vec![0x5a; 8258]);
         let rejection = client
-            .medium_preflight()
+            .medium_preflight(Some("hal-aot"))
             .await
             .err()
             .expect("preflight must refuse");

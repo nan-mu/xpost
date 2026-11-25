@@ -102,12 +102,16 @@ static CTRL_TX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
 static CTRL_RX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 static CTRL_TX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 
+#[path = "../../../medium-wifi.rs"]
+mod medium_wifi;
+
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
+    medium_wifi::retain_marker();
     esp_println::logger::init_logger(log::LevelFilter::Error);
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -264,9 +268,13 @@ async fn udp_task(stack: embassy_net::Stack<'static>) {
     socket.bind(STIM_PORT).expect("bind stim");
     let mut buf = [0u8; 256];
     loop {
-        let Ok((n, _meta)) = socket.recv_from(&mut buf).await else {
+        let Ok((n, meta)) = socket.recv_from(&mut buf).await else {
             continue;
         };
+        if &buf[..n] == b"READY" {
+            let _ = socket.send_to(b"ACK\n", meta.endpoint).await;
+            continue;
+        }
         NET_RX.fetch_add(1, Ordering::Relaxed);
         // Legal (XDP PASS) flow: record LE u16 token; never ACK.
         if n >= 2 {

@@ -63,6 +63,38 @@ pub fn postgres() -> &'static PostgresConfig {
         .expect("postgres config: call install_postgres after FileConfig::embedded")
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MediumStage {
+    #[default]
+    HalAot,
+    JitRbpf,
+}
+
+impl MediumStage {
+    pub const fn modes(self) -> [&'static str; 2] {
+        match self {
+            Self::HalAot => ["hal", "aot"],
+            Self::JitRbpf => ["jit", "rbpf"],
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HalAot => "hal-aot",
+            Self::JitRbpf => "jit-rbpf",
+        }
+    }
+
+    pub const fn for_mode(mode: &str) -> &'static str {
+        if matches!(mode.as_bytes(), b"hal" | b"aot") {
+            Self::HalAot.as_str()
+        } else {
+            Self::JitRbpf.as_str()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct FileConfig {
     #[serde(default = "default_version")]
@@ -72,6 +104,8 @@ pub struct FileConfig {
     pub run: Vec<String>,
     #[serde(default)]
     pub medium_resume_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub medium_stage: MediumStage,
     pub postgres: PostgresConfig,
     pub probe: ProbeConfig,
     #[serde(rename = "dut")]
@@ -256,6 +290,8 @@ struct DefaultFile {
     run: Vec<String>,
     #[serde(default)]
     medium_resume_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    medium_stage: MediumStage,
     postgres: PostgresConfig,
     probe: ProbeConfig,
     #[serde(rename = "dut")]
@@ -304,6 +340,7 @@ impl FileConfig {
             version: def.version,
             run: def.run,
             medium_resume_id: def.medium_resume_id,
+            medium_stage: def.medium_stage,
             postgres: def.postgres,
             probe: def.probe,
             target: def.target,

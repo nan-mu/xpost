@@ -188,6 +188,9 @@ enum Command {
         /// Check the release archive inventory without target firmware.
         #[arg(long, conflicts_with = "remote")]
         inventory: bool,
+        /// Check only the selected medium phase.
+        #[arg(long, value_enum, conflicts_with_all = ["inventory","xdp"])]
+        stage: Option<preflight::Scope>,
         /// Query the service's host-only preflight route.
         #[arg(long)]
         remote: bool,
@@ -214,9 +217,17 @@ fn run(cli: Cli) -> Result<()> {
             http::serve_http(&args.bind, &args.log_dir, Location::resolve()?)
         }
         Command::Preflight {
-            xdp, remote: true, ..
-        } => client::preflight(xdp, cli.endpoint.as_deref()),
-        Command::Preflight { xdp, inventory, .. } => {
+            xdp,
+            stage,
+            remote: true,
+            ..
+        } => client::preflight(xdp, stage, cli.endpoint.as_deref()),
+        Command::Preflight {
+            xdp,
+            stage,
+            inventory,
+            ..
+        } => {
             ensure!(
                 cli.endpoint.is_none(),
                 "use preflight --remote with --endpoint"
@@ -232,7 +243,7 @@ fn run(cli: Cli) -> Result<()> {
             if let Some(name) = xdp {
                 return print_json(&preflight::profile(&root, &profiles, &name)?);
             }
-            let report = preflight::medium(&root, &profiles);
+            let report = preflight::medium_scope(&root, &profiles, stage.unwrap_or_default());
             print_json(&report)?;
             ensure!(
                 report.deployment_ready(),

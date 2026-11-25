@@ -63,12 +63,16 @@ static UDP_TX_META: StaticCell<[PacketMetadata; 16]> = StaticCell::new();
 static UDP_RX_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
 static UDP_TX_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
 
+#[path = "../../../medium-wifi.rs"]
+mod medium_wifi;
+
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
+    medium_wifi::retain_marker();
     // Quiet USB: match just_drop under stress (agent session contention).
     esp_println::logger::init_logger(log::LevelFilter::Error);
 
@@ -172,6 +176,10 @@ async fn udp_task(
         let Ok((n, meta)) = socket.recv_from(&mut buf).await else {
             continue;
         };
+        if &buf[..n] == b"READY" {
+            let _ = socket.send_to(b"ACK\n", meta.endpoint).await;
+            continue;
+        }
         let trace = NETWORK_PERF.socket_rx(&buf[..n], 0);
         let t0 = cag::now_ticks();
         {

@@ -143,9 +143,9 @@ impl Attempt {
         };
         let release = (!cell.hal()).then_some("07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113");
         tx.execute("INSERT INTO bench.run
-            (run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit)
-             VALUES($1,$2,$3,$4,$5,$6,'formal',$7,0,$8,'running',$1,$9)",
-            &[&run,&condition,&config,&mode,&name,&variant,&repeat,&order,&release]).await?;
+            (run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit)
+             VALUES($1,$2,$3,$4,$5,$6,'formal',$7,0,$8,'running',$1,$9,$10)",
+            &[&run,&condition,&config,&mode,&name,&variant,&repeat,&order,&release,&super::super::medium::revision()]).await?;
         if let Some(fixture) = fixture {
             tx.execute("INSERT INTO bench.run_artifact(run_id,role,artifact_id) VALUES($1,'firewall_fixture',$2)",
                 &[&run,&fixture]).await?;

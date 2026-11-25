@@ -47,6 +47,8 @@ pub struct PreparedDeployment {
     pub mode: String,
     pub profile: String,
     pub slot: u8,
+    #[serde(default)]
+    pub container_sha256: String,
     #[serde(flatten)]
     pub firmware: FirmwareIdentity,
 }
@@ -55,6 +57,19 @@ pub struct PreparedDeployment {
 pub struct FirmwareIdentity {
     pub firmware_profile: String,
     pub firmware_sha256: String,
+}
+
+#[derive(Deserialize)]
+pub struct InstalledDeployment {
+    pub firmware_matches: bool,
+    pub container_sha256: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AttestResponse {
+    ok: bool,
+    message: Option<String>,
+    result: Option<InstalledDeployment>,
 }
 
 #[derive(Deserialize)]
@@ -121,10 +136,11 @@ impl AgentClient {
         Ok(())
     }
 
-    pub async fn medium_preflight(&self) -> Result<DeploymentReport> {
+    pub async fn medium_preflight(&self, stage: Option<&str>) -> Result<DeploymentReport> {
+        let suffix = stage.map_or_else(String::new, |stage| format!("/{stage}"));
         let response: MediumPreflight = self
             .http
-            .get(format!("{}/v1/preflight/medium", self.base))
+            .get(format!("{}/v1/preflight/medium{suffix}", self.base))
             .send()
             .await?
             .error_for_status()?
@@ -290,6 +306,33 @@ impl AgentClient {
         .await?
         .flash
         .context("Agent did not return the flashed firmware identity")
+    }
+
+    pub async fn attest_deployment(
+        &self,
+        firmware: &str,
+        sha256: &str,
+    ) -> Result<InstalledDeployment> {
+        let response: AttestResponse = self
+            .http
+            .post(format!("{}/v1/deployment/attest", self.base))
+            .json(&serde_json::json!({ "firmware": firmware, "expected_sha256": sha256 }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        anyhow::ensure!(
+            response.ok,
+            "{}",
+            response
+                .message
+                .as_deref()
+                .unwrap_or("DUT attestation failed")
+        );
+        response
+            .result
+            .context("Agent returned no installed deployment")
     }
 
     /// Replace a single installed image using its checked Firmware ELF and partition.
@@ -540,7 +583,7 @@ mod tests {
             socket.write_all(reply.as_bytes()).await.unwrap();
         });
         let err = agent
-            .medium_preflight()
+            .medium_preflight(None)
             .await
             .err()
             .expect("business failure must block");

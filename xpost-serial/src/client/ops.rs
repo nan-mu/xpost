@@ -34,6 +34,10 @@ pub enum FlashOp {
         /// Empty = clear all (`*`).
         names: Vec<String>,
     },
+    /// Read the installed firmware identity and one cold image without writing flash.
+    Attest {
+        expectation: FirmwareExpectation,
+    },
     /// Read the XDP table through an exclusive download-mode session.
     List,
 }
@@ -51,6 +55,7 @@ impl FlashOp {
             Self::Clear { names } if names.is_empty() => "clear xdp *".into(),
             Self::Clear { names } => format!("clear xdp {}", names.join(",")),
             Self::List => "get xdp".into(),
+            Self::Attest { .. } => "attest deployment".into(),
         }
     }
 }
