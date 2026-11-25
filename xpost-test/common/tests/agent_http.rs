@@ -6,6 +6,7 @@ mod agent;
 
 use std::time::Duration;
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -60,6 +61,9 @@ async fn tr3000_client_preserves_typed_http_contract() {
         let server = tokio::spawn(record(
             listener,
             vec![
+                ("GET /health HTTP/1.1", None, envelope("ok")),
+                ("GET /v1/status HTTP/1.1", None, envelope("busy")),
+                ("GET /v1/status HTTP/1.1", None, envelope("busy")),
                 ("GET /v1/status HTTP/1.1", None, envelope("idle")),
                 ("GET /v1/get/init HTTP/1.1", None, envelope("OK init")),
                 (
@@ -96,14 +100,9 @@ async fn tr3000_client_preserves_typed_http_contract() {
                     envelope("OK get perf 4 b64=Q0FHVA=="),
                 ),
                 (
-                    "POST /v1/enable/exec HTTP/1.1",
+                    "POST /v1/enable/xdp HTTP/1.1",
                     Some(json!({})),
-                    envelope("OK enable exec"),
-                ),
-                (
-                    "POST /v1/get/finish HTTP/1.1",
-                    Some(json!({})),
-                    envelope("OK finish"),
+                    envelope("OK enable xdp"),
                 ),
                 (
                     "POST /v1/disable/xdp HTTP/1.1",
@@ -113,6 +112,7 @@ async fn tr3000_client_preserves_typed_http_contract() {
             ],
         ));
 
+        client.health().await.unwrap();
         client.wait_idle(Duration::from_secs(1)).await.unwrap();
         assert_eq!(client.get_init().await.unwrap(), "OK init");
         client.flash_fw("case-cag").await.unwrap();
@@ -136,12 +136,161 @@ async fn tr3000_client_preserves_typed_http_contract() {
             client.get_perf().await.unwrap(),
             "OK get perf 4 b64=Q0FHVA=="
         );
-        assert_eq!(client.enable_exec().await.unwrap(), "OK enable exec");
-        assert_eq!(client.get_finish().await.unwrap(), "OK finish");
+        assert_eq!(client.enable_xdp().await.unwrap(), "OK enable xdp");
         assert_eq!(
             client.disable_xdp().await.unwrap_err().to_string(),
             "ERR not-ready"
         );
+        server.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn tr3000_reads_deployment_perf_and_exb2_from_typed_routes() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = AgentClient::new(listener.local_addr().unwrap().to_string());
+    let image_sha = "ab".repeat(32);
+    let firmware = json!({"firmware_profile": "carrier", "firmware_sha256": image_sha});
+    let report = json!({
+        "release": "v0.1.1", "required": 1, "deployments": [{}], "issues": [],
+        "prepared": [{
+            "program": "case_mark", "mode": "aot", "profile": "mark", "slot": 1,
+            "firmware_profile": "carrier", "firmware_sha256": image_sha,
+        }],
+        "hal_firmware": [firmware.clone()],
+    });
+    let exp = "0".repeat(8258 * 2);
+    let capture = vec![57; 600];
+    // Independent FNV-1a digest for 600 ASCII '9' bytes.
+    let digest = 0xda68698d_u32;
+    let envelope = |message: &str| json!({"ok": true, "message": message});
+    let server = tokio::spawn(record(
+        listener,
+        vec![
+            (
+                "GET /v1/preflight/medium HTTP/1.1",
+                None,
+                json!({"ok": true, "preflight": report}),
+            ),
+            (
+                "POST /v1/flash/fw HTTP/1.1",
+                Some(json!({"name": "carrier", "expected_sha256": image_sha})),
+                json!({"ok": true, "message": "flashed", "flash": {
+                   "firmware_profile": "carrier", "firmware_sha256": image_sha, "containers": [],
+                }}),
+            ),
+            (
+                "POST /v1/flash/xdp HTTP/1.1",
+                Some(json!({"name": "mark", "firmware": "carrier", "expected_sha256": image_sha})),
+                envelope("installed"),
+            ),
+            (
+                "POST /v1/perf/prepare HTTP/1.1",
+                Some(json!({
+                   "uuid": "01010101010101010101010101010101", "variant": "trace", "profile": image_sha,
+                })),
+                envelope("OK perf prepare epoch=7 boot_id=42"),
+            ),
+            (
+                "POST /v1/perf/arm HTTP/1.1",
+                Some(json!({"epoch": 7})),
+                envelope("OK perf arm tick=21"),
+            ),
+            (
+                "POST /v1/perf/freeze HTTP/1.1",
+                Some(json!({"epoch": 7})),
+                envelope(&format!(
+                    "OK perf freeze tick=24 flags=2 len=600 digest={digest}"
+                )),
+            ),
+            (
+                "POST /v1/perf/read HTTP/1.1",
+                Some(json!({"epoch": 7, "offset": 0, "max_bytes": 512})),
+                envelope(&format!(
+                    "OK perf read total=600 digest={digest} n=512 b64={}",
+                    STANDARD.encode(&capture[..512])
+                )),
+            ),
+            (
+                "POST /v1/perf/read HTTP/1.1",
+                Some(json!({"epoch": 7, "offset": 512, "max_bytes": 512})),
+                envelope(&format!(
+                    "OK perf read total=600 digest={digest} n=88 b64={}",
+                    STANDARD.encode(&capture[512..])
+                )),
+            ),
+            (
+                "POST /v1/perf/release HTTP/1.1",
+                Some(json!({"epoch": 7})),
+                envelope("OK perf release"),
+            ),
+            (
+                "POST /v1/exec/batch HTTP/1.1",
+                Some(json!({"input_hex": exp})),
+                json!({"ok": true, "result": {
+                   "boot_id": 42, "begin_tick": 20, "end_tick": 30, "execution_return": 2,
+                   "output": STANDARD.encode(vec![0x5a; 8258]),
+                }}),
+            ),
+            (
+                "GET /v1/preflight/medium HTTP/1.1",
+                None,
+                json!({"ok": false, "preflight": {
+                   "release": "v0.1.1", "required": 1, "deployments": [], "issues": ["missing layout"],
+                }}),
+            ),
+        ],
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let preflight = client.medium_preflight().await.unwrap();
+        assert_eq!(
+            (
+                preflight.prepared[0].slot,
+                preflight.prepared[0].mode.as_str()
+            ),
+            (1, "aot")
+        );
+        assert_eq!(preflight.prepared[0].firmware.firmware_sha256, image_sha);
+        assert_eq!(preflight.hal_firmware[0].firmware_profile, "carrier");
+        let flash = client
+            .flash_fw_evidence("carrier", Some(&image_sha))
+            .await
+            .unwrap();
+        assert_eq!(flash["containers"], json!([]));
+        assert_eq!(flash["firmware_sha256"], image_sha);
+        client
+            .bind_xdp("mark", "carrier", &image_sha)
+            .await
+            .unwrap();
+        let run = uuid::Uuid::from_bytes([1; 16]);
+        assert_eq!(
+            client.perf_prepare(run, &image_sha, "trace").await.unwrap(),
+            (7, 42)
+        );
+        assert_eq!(client.perf_arm(7).await.unwrap(), 21);
+        let freeze = client.perf_freeze(7).await.unwrap();
+        assert_eq!((freeze.tick, freeze.flags), (24, 2));
+        assert_eq!(client.perf_read(7, freeze).await.unwrap(), capture);
+        client.perf_release(7).await.unwrap();
+        let result = client.exb2(&exp).await.unwrap();
+        assert_eq!(
+            (
+                result.boot_id,
+                result.begin_tick,
+                result.end_tick,
+                result.execution_return
+            ),
+            (42, 20, 30, 2)
+        );
+        assert_eq!(result.output, vec![0x5a; 8258]);
+        let rejection = client
+            .medium_preflight()
+            .await
+            .err()
+            .expect("preflight must refuse");
+        assert!(rejection.to_string().contains("missing layout"));
         server.await.unwrap();
     })
     .await

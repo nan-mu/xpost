@@ -1,91 +1,63 @@
 # Agent operation
 
-Build the Agent on the Mac connected to the DUT. Its host workspace produces
-one `xpost-agent` binary for both daemon and CLI commands.
+Run the service on the Mac connected to the DUT. Start it from `xpost-agent/`.
 
 ```sh
-cd xpost-agent
-cargo build --release --locked
-export PATH="$PWD/target/aarch64-apple-darwin/release:$PATH"
-xpost-agent --help
+cargo run --release --locked -- serve
 ```
 
-## Run the daemon
+Keep this execution session open during the experiment. After the experiment,
+press Ctrl+C. The service also accepts SIGTERM. It finishes accepted device
+operations before it releases the device lock.
 
-Use `xpost-agent serve` for foreground debugging. Stop it with Ctrl+C in
-its terminal. The daemon drains accepted device operations before it exits.
+The service runs espflash Board Info once at startup. It restores App mode
+before it opens HTTP. Read the board information in the terminal. A failed
+check exits with an error. Later health requests use the startup result.
+Use `dut status` to query the App.
 
-For background use, run the following commands from the same Worktree.
+The default bind is `127.0.0.1:9240`. For TR3000 access, use this command on the Mac.
 
 ```sh
-xpost-agent start
-xpost-agent status
-xpost-agent logs
-xpost-agent dut status
-xpost-agent get map rxcnt
+cargo run --release --locked -- serve --bind 0.0.0.0:9240
 ```
 
-`start` waits for the daemon to become ready. The daemon continues to run after
-the terminal closes. A repeat `start` returns the same instance when the
-configuration and executable identity match. `status` reports the loaded
-executable, build revision, configuration paths, and current DUT state as JSON.
-An idle daemon reports `unknown`. Use `dut status` to query the App.
-`logs` prints the background service log. The daemon also keeps the rotating
-`serial.log` transcript.
+Expose this unauthenticated interface only to the trusted experiment network.
+Set `[agent].endpoint` on TR3000 to the Mac's HTTP address.
 
-After a successful rebuild, use `xpost-agent restart` to load the new binary.
-Use the same `--bind` and `--log-dir` options to retain custom settings.
-Use `xpost-agent stop` to release the device. Wait until the experiment ends.
-A busy daemon refuses `stop` and `restart`, including while work continues
-after a client times out. Starting, stopping, and restarting affect only this
-Worktree's managed instance.
+## Client commands
 
-Set `XPOST_ROOT` to override the root used for builds and default profiles.
-Set `XPOST_PROFILES` to select a different profiles file.
-The daemon resolves relative overrides and `--log-dir` from the invoking
-directory. The default log directory is `target/xpost-agent`.
-The operating system releases the USB ownership lock when the daemon exits.
-Keep the lock file in place while any daemon uses it.
-
-## Connect a client
-
-Run `xpost-agent <command> --help` to see its arguments. Device commands print
-JSON and exit nonzero on HTTP, decoding, or device errors. Local device
-commands check the Worktree and the running executable identity. If the build
-differs, use `status` and `logs` to inspect it before an explicit `restart`.
-
-On the Mac, the daemon listens on `127.0.0.1:9240` by default. To accept
-TR3000 requests, start with an explicit LAN bind.
+Use a second terminal in the same Worktree.
 
 ```sh
-xpost-agent start --bind 0.0.0.0:9240
+cargo run --release --locked -- --help
+cargo run --release --locked -- status
+cargo run --release --locked -- dut status
+cargo run --release --locked -- get map rxcnt
 ```
 
-Keep the existing `[agent].endpoint` on TR3000 set to the Mac's HTTP address.
-Expose this unauthenticated HTTP interface only on the trusted experiment
-network. For an intentional connection from another host, specify its
-endpoint on the CLI.
+Device commands print JSON. Check their exit code. By default, the CLI checks
+the Worktree identity at `127.0.0.1:9240`. Set `--endpoint` to select another
+HTTP origin explicitly. `status` reports `busy` while an accepted operation
+runs or waits. An HTTP timeout can leave the operation running.
 
-```sh
-xpost-agent --endpoint http://lab-mac:9240 dut status
-```
+Use `preflight`, `preflight --inventory`, and `preflight --xdp NAME` for
+offline checks. Use `preflight --remote` or `preflight --remote --xdp NAME`
+to use the service's configuration. Use command help for deployment bindings,
+Perf epochs and chunks, and EXB2 batch inputs.
 
-The CLI replaces the old MCP entry point. Stop any old Agent process
-explicitly before you start the updated daemon.
+Set `XPOST_ROOT` to override the build root. Set `XPOST_PROFILES` to choose
+a profiles file. Relative overrides and `--log-dir` use the invoking directory.
+The default log directory is `target/xpost-agent`. The service writes
+its logs to the terminal and rotates the `serial.log` transcript.
 
 ## Host checks
 
-Use the normal release build for USB operation. The `test-device` Cargo
-feature enables a fixture for host tests. The fixture uses a file as the DUT
-identity and never opens USB when `XPOST_AGENT_TEST_DEVICE` selects it.
-
-From this directory, build two fixture binaries at the same Git revision.
+The `test-device` feature replaces USB with a fixture. Use a normal release
+build for USB.
 
 ```sh
-cargo build --offline --locked --features test-device --target-dir target/fixture-a
-CARGO_PROFILE_DEV_DEBUG=0 cargo build --offline --locked --features test-device --target-dir target/fixture-b
-python3 tests/lifecycle.py \
-  target/fixture-a/aarch64-apple-darwin/debug/xpost-agent \
-  target/fixture-b/aarch64-apple-darwin/debug/xpost-agent
+cargo build --locked --features test-device
+python3 tests/serve_http.py target/aarch64-apple-darwin/debug/xpost-agent
+cargo build --release --locked
 python3 tests/cli_http.py target/aarch64-apple-darwin/release/xpost-agent
 ```

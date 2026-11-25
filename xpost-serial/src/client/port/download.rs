@@ -195,6 +195,10 @@ impl Downloader {
         Ok(())
     }
 
+    pub(crate) fn board_info(&mut self) -> io::Result<espflash::flasher::DeviceInfo> {
+        self.flasher()?.device_info().map_err(ext)
+    }
+
     /// Hard-reset to app and release the port.
     pub fn reset_to_app(mut self) -> io::Result<()> {
         let result = if let Some(mut flasher) = self.flasher.take() {

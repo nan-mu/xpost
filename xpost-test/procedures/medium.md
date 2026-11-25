@@ -43,6 +43,18 @@ Preparation changes the target address and alias. It keeps the payload bytes.
 The case JIT and rBPF profiles remain available for independent diagnostics.
 Other native slot changes require equivalent evidence or relocation data.
 
+## Agent session
+
+Start the service from `xpost-agent/` on the Mac.
+
+```sh
+cargo run --release --locked -- serve --bind 0.0.0.0:9240
+```
+
+Keep the execution session open through the experiment.
+Press Ctrl+C after the runner finishes.
+See [Agent operation](../../xpost-agent/README.md) for the HTTP endpoint and startup check.
+
 ## Planned matrix and time budget
 
 Set `run = ["medium-plan"]` to print the 29 cells and their firmware groups.

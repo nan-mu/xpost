@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -6,8 +7,9 @@ use reqwest::blocking::ClientBuilder;
 use reqwest::{Method, Url};
 use serde_json::{Value, json};
 
-use crate::config::{Build, Location};
-use crate::lifecycle::{INSTANCE_HEADER, Phase, RuntimeDir, print_json};
+use crate::config::Location;
+use crate::http::WORKTREE_HEADER;
+use crate::print_json;
 
 const TIMEOUT: Duration = Duration::from_secs(1210);
 
@@ -15,6 +17,18 @@ const TIMEOUT: Duration = Duration::from_secs(1210);
 pub enum DeviceCommand {
     /// Check HTTP liveness.
     Health,
+    /// Read the Agent's current device-operation status.
+    Status,
+    /// Submit one typed EXB2 invocation.
+    Exec {
+        #[command(subcommand)]
+        command: Exec,
+    },
+    /// Control the Perf session and read export chunks.
+    Perf {
+        #[command(subcommand)]
+        command: Perf,
+    },
     /// Query the device through the daemon.
     Dut {
         #[command(subcommand)]
@@ -62,14 +76,85 @@ pub enum Dut {
 #[derive(Subcommand)]
 pub enum Flash {
     /// Build and flash a Firmware ELF by profile name.
-    Fw { name: String },
+    Fw {
+        name: String,
+        #[arg(long)]
+        expected_sha256: Option<String>,
+    },
     /// Install a cold XDP ELF or copy it into a SRAM slot.
     Xdp {
         name: String,
         /// Copy an installed image into this slot without resetting the device.
         #[arg(long)]
         slot: Option<u8>,
+        /// Bind a cold install to this Firmware ELF profile.
+        #[arg(long, requires = "expected_sha256", conflicts_with = "slot")]
+        firmware: Option<String>,
+        /// Expected SHA-256 of the Firmware ELF for a cold install.
+        #[arg(long, requires = "firmware", conflicts_with = "slot")]
+        expected_sha256: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum Exec {
+    /// Upload, invoke once, and read a complete EXB2 buffer.
+    Batch {
+        /// Complete 8258-byte input as hexadecimal text.
+        #[arg(
+            long,
+            required_unless_present = "input_file",
+            conflicts_with = "input_file"
+        )]
+        input_hex: Option<String>,
+        /// File containing the complete binary EXB2 buffer.
+        #[arg(long)]
+        input_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum Perf {
+    /// Prepare a Metrics or Trace capture for the run and firmware.
+    Prepare {
+        #[arg(long)]
+        uuid: String,
+        #[arg(long)]
+        variant: Variant,
+        #[arg(long)]
+        profile: String,
+    },
+    /// Begin capture for the prepared epoch.
+    Arm {
+        #[arg(long)]
+        epoch: u32,
+    },
+    /// Freeze capture for the epoch.
+    Freeze {
+        #[arg(long)]
+        epoch: u32,
+    },
+    /// Read one chunk of the frozen export.
+    Read {
+        #[arg(long)]
+        epoch: u32,
+        #[arg(long)]
+        offset: u32,
+        #[arg(long)]
+        max_bytes: u32,
+    },
+    /// Release the epoch after successful export.
+    Release {
+        #[arg(long)]
+        epoch: u32,
+    },
+}
+
+#[derive(ValueEnum, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Variant {
+    Metrics,
+    Trace,
 }
 
 #[derive(Subcommand)]
@@ -87,8 +172,6 @@ pub enum Clear {
 
 #[derive(Subcommand)]
 pub enum Get {
-    /// Read the existing Agent HTTP status.
-    Status,
     /// Wait for the unsolicited App initialization marker.
     Init,
     /// Wait for the unsolicited App completion marker.
@@ -213,21 +296,84 @@ impl DeviceCommand {
         let empty = || json!({});
         Ok(match self {
             Self::Health => Request::get("/health"),
+            Self::Status => Request::get("/v1/status"),
             Self::Dut {
                 command: Dut::Status,
             } => Request::get("/v1/dut_status"),
             Self::Flash {
-                command: Flash::Fw { name },
-            } => Request::post("/v1/flash/fw", json!({ "name": name })),
-            Self::Flash {
-                command: Flash::Xdp { name, slot },
+                command:
+                    Flash::Fw {
+                        name,
+                        expected_sha256,
+                    },
             } => {
-                let body = match slot {
-                    Some(slot) => json!({ "name": name, "slot": slot }),
-                    None => json!({ "name": name }),
-                };
+                let mut body = json!({ "name": name });
+                if let Some(digest) = expected_sha256 {
+                    body["expected_sha256"] = json!(digest);
+                }
+                Request::post("/v1/flash/fw", body)
+            }
+            Self::Flash {
+                command:
+                    Flash::Xdp {
+                        name,
+                        slot,
+                        firmware,
+                        expected_sha256,
+                    },
+            } => {
+                let mut body = json!({ "name": name });
+                if let Some(slot) = slot {
+                    body["slot"] = json!(slot);
+                }
+                if let (Some(firmware), Some(digest)) = (firmware, expected_sha256) {
+                    body["firmware"] = json!(firmware);
+                    body["expected_sha256"] = json!(digest);
+                }
                 Request::post("/v1/flash/xdp", body)
             }
+            Self::Exec {
+                command:
+                    Exec::Batch {
+                        input_hex,
+                        input_file,
+                    },
+            } => {
+                let input_hex = match input_file {
+                    Some(path) => std::fs::read(&path)
+                        .with_context(|| format!("read EXB2 file {}", path.display()))?
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect(),
+                    None => input_hex.context("missing EXB2 input")?,
+                };
+                Request::post("/v1/exec/batch", json!({ "input_hex": input_hex }))
+            }
+            Self::Perf { command } => match command {
+                Perf::Prepare {
+                    uuid,
+                    variant,
+                    profile,
+                } => Request::post(
+                    "/v1/perf/prepare",
+                    json!({ "uuid": uuid, "variant": variant, "profile": profile }),
+                ),
+                Perf::Arm { epoch } => Request::post("/v1/perf/arm", json!({ "epoch": epoch })),
+                Perf::Freeze { epoch } => {
+                    Request::post("/v1/perf/freeze", json!({ "epoch": epoch }))
+                }
+                Perf::Read {
+                    epoch,
+                    offset,
+                    max_bytes,
+                } => Request::post(
+                    "/v1/perf/read",
+                    json!({ "epoch": epoch, "offset": offset, "max_bytes": max_bytes }),
+                ),
+                Perf::Release { epoch } => {
+                    Request::post("/v1/perf/release", json!({ "epoch": epoch }))
+                }
+            },
             Self::Clear {
                 command: Clear::Xdp { names },
             } => {
@@ -244,9 +390,6 @@ impl DeviceCommand {
             Self::Clear {
                 command: Clear::Perf,
             } => Request::post("/v1/clear/perf", empty()),
-            Self::Get {
-                command: Get::Status,
-            } => Request::get("/v1/status"),
             Self::Get { command: Get::Init } => Request::get("/v1/get/init"),
             Self::Get {
                 command: Get::Finish,
@@ -324,65 +467,87 @@ pub fn builder(timeout: Duration) -> ClientBuilder {
 }
 
 pub fn run(command: DeviceCommand, endpoint: Option<&str>) -> Result<()> {
-    let request = command.request()?;
-    let (base, instance) = match endpoint {
-        Some(endpoint) => (endpoint_url(endpoint)?, None),
-        None => {
-            let location = Location::resolve()?;
-            let runtime = RuntimeDir::open(&location.worktree)?;
-            let status = runtime
-                .query()?
-                .context("no daemon for this Worktree. Run xpost-agent start")?;
-            ensure!(
-                status.state == Phase::Running,
-                "daemon is {:?}",
-                status.state
-            );
-            let instance = status.instance;
-            let build = Build::current()?;
-            ensure!(
-                instance.build.image_id == build.image_id,
-                "daemon is running {} (image {}, Git {}). Build {} was requested. Run xpost-agent restart",
-                instance.build.executable.display(),
-                instance.build.image_id,
-                instance.build.git_revision.as_deref().unwrap_or("unknown"),
-                build.image_id,
-            );
-            (endpoint_url(&instance.endpoint)?, Some(instance.id))
-        }
+    send(command.request()?, endpoint)
+}
+
+pub fn preflight(name: Option<String>, endpoint: Option<&str>) -> Result<()> {
+    let request = match name {
+        Some(name) => Request::get("/v1/preflight/xdp").map(name),
+        None => Request::get("/v1/preflight/medium"),
+    };
+    send(request, endpoint)
+}
+
+fn send(request: Request, endpoint: Option<&str>) -> Result<()> {
+    let base = endpoint_url(endpoint.unwrap_or("127.0.0.1:9240"))?;
+    let client = builder(TIMEOUT).build()?;
+    let worktree = if endpoint.is_none() {
+        let worktree = Location::resolve()?.worktree_id();
+        let check = builder(Duration::from_secs(2)).build()?
+            .get(base.join("/health")?)
+            .header(WORKTREE_HEADER, &worktree)
+            .send()
+            .context("connect to local Agent. Run cargo run --release --locked -- serve from xpost-agent")?;
+        ensure!(
+            check.status().is_success()
+                && check
+                    .headers()
+                    .get(WORKTREE_HEADER)
+                    .is_some_and(|id| id == &worktree),
+            "local Agent did not identify this Worktree"
+        );
+        let health: Value = check.json().context("decode local Agent health response")?;
+        ensure!(health["ok"] == true, "local Agent health check failed");
+        Some(worktree)
+    } else {
+        None
     };
     let url = request.url(base)?;
-    let method = if request.body.is_some() {
-        Method::POST
-    } else {
-        Method::GET
-    };
-    let client = builder(TIMEOUT).build()?;
+    let operation = request.body.is_some();
+    let method = if operation { Method::POST } else { Method::GET };
     let mut call = client.request(method, url.clone());
-    if let Some(id) = instance {
-        call = call.header(INSTANCE_HEADER, id.to_string());
+    if let Some(worktree) = worktree {
+        call = call.header(WORKTREE_HEADER, worktree);
     }
     if let Some(body) = request.body {
         call = call.json(&body);
     }
     let response = call
         .send()
+        .map_err(|error| {
+            if operation && error.is_timeout() {
+                anyhow::Error::from(error).context("operation outcome unknown")
+            } else {
+                error.into()
+            }
+        })
         .with_context(|| format!("send request to {url}"))?;
     let status = response.status();
     let bytes = response.bytes()?;
+    let status_context = if operation && status == reqwest::StatusCode::REQUEST_TIMEOUT {
+        " (operation outcome unknown)"
+    } else {
+        ""
+    };
     match serde_json::from_slice::<Value>(&bytes) {
         Ok(value) => {
             print_json(&value)?;
-            ensure!(status.is_success(), "HTTP {status} from {url}");
+            ensure!(
+                status.is_success(),
+                "HTTP {status} from {url}{status_context}"
+            );
             match value.get("ok").and_then(Value::as_bool) {
                 Some(true) => Ok(()),
-                Some(false) => bail!("daemon reported failure: {}", value["message"]),
+                Some(false) => bail!(
+                    "Agent reported failure: {}",
+                    value["message"].as_str().unwrap_or("see JSON response")
+                ),
                 None => bail!("response has no boolean ok field"),
             }
         }
         Err(error) if status.is_success() => Err(error).context("decode HTTP response JSON"),
         Err(_) => bail!(
-            "HTTP {status} from {url}: {}",
+            "HTTP {status} from {url}{status_context}: {}",
             String::from_utf8_lossy(&bytes)
         ),
     }

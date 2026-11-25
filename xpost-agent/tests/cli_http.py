@@ -1,6 +1,7 @@
 """Check the binary's HTTP requests against the baseline route contract."""
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import base64
 import json
 from pathlib import Path
 from queue import Queue
@@ -45,9 +46,22 @@ map_reply = {
     "entries": [{"key": "0", "value": "42"}],
 }
 perf_reply = {"ok": True, "message": "OK get perf 4 b64=Q0FHVA=="}
+sha = "34" * 32
+container = {"program": "case_mark", "mode": "aot", "profile": "case_mark", "container_sha256": "56" * 32}
+firmware = {"firmware_profile": "carrier", "firmware_sha256": sha}
+flash = {"ok": True, "message": "flashed", "flash": {**firmware, "containers": [container]}}
+preflight = {"ok": True, "preflight": {
+    "release": "v0.1.1", "required": 1, "deployments": [container], "issues": [],
+    "prepared": [{**container, **firmware, "slot": 0}], "hal_firmware": [],
+}}
+exb2 = (b"EXB2\x02\x00\x40\x00" + b"\x00" * 8250).hex()
+batch = {"ok": True, "result": {
+    "boot_id": 42, "begin_tick": 1, "end_tick": 2, "execution_return": 2,
+    "output": base64.b64encode(b"Z" * 8258).decode(),
+}}
 cases = [
     (["health"], "GET", "/health", None, {"ok": True, "message": "ok"}),
-    (["get", "status"], "GET", "/v1/status", None, {"ok": True, "message": "idle"}),
+    (["status"], "GET", "/v1/status", None, {"ok": True, "message": "idle"}),
     (["dut", "status"], "GET", "/v1/dut_status", None, ok),
     (["get", "init"], "GET", "/v1/get/init", None, ok),
     (["get", "finish"], "POST", "/v1/get/finish", {}, ok),
@@ -80,6 +94,23 @@ cases = [
     (["get", "serial", "--since-unix-ms", "309924007", "--until-unix-ms", "309925009"],
      "POST", "/v1/get/serial", {"since_unix_ms": 309924007, "until_unix_ms": 309925009}, ok),
     (["run", "ping"], "POST", "/v1/run", {"cmd": "ping"}, ok),
+    (["flash", "fw", "carrier", "--expected-sha256", sha], "POST", "/v1/flash/fw",
+     {"name": "carrier", "expected_sha256": sha}, flash),
+    (["flash", "xdp", "case_mark", "--firmware", "carrier", "--expected-sha256", sha],
+     "POST", "/v1/flash/xdp", {"name": "case_mark", "firmware": "carrier", "expected_sha256": sha}, flash),
+    (["preflight", "--remote"], "GET", "/v1/preflight/medium", None, preflight),
+    (["preflight", "--remote", "--xdp", "case_mark"], "GET", "/v1/preflight/xdp/case_mark",
+     None, {"ok": True, "message": "56" * 32}),
+    (["perf", "prepare", "--uuid", "01" * 16, "--variant", "metrics", "--profile", sha],
+     "POST", "/v1/perf/prepare", {"uuid": "01" * 16, "variant": "metrics", "profile": sha},
+     {"ok": True, "message": "OK perf prepare epoch=7 boot_id=42"}),
+    (["perf", "arm", "--epoch", "7"], "POST", "/v1/perf/arm", {"epoch": 7}, ok),
+    (["perf", "freeze", "--epoch", "7"], "POST", "/v1/perf/freeze", {"epoch": 7}, ok),
+    (["perf", "read", "--epoch", "7", "--offset", "512", "--max-bytes", "88"],
+     "POST", "/v1/perf/read", {"epoch": 7, "offset": 512, "max_bytes": 88}, ok),
+    (["perf", "release", "--epoch", "7"], "POST", "/v1/perf/release", {"epoch": 7}, ok),
+    (["exec", "batch", "--input-hex", exb2], "POST", "/v1/exec/batch", {"input_hex": exb2}, batch),
+
 ]
 
 
@@ -94,11 +125,23 @@ with ThreadingHTTPServer(("127.0.0.1", 0), Record) as server:
             assert result.returncode == 0, (args, result.stderr)
             assert requests.get(timeout=2) == (method, path, body), args
             assert json.loads(result.stdout) == response, args
+        replies.put((200, b'{"ok":false,"preflight":{"issues":["missing artifact"]}}'))
+        result = invoke(endpoint, ["preflight", "--remote"])
+        assert result.returncode != 0
+        assert json.loads(result.stdout)["preflight"]["issues"] == ["missing artifact"]
+        assert requests.get(timeout=2) == ("GET", "/v1/preflight/medium", None)
+        for args in [
+            ["flash", "xdp", "case_mark", "--firmware", "carrier"],
+            ["flash", "xdp", "case_mark", "--slot", "1", "--firmware", "carrier", "--expected-sha256", sha],
+        ]:
+            assert invoke(endpoint, args).returncode != 0
+            assert requests.empty()
         for status, body, message in [
             (200, b'{"ok":false,"message":"DUT refused"}', "DUT refused"),
             (200, b'{"message":"missing ok"}', "no boolean ok"),
             (200, b'not JSON', "decode HTTP response JSON"),
             (503, b'{"ok":true,"message":"offline"}', "HTTP 503"),
+            (408, b'{"ok":false,"message":"deadline"}', "operation outcome unknown"),
             (302, b'{"ok":true,"message":"redirect"}', "HTTP 302"),
         ]:
             replies.put((status, body))

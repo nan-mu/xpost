@@ -331,21 +331,17 @@ fn verify_firmware(
 pub(crate) fn clear(port: &Port, xdp: XdpTable, names: &[String]) -> io::Result<()> {
     let mut dl = port.open_download()?;
     if !names.is_empty() {
-        let table = dl.read_flash(xdp.base, xdp.len)?;
-        let entries = list_entries(&table)?;
-        dl.reconnect()?;
-        for name in names {
-            let Some(e) = entries.iter().find(|e| e.name == *name) else {
-                return Err(std::io::Error::other(format!("xdp `{name}` not found")));
-            };
-            let abs = xdp.base.saturating_add(e.offset);
-            let erase_len = e.len.saturating_add(FLASH_SECTOR - 1) / FLASH_SECTOR * FLASH_SECTOR;
-            if erase_len > 0 {
-                dl.erase_region(abs, erase_len)?;
+        let result = (|| {
+            let table = dl.read_flash(xdp.base, xdp.len)?;
+            let ranges = clear_ranges(xdp, &list_entries(&table)?, names)?;
+            dl.reconnect()?;
+            for (offset, len) in ranges {
+                dl.erase_region(offset, len)?;
             }
-        }
-        dl.reset_to_app()?;
-        return Ok(());
+            Ok(())
+        })();
+        let reset = dl.reset_to_app();
+        return result.and(reset);
     }
     let abs = xdp.base;
     let len = xdp.len;
@@ -357,6 +353,33 @@ pub(crate) fn clear(port: &Port, xdp: XdpTable, names: &[String]) -> io::Result<
     dl.erase_region(abs, len)?;
     dl.reset_to_app()?;
     Ok(())
+}
+
+fn clear_ranges(
+    xdp: XdpTable,
+    entries: &[XdpEntry],
+    names: &[String],
+) -> io::Result<Vec<(u32, u32)>> {
+    names
+        .iter()
+        .map(|name| {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.name == *name)
+                .ok_or_else(|| io::Error::other(format!("xdp `{name}` not found")))?;
+            let start = xdp.base.saturating_add(entry.offset);
+            let len = entry.len.saturating_add(FLASH_SECTOR - 1) / FLASH_SECTOR * FLASH_SECTOR;
+            if !start.is_multiple_of(FLASH_SECTOR)
+                || len == 0
+                || entry.offset.saturating_add(len) > xdp.len
+            {
+                return Err(io::Error::other(format!(
+                    "invalid erase range for xdp `{name}`"
+                )));
+            }
+            Ok((start, len))
+        })
+        .collect()
 }
 
 pub(crate) fn list(port: &Port, xdp: XdpTable) -> io::Result<Vec<XdpEntry>> {
@@ -457,6 +480,32 @@ mod attestation_tests {
             },
         )
     }
+    #[test]
+    fn named_clear_requires_every_target_before_any_erase() {
+        let (_, table, _) = fixture();
+        let entries = [
+            XdpEntry {
+                name: "valid".into(),
+                offset: 0,
+                len: 1234,
+            },
+            XdpEntry {
+                name: "other".into(),
+                offset: FLASH_SECTOR,
+                len: 1536,
+            },
+        ];
+        let error = clear_ranges(table, &entries, &["valid".into(), "missing".into()]).unwrap_err();
+        assert!(error.to_string().contains("missing"));
+        assert_eq!(
+            clear_ranges(table, &entries, &["valid".into(), "other".into()]).unwrap(),
+            [
+                (table.base, FLASH_SECTOR),
+                (table.base + FLASH_SECTOR, FLASH_SECTOR)
+            ]
+        );
+    }
+
     #[test]
     fn matching_firmware_precedes_cold_read_and_write_on_every_attempt() {
         let (expectation, xdp, mut io) = fixture();
