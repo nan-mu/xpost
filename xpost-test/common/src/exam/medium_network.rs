@@ -34,7 +34,8 @@ use crate::{
 const RATES: [i32; 3] = [400, 1400, 4000];
 const WINDOW: Duration = Duration::from_secs(5);
 const DRAIN: Duration = Duration::from_millis(250);
-const CAPTURE_TAIL: Duration = Duration::from_millis(200);
+// Allow the final tcpdump capture block to retire after its 1 s buffer timeout.
+const CAPTURE_TAIL: Duration = Duration::from_millis(1_200);
 const BODY: usize = 40;
 const PORT: u16 = 8080;
 const LEGAL_EVERY: i64 = 10;
