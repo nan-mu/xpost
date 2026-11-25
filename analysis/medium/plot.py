@@ -37,12 +37,17 @@ def milliseconds(nanoseconds):
     return float(nanoseconds) / 1_000_000
 
 
-def plot(experiment, events, modes, phase, rates, out):
+def plot(experiment, events, data, out):
+    modes = data["modes"]
+    phase = data["stage"]
+    full = data.get("volume") == "all"
     if experiment == "exec_bench":
         categories = WORKLOADS
-        panels = (("batch_us", "DUT time per batch (µs)"), ("us_per_round", "DUT time per round (µs)"))
+        mean = "Mean " if full else ""
+        panels = (("batch_us", f"{mean}DUT time per batch (µs)"),
+                  ("us_per_round", f"{mean}DUT time per round (µs)"))
     else:
-        categories = rates
+        categories = data.get("rates", RATES)
         per_experiment = {
             "firewall": (("legal", "Legal delivery fraction"), ("hit", "Target-key hit fraction")),
             "just_tx": (("loss", "Qualified loss fraction"), ("median_ms", "Median RTT (ms)"),
@@ -51,7 +56,7 @@ def plot(experiment, events, modes, phase, rates, out):
         }
         panels = (("offered", "Actual offered rate (packets/s)"), *per_experiment[experiment])
 
-    fig, axs = plt.subplots(len(panels), 1, figsize=(8.2, 2.05 * len(panels) + .9),
+    fig, axs = plt.subplots(len(panels), 1, figsize=(10.4 if full else 8.2, 2.05 * len(panels) + .9),
                             sharex=True, layout="constrained")
     counts = []
     for i, mode in enumerate(modes):
@@ -60,16 +65,16 @@ def plot(experiment, events, modes, phase, rates, out):
         xoffset = (i - (len(modes) - 1) / 2) * .13
         per_condition = []
         for category in categories:
-            data = [e for e in entries if (
+            observations = [e for e in entries if (
                 e["input"]["program"] if experiment == "exec_bench" else e["condition"]["pps"]
             ) == category]
-            per_condition.append(len(data))
+            per_condition.append(len(observations))
             for ax, (field, _) in zip(axs, panels):
                 x = categories.index(category) + xoffset
-                for repeat, event in enumerate(data):
+                for repeat, event in enumerate(observations):
                     fields = event if experiment == "exec_bench" else network_fields(event)
                     if fields.get(field) is not None:
-                        ax.scatter(x + (repeat - (len(data) - 1) / 2) * .045, fields[field],
+                        ax.scatter(x + (repeat - (len(observations) - 1) / 2) * .045, fields[field],
                                    color=color, marker=marker, s=32)
         counts.append(f"{mode.upper()}  " + " · ".join(str(value) for value in per_condition))
     for ax, (_, label) in zip(axs, panels):
@@ -83,7 +88,12 @@ def plot(experiment, events, modes, phase, rates, out):
                for m in modes]
     axs[0].legend(handles=handles, frameon=False, ncols=len(modes), loc="best")
     subtitle = "Qualified attempts per condition in x-axis order"
-    fig.suptitle(f"{experiment.replace('_', ' ')} · {phase.upper()}\n{subtitle}\n" + "    |    ".join(counts),
+    scope = ""
+    if full and experiment == "exec_bench":
+        scope = f" · {data['samples_per_run']} batches per run"
+    elif full:
+        scope = f" · {data['send_s']} s send, {data['observe_s']} s observation"
+    fig.suptitle(f"{experiment.replace('_', ' ')} · {phase.upper()}{scope}\n{subtitle}\n" + "    |    ".join(counts),
                  fontsize=11, fontweight="bold")
     fig.savefig(out / f"{experiment}.png", dpi=170)
     plt.close(fig)
@@ -99,8 +109,7 @@ def main():
     events = [e for e in data["attempts"] if e["run_id"] in accepted and e["variant"] == "metrics"]
     args.output.mkdir(parents=True, exist_ok=True)
     for name in sorted({e["experiment"] for e in events}):
-        plot(name, [e for e in events if e["experiment"] == name], data["modes"], data["stage"],
-             data.get("rates", RATES), args.output)
+        plot(name, [e for e in events if e["experiment"] == name], data, args.output)
 
 
 if __name__ == "__main__":
