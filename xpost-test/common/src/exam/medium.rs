@@ -170,6 +170,14 @@ pub async fn run(cfg: &FileConfig) -> Result<()> {
         })
     );
     for (index, group) in ready.groups.iter().enumerate() {
+        let experiment = group.profiles[0].cells[0].experiment;
+        if cfg
+            .medium_resume_experiment
+            .as_deref()
+            .is_some_and(|selected| selected != experiment)
+        {
+            continue;
+        }
         if let Err(error) = run_group(
             cfg,
             &agent,
@@ -200,7 +208,6 @@ pub async fn run(cfg: &FileConfig) -> Result<()> {
                 }
             }
         }
-        let experiment = group.profiles[0].cells[0].experiment;
         if ready
             .groups
             .get(index + 1)
@@ -458,7 +465,7 @@ async fn run_group(
                     device.active = Some(name);
                 }
             }
-            super::medium_network::qualify_group(cfg, agent, cell.mode).await?;
+            super::medium_network::qualify_group(cfg, agent, cell.experiment, cell.mode).await?;
             super::medium_network::run_cell(
                 cfg,
                 agent,
@@ -693,6 +700,20 @@ pub async fn check(cfg: &FileConfig) -> Result<()> {
 }
 
 async fn preflight(cfg: &FileConfig) -> Result<Readiness> {
+    let planned = plan(cfg.medium_stage);
+    if let Some(experiment) = &cfg.medium_resume_experiment {
+        ensure!(
+            cfg.medium_resume_id.is_some(),
+            "medium_resume_experiment needs medium_resume_id"
+        );
+        ensure!(
+            planned
+                .iter()
+                .flat_map(|group| &group.cells)
+                .any(|cell| cell.experiment == experiment),
+            "experiment {experiment} is outside the selected medium stage"
+        );
+    }
     let endpoint = cfg
         .agent
         .resolved_endpoint()
@@ -712,7 +733,6 @@ async fn preflight(cfg: &FileConfig) -> Result<Readiness> {
         deployments.release == "v0.1.1",
         "medium requires the v0.1.1 release"
     );
-    let planned = plan(cfg.medium_stage);
     let tables = protocol_tables(&planned);
     let mut unavailable = BTreeSet::new();
     for cell in planned.iter().flat_map(|group| &group.cells) {

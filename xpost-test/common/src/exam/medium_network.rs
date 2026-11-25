@@ -49,12 +49,25 @@ enum Workload {
 }
 
 impl Workload {
+    fn parse(experiment: &str) -> Result<Self> {
+        match experiment {
+            "firewall" => Ok(Self::Firewall),
+            "just_drop" => Ok(Self::Drop),
+            "just_tx" => Ok(Self::Tx),
+            _ => bail!("unknown medium network experiment {experiment}"),
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Firewall => "firewall",
             Self::Drop => "just_drop",
             Self::Tx => "just_tx",
         }
+    }
+
+    fn toggles_policy(self, mode: &str) -> bool {
+        mode != "hal" || self == Self::Drop
     }
 }
 
@@ -106,7 +119,7 @@ impl Cell<'_> {
     }
 
     fn toggles_policy(&self) -> bool {
-        !self.hal() || self.experiment == Workload::Drop
+        self.experiment.toggles_policy(self.mode)
     }
 }
 
@@ -147,12 +160,7 @@ pub(super) async fn run_cell(
     plan_order: &mut i32,
     resume: &super::medium::Resume,
 ) -> Result<()> {
-    let experiment = match experiment {
-        "firewall" => Workload::Firewall,
-        "just_drop" => Workload::Drop,
-        "just_tx" => Workload::Tx,
-        _ => bail!("unknown medium network experiment {experiment}"),
-    };
+    let experiment = Workload::parse(experiment)?;
     ensure!(
         matches!(mode, "hal" | "aot" | "jit" | "rbpf"),
         "invalid mode {mode}"
@@ -656,9 +664,14 @@ async fn capture_window(
     window
 }
 
-pub(super) async fn qualify_group(cfg: &FileConfig, agent: &AgentClient, mode: &str) -> Result<()> {
+pub(super) async fn qualify_group(
+    cfg: &FileConfig,
+    agent: &AgentClient,
+    experiment: &str,
+    mode: &str,
+) -> Result<()> {
     let link = Link::from_config(cfg)?;
-    if mode != "hal" {
+    if Workload::parse(experiment)?.toggles_policy(mode) {
         agent
             .disable_xdp()
             .await
@@ -1462,6 +1475,13 @@ impl DutTrace {
 #[cfg(test)]
 mod attribution_tests {
     use super::*;
+
+    #[test]
+    fn hal_drop_switches_policy_to_acknowledge_readiness() {
+        assert!(Workload::Drop.toggles_policy("hal"));
+        assert!(!Workload::Firewall.toggles_policy("hal"));
+        assert!(!Workload::Tx.toggles_policy("hal"));
+    }
 
     #[test]
     fn firewall_keeps_other_key_hits_separate_from_the_stimulus() {

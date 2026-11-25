@@ -16,7 +16,7 @@
 //!
 //! | Name | What | Postgres tables |
 //! |------|------|-----------------|
-//! | `medium` | 29-cell campaign after preflight | Dedicated protocol database |
+//! | `medium` | Selected phase after preflight | Dedicated protocol database |
 //! | `just_drop` | Formal XDP PPS grid + Trace | `exam` + `just_drop_*` + `xdp_*` / `trace_event` |
 //! | `just_tx` | Formal XDP pps grid RTT + Trace | `exam` + `just_tx_config`(sent/ok) / `just_tx_data` + perf |
 //! | `firewall` | Hash blacklist size×hit/miss PPS grid + Trace | `exam` + `firewall_*` + perf |
@@ -104,6 +104,8 @@ pub struct FileConfig {
     pub run: Vec<String>,
     #[serde(default)]
     pub medium_resume_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub medium_resume_experiment: Option<String>,
     #[serde(default)]
     pub medium_stage: MediumStage,
     pub postgres: PostgresConfig,
@@ -291,6 +293,8 @@ struct DefaultFile {
     #[serde(default)]
     medium_resume_id: Option<uuid::Uuid>,
     #[serde(default)]
+    medium_resume_experiment: Option<String>,
+    #[serde(default)]
     medium_stage: MediumStage,
     postgres: PostgresConfig,
     probe: ProbeConfig,
@@ -340,6 +344,7 @@ impl FileConfig {
             version: def.version,
             run: def.run,
             medium_resume_id: def.medium_resume_id,
+            medium_resume_experiment: def.medium_resume_experiment,
             medium_stage: def.medium_stage,
             postgres: def.postgres,
             probe: def.probe,

@@ -17,6 +17,7 @@ version = "1"
 run = ["medium"]
 medium_stage = "hal-aot"
 # medium_resume_id = "<original campaign UUID>"
+# medium_resume_experiment = "just_drop"
 
 [postgres]
 host = "192.168.110.96"

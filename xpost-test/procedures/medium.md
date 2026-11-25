@@ -81,6 +81,8 @@ EXB2 measures two batches for each of seven workloads per mode.
 Publish phase one results and figures before phase two.
 Set `medium_stage = "jit-rbpf"` for phase two.
 Set `medium_resume_id` to the same campaign UUID.
+Set `medium_resume_experiment` to retry one experiment in that phase.
+Preflight and reconciliation still cover all 14 cells in the phase.
 The runner checks for valid Metrics in each phase one experiment and mode.
 The runner resumes with compatible qualified attempts from the selected phase.
 An explicit replacement analysis identifies its predecessor in `supersedes_analysis_id`.
