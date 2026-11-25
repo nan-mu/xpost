@@ -507,12 +507,6 @@ impl XdpRt {
             meta.check_helper_address()?;
             meta.check_slot_address(&slot_state.slot)?;
         }
-        #[cfg(feature = "interp")]
-        {
-            // Checked where the bytes arrive, in `stage`; `pre_lease` cannot
-            // scan them because it holds `&self` and the table read needs
-            // `&mut`.
-        }
         self.check_required_maps(meta, maps)?;
         Ok(())
     }
@@ -574,6 +568,20 @@ impl XdpRt {
             self.primary = prev_primary;
             return Err(XdpSwitchError::ImageTooLarge);
         }
+        #[cfg(feature = "interp")]
+        let (digest, binds) = {
+            let meta = &self
+                .images
+                .get(id)
+                .ok_or(XdpSwitchError::UnknownImage)?
+                .meta;
+            let mut binds: heapless::Vec<usize, { crate::xdp::state::MAX_REQUIRED_MAPS }> =
+                heapless::Vec::new();
+            for (_, address) in meta.aot_binds.iter() {
+                let _ = binds.push(*address);
+            }
+            (meta.digest, binds)
+        };
         let Some(buf) = self.copy_buffer.get_mut(..image_len) else {
             self.primary = prev_primary;
             return Err(XdpSwitchError::ScratchTooSmall);
@@ -582,6 +590,11 @@ impl XdpRt {
         if let Err(e) = self.table.read(aot_abs, buf) {
             self.primary = prev_primary;
             return Err(e.into());
+        }
+        #[cfg(feature = "interp")]
+        if xpost_elf::sha256(buf) != digest || !interp::prepare_slot(buf, binds.as_slice()) {
+            self.primary = prev_primary;
+            return Err(XdpSwitchError::Arch);
         }
         unsafe {
             core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, image_len);

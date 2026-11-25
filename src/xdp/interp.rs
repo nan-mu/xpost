@@ -49,7 +49,6 @@ static mut EBPF_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
 /// Instructions left in the current flight.
 
-
 /// Map value windows the program may touch: `(start, size)` pairs.
 ///
 /// Written by [`set_ranges`] at lease, before `ACTIVE` is stored, and cleared
@@ -176,7 +175,10 @@ pub(crate) unsafe fn run_with(vm: &rbpf::EbpfVmMbuff<'_>, ctx: *mut XdpMd) -> i3
     // fail and it exits without touching the frame.
     let md = EbpfXdpMd::for_frame(data as *mut u8, data_end as *mut u8);
     let md_bytes = unsafe {
-        core::slice::from_raw_parts(&md as *const EbpfXdpMd as *const u8, core::mem::size_of::<EbpfXdpMd>())
+        core::slice::from_raw_parts(
+            &md as *const EbpfXdpMd as *const u8,
+            core::mem::size_of::<EbpfXdpMd>(),
+        )
     };
 
     let stack = unsafe { &mut *addr_of_mut!(EBPF_STACK) };
@@ -251,13 +253,17 @@ pub(crate) fn apply_map_addresses(prog: &mut [u8], binds: &[usize]) -> Result<()
             let src = (prog[at + 1] >> 4) & 0x0f;
             // src == 1 marks a map index rather than a constant.
             if src == 1 {
-                let idx = u32::from_le_bytes([prog[at + 4], prog[at + 5], prog[at + 6], prog[at + 7]])
-                    as usize;
+                let idx =
+                    u32::from_le_bytes([prog[at + 4], prog[at + 5], prog[at + 6], prog[at + 7]])
+                        as usize;
                 if binds.is_empty() {
                     return Err(MapPatchError::NoBinds);
                 }
                 let addr = *binds.get(idx).ok_or(MapPatchError::IndexOutOfRange)?;
-                // A 32-bit address on this target, so the high half is zero.
+                if addr == 0 {
+                    return Err(MapPatchError::NoBinds);
+                }
+                // Clear the high half of the 32-bit target address.
                 prog[at + 4..at + 8].copy_from_slice(&(addr as u32).to_le_bytes());
                 prog[at + 12..at + 16].copy_from_slice(&0u32.to_le_bytes());
                 // Clear the source bit: the value is now an ordinary constant.
@@ -271,31 +277,9 @@ pub(crate) fn apply_map_addresses(prog: &mut [u8], binds: &[usize]) -> Result<()
     Ok(())
 }
 
-/// Count the `lddw` instructions that carry a map index.
-///
-/// Used to reject a program whose map references were never resolved: a
-/// bytecode image with one such instruction and no binds would run with a null
-/// map pointer and every lookup would silently miss.
-pub(crate) fn map_ref_count(prog: &[u8]) -> usize {
-    use rbpf::ebpf;
-    if !prog.len().is_multiple_of(ebpf::INSN_SIZE) {
-        return 0;
-    }
-    let mut n = 0;
-    let mut i = 0;
-    while i < prog.len() / ebpf::INSN_SIZE {
-        let at = i * ebpf::INSN_SIZE;
-        if prog[at] == ebpf::LD_DW_IMM {
-            let src = (prog[at + 1] >> 4) & 0x0f;
-            if src == 1 {
-                n += 1;
-            }
-            i += 2;
-            continue;
-        }
-        i += 1;
-    }
-    n
+/// Verify cold bytecode and resolve its map indexes in the slot copy.
+pub(crate) fn prepare_slot(prog: &mut [u8], binds: &[usize]) -> bool {
+    verify(prog) && !rejects_ctx_writes(prog) && apply_map_addresses(prog, binds).is_ok()
 }
 
 /// Whether one instruction stores through `r1` while `r1` is still the context.

@@ -147,29 +147,9 @@ impl XdpRt {
         if xpost_elf::sha256(buf) != digest {
             return Err(self.fail(XdpSwapError::Digest));
         }
-        // Verify before publishing: the interpreter executes these bytes and
-        // skips its own per-run scan, so the checks have to happen here.
         #[cfg(feature = "interp")]
-        {
-            if !crate::xdp::interp::verify(buf) {
-                return Err(self.fail(XdpSwapError::Arch));
-            }
-            if crate::xdp::interp::rejects_ctx_writes(buf) {
-                return Err(self.fail(XdpSwapError::Arch));
-            }
-            // A program that references a map needs its references turned into
-            // addresses. Without this the helper hook receives the index and
-            // every lookup silently misses, so a missing binding is a load
-            // failure rather than a run that reports zeros.
-            let refs = crate::xdp::interp::map_ref_count(buf);
-            if refs > 0 {
-                if binds.is_empty() {
-                    return Err(self.fail(XdpSwapError::Arch));
-                }
-                if crate::xdp::interp::apply_map_addresses(buf, binds.as_slice()).is_err() {
-                    return Err(self.fail(XdpSwapError::Arch));
-                }
-            }
+        if !crate::xdp::interp::prepare_slot(buf, binds.as_slice()) {
+            return Err(self.fail(XdpSwapError::Arch));
         }
         let generation = self.alloc_generation();
         let buf = &self.copy_buffer[..image_len];
