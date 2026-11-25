@@ -41,6 +41,7 @@ def plot(experiment, events, data, out):
     modes = data["modes"]
     phase = data["stage"]
     full = data.get("volume") == "all"
+    log_runtime = full and experiment == "exec_bench" and phase == "jit-rbpf"
     if experiment == "exec_bench":
         categories = WORKLOADS
         batch_label = "DUT batch mean (µs)" if full else "DUT time per batch (µs)"
@@ -80,9 +81,13 @@ def plot(experiment, events, data, out):
                         ax.scatter(x + (repeat - (len(observations) - 1) / 2) * repeat_spacing,
                                    fields[field], color=color, marker=marker, s=marker_size)
         counts.append(f"{mode.upper()}  " + " · ".join(str(value) for value in per_condition))
-    for ax, (_, label) in zip(axs, panels):
+    for ax, (field, label) in zip(axs, panels):
+        if log_runtime and all(event[field] > 0 for event in events if event.get(field) is not None):
+            ax.set_yscale("log")
+            label += "\n(log scale)"
+        else:
+            ax.set_ylim(bottom=0)
         ax.set_ylabel(label)
-        ax.set_ylim(bottom=0)
         ax.grid(axis="y", alpha=.22)
         ax.spines[["top", "right"]].set_visible(False)
     axs[-1].set_xticks(range(len(categories)), categories)
