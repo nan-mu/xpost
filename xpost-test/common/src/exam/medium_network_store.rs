@@ -1,6 +1,11 @@
 //! Store network attempts and their evidence in the four mode schemas.
 
-use std::{fs, net::Ipv4Addr, path::PathBuf};
+use std::{
+    fs,
+    io::{BufWriter, Write},
+    net::Ipv4Addr,
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -13,6 +18,10 @@ use crate::{
 };
 
 use super::{Analysis, Cell, Link, Observation, Stimulus, Workload, seed, sent_token};
+
+// Bound JSON construction and PostgreSQL binding memory on TR3000.
+// The enclosing transaction still commits or rolls back the entire run.
+const EVIDENCE_ROWS_PER_BIND: usize = 4096;
 
 pub(super) struct Attempt {
     run: Uuid,
@@ -229,22 +238,18 @@ impl Attempt {
         if out.sends.is_empty() {
             return Ok(());
         }
-        let records: Vec<_> = out
-            .sends
-            .iter()
-            .map(|send| {
-                json!({
-                    "seq": send.seq, "mono": send.mono.to_string(), "wall": send.wall.to_string(),
-                    "submitted": send.submitted, "class": send.class, "source": send.source,
-                    "payload": protocol::hex(&send.payload),
-                })
-            })
-            .collect();
-        tx.execute("INSERT INTO bench.send_attempt
+        let insert = tx.prepare("INSERT INTO bench.send_attempt
             (run_id,seq,mono_ns,wall_ns,submitted,traffic_class,source_ip,payload)
             SELECT $1,r.seq,r.mono::bench.u64,r.wall::bench.u64,r.submitted,r.class,r.source::inet,decode(r.payload,'hex')
-            FROM jsonb_to_recordset($2) AS r(seq bigint,mono text,wall text,submitted bool,class text,source text,payload text)",
-            &[&self.run,&json!(records)]).await?;
+            FROM jsonb_to_recordset($2) AS r(seq bigint,mono text,wall text,submitted bool,class text,source text,payload text)").await?;
+        for chunk in out.sends.chunks(EVIDENCE_ROWS_PER_BIND) {
+            let records = Value::Array(chunk.iter().map(|send| json!({
+                "seq": send.seq, "mono": send.mono.to_string(), "wall": send.wall.to_string(),
+                "submitted": send.submitted, "class": send.class, "source": send.source,
+                "payload": protocol::hex(&send.payload),
+            })).collect());
+            tx.execute(&insert, &[&self.run, &records]).await?;
+        }
         Ok(())
     }
 
@@ -273,6 +278,11 @@ impl Attempt {
         tx.execute("INSERT INTO bench.clock(run_id,clock_id,domain,tick_hz,tick_bits,precision_description)
                     VALUES($1,'pcap','host_pcap',$2,64,'Host realtime pcap timestamps in both directions')",
             &[&run,&i64::from(hz)]).await?;
+        let insert = tx.prepare("INSERT INTO bench.packet_fact(capture_id,record_index,file_offset,captured_len,original_len,
+                    ts_sec,ts_subsec,timestamp_hz,observed_uuid,seq,parse_status,identity_ok,payload_ok)
+            SELECT $1,p.idx,p.off,p.cap,p.orig,p.sec,p.subsec,$2,$3,p.seq,p.status,p.identity,p.body
+            FROM jsonb_to_recordset($4) AS p(idx bigint,off bigint,cap int,orig int,sec bigint,subsec int,
+                seq bigint,status text,identity bool,body bool)").await?;
         let mut ids = [None; 2];
         for (index, direction) in ["tx", "rx"].into_iter().enumerate() {
             let capture = Uuid::new_v4();
@@ -282,17 +292,17 @@ impl Attempt {
                         VALUES($1,$2,$3,$4,'pcap',$5,$6,$7,$8,$9,$10,$11,$12)",
                 &[&capture,&run,&direction,&link.iface,&hz,&evidence.listening,&evidence.stopped,
                   &evidence.exit,&evidence.dropped(),&evidence.complete(),&evidence.stderr,&id]).await?;
-            let packets: Vec<_> = result.packets.iter().filter(|p| p.tx == (index == 0)).map(|p| json!({
-                "idx":p.index,"off":p.offset,"cap":p.captured,"orig":p.original,
-                "sec":p.sec,"subsec":p.subsec,"seq":p.seq,
-                "status":if p.valid() { "ok" } else { "damaged" },"identity":p.identity,"body":p.payload,
-            })).collect();
-            tx.execute("INSERT INTO bench.packet_fact(capture_id,record_index,file_offset,captured_len,original_len,
-                        ts_sec,ts_subsec,timestamp_hz,observed_uuid,seq,parse_status,identity_ok,payload_ok)
-                SELECT $1,p.idx,p.off,p.cap,p.orig,p.sec,p.subsec,$2,$3,p.seq,p.status,p.identity,p.body
-                FROM jsonb_to_recordset($4) AS p(idx bigint,off bigint,cap int,orig int,sec bigint,subsec int,
-                    seq bigint,status text,identity bool,body bool)",
-                &[&capture,&hz,&run,&json!(packets)]).await?;
+            for chunk in result.packets.chunks(EVIDENCE_ROWS_PER_BIND) {
+                let packets: Vec<_> = chunk.iter().filter(|p| p.tx == (index == 0)).map(|p| json!({
+                    "idx":p.index,"off":p.offset,"cap":p.captured,"orig":p.original,
+                    "sec":p.sec,"subsec":p.subsec,"seq":p.seq,
+                    "status":if p.valid() { "ok" } else { "damaged" },"identity":p.identity,"body":p.payload,
+                })).collect();
+                if !packets.is_empty() {
+                    tx.execute(&insert, &[&capture, &hz, &run, &Value::Array(packets)])
+                        .await?;
+                }
+            }
         }
         Ok(ids)
     }
@@ -419,20 +429,23 @@ impl Attempt {
             return Ok(());
         };
         let observed: std::collections::BTreeSet<_> = tokens.iter().copied().collect();
-        let records: Vec<_> = out
-            .sends
-            .iter()
-            .map(|send| {
-                let value = sent_token(send);
-                let got = observed.contains(&value);
-                json!({"seq":send.seq,"sent":send.submitted,"observed":got,
-                "received":got.then(|| protocol::hex(&value.to_le_bytes()))})
-            })
-            .collect();
-        tx.execute(&format!("INSERT INTO {mode}.firewall_token(run_id,seq,sent,observed,received_bytes)
+        let insert = tx.prepare(&format!("INSERT INTO {mode}.firewall_token(run_id,seq,sent,observed,received_bytes)
                     SELECT $1,t.seq,t.sent,t.observed,decode(t.received,'hex')
-                    FROM jsonb_to_recordset($2) AS t(seq bigint,sent bool,observed bool,received text)"),
-            &[&self.run,&json!(records)]).await?;
+                    FROM jsonb_to_recordset($2) AS t(seq bigint,sent bool,observed bool,received text)")).await?;
+        for chunk in out.sends.chunks(EVIDENCE_ROWS_PER_BIND) {
+            let records = Value::Array(
+                chunk
+                    .iter()
+                    .map(|send| {
+                        let value = sent_token(send);
+                        let got = observed.contains(&value);
+                        json!({"seq":send.seq,"sent":send.submitted,"observed":got,
+                "received":got.then(|| protocol::hex(&value.to_le_bytes()))})
+                    })
+                    .collect(),
+            );
+            tx.execute(&insert, &[&self.run, &records]).await?;
+        }
         Ok(())
     }
 
@@ -444,15 +457,21 @@ impl Attempt {
         [tx_id, rx_id]: [Option<Uuid>; 2],
         result: &Analysis,
     ) -> Result<()> {
-        tx.execute(&format!("INSERT INTO {mode}.probe_result(analysis_id,run_id,seq,returned,duplicate_rx,late_rx,
+        let insert = tx.prepare(&format!("INSERT INTO {mode}.probe_result(analysis_id,run_id,seq,returned,duplicate_rx,late_rx,
                     tx_capture_id,tx_record_index,rx_capture_id,rx_record_index,rtt_ns,qualified,issues)
                     SELECT $1,$2,p.seq,p.returned,p.duplicate,p.late,
                            CASE WHEN p.tx_index IS NOT NULL THEN $3::uuid END,p.tx_index,
                            CASE WHEN p.rx_index IS NOT NULL THEN $4::uuid END,p.rx_index,p.rtt::bench.u64,p.qualified,
                            CASE WHEN p.qualified THEN '[]'::jsonb ELSE jsonb_build_array('capture or clock evidence incomplete') END
                     FROM jsonb_to_recordset($5) AS p(seq bigint,returned bool,duplicate bigint,late bigint,
-                         tx_index bigint,rx_index bigint,rtt text,qualified bool)"),
-            &[&analysis,&self.run,&tx_id,&rx_id,&json!(result.probes)]).await?;
+                         tx_index bigint,rx_index bigint,rtt text,qualified bool)")).await?;
+        for chunk in result.probes.chunks(EVIDENCE_ROWS_PER_BIND) {
+            tx.execute(
+                &insert,
+                &[&analysis, &self.run, &tx_id, &rx_id, &json!(chunk)],
+            )
+            .await?;
+        }
         Ok(())
     }
 }
@@ -487,7 +506,9 @@ pub(super) fn recover(run: Uuid, out: &Observation, summary: &Value) -> Result<P
         dir.join("observation.json"),
         serde_json::to_vec(&observation_json(out, summary))?,
     )?;
-    fs::write(dir.join("sends.json"), serde_json::to_vec(&out.sends)?)?;
+    let mut sends = BufWriter::new(fs::File::create(dir.join("sends.json"))?);
+    serde_json::to_writer(&mut sends, &out.sends)?;
+    sends.flush()?;
     if let Some(bytes) = &out.perf {
         fs::write(dir.join("perf.bin"), bytes)?;
     }
