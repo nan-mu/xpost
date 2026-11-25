@@ -1047,6 +1047,16 @@ mod tests {
             };
             tx.execute("INSERT INTO bench.condition(condition_id,experiment,protocol_version,parameters,planned_modes)
                 VALUES ($1,'firewall','1',$2,ARRAY['hal'])", &[&condition,&parameters]).await?;
+            let fixture = Uuid::new_v4();
+            let fixture_digest = "b".repeat(64);
+            tx.execute("INSERT INTO bench.artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type)
+                VALUES($1,'fixture',$2,0,''::bytea,'application/octet-stream')", &[&fixture,&fixture_digest]).await?;
+            let profile_hash = "c".repeat(64);
+            tx.execute("INSERT INTO hal.firewall_config(config_id,condition_id,instrumentation,profile_hash,target_pps,
+                send_window_ns,drain_ns,payload_bytes,blacklist_capacity,blacklist_entries,legal_numerator,
+                legal_denominator,lookup_case,map_fixture_artifact_id)
+                VALUES($1,$2,'counter_only',$3,400,5000000000,250000000,42,256,1,1,10,'mixed',$4)",
+                &[&config,&condition,&profile_hash,&fixture]).await?;
             tx.execute("INSERT INTO bench.run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid)
                 VALUES($1,$2,$3,'hal','firewall','metrics','formal',1,0,$4,$5,$1)",
                 &[&run,&condition,&config,&scenario,&status]).await?;
