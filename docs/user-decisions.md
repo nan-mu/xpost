@@ -192,3 +192,13 @@ Use a new campaign for the retest. Retain earlier runs as diagnostic evidence.
 
 Reason. The updated PR #23 brief requires HAL and AOT results before the second phase.
 The earlier 29-cell scope still records the original campaign.
+
+## 2026-11-25 Full campaign after the phased retest
+
+Select `all` in `xpost-test/profile.toml`.
+Use one new campaign for both phases and one AOT Case switch.
+Run 29 cells and 625 attempts. Keep the phased medium measurements for diagnosis.
+Publish the first phase and verify all its terminal keys before the second phase.
+Use the 30-second network windows and 100-batch EXB2 runs specified in the full brief.
+
+Reason. The maintainer requested the full grid after reviewing the phased PR evidence.

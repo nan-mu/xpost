@@ -3,7 +3,7 @@
 //! Keep rates and repeats inside each firmware group.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
+use super::{exb2::Sampling, medium_network::NetworkPlan};
 use crate::{
     agent::{AgentClient, DeploymentReport},
     config::{FileConfig, MediumStage},
@@ -19,6 +20,39 @@ use crate::{
 
 const MODES: [&str; 4] = ["hal", "aot", "jit", "rbpf"];
 const NETWORK: [&str; 3] = ["firewall", "just_tx", "just_drop"];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Volume {
+    Medium,
+    All,
+}
+
+impl Volume {
+    fn network(self) -> NetworkPlan {
+        match self {
+            Self::Medium => NetworkPlan::MEDIUM,
+            Self::All => NetworkPlan::FULL,
+        }
+    }
+
+    fn sampling(self) -> Sampling {
+        match self {
+            Self::Medium => Sampling::MEDIUM,
+            Self::All => Sampling::FULL,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Medium => "medium",
+            Self::All => "all",
+        }
+    }
+
+    fn accepts_duration(self, elapsed: Duration) -> bool {
+        self == Self::All || elapsed <= Duration::from_secs(3600)
+    }
+}
 #[derive(Serialize)]
 struct Group {
     firmware: String,
@@ -34,6 +68,7 @@ struct FirmwareGroup {
 #[derive(Serialize)]
 struct Readiness {
     release: String,
+    volume: &'static str,
     stage: &'static str,
     groups: Vec<FirmwareGroup>,
     unavailable: Vec<String>,
@@ -51,8 +86,9 @@ struct Cell {
     conditions: Value,
 }
 
-fn plan(stage: MediumStage) -> Vec<Group> {
+fn plan(volume: Volume, stage: MediumStage) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
+    let network = volume.network();
     let mut add = |firmware, cell: Cell| {
         if let Some(group) = groups.iter_mut().find(|group| {
             group.firmware == firmware && group.cells[0].experiment == cell.experiment
@@ -77,7 +113,7 @@ fn plan(stage: MediumStage) -> Vec<Group> {
                 experiment: "exec_bench",
                 mode,
                 variant: "metrics",
-                conditions: super::exb2::conditions(),
+                conditions: super::exb2::conditions(volume.sampling()),
             },
         );
     }
@@ -92,7 +128,8 @@ fn plan(stage: MediumStage) -> Vec<Group> {
                     _ => format!("{family}-{variant}"),
                 };
                 let conditions = if variant == "metrics" {
-                    json!({ "pps": [400,1400,4000], "window_s": 5, "repeats": 2 })
+                    json!({ "pps": network.rates, "window_s": network.window.as_secs(),
+                        "observation_ms": network.observation.as_millis() as u64, "repeats": network.repeats })
                 } else if experiment == "firewall" {
                     json!({ "probes": ["hit","miss"] })
                 } else {
@@ -110,17 +147,38 @@ fn plan(stage: MediumStage) -> Vec<Group> {
             }
         }
     }
+    if volume == Volume::All && stage == MediumStage::JitRbpf {
+        add(
+            "case-xdp".into(),
+            Cell {
+                experiment: "case",
+                mode: "aot",
+                variant: "trace",
+                conditions: json!({"probes": ["A-to-B"]}),
+            },
+        );
+    }
 
     groups
 }
 
-pub fn preview(stage: MediumStage) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({
-            "stage": stage.as_str(), "groups": plan(stage),
-        }))?
-    );
+pub fn preview(stage: MediumStage, volume: Volume) -> Result<()> {
+    let phase = |stage: MediumStage| {
+        let groups = plan(volume, stage);
+        let cells = groups.iter().flat_map(|group| &group.cells);
+        let count = cells.clone().count();
+        let attempts = cells
+            .flat_map(cell_conditions)
+            .map(|(_, repeats)| repeats)
+            .sum::<i32>();
+        json!({"stage": stage.as_str(), "cells": count, "planned_attempts": attempts, "groups": groups})
+    };
+    let output = match volume {
+        Volume::Medium => phase(stage),
+        Volume::All => json!({"volume": volume.label(), "selected_stage": stage.as_str(),
+            "stages": [phase(MediumStage::HalAot), phase(MediumStage::JitRbpf)]}),
+    };
+    println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
 
@@ -129,13 +187,14 @@ pub(super) fn revision() -> Option<&'static str> {
         .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
-pub async fn run(cfg: &FileConfig) -> Result<()> {
+pub async fn run(cfg: &FileConfig, volume: Volume) -> Result<()> {
     let revision = revision().context("build the formal runner with xpost-test.fish")?;
+    let preflight_started = Instant::now();
     ensure!(
         cfg.medium_stage == MediumStage::HalAot || cfg.medium_resume_id.is_some(),
         "JIT/rBPF requires the HAL/AOT campaign ID"
     );
-    let ready = preflight(cfg).await?;
+    let ready = preflight(cfg, volume).await?;
     println!("{}", serde_json::to_string(&ready)?);
     ensure!(
         ready.unavailable.is_empty(),
@@ -149,13 +208,29 @@ pub async fn run(cfg: &FileConfig) -> Result<()> {
     let agent = AgentClient::new(endpoint);
     let mut database = protocol::connect(&cfg.postgres).await?;
     let expected: BTreeSet<String> = ready.identities.keys().cloned().collect();
+    let medium_id = cfg.medium_resume_id.unwrap_or_else(Uuid::new_v4);
+    // A dedicated connection keeps the lock while collectors recover their writes.
+    let lock = protocol::connect(&cfg.postgres).await?;
+    let lock_key = i64::from_be_bytes(medium_id.as_bytes()[..8].try_into().expect("UUID prefix"));
+    ensure!(
+        lock.query_one("SELECT pg_try_advisory_lock($1)", &[&lock_key])
+            .await?
+            .get::<_, bool>(0),
+        "campaign {medium_id} already has an active runner"
+    );
     let (mut resume, mut order) = match cfg.medium_resume_id {
         Some(id) => Resume::load(&database, id, &ready.identities).await?,
-        None => (Resume::default(), 0),
+        None => (
+            Resume {
+                id: medium_id,
+                ..Resume::default()
+            },
+            0,
+        ),
     };
     resume.identities = ready.identities;
-    let medium_id = resume.id;
-    let start = std::time::Instant::now();
+    let preflight_s = preflight_started.elapsed().as_secs_f64();
+    let start = Instant::now();
     let mut actions = Actions::default();
     let mut problems = Vec::new();
     let mut device = DeviceDeployment {
@@ -165,8 +240,9 @@ pub async fn run(cfg: &FileConfig) -> Result<()> {
     println!(
         "XPOST_MEDIUM_START {}",
         json!({
-            "medium_id": medium_id, "stage": cfg.medium_stage.as_str(), "revision": revision, "planned_attempts": expected.len(),
-            "previously_complete": resume.completed.len(),
+            "medium_id": medium_id, "stage": cfg.medium_stage.as_str(), "volume": volume.label(),
+            "revision": revision, "planned_attempts": expected.len(), "preflight_s": preflight_s,
+            "previously_complete": resume.completed.len(), "incompatible": resume.incompatible,
         })
     );
     for (index, group) in ready.groups.iter().enumerate() {
@@ -180,6 +256,7 @@ pub async fn run(cfg: &FileConfig) -> Result<()> {
         }
         if let Err(error) = run_group(
             cfg,
+            volume,
             &agent,
             &mut database,
             group,
@@ -224,20 +301,28 @@ pub async fn run(cfg: &FileConfig) -> Result<()> {
         }
     }
     let audit = reconcile(&database, medium_id, &expected, &resume.identities).await?;
-    let elapsed_s = start.elapsed().as_secs_f64();
+    let elapsed = start.elapsed();
     println!(
         "XPOST_MEDIUM_SUMMARY {}",
         json!({
-            "medium_id": medium_id, "stage": cfg.medium_stage.as_str(), "elapsed_s": elapsed_s, "actions": actions,
+            "medium_id": medium_id, "stage": cfg.medium_stage.as_str(), "volume": volume.label(),
+            "elapsed_s": elapsed.as_secs_f64(), "actions": actions,
             "audit": audit, "problems": problems,
         })
     );
+    if volume == Volume::All && cfg.medium_stage == MediumStage::HalAot {
+        check_first_stage(&audit)?;
+    }
+    let covers_plan = match volume {
+        Volume::Medium => audit.missing.is_empty(),
+        Volume::All => audit.unrecorded.is_empty(),
+    };
     ensure!(
-        audit.missing.is_empty()
+        covers_plan
             && audit.duplicate.is_empty()
             && audit.extra.is_empty()
             && problems.is_empty()
-            && elapsed_s <= 3600.0,
+            && volume.accepts_duration(elapsed),
         "medium {medium_id} did not meet all attempt, duplication, and elapsed-time criteria"
     );
     Ok(())
@@ -250,6 +335,8 @@ pub(super) struct Actions {
     pub sram_preload_confirmed: u32,
     pub preparation_publish_confirmed: u32,
     pub measured_publish_confirmed: u32,
+    pub firmware_flash_s: f64,
+    pub cold_install_s: f64,
 }
 
 impl Actions {
@@ -267,6 +354,7 @@ pub(super) struct Resume {
     identities: BTreeMap<String, Value>,
     prior_attempts: BTreeMap<String, Uuid>,
     case_requires_recovery: Option<Uuid>,
+    incompatible: Vec<Incompatible>,
 }
 
 impl Default for Resume {
@@ -277,6 +365,7 @@ impl Default for Resume {
             identities: BTreeMap::new(),
             prior_attempts: BTreeMap::new(),
             case_requires_recovery: None,
+            incompatible: Vec::new(),
         }
     }
 }
@@ -316,8 +405,17 @@ impl Resume {
             if qualifies(identities, &key, status, &parameters, row.get(8)) {
                 resume.completed.insert(key);
             } else {
+                if identities.contains_key(&key) && !compatible(identities, &key, &parameters) {
+                    resume.incompatible.push(Incompatible {
+                        key: key.clone(),
+                        run_id,
+                    });
+                }
                 resume.prior_attempts.insert(key, run_id);
-                if experiment == "case" && (status == "running" || row.get::<_, bool>(9)) {
+                if experiment == "case"
+                    && !resume.completed.contains("case/aot/trace/A-to-B/1")
+                    && (status == "complete" || row.get::<_, bool>(9))
+                {
                     resume.case_requires_recovery = Some(run_id);
                 }
             }
@@ -381,6 +479,7 @@ struct DeviceDeployment {
 
 async fn run_group(
     cfg: &FileConfig,
+    volume: Volume,
     agent: &AgentClient,
     db: &mut Client,
     group: &FirmwareGroup,
@@ -408,12 +507,16 @@ async fn run_group(
                     cfg,
                     hash,
                     medium_id,
+                    resume
+                        .identity("case", "aot", "trace", "A-to-B", 1)
+                        .context("missing case plan identity")?,
                     resume.retry_of("case", "aot", "trace", "A-to-B", 1),
                     *order,
                     actions,
                 )
                 .await?;
                 *order += 1;
+                *device = DeviceDeployment::default();
                 continue;
             }
             if std::mem::take(&mut device.attest_on_resume) {
@@ -427,7 +530,9 @@ async fn run_group(
                 }
             }
             if device.firmware_sha256.as_deref() != Some(hash) {
+                let flash_started = Instant::now();
                 let evidence = agent.flash_fw_evidence(firmware, Some(hash)).await?;
+                actions.firmware_flash_s += flash_started.elapsed().as_secs_f64();
                 actions.note_flash(&evidence);
                 device.active = evidence["containers"]
                     .as_array()
@@ -446,6 +551,7 @@ async fn run_group(
                     hash,
                     Some(medium_id),
                     order,
+                    volume.sampling(),
                     Some((resume, &mut device.active, actions)),
                 )
                 .await
@@ -459,7 +565,9 @@ async fn run_group(
                     format!("{}_{}", cell.experiment, cell.mode)
                 };
                 if device.active.as_deref() != Some(&name) {
+                    let install_started = Instant::now();
                     agent.bind_xdp(&name, firmware, hash).await?;
+                    actions.cold_install_s += install_started.elapsed().as_secs_f64();
                     actions.cold_install_confirmed += 1;
                     agent.get_init().await?;
                     device.active = Some(name);
@@ -476,6 +584,8 @@ async fn run_group(
                 firmware,
                 hash,
                 medium_id,
+                volume.network(),
+                &cell_conditions(cell),
                 order,
                 resume,
             )
@@ -488,6 +598,8 @@ async fn run_group(
 
 fn planned_identities(
     cfg: &FileConfig,
+    volume: Volume,
+    stage: MediumStage,
     groups: &[FirmwareGroup],
     report: &DeploymentReport,
 ) -> Result<BTreeMap<String, Value>> {
@@ -496,21 +608,14 @@ fn planned_identities(
         for profile in &group.profiles {
             for cell in &profile.cells {
                 for (condition, repeats) in cell_conditions(cell) {
-                    let program = if cell.experiment == "exec_bench" {
-                        condition.as_str()
-                    } else {
-                        cell.experiment
-                    };
-                    let deployment = if cell.mode == "hal" {
-                        None
-                    } else {
+                    let prepared_sha = |program: &str, slot: u8| -> Result<&str> {
                         let prepared = report
                             .prepared
                             .iter()
                             .find(|image| {
                                 image.program == program
                                     && image.mode == cell.mode
-                                    && image.slot == 0
+                                    && image.slot == slot
                                     && image.firmware.firmware_profile == profile.firmware
                             })
                             .context("missing planned deployment identity")?;
@@ -518,7 +623,13 @@ fn planned_identities(
                             prepared.container_sha256.len() == 64,
                             "missing prepared XDP ELF digest"
                         );
-                        Some(prepared.container_sha256.as_str())
+                        Ok(prepared.container_sha256.as_str())
+                    };
+                    let deployment = match (cell.experiment, cell.mode) {
+                        (_, "hal") => None,
+                        ("case", _) => Some(prepared_sha("case_swap", 0)?),
+                        ("exec_bench", _) => Some(prepared_sha(&condition, 0)?),
+                        (program, _) => Some(prepared_sha(program, 0)?),
                     };
                     let input = if cell.experiment == "exec_bench" {
                         cell.conditions["workloads"]
@@ -528,15 +639,26 @@ fn planned_identities(
                             .find(|input| input["program"] == condition)
                             .context("missing EXB2 workload input")?
                             .clone()
+                    } else if cell.experiment == "case" {
+                        super::case::planned_input(cfg, prepared_sha("case_mark", 1)?)?
                     } else {
-                        super::medium_network::planned_input(cfg, cell.experiment, &condition)?
+                        super::medium_network::planned_input(
+                            cfg,
+                            cell.experiment,
+                            cell.variant,
+                            &condition,
+                            volume.network(),
+                        )?
                     };
-                    let identity = json!({
-                        "stage": cfg.medium_stage.as_str(),
+                    let mut identity = json!({
+                        "stage": stage.as_str(),
                         "firmware_sha256": group.firmware_sha256,
                         "container_sha256": deployment,
                         "input": input,
                     });
+                    if volume == Volume::All {
+                        identity["volume"] = json!(volume.label());
+                    }
                     for repeat in 1..=repeats {
                         identities.insert(
                             attempt_key(
@@ -557,19 +679,32 @@ fn planned_identities(
 }
 
 fn cell_conditions(cell: &Cell) -> Vec<(String, i32)> {
-    match (cell.experiment, cell.variant) {
-        ("exec_bench", _) => super::exb2::PROGRAMS
+    if cell.experiment == "exec_bench" {
+        let repeats = cell.conditions["runs_per_program"]
+            .as_i64()
+            .expect("EXB2 repeats") as i32;
+        return super::exb2::PROGRAMS
             .into_iter()
-            .map(|name| (name.to_owned(), 2))
-            .collect::<Vec<_>>(),
-        ("case", _) => vec![("A-to-B".into(), 1)],
-        (_, "metrics") => [400, 1400, 4000]
-            .into_iter()
-            .map(|pps| (pps.to_string(), 2))
-            .collect(),
-        ("firewall", "trace") => vec![("hit".into(), 1), ("miss".into(), 1)],
-        _ => vec![("tagged".into(), 1)],
+            .map(|name| (name.to_owned(), repeats))
+            .collect();
     }
+    if cell.variant == "metrics" {
+        let repeats = cell.conditions["repeats"]
+            .as_i64()
+            .expect("network repeats") as i32;
+        return cell.conditions["pps"]
+            .as_array()
+            .expect("network rates")
+            .iter()
+            .map(|rate| (rate.to_string(), repeats))
+            .collect();
+    }
+    cell.conditions["probes"]
+        .as_array()
+        .expect("Trace probes")
+        .iter()
+        .map(|probe| (probe.as_str().expect("named probe").to_owned(), 1))
+        .collect()
 }
 
 fn attempt_condition(experiment: &str, variant: &str, parameters: &Value) -> String {
@@ -590,10 +725,18 @@ struct Reconciliation {
     planned: usize,
     completed: usize,
     missing: Vec<String>,
+    unrecorded: Vec<String>,
     duplicate: Vec<String>,
     extra: Vec<String>,
+    incompatible: Vec<Incompatible>,
     status_counts: BTreeMap<String, usize>,
     accepted_run_ids: BTreeMap<String, Uuid>,
+}
+
+#[derive(Serialize)]
+struct Incompatible {
+    key: String,
+    run_id: Uuid,
 }
 
 async fn reconcile(
@@ -608,28 +751,36 @@ async fn reconcile(
     let mut accepted_run_ids = BTreeMap::new();
     let mut duplicate = Vec::new();
     let mut extra = Vec::new();
+    let mut incompatible = Vec::new();
+    let mut terminal = BTreeSet::new();
+    let stage = identities.values().next().context("empty campaign plan")?["stage"].clone();
     for row in rows {
         let (experiment, mode, variant, status): (&str, &str, &str, &str) =
             (row.get(0), row.get(1), row.get(2), row.get(4));
         let parameters: Value = row.get(5);
         let field = attempt_condition(experiment, variant, &parameters);
         let key = attempt_key(experiment, mode, variant, &field, row.get(3));
-        if parameters["stage"]
-            != identities
-                .values()
-                .next()
-                .map_or(Value::Null, |v| v["stage"].clone())
-        {
+        if parameters["stage"] != stage {
             continue;
         }
         *status_counts.entry(status.to_owned()).or_insert(0) += 1;
         if !expected.contains(&key) {
             extra.push(key);
-        } else if qualifies(identities, &key, status, &parameters, row.get(8)) {
-            if !observed.insert(key.clone()) {
-                duplicate.push(key.clone());
+        } else if !compatible(identities, &key, &parameters) {
+            incompatible.push(Incompatible {
+                key,
+                run_id: row.get(6),
+            });
+        } else {
+            if terminal_attempt(status, &row.get(10)) {
+                terminal.insert(key.clone());
             }
-            accepted_run_ids.insert(key, row.get(6));
+            if qualifies(identities, &key, status, &parameters, row.get(8)) {
+                if !observed.insert(key.clone()) {
+                    duplicate.push(key.clone());
+                }
+                accepted_run_ids.insert(key, row.get(6));
+            }
         }
     }
     let missing = expected.difference(&observed).cloned().collect();
@@ -637,8 +788,10 @@ async fn reconcile(
         planned: expected.len(),
         completed: observed.len(),
         missing,
+        unrecorded: expected.difference(&terminal).cloned().collect(),
         duplicate,
         extra,
+        incompatible,
         status_counts,
         accepted_run_ids,
     })
@@ -666,7 +819,7 @@ async fn attempt_rows(
               AND newer.analysis_id <> a.analysis_id
               AND newer.issues @> jsonb_build_array(jsonb_build_object('supersedes_analysis_id',a.analysis_id))
           )),false),
-        EXISTS(SELECT 1 FROM bench.run_artifact ra WHERE ra.run_id=r.run_id AND ra.role='case_publish_intent')
+        EXISTS(SELECT 1 FROM bench.run_artifact ra WHERE ra.run_id=r.run_id AND ra.role='case_publish_intent'),r.issues
         FROM bench.run r JOIN bench.condition c USING(condition_id)
         WHERE r.phase='formal' AND c.parameters->>'medium_id'=$1
         ORDER BY r.plan_order",
@@ -683,13 +836,25 @@ fn qualifies(
 ) -> bool {
     qualified
         && matches!(status, "complete" | "inconclusive")
-        && identities.get(key).is_some_and(|identity| {
-            parameters["medium_identity"] == *identity && parameters["stage"] == identity["stage"]
-        })
+        && compatible(identities, key, parameters)
 }
 
-pub async fn check(cfg: &FileConfig) -> Result<()> {
-    let ready = preflight(cfg).await?;
+fn compatible(identities: &BTreeMap<String, Value>, key: &str, parameters: &Value) -> bool {
+    identities.get(key).is_some_and(|identity| {
+        parameters["medium_identity"] == *identity && parameters["stage"] == identity["stage"]
+    })
+}
+
+fn terminal_attempt(status: &str, issues: &Value) -> bool {
+    status == "complete"
+        || matches!(
+            status,
+            "failed" | "unsupported" | "inconclusive" | "blocked"
+        ) && issues.as_array().is_some_and(|issues| !issues.is_empty())
+}
+
+pub async fn check(cfg: &FileConfig, volume: Volume) -> Result<()> {
+    let ready = preflight(cfg, volume).await?;
     println!("{}", serde_json::to_string_pretty(&ready)?);
     ensure!(
         ready.unavailable.is_empty(),
@@ -699,8 +864,8 @@ pub async fn check(cfg: &FileConfig) -> Result<()> {
     Ok(())
 }
 
-async fn preflight(cfg: &FileConfig) -> Result<Readiness> {
-    let planned = plan(cfg.medium_stage);
+async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<Readiness> {
+    let planned = plan(volume, cfg.medium_stage);
     if let Some(experiment) = &cfg.medium_resume_experiment {
         ensure!(
             cfg.medium_resume_id.is_some(),
@@ -725,7 +890,11 @@ async fn preflight(cfg: &FileConfig) -> Result<Readiness> {
         .context("medium Agent health")?;
     let deployments = tokio::time::timeout(
         Duration::from_secs(180),
-        agent.medium_preflight(Some(cfg.medium_stage.as_str())),
+        agent.medium_preflight(Some(if volume == Volume::All {
+            "full"
+        } else {
+            cfg.medium_stage.as_str()
+        })),
     )
     .await
     .context("medium deployment preflight deadline")??;
@@ -733,7 +902,13 @@ async fn preflight(cfg: &FileConfig) -> Result<Readiness> {
         deployments.release == "v0.1.1",
         "medium requires the v0.1.1 release"
     );
-    let tables = protocol_tables(&planned);
+    let tables = if volume == Volume::All {
+        let mut both = plan(volume, MediumStage::HalAot);
+        both.extend(plan(volume, MediumStage::JitRbpf));
+        protocol_tables(&both)
+    } else {
+        protocol_tables(&planned)
+    };
     let mut unavailable = BTreeSet::new();
     for cell in planned.iter().flat_map(|group| &group.cells) {
         let supported = match (cell.experiment, cell.mode, cell.variant) {
@@ -752,7 +927,7 @@ async fn preflight(cfg: &FileConfig) -> Result<Readiness> {
         }
     }
     let groups = bind_firmware(planned, &deployments)?;
-    let identities = planned_identities(cfg, &groups, &deployments)?;
+    let identities = planned_identities(cfg, volume, cfg.medium_stage, &groups, &deployments)?;
     let containers = deployments
         .prepared
         .iter()
@@ -773,10 +948,22 @@ async fn preflight(cfg: &FileConfig) -> Result<Readiness> {
     let mut database = protocol::connect(&cfg.postgres).await?;
     protocol::check(&mut database, &tables).await?;
     check_host(cfg)?;
+    super::medium_network::check_capture_path(cfg)?;
     if let Some(id) = cfg.medium_resume_id {
         Resume::load(&database, id, &identities).await?;
         if cfg.medium_stage == MediumStage::JitRbpf {
-            check_first_stage(&database, id).await?;
+            let first_deployments;
+            let report = if volume == Volume::All {
+                &deployments
+            } else {
+                first_deployments = agent.medium_preflight(Some("hal-aot")).await?;
+                &first_deployments
+            };
+            let first = bind_firmware(plan(volume, MediumStage::HalAot), report)?;
+            let first = planned_identities(cfg, volume, MediumStage::HalAot, &first, report)?;
+            let expected = first.keys().cloned().collect();
+            let audit = reconcile(&database, id, &expected, &first).await?;
+            check_first_stage(&audit)?;
         }
     } else {
         ensure!(
@@ -786,6 +973,7 @@ async fn preflight(cfg: &FileConfig) -> Result<Readiness> {
     }
     Ok(Readiness {
         release: deployments.release,
+        volume: volume.label(),
         stage: cfg.medium_stage.as_str(),
         groups,
         unavailable: unavailable.into_iter().collect(),
@@ -794,25 +982,19 @@ async fn preflight(cfg: &FileConfig) -> Result<Readiness> {
     })
 }
 
-async fn check_first_stage(db: &Client, campaign: Uuid) -> Result<()> {
-    let mut pairs = BTreeSet::new();
-    for row in attempt_rows(db, campaign).await? {
-        let (experiment, mode, variant, status): (String, String, &str, &str) =
-            (row.get(0), row.get(1), row.get(2), row.get(4));
-        let parameters: Value = row.get(5);
-        if variant == "metrics"
-            && matches!(status, "complete" | "inconclusive")
-            && row.get::<_, bool>(8)
-            && parameters["stage"] == "hal-aot"
-            && parameters["medium_identity"]["stage"] == "hal-aot"
-        {
-            pairs.insert((experiment, mode));
-        }
-    }
+fn check_first_stage(audit: &Reconciliation) -> Result<()> {
+    ensure!(
+        audit.unrecorded.is_empty(),
+        "HAL/AOT attempts lack compatible terminal records: {}",
+        audit.unrecorded.join(", ")
+    );
     for experiment in ["exec_bench", "firewall", "just_tx", "just_drop"] {
         for mode in MediumStage::HalAot.modes() {
             ensure!(
-                pairs.contains(&(experiment.to_owned(), mode.to_owned())),
+                audit
+                    .accepted_run_ids
+                    .keys()
+                    .any(|key| key.starts_with(&format!("{experiment}/{mode}/metrics/"))),
                 "missing plot-ready HAL/AOT Metrics for {experiment}/{mode}"
             );
         }
@@ -935,25 +1117,19 @@ fn bind_firmware(plan: Vec<Group>, report: &DeploymentReport) -> Result<Vec<Firm
             };
             for &program in programs {
                 let slot = u8::from(program == "case_mark");
-                let xdp = match (program, slot, cell.mode) {
-                    ("case_mark", 1, "aot") => "case_mark_idle".to_owned(),
-                    (_, _, "aot") => program.to_owned(),
-                    (_, _, mode) => format!("{program}_{mode}"),
-                };
                 let identity = report
                     .prepared
                     .iter()
                     .find(|image| {
                         image.program == program
                             && image.mode == cell.mode
-                            && image.profile == xdp
                             && image.slot == slot
                             && image.firmware.firmware_profile == profile.firmware
                     })
                     .with_context(|| {
                         format!(
-                            "missing preflight target {} / {xdp} / slot {slot}",
-                            profile.firmware
+                            "missing preflight target {} / {program} / {} / slot {slot}",
+                            profile.firmware, cell.mode
                         )
                     })?;
                 hashes.insert(identity.firmware.firmware_sha256.as_str());
@@ -991,7 +1167,7 @@ mod tests {
 
     #[test]
     fn first_stage_plan_selects_only_hal_and_aot_in_experiment_order() {
-        let groups = super::plan(super::MediumStage::HalAot);
+        let groups = super::plan(super::Volume::Medium, super::MediumStage::HalAot);
         let cells = groups
             .iter()
             .flat_map(|group| &group.cells)
@@ -1021,7 +1197,7 @@ mod tests {
 
     #[test]
     fn second_stage_excludes_hal_aot_and_keeps_the_same_order() {
-        let groups = super::plan(super::MediumStage::JitRbpf);
+        let groups = super::plan(super::Volume::Medium, super::MediumStage::JitRbpf);
         let cells = groups
             .iter()
             .flat_map(|group| &group.cells)
@@ -1040,6 +1216,109 @@ mod tests {
         let mut order = cells.iter().map(|cell| cell.experiment).collect::<Vec<_>>();
         order.dedup();
         assert_eq!(order, ["exec_bench", "firewall", "just_tx", "just_drop"]);
+    }
+
+    #[test]
+    fn all_has_625_attempts_across_29_cells() {
+        use super::{MediumStage, Volume, cell_conditions, plan};
+        let hal_aot = plan(Volume::All, MediumStage::HalAot);
+        let jit_rbpf = plan(Volume::All, MediumStage::JitRbpf);
+        let first = hal_aot.iter().flat_map(|group| &group.cells);
+        let second = jit_rbpf.iter().flat_map(|group| &group.cells);
+        assert_eq!(first.clone().count(), 14);
+        assert_eq!(second.clone().count(), 15);
+        assert_eq!(
+            first.flat_map(cell_conditions).map(|(_, n)| n).sum::<i32>(),
+            312
+        );
+        assert_eq!(
+            second
+                .flat_map(cell_conditions)
+                .map(|(_, n)| n)
+                .sum::<i32>(),
+            313
+        );
+        let elapsed = std::time::Duration::from_secs(14_508);
+        assert!(Volume::All.accepts_duration(elapsed));
+        assert!(!Volume::Medium.accepts_duration(elapsed));
+    }
+
+    #[test]
+    fn first_stage_needs_terminal_trace_and_all_eight_plot_pairs() {
+        use super::{Reconciliation, Uuid, check_first_stage, json, terminal_attempt};
+        assert!(!terminal_attempt(
+            "running",
+            &json!(["previous windows completed"])
+        ));
+        assert!(!terminal_attempt("inconclusive", &json!([])));
+        assert!(terminal_attempt(
+            "inconclusive",
+            &json!(["capture incomplete"])
+        ));
+        let mut audit = Reconciliation {
+            planned: 312,
+            completed: 307,
+            missing: vec![],
+            unrecorded: vec![],
+            duplicate: vec![],
+            extra: vec![],
+            incompatible: vec![],
+            status_counts: Default::default(),
+            accepted_run_ids: ["exec_bench", "firewall", "just_tx", "just_drop"]
+                .into_iter()
+                .flat_map(|experiment| {
+                    ["hal", "aot"].map(move |mode| {
+                        (
+                            format!("{experiment}/{mode}/metrics/input/1"),
+                            Uuid::new_v4(),
+                        )
+                    })
+                })
+                .collect(),
+        };
+        assert!(check_first_stage(&audit).is_ok());
+        audit.unrecorded.push("firewall/hal/trace/miss/1".into());
+        assert!(
+            check_first_stage(&audit)
+                .unwrap_err()
+                .to_string()
+                .contains("firewall/hal/trace/miss/1")
+        );
+        audit.unrecorded.clear();
+        audit.accepted_run_ids.remove("just_tx/hal/metrics/input/1");
+        assert!(
+            check_first_stage(&audit)
+                .unwrap_err()
+                .to_string()
+                .contains("just_tx/hal")
+        );
+    }
+
+    #[test]
+    fn capture_boundary_analysis_and_window_are_part_of_attempt_identity() {
+        use super::{compatible, json};
+        let key = "just_tx/hal/metrics/400/1";
+        let planned = json!({"stage":"hal-aot","firmware_sha256":"same","volume":"all",
+            "input":{"window_ns":30_000_000_000_u64,"capture":{"export_tail_ns":1_200_000_000_u64},
+            "analysis_version":"campaign-network-v3"}});
+        let identities = [(key.to_owned(), planned.clone())].into();
+        let actual = json!({"stage":"hal-aot","medium_identity":planned});
+        assert!(compatible(&identities, key, &actual));
+        for (path, value) in [
+            (
+                "/medium_identity/input/capture/export_tail_ns",
+                json!(1_100_000_000_u64),
+            ),
+            (
+                "/medium_identity/input/analysis_version",
+                json!("older-analysis"),
+            ),
+            ("/medium_identity/input/window_ns", json!(5_000_000_000_u64)),
+        ] {
+            let mut changed = actual.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert!(!compatible(&identities, key, &changed));
+        }
     }
 
     #[tokio::test]
@@ -1130,7 +1409,10 @@ mod tests {
         let dsn = std::env::var("XPOST_CASE_TEST_PG")?;
         let (mut client, session) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls).await?;
         tokio::spawn(session);
-        let tables = super::protocol_tables(&super::plan(super::MediumStage::HalAot));
+        let tables = super::protocol_tables(&super::plan(
+            super::Volume::Medium,
+            super::MediumStage::HalAot,
+        ));
         super::protocol::check(&mut client, &tables).await?;
         let error = super::protocol::check(&mut client, &["aot.missing_fixture_table".into()])
             .await

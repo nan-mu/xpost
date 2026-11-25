@@ -1,7 +1,7 @@
 //! TR3000 host harness binary **`xpost-test`**.
 //!
 //! Sole entry: bare `./xpost-test` (no env, no flags). Experiments and knobs
-//! come from compile-time `config/default.toml` + `just_tx.toml` /
+//! come from compile-time `profile.toml`, `config/default.toml` and `just_tx.toml` /
 //! `just_drop.toml` — see [`config`].
 //!
 #![doc = include_str!("overview.md")]
@@ -20,15 +20,16 @@ use log::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    use exam::medium::{self, Volume};
     let cfg = FileConfig::embedded()?;
-    if cfg.run == ["medium"] {
-        return exam::medium::run(&cfg).await;
-    }
-    if cfg.run == ["medium-plan"] {
-        return exam::medium::preview(cfg.medium_stage);
-    }
-    if cfg.run == ["medium-preflight"] {
-        return exam::medium::check(&cfg).await;
+    match cfg.run[0].as_str() {
+        "all" => return medium::run(&cfg, Volume::All).await,
+        "all-plan" => return medium::preview(cfg.medium_stage, Volume::All),
+        "all-preflight" => return medium::check(&cfg, Volume::All).await,
+        "medium" => return medium::run(&cfg, Volume::Medium).await,
+        "medium-plan" => return medium::preview(cfg.medium_stage, Volume::Medium),
+        "medium-preflight" => return medium::check(&cfg, Volume::Medium).await,
+        _ => {}
     }
     install_postgres(cfg.postgres.clone());
 

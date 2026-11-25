@@ -16,7 +16,124 @@ use crate::{config::format_mac, pipeline::build_udp_frame};
 
 use super::{Link, Send};
 
-const SIZE_LIMIT: u64 = 16 * 1024 * 1024;
+// At 4,000 pps for 30 s, 240,000 records of 82 + 16 bytes total 22.4 MiB.
+// Allow duplicate replies and other traffic that matches the filter.
+const SIZE_LIMIT: usize = 32 * 1024 * 1024;
+
+pub(super) fn check_rx_path(bridge: &str, rx_iface: Option<&str>) -> Result<()> {
+    let Some(iface) = rx_iface else {
+        return Ok(());
+    };
+    ensure!(
+        [bridge, iface].iter().all(|name| !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            && !matches!(*name, "." | "..")),
+        "invalid capture interface name"
+    );
+    ensure!(
+        bridge == iface
+            || std::path::Path::new("/sys/class/net")
+                .join(bridge)
+                .join("brif")
+                .join(iface)
+                .exists(),
+        "Just TX RX interface {iface} is outside capture bridge {bridge}"
+    );
+    ensure!(
+        !rx_gro_list(iface).with_context(|| format!("check GRO on {iface}"))?,
+        "Just TX needs rx-gro-list disabled on {iface} for per-packet timestamps"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn rx_gro_list(iface: &str) -> Result<bool> {
+    use std::{net::UdpSocket, os::fd::AsRawFd};
+
+    // Linux ethtool UAPI. ETH_SS_FEATURES is string set 4.
+    const STRING_SET: u32 = 4;
+    const FEATURE_LIMIT: usize = 256;
+    const FEATURE_BLOCKS: usize = FEATURE_LIMIT / 32;
+    #[repr(C)]
+    struct StringSet {
+        command: u32,
+        reserved: u32,
+        mask: u64,
+        count: u32,
+    }
+    #[repr(C)]
+    struct FeatureNames {
+        command: u32,
+        set: u32,
+        count: u32,
+        names: [[u8; 32]; FEATURE_LIMIT],
+    }
+    #[repr(C)]
+    struct Features {
+        command: u32,
+        blocks: u32,
+        values: [[u32; 4]; FEATURE_BLOCKS],
+    }
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    ensure!(
+        iface.len() < libc::IFNAMSIZ,
+        "RX interface name is too long"
+    );
+    let request = |data: *mut libc::c_char| -> io::Result<()> {
+        // ifreq must include the trailing NUL in the kernel interface name.
+        let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
+        for (slot, byte) in request.ifr_name.iter_mut().zip(iface.bytes()) {
+            *slot = byte as libc::c_char;
+        }
+        request.ifr_ifru.ifru_data = data;
+        // Each UAPI buffer has room for every item specified by its count field.
+        let returned =
+            unsafe { libc::ioctl(socket.as_raw_fd(), libc::SIOCETHTOOL as _, &mut request) };
+        if returned < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    };
+    let mut size = StringSet {
+        command: 0x37,
+        reserved: 0,
+        mask: 1 << STRING_SET,
+        count: 0,
+    };
+    request(std::ptr::from_mut(&mut size).cast())?;
+    ensure!(
+        (1..=FEATURE_LIMIT).contains(&(size.count as usize)),
+        "invalid ethtool feature count"
+    );
+    let mut names = FeatureNames {
+        command: 0x1b,
+        set: STRING_SET,
+        count: size.count,
+        names: [[0; 32]; FEATURE_LIMIT],
+    };
+    request(std::ptr::from_mut(&mut names).cast())?;
+    let feature = names.names[..size.count as usize]
+        .iter()
+        .position(|name| name.starts_with(b"rx-gro-list\0"));
+    let Some(index) = feature else {
+        return Ok(false);
+    };
+    let mut features = Features {
+        command: 0x3a,
+        blocks: size.count.div_ceil(32),
+        values: [[0; 4]; FEATURE_BLOCKS],
+    };
+    request(std::ptr::from_mut(&mut features).cast())?;
+    // Feature blocks contain available, requested, active and never_changed masks.
+    Ok(features.values[index / 32][2] & (1 << (index % 32)) != 0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rx_gro_list(_iface: &str) -> Result<bool> {
+    bail!("RX offload verification requires Linux")
+}
 
 pub(super) struct Capture {
     child: Child,
@@ -24,10 +141,13 @@ pub(super) struct Capture {
     stderr: JoinHandle<io::Result<String>>,
     listening: oneshot::Receiver<()>,
     ready: bool,
+    iface: String,
+    rx_iface: Option<String>,
 }
 
 impl Capture {
     pub(super) fn start(link: &Link) -> Result<Self> {
+        check_rx_path(&link.iface, link.capture_rx_iface.as_deref())?;
         let mut child = Command::new("tcpdump")
             .args([
                 "-i",
@@ -57,7 +177,7 @@ impl Capture {
             .stdout
             .take()
             .context("tcpdump stdout")?
-            .take(SIZE_LIMIT + 1);
+            .take(SIZE_LIMIT as u64 + 1);
         let mut lines = BufReader::new(child.stderr.take().context("tcpdump stderr")?).lines();
         let (ready, listening) = oneshot::channel();
         let reader = tokio::spawn(async move {
@@ -85,6 +205,8 @@ impl Capture {
             stderr,
             listening,
             ready: false,
+            iface: link.iface.clone(),
+            rx_iface: link.capture_rx_iface.clone(),
         })
     }
 
@@ -113,15 +235,19 @@ impl Capture {
             Ok(Ok(Ok(bytes))) => bytes,
             _ => Vec::new(),
         };
-        let stderr = match timeout(Duration::from_secs(2), &mut self.stderr).await {
+        let mut stderr = match timeout(Duration::from_secs(2), &mut self.stderr).await {
             Ok(Ok(Ok(text))) => text,
             _ => String::new(),
         };
+        let capture_path = check_rx_path(&self.iface, self.rx_iface.as_deref());
+        if let Err(error) = &capture_path {
+            stderr.push_str(&format!("\nJust TX RX capture path changed: {error:#}\n"));
+        }
         Evidence {
             bytes,
             stderr,
             exit,
-            stopped,
+            stopped: stopped && capture_path.is_ok(),
             listening: self.ready,
         }
     }
@@ -145,12 +271,23 @@ impl Evidence {
         })
     }
 
+    fn captured_count(&self) -> Option<i64> {
+        self.stderr.lines().find_map(|line| {
+            line.strip_suffix(" packets captured")
+                .or_else(|| line.strip_suffix(" packet captured"))?
+                .trim()
+                .parse()
+                .ok()
+        })
+    }
+
     pub(super) fn complete(&self) -> bool {
         self.listening
             && self.stopped
             && self.exit == Some(0)
             && self.dropped() == Some(0)
-            && self.bytes.len() <= SIZE_LIMIT as usize
+            && self.captured_count().is_some()
+            && self.bytes.len() <= SIZE_LIMIT
     }
 
     pub(super) fn packets(
@@ -161,6 +298,7 @@ impl Evidence {
         sent: &[Send],
     ) -> Result<(i32, Vec<Packet>)> {
         let bytes = &self.bytes;
+        ensure!(bytes.len() <= SIZE_LIMIT, "pcap size limit exceeded");
         ensure!(bytes.len() >= 24, "short pcap header");
         let (little, hz) = match bytes[..4] {
             [0xd4, 0xc3, 0xb2, 0xa1] => (true, 1_000_000),
@@ -193,6 +331,7 @@ impl Evidence {
                 subsec < hz as u32 && captured <= original,
                 "invalid pcap record"
             );
+            ensure!(captured == original, "truncated pcap frame");
             let frame = &bytes[at + 16..end];
             if let Some((seq, tx)) = classify(frame, link, run)
                 && let Ok(send_index) = sent.binary_search_by_key(&seq, |send| send.seq)
@@ -208,7 +347,7 @@ impl Evidence {
                     original: i32::try_from(original)?,
                     seq,
                     tx,
-                    identity: identity && captured == original,
+                    identity,
                     payload,
                 });
             }
@@ -216,6 +355,12 @@ impl Evidence {
             index += 1;
         }
         ensure!(at == bytes.len(), "partial pcap record header");
+        if let Some(reported) = self.captured_count() {
+            ensure!(
+                index == reported,
+                "pcap record count {index} differs from tcpdump count {reported}"
+            );
+        }
         Ok((hz, packets))
     }
 }
@@ -296,9 +441,11 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
-    #[test]
-    fn only_the_published_mac_swap_is_a_valid_xdp_reply() {
-        let link = Link {
+    const SECONDS: u32 = 1_700_000_000;
+
+    fn link() -> Link {
+        Link {
+            capture_rx_iface: None,
             iface: "eth0".into(),
             src: Ipv4Addr::new(10, 0, 0, 2),
             dut: Ipv4Addr::new(10, 0, 0, 3),
@@ -307,7 +454,129 @@ mod tests {
             dut_mac: [2; 6],
             port: 8080,
             sport: 17777,
-        };
+        }
+    }
+
+    fn evidence(records: usize) -> Evidence {
+        // Classic little-endian pcap, microseconds, full snaplen, Ethernet.
+        Evidence {
+            bytes: vec![
+                0xd4, 0xc3, 0xb2, 0xa1, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 1, 0, 0, 0,
+            ],
+            stderr: format!(
+                "{records} packet{} captured\n0 packets dropped by kernel\n",
+                if records == 1 { "" } else { "s" }
+            ),
+            exit: Some(0),
+            stopped: true,
+            listening: true,
+        }
+    }
+
+    fn append_record(bytes: &mut Vec<u8>, offset_us: u32, frame: &[u8]) {
+        let length = (frame.len() as u32).to_le_bytes();
+        bytes.extend_from_slice(&(SECONDS + offset_us / 1_000_000).to_le_bytes());
+        bytes.extend_from_slice(&(offset_us % 1_000_000).to_le_bytes());
+        bytes.extend_from_slice(&length);
+        bytes.extend_from_slice(&length);
+        bytes.extend_from_slice(frame);
+    }
+
+    #[test]
+    fn full_rate_window_retains_both_directions_and_timestamps() {
+        const PROBES: usize = 4_000 * 30;
+        let link = link();
+        let run = Uuid::nil();
+        let mut capture = evidence(2 * PROBES);
+        let mut sends = Vec::with_capacity(PROBES);
+        for i in 0..PROBES {
+            let seq = i as i64 + 1;
+            let offset_us = i as u32 * 250;
+            let wall = u64::from(SECONDS) * 1_000_000_000 + u64::from(offset_us) * 1_000;
+            let payload = super::super::payload(run, seq, None);
+            for (dst, src, time) in [
+                (&link.dut_mac, &link.src_mac, offset_us),
+                (&link.src_mac, &link.dut_mac, offset_us + 125),
+            ] {
+                let frame = build_udp_frame(
+                    dst, src, link.src, link.dut, link.sport, link.port, &payload,
+                );
+                assert_eq!(frame.len(), 82);
+                append_record(&mut capture.bytes, time, &frame);
+            }
+            sends.push(Send {
+                seq,
+                wall,
+                mono: u64::from(offset_us) * 1_000,
+                submitted: true,
+                error: None,
+                class: "probe",
+                source: link.src,
+                payload,
+            });
+        }
+
+        assert_eq!(capture.bytes.len(), 24 + 2 * PROBES * (16 + 82));
+        assert!(capture.bytes.len() > 16 * 1024 * 1024);
+        assert!(capture.complete());
+        let (hz, packets) = capture.packets(&link, run, false, &sends).unwrap();
+        assert_eq!(hz, 1_000_000);
+        assert_eq!(packets.len(), 2 * PROBES);
+        for (pair, send) in packets.chunks_exact(2).zip(&sends) {
+            let tx = &pair[0];
+            let rx = &pair[1];
+            assert!(tx.tx && !rx.tx);
+            assert!(tx.valid() && rx.valid());
+            assert_eq!((tx.seq, rx.seq), (send.seq, send.seq));
+            assert_eq!(tx.ns(hz), send.wall);
+            assert_eq!(rx.ns(hz), send.wall + 125_000);
+        }
+    }
+
+    #[test]
+    fn rejects_truncated_capture() {
+        let link = link();
+        let run = Uuid::nil();
+        let mut capture = evidence(1);
+        append_record(&mut capture.bytes, 0, &[0; 82]);
+        assert!(capture.complete());
+        assert!(capture.packets(&link, run, false, &[]).is_ok());
+
+        // A snaplen-truncated frame still has a complete pcap record.
+        capture.bytes[36..40].copy_from_slice(&83_u32.to_le_bytes());
+        let error = capture.packets(&link, run, false, &[]).err().unwrap();
+        assert!(
+            error.to_string().contains("truncated pcap frame"),
+            "{error:#}"
+        );
+        capture.bytes[36..40].copy_from_slice(&82_u32.to_le_bytes());
+
+        for (len, message) in [
+            (24 + 16 + 81, "truncated pcap record"),
+            (24 + 15, "partial pcap record header"),
+            (24, "pcap record count"),
+        ] {
+            capture.bytes.truncate(len);
+            let error = capture.packets(&link, run, false, &[]).err().unwrap();
+            assert!(error.to_string().contains(message), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn rejects_capture_over_size_limit() {
+        let mut capture = evidence(0);
+        capture.bytes.resize(SIZE_LIMIT + 1, 0);
+        assert!(!capture.complete());
+        let error = capture
+            .packets(&link(), Uuid::nil(), false, &[])
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("pcap size limit"), "{error:#}");
+    }
+
+    #[test]
+    fn only_the_published_mac_swap_is_a_valid_xdp_reply() {
+        let link = link();
         let run = Uuid::new_v4();
         let send = Send {
             seq: 1,

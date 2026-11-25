@@ -37,12 +37,12 @@ def milliseconds(nanoseconds):
     return float(nanoseconds) / 1_000_000
 
 
-def plot(experiment, events, modes, phase, out):
+def plot(experiment, events, modes, phase, rates, out):
     if experiment == "exec_bench":
         categories = WORKLOADS
         panels = (("batch_us", "DUT time per batch (µs)"), ("us_per_round", "DUT time per round (µs)"))
     else:
-        categories = RATES
+        categories = rates
         per_experiment = {
             "firewall": (("legal", "Legal delivery fraction"), ("hit", "Target-key hit fraction")),
             "just_tx": (("loss", "Qualified loss fraction"), ("median_ms", "Median RTT (ms)"),
@@ -99,7 +99,8 @@ def main():
     events = [e for e in data["attempts"] if e["run_id"] in accepted and e["variant"] == "metrics"]
     args.output.mkdir(parents=True, exist_ok=True)
     for name in sorted({e["experiment"] for e in events}):
-        plot(name, [e for e in events if e["experiment"] == name], data["modes"], data["stage"], args.output)
+        plot(name, [e for e in events if e["experiment"] == name], data["modes"], data["stage"],
+             data.get("rates", RATES), args.output)
 
 
 if __name__ == "__main__":

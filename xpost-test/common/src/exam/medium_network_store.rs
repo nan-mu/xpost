@@ -12,7 +12,7 @@ use crate::{
     db::{metrics, protocol},
 };
 
-use super::{Analysis, Cell, Link, Observation, Stimulus, Workload, token};
+use super::{Analysis, Cell, Link, Observation, Stimulus, Workload, seed, sent_token};
 
 pub(super) struct Attempt {
     run: Uuid,
@@ -89,8 +89,8 @@ impl Attempt {
         let variant = cell.variant;
         let profile = protocol::hex(profile);
         let pps = stimulus.rate();
-        let window = pps.map(|_| super::WINDOW.as_nanos().to_string());
-        let drain = super::DRAIN.as_nanos().to_string();
+        let window = pps.map(|_| cell.timing.window.as_nanos().to_string());
+        let drain = cell.timing.observation.as_nanos().to_string();
         let instrumentation = if variant == "trace" {
             "trace"
         } else {
@@ -144,8 +144,8 @@ impl Attempt {
         let release = (!cell.hal()).then_some("07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113");
         tx.execute("INSERT INTO bench.run
             (run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit)
-             VALUES($1,$2,$3,$4,$5,$6,'formal',$7,0,$8,'running',$1,$9,$10)",
-            &[&run,&condition,&config,&mode,&name,&variant,&repeat,&order,&release,&super::super::medium::revision()]).await?;
+             VALUES($1,$2,$3,$4,$5,$6,'formal',$7,$8::text::bench.u64,$9,'running',$1,$10,$11)",
+            &[&run,&condition,&config,&mode,&name,&variant,&repeat,&seed(run).to_string(),&order,&release,&super::super::medium::revision()]).await?;
         if let Some(fixture) = fixture {
             tx.execute("INSERT INTO bench.run_artifact(run_id,role,artifact_id) VALUES($1,'firewall_fixture',$2)",
                 &[&run,&fixture]).await?;
@@ -201,7 +201,7 @@ impl Attempt {
         let digest = protocol::digest(&meta_bytes);
         tx.execute("INSERT INTO bench.analysis(analysis_id,run_id,algorithm_version,source_digest,qualified,issues)
             VALUES($1,$2,$3,$4,$5,$6)",
-            &[&id,&run,&super::ANALYSIS_VERSION,&digest,&result.qualified,&issues]).await?;
+            &[&id,&run,&cell.timing.analysis_version(cell.experiment),&digest,&result.qualified,&issues]).await?;
         if cell.variant == "metrics" {
             let (baseline, final_id) = if result.metrics_valid {
                 let pair =
@@ -423,7 +423,7 @@ impl Attempt {
             .sends
             .iter()
             .map(|send| {
-                let value = token(self.run, send.seq);
+                let value = sent_token(send);
                 let got = observed.contains(&value);
                 json!({"seq":send.seq,"sent":send.submitted,"observed":got,
                 "received":got.then(|| protocol::hex(&value.to_le_bytes()))})

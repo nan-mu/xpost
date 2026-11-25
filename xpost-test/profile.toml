@@ -1,0 +1,5 @@
+# Rebuild after changing the experiment or phase.
+run = ["all"]
+medium_stage = "hal-aot"
+# medium_resume_id = "<original campaign UUID>"
+# medium_resume_experiment = "just_drop"

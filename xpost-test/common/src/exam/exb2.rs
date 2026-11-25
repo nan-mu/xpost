@@ -19,6 +19,24 @@ pub(super) const BUF: usize = 8258;
 const HEADER: usize = 64;
 pub(super) const ROUNDS: u32 = 3;
 pub(super) const SEED: u32 = 1;
+pub(super) const ANALYSIS_VERSION: &str = "exb2-equality/nms1-v1";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct Sampling {
+    pub(super) runs: i32,
+    pub(super) samples: i32,
+}
+
+impl Sampling {
+    pub(super) const MEDIUM: Self = Self {
+        runs: 2,
+        samples: 1,
+    };
+    pub(super) const FULL: Self = Self {
+        runs: 5,
+        samples: 100,
+    };
+}
 
 struct Vector {
     n: u32,
@@ -115,18 +133,26 @@ fn buffers(task: usize, vector: &Vector) -> (Vec<u8>, Vec<u8>) {
     (request, expected)
 }
 
-pub(super) fn conditions() -> Value {
+pub(super) fn conditions(sampling: Sampling) -> Value {
     let workloads = PROGRAMS.iter().zip(&VECTORS).enumerate().map(|(task, (program, vector))| {
         let (request, expected) = buffers(task, vector);
-        json!({ "program": program, "task": task, "n": vector.n, "seed": SEED, "variant": 0,
+        let mut input = json!({ "program": program, "task": task, "n": vector.n, "seed": SEED, "variant": 0,
             "batch_count": ROUNDS, "input_bytes": vector.input.len(), "scratch_bytes": vector.scratch.len(),
             "request_sha256": super::case_store::hex(&Sha256::digest(request)),
             "response_sha256": super::case_store::hex(&Sha256::digest(expected)),
             "expected_status": 0, "expected_completed": ROUNDS, "expected_result": vector.result,
             "expected_digest": vector.digest,
-        })
+        });
+        // Preserve existing medium workload identities for resume.
+        if sampling != Sampling::MEDIUM {
+            input["sampling"] = json!({ "runs": sampling.runs, "samples_per_run": sampling.samples });
+            input["analysis_version"] = json!(ANALYSIS_VERSION);
+        }
+        input
     }).collect::<Vec<_>>();
-    json!({ "buffer_bytes": BUF, "header_bytes": HEADER, "workloads": workloads, "batches_per_program": 2 })
+    json!({ "buffer_bytes": BUF, "header_bytes": HEADER, "workloads": workloads,
+        "runs_per_program": sampling.runs, "samples_per_run": sampling.samples,
+        "batches_per_program": sampling.runs * sampling.samples })
 }
 
 pub(super) fn request(task: usize) -> (u32, Vec<u8>, Vec<u8>) {
@@ -138,6 +164,28 @@ pub(super) fn request(task: usize) -> (u32, Vec<u8>, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_sampling_changes_identity_without_changing_workload_vectors() {
+        let medium = conditions(Sampling::MEDIUM);
+        let full = conditions(Sampling::FULL);
+        assert_eq!(medium["batches_per_program"], 2);
+        assert_eq!(full["batches_per_program"], 500);
+        assert_eq!(medium["runs_per_program"], 2);
+        assert_eq!(full["runs_per_program"], 5);
+        for task in 0..PROGRAMS.len() {
+            let mut full_input = full["workloads"][task].as_object().unwrap().clone();
+            assert_eq!(
+                full_input.remove("sampling"),
+                Some(json!({ "runs": 5, "samples_per_run": 100 }))
+            );
+            assert_eq!(
+                full_input.remove("analysis_version"),
+                Some(json!(ANALYSIS_VERSION))
+            );
+            assert_eq!(Value::Object(full_input), medium["workloads"][task]);
+        }
+    }
 
     #[test]
     fn copy_vector_separates_input_scratch_and_padding() {

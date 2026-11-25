@@ -31,10 +31,21 @@ const FIRMWARE: &str = "case-xdp";
 const SLOT_A: &str = "case_swap";
 const SLOT_B: &str = "case_mark_idle";
 
+pub(super) fn planned_input(cfg: &FileConfig, slot_b_sha256: &str) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "direction": "A-to-B", "pps": super::case_capture::PPS,
+        "pre_window_ns": PRE.as_nanos() as u64, "post_window_ns": POST.as_nanos() as u64,
+        "capture_interface": cfg.probe.iface, "capture_clock": "host-realtime",
+        "dut_ip": cfg.target.esp_ip, "dut_mac": cfg.esp_mac_bytes()?,
+        "slot_b_sha256": slot_b_sha256, "analysis_version": "case-trace-v1",
+    }))
+}
+
 pub(super) async fn run_case(
     cfg: &FileConfig,
     expected_fw: &str,
     medium_id: Uuid,
+    identity: &serde_json::Value,
     retry_of: Option<Uuid>,
     order: i32,
     actions: &mut Actions,
@@ -53,6 +64,11 @@ pub(super) async fn run_case(
         .preflight_xdp(SLOT_B)
         .await
         .context("prepare Slot B")?;
+    ensure!(
+        identity["container_sha256"].as_str() == Some(&digest_a)
+            && identity["input"]["slot_b_sha256"].as_str() == Some(&digest_b),
+        "case preflight changed since campaign planning"
+    );
     let mut client = case_store::connect(&cfg.postgres).await?;
     let run = Uuid::new_v4();
     let profile = case_store::hex(&Sha256::digest(b"case-aot-trace-v0.1.1"));
@@ -62,6 +78,7 @@ pub(super) async fn run_case(
         "formal",
         &profile,
         Some(medium_id),
+        Some(identity),
         retry_of,
         order,
     )
@@ -98,11 +115,7 @@ pub(super) async fn run_case(
     {
         observation.issues.push(format!("{error:#}"));
     }
-    let status = if observation.qualified() {
-        "complete"
-    } else {
-        "failed"
-    };
+    let status = observation.status();
     let mut write_error = None;
     if let Err(error) = attempt
         .finish(&mut client, &observation, &cfg.probe.iface)
@@ -195,7 +208,9 @@ async fn perform(
     let ui = RoundUi::new();
     ui.begin_round();
     ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
+    let flash_started = Instant::now();
     let identity = agent.flash_fw_evidence(FIRMWARE, Some(expected_fw)).await?;
+    actions.firmware_flash_s += flash_started.elapsed().as_secs_f64();
     actions.note_flash(&identity);
     let checked = check_flashed(&identity, digests);
     result.flash = Some(identity);
@@ -257,18 +272,34 @@ async fn perform(
     result
         .preparation
         .push(format!("Trace epoch {epoch} boot {boot}"));
-    ensure!(
-        boot == u64::from(initial.boot),
-        "DUT boot changed before Trace prepare"
-    );
-    agent.perf_arm(epoch).await?;
-    let intent = serde_json::to_vec(&serde_json::json!({
-        "run_id": run, "epoch": epoch, "boot_id": boot,
-        "source_slot": 0, "target_slot": 1, "target_generation": gen_b,
-    }))?;
-    let tx = client.transaction().await?;
-    crate::db::protocol::artifact(&tx, run, "case_publish_intent", &intent).await?;
-    tx.commit().await.context("persist case publish intent")?;
+    let setup = async {
+        ensure!(
+            boot == u64::from(initial.boot),
+            "DUT boot changed before Trace prepare"
+        );
+        agent.perf_arm(epoch).await?;
+        let intent = serde_json::to_vec(&serde_json::json!({
+            "run_id": run, "epoch": epoch, "boot_id": boot,
+            "source_slot": 0, "target_slot": 1, "target_generation": gen_b,
+        }))?;
+        let tx = client.transaction().await?;
+        crate::db::protocol::artifact(&tx, run, "case_publish_intent", &intent).await?;
+        tx.commit().await.context("persist case publish intent")
+    }
+    .await;
+    if let Err(error) = setup {
+        if agent.perf_freeze(epoch).await.is_err() {
+            let _ = agent.perf_arm(epoch).await;
+            let _ = agent.perf_freeze(epoch).await;
+        }
+        if let Err(cleanup) = agent.perf_release(epoch).await {
+            result.issues.push(format!(
+                "release case Trace after setup failure: {cleanup:#}"
+            ));
+        }
+        result.capture = capture.stop().await.ok();
+        return Err(error).context("prepare Case publish");
+    }
     let begin_ns = capture_start.elapsed().as_nanos();
     let reply = tokio::time::timeout(Duration::from_secs(5), agent.switch_xdp(1, gen_b, "drop"))
         .await

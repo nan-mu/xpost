@@ -29,6 +29,7 @@ pub(super) async fn connect(cfg: &PostgresConfig) -> Result<Client> {
         "bench.clock",
         "bench.capture",
         "bench.packet_fact",
+        "bench.analysis",
         "bench.event_definition",
         "aot.case_config",
         "aot.case_switch",
@@ -52,18 +53,20 @@ impl Attempt {
         phase: &str,
         profile: &str,
         medium_id: Option<Uuid>,
+        identity: Option<&Value>,
         retry_of: Option<Uuid>,
         order: i32,
     ) -> Result<Self> {
         let condition = Uuid::new_v4();
         let config = Uuid::new_v4();
         let tx = client.transaction().await?;
-        let parameters = json!({ "port": 8080, "pps": PPS, "slots": [0,1], "versions": [2,1], "switches": 1, "medium_id": medium_id, "retry_of": retry_of });
+        let parameters = json!({ "port": 8080, "pps": PPS, "slots": [0,1], "versions": [2,1], "switches": 1, "medium_id": medium_id, "retry_of": retry_of,
+            "stage": identity.and_then(|id| id["stage"].as_str()), "medium_identity": identity });
         tx.execute("INSERT INTO bench.condition(condition_id,experiment,protocol_version,parameters,planned_modes) VALUES($1,'case','1',$2,ARRAY['aot'])", &[&condition,&parameters]).await?;
         let pre = PRE.as_nanos().to_string();
         let post = POST.as_nanos().to_string();
         tx.execute("INSERT INTO aot.case_config(config_id,condition_id,instrumentation,profile_hash,target_pps,switch_count,switch_kind,quiesce_policy,pre_window_ns,post_window_ns,payload_bytes,source_mode,target_mode) VALUES($1,$2,'trace',$3,$4,1,'hot_publish','drop',$5::text::bench.u64,$6::text::bench.u64,40,'aot','aot')", &[&config,&condition,&profile,&PPS,&pre,&post]).await?;
-        tx.execute("INSERT INTO bench.run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit) VALUES($1,$2,$3,'aot','case','trace',$4,1,0,$6,'running',$1,$5)", &[&run,&condition,&config,&phase,&RELEASE_COMMIT,&order]).await?;
+        tx.execute("INSERT INTO bench.run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit) VALUES($1,$2,$3,'aot','case','trace',$4,1,0,$6,'running',$1,$5,$7)", &[&run,&condition,&config,&phase,&RELEASE_COMMIT,&order,&super::medium::revision()]).await?;
         tx.commit().await?;
         Ok(Self { run, config })
     }
@@ -77,7 +80,7 @@ impl Attempt {
         let tx = client.transaction().await?;
         let issues = json!(result.issues);
         let boot = result.boot.map(|n| n.to_string());
-        let updated = tx.execute("UPDATE bench.run SET status=$2, issues=$3, boot_id=$4::text::bench.u64 WHERE run_id=$1 AND status='running'", &[&self.run,&if result.qualified() { "complete" } else { "failed" },&issues,&boot]).await?;
+        let updated = tx.execute("UPDATE bench.run SET status=$2, issues=$3, boot_id=$4::text::bench.u64 WHERE run_id=$1 AND status='running'", &[&self.run,&result.status(),&issues,&boot]).await?;
         ensure!(
             updated == 1,
             "case attempt {} has no running record to complete",
@@ -135,6 +138,24 @@ impl Attempt {
         if let Some(switch) = &result.switch {
             self.switch(&tx, switch, result, capture, &issues).await?;
         }
+        let evidence = serde_json::to_vec(&json!({
+            "pcap_sha256": result.capture.as_ref().map(|capture| hex(&Sha256::digest(&capture.pcap))),
+            "trace_sha256": result.trace_bytes.as_ref().map(|bytes| hex(&Sha256::digest(bytes))),
+            "freeze_receipt": result.freeze_receipt, "boot_id": result.boot,
+            "switch_reply": result.switch.as_ref().and_then(|switch| switch.reply.as_ref()),
+            "published_state": result.switch.as_ref().and_then(|switch| switch.state_after.as_ref()),
+        }))?;
+        self.artifact(
+            &tx,
+            "case_observation",
+            "application/json",
+            &evidence,
+            &json!({}),
+        )
+        .await?;
+        tx.execute("INSERT INTO bench.analysis(analysis_id,run_id,algorithm_version,source_digest,qualified,issues)
+            VALUES($1,$2,'case-trace-v1',$3,$4,$5)",
+            &[&Uuid::new_v4(), &self.run, &hex(&Sha256::digest(&evidence)), &result.qualified(), &issues]).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -303,6 +324,16 @@ impl Observation {
         self.issues.is_empty()
     }
 
+    pub fn status(&self) -> &'static str {
+        if self.qualified() {
+            "complete"
+        } else if self.switch.is_some() {
+            "inconclusive"
+        } else {
+            "failed"
+        }
+    }
+
     pub fn preserve(&self, run: Uuid) -> Result<std::path::PathBuf> {
         use std::fs;
 
@@ -381,6 +412,7 @@ mod tests {
             run,
             "qualification",
             &"a".repeat(64),
+            None,
             None,
             None,
             0,

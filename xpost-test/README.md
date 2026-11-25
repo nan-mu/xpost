@@ -26,7 +26,7 @@ Host-only / no bpfel: `TEST_SKIP_EBPF=1 cargo build --release`.
 - `exam` — `just_drop` / `just_tx` / `firewall` / empty `dev`
 - `config` — compile-time TOML embed
 
-Sole runtime entry: bare `./xpost-test` (no flags). Experiments from `config/default.toml` `run`.
+Run `./xpost-test` without flags on TR3000. Select experiments in `profile.toml` and rebuild.
 
 The default `run = ["medium"]` stops at the release readiness check.
 See the [medium procedure](procedures/medium.md) for the release audit, planned matrix, and PostgreSQL queries.

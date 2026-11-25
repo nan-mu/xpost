@@ -1,23 +1,14 @@
 # Compile-time xpost-test defaults (embedded via include_str!).
 # TR3000 path: rebuild, scp binary, then always:
 #   ./xpost-test
-# No env vars, no CLI flags. Edit `run` to choose which experiments run.
+# Select the experiment in ../profile.toml.
 #
 # On the Mac, run cargo run --release --locked -- serve --bind 0.0.0.0:9240 from xpost-agent/.
 # The runner connects via HTTP. Set endpoint to host:port or a URL.
 #
 # Medium status and release audit: see procedures/medium.md.
-# Debug: run = ["dev"] — HAL smoke for just_tx/just_drop/firewall (no XDP, no DB).
-# Wipe: run = ["formal-clear"] → TRUNCATE exam CASCADE.
 
 version = "1"
-
-# Use a separate run list for older experiments or diagnostics.
-# Medium checks Agent deployment readiness before device writes or database access.
-run = ["medium"]
-medium_stage = "hal-aot"
-# medium_resume_id = "<original campaign UUID>"
-# medium_resume_experiment = "just_drop"
 
 [postgres]
 host = "192.168.110.96"
@@ -34,6 +25,8 @@ endpoint = "192.168.110.96:9240"
 
 [probe]
 iface = "br-lan"
+# Disable rx-gro-list on this bridge member during Just TX capture.
+capture_rx_iface = "phy0-ap0"
 # Optional Ethernet source MAC override (default: iface hardware address)
 # src_mac = "00:11:22:33:44:55"
 

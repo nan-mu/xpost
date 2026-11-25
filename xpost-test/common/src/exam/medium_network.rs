@@ -31,15 +31,58 @@ use crate::{
     pipeline::{self, RawTx},
 };
 
-const RATES: [i32; 3] = [400, 1400, 4000];
-const WINDOW: Duration = Duration::from_secs(5);
-const DRAIN: Duration = Duration::from_millis(250);
+#[derive(Clone, Copy)]
+pub(super) struct NetworkPlan {
+    pub rates: &'static [i32],
+    pub repeats: i32,
+    pub window: Duration,
+    pub observation: Duration,
+    full: bool,
+}
+
+impl NetworkPlan {
+    pub const MEDIUM: Self = Self {
+        rates: &[400, 1400, 4000],
+        repeats: 2,
+        window: Duration::from_secs(5),
+        observation: Duration::from_millis(250),
+        full: false,
+    };
+    pub const FULL: Self = Self {
+        rates: &[
+            400, 600, 800, 1000, 1200, 1400, 1600, 2000, 2400, 2800, 3200, 3600, 4000,
+        ],
+        repeats: 3,
+        window: Duration::from_secs(30),
+        observation: Duration::from_secs(1),
+        full: true,
+    };
+
+    fn for_variant(self, variant: &str) -> Self {
+        if variant == "metrics" {
+            self
+        } else {
+            Self {
+                full: self.full,
+                ..Self::MEDIUM
+            }
+        }
+    }
+
+    fn analysis_version(self, workload: Workload) -> &'static str {
+        if self.full || workload == Workload::Tx {
+            ANALYSIS_VERSION
+        } else {
+            "medium-network-v2"
+        }
+    }
+}
 // Allow the final tcpdump capture block to retire after its 1 s buffer timeout.
 const CAPTURE_TAIL: Duration = Duration::from_millis(1_200);
 const BODY: usize = 40;
 const PORT: u16 = 8080;
 const LEGAL_EVERY: i64 = 10;
-const ANALYSIS_VERSION: &str = "medium-network-v2";
+const ANALYSIS_VERSION: &str = "campaign-network-v3";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Workload {
@@ -80,6 +123,15 @@ enum Stimulus {
 }
 
 impl Stimulus {
+    fn from_condition(variant: &str, condition: &str) -> Result<Self> {
+        match (variant, condition) {
+            ("metrics", rate) => Ok(Self::Rate(rate.parse().context("invalid planned pps")?)),
+            ("trace", "hit") => Ok(Self::Hit),
+            ("trace", "miss") => Ok(Self::Miss),
+            ("trace", "tagged") => Ok(Self::Tagged),
+            _ => bail!("invalid acquisition condition {variant}/{condition}"),
+        }
+    }
     fn rate(self) -> Option<i32> {
         match self {
             Self::Rate(rate) => Some(rate),
@@ -111,6 +163,7 @@ struct Cell<'a> {
     variant: &'a str,
     firmware: &'a str,
     firmware_sha256: &'a str,
+    timing: NetworkPlan,
 }
 
 impl Cell<'_> {
@@ -126,23 +179,40 @@ impl Cell<'_> {
 pub(super) fn planned_input(
     cfg: &FileConfig,
     experiment: &str,
+    variant: &str,
     condition: &str,
+    plan: NetworkPlan,
 ) -> Result<serde_json::Value> {
     let link = Link::from_config(cfg)?;
+    let timing = plan.for_variant(variant);
     let rules = if experiment == "firewall" {
         link.rules(cfg.firewall.blacklist_size, cfg.target.vip_ip)?
     } else {
         Vec::new()
     };
-    Ok(json!({
+    let mut input = json!({
         "condition": condition,
-        "window_ns": WINDOW.as_nanos() as u64,
-        "drain_ns": DRAIN.as_nanos() as u64,
+        "window_ns": timing.window.as_nanos() as u64,
+        "drain_ns": timing.observation.as_nanos() as u64,
         "source_ip": link.src, "dut_ip": link.dut, "interface": link.iface,
         "source_mac": link.src_mac, "dut_mac": link.dut_mac,
         "port": link.port, "stimulus_source_port": link.sport,
         "firewall_hit": link.hit, "blacklist": rules,
-    }))
+    });
+    if plan.full || experiment == "just_tx" {
+        input["analysis_version"] = json!(timing.analysis_version(Workload::parse(experiment)?));
+        input["seed_policy"] = json!("run-uuid-first-eight-le");
+    }
+    if experiment == "just_tx" {
+        input["capture"] = json!({
+            "interface": link.iface,
+            "rx_interface_no_gro_list": link.capture_rx_iface,
+            "clock": "host-realtime",
+            "timestamp_policy": "one-frame-per-record",
+            "export_tail_ns": CAPTURE_TAIL.as_nanos() as u64,
+        });
+    }
+    Ok(input)
 }
 
 /// Run a cell for the firmware and XDP image already prepared by the scheduler.
@@ -157,6 +227,8 @@ pub(super) async fn run_cell(
     firmware: &str,
     firmware_sha256: &str,
     campaign: Uuid,
+    network: NetworkPlan,
+    conditions: &[(String, i32)],
     plan_order: &mut i32,
     resume: &super::medium::Resume,
 ) -> Result<()> {
@@ -165,38 +237,35 @@ pub(super) async fn run_cell(
         matches!(mode, "hal" | "aot" | "jit" | "rbpf"),
         "invalid mode {mode}"
     );
-    let plan: Vec<_> = match variant {
-        "metrics" => RATES
-            .into_iter()
-            .flat_map(|rate| [(Stimulus::Rate(rate), 1), (Stimulus::Rate(rate), 2)])
-            .collect(),
-        "trace" if experiment == Workload::Firewall => {
-            vec![(Stimulus::Hit, 1), (Stimulus::Miss, 1)]
-        }
-        "trace" => vec![(Stimulus::Tagged, 1)],
-        _ => bail!("invalid collection variant {variant}"),
-    };
     let cell = Cell {
         experiment,
         mode,
         variant,
         firmware,
         firmware_sha256,
+        timing: network.for_variant(variant),
     };
-    let profile: [u8; 32] = Sha256::digest(serde_json::to_vec(&(ANALYSIS_VERSION, &cell))?).into();
+    let profile: [u8; 32] = Sha256::digest(serde_json::to_vec(&(
+        network.analysis_version(experiment),
+        &cell,
+        cell.timing.window,
+        cell.timing.observation,
+    ))?)
+    .into();
     let link = Link::from_config(cfg)?;
     let rules = match experiment {
         Workload::Firewall => link.rules(cfg.firewall.blacklist_size, cfg.target.vip_ip)?,
         _ => Vec::new(),
     };
-    for (stimulus, repeat) in plan {
-        let condition = stimulus
-            .rate()
-            .map_or_else(|| stimulus.case().to_owned(), |rate| rate.to_string());
-        if !resume.should_run(experiment.name(), mode, variant, &condition, repeat) {
+    for (condition, repeat) in conditions
+        .iter()
+        .flat_map(|(condition, count)| (1..=*count).map(move |repeat| (condition, repeat)))
+    {
+        let stimulus = Stimulus::from_condition(variant, condition)?;
+        if !resume.should_run(experiment.name(), mode, variant, condition, repeat) {
             continue;
         }
-        let retry_of = resume.retry_of(experiment.name(), mode, variant, &condition, repeat);
+        let retry_of = resume.retry_of(experiment.name(), mode, variant, condition, repeat);
         let run = Uuid::new_v4();
         let order = *plan_order;
         *plan_order = order.checked_add(1).context("medium plan order overflow")?;
@@ -215,8 +284,8 @@ pub(super) async fn run_cell(
             "blacklist": rules,
             "pps": stimulus.rate(),
             "probe": stimulus.case(),
-            "window_ns": stimulus.rate().map(|_| WINDOW.as_nanos() as u64),
-            "drain_ns": DRAIN.as_nanos() as u64,
+            "window_ns": stimulus.rate().map(|_| cell.timing.window.as_nanos() as u64),
+            "drain_ns": cell.timing.observation.as_nanos() as u64,
         });
         let attempt = match store::Attempt::start(
             client,
@@ -260,6 +329,7 @@ pub(super) async fn run_cell(
         {
             observation.fail(format!("{error:#}"));
         }
+        let analysis_started = Instant::now();
         let result = analyze(
             &cell,
             &link,
@@ -270,6 +340,8 @@ pub(super) async fn run_cell(
             &mut observation,
         );
         let summary = result.summary(&observation);
+        let analysis_s = analysis_started.elapsed().as_secs_f64();
+        let persistence_started = Instant::now();
         let intended_status = observation.status(&result);
         let (status, recovered) = match attempt
             .finish_recovering(
@@ -307,6 +379,7 @@ pub(super) async fn run_cell(
                 "medium_id": campaign.to_string(), "run_id": run.to_string(), "mode": mode, "experiment": experiment.name(), "variant": variant,
                 "condition": parameters, "repeat": repeat, "plan_order": order, "status": status,
                 "issues": observation.issues, "result": summary, "database_recovered": recovered,
+                "analysis_s": analysis_s, "persistence_s": persistence_started.elapsed().as_secs_f64(),
             })
         );
         ensure!(
@@ -336,6 +409,7 @@ impl Serialize for Cell<'_> {
 #[derive(Clone)]
 struct Link {
     iface: String,
+    capture_rx_iface: Option<String>,
     src: Ipv4Addr,
     dut: Ipv4Addr,
     hit: Ipv4Addr,
@@ -374,6 +448,7 @@ impl Link {
         );
         Ok(Self {
             iface,
+            capture_rx_iface: cfg.probe.capture_rx_iface.clone(),
             src,
             dut,
             hit,
@@ -577,13 +652,14 @@ async fn capture_window(
         out.arm = Some(agent.perf_arm(epoch).await.context("perf arm")?);
         let link = link.clone();
         let firewall = cell.experiment == Workload::Firewall;
+        let timing = cell.timing;
         let (sends, elapsed, start) =
-            tokio::task::spawn_blocking(move || send(raw, &link, run, stimulus, firewall))
+            tokio::task::spawn_blocking(move || send(raw, &link, run, stimulus, firewall, timing))
                 .await
                 .context("join network sender")??;
         out.sends = sends;
         out.elapsed = Some(elapsed);
-        sleep(DRAIN).await;
+        sleep(cell.timing.observation).await;
         out.drain_mono = Some(start.elapsed().as_nanos() as u64);
         out.drain_wall = Some(wall_ns()?);
         Ok::<_, anyhow::Error>(())
@@ -734,9 +810,25 @@ fn payload(run: Uuid, seq: i64, token: Option<u16>) -> Vec<u8> {
     bytes
 }
 
-fn token(run: Uuid, seq: i64) -> u16 {
-    let salt = u16::from_le_bytes(run.as_bytes()[..2].try_into().unwrap()) as i64;
-    ((salt + seq - 1) % 65_535 + 1) as u16
+fn firewall_token(run: Uuid, seq: i64, stimulus: Stimulus) -> u16 {
+    let salt = (seed(run) % 32_767) as i64;
+    if stimulus.legal(seq) {
+        ((salt + seq / LEGAL_EVERY) % 32_767 + 1) as u16
+    } else {
+        (32_768 + (salt + seq) % 32_768) as u16
+    }
+}
+
+fn sent_token(send: &Send) -> u16 {
+    u16::from_le_bytes(send.payload[..2].try_into().expect("firewall token prefix"))
+}
+
+fn seed(run: Uuid) -> u64 {
+    u64::from_le_bytes(run.as_bytes()[..8].try_into().expect("UUID prefix"))
+}
+
+pub(super) fn check_capture_path(cfg: &FileConfig) -> Result<()> {
+    capture::check_rx_path(&cfg.probe.iface, cfg.probe.capture_rx_iface.as_deref())
 }
 
 fn wall_ns() -> Result<u64> {
@@ -751,10 +843,11 @@ fn send(
     run: Uuid,
     stimulus: Stimulus,
     firewall: bool,
+    timing: NetworkPlan,
 ) -> Result<(Vec<Send>, u64, Instant)> {
     let start = Instant::now();
     let rate = stimulus.rate().map(|rate| rate as i64);
-    let slots = rate.map_or(1, |rate| rate * WINDOW.as_secs() as i64);
+    let slots = rate.map_or(1, |rate| rate * timing.window.as_secs() as i64);
     let mut sends = Vec::with_capacity(slots as usize);
     for slot in 0..slots {
         if let Some(rate) = rate {
@@ -767,7 +860,12 @@ fn send(
         }
         let seq = slot + 1;
         let (source, class, token) = if firewall {
-            let value = Some(token(run, seq));
+            let value = Some(if timing.full {
+                firewall_token(run, seq, stimulus)
+            } else {
+                let salt = (seed(run) & 0xffff) as i64;
+                ((salt + seq - 1) % 65_535 + 1) as u16
+            });
             if stimulus.legal(seq) {
                 (link.src, "legal", value)
             } else {
@@ -792,7 +890,7 @@ fn send(
         });
     }
     if rate.is_some() {
-        wait_slot(start + WINDOW);
+        wait_slot(start + timing.window);
     }
     Ok((sends, start.elapsed().as_nanos() as u64, start))
 }
@@ -981,7 +1079,7 @@ fn analyze(
         .count() as u64;
     let sender_limited = stimulus
         .rate()
-        .is_some_and(|rate| sent < rate as u64 * WINDOW.as_secs());
+        .is_some_and(|rate| sent < rate as u64 * cell.timing.window.as_secs());
     let offered_pps = stimulus
         .rate()
         .and(out.elapsed)
@@ -999,7 +1097,7 @@ fn analyze(
         out.issues.push("no stimulus was submitted".into());
     }
     match cell.experiment {
-        Workload::Firewall => analyze_firewall(link, rules, run, stimulus, out, &mut result),
+        Workload::Firewall => analyze_firewall(link, rules, stimulus, out, &mut result),
         Workload::Tx => analyze_tx(cell, link, run, out, &mut result),
         Workload::Drop => {}
     }
@@ -1095,7 +1193,6 @@ fn analyze(
 fn analyze_firewall(
     link: &Link,
     rules: &[Ipv4Addr],
-    run: Uuid,
     stimulus: Stimulus,
     out: &mut Observation,
     result: &mut Analysis,
@@ -1117,14 +1214,12 @@ fn analyze_firewall(
             out.sends
                 .iter()
                 .filter(|send| {
-                    send.submitted
-                        && send.class == "legal"
-                        && observed.contains(&token(run, send.seq))
+                    send.submitted && send.class == "legal" && observed.contains(&sent_token(send))
                 })
                 .count() as u64,
         );
         if out.sends.iter().any(|send| {
-            send.submitted && send.class == "illegal" && observed.contains(&token(run, send.seq))
+            send.submitted && send.class == "illegal" && observed.contains(&sent_token(send))
         }) {
             out.issues
                 .push("firewall delivered an illegal token".into());
@@ -1475,6 +1570,24 @@ impl DutTrace {
 #[cfg(test)]
 mod attribution_tests {
     use super::*;
+
+    #[test]
+    fn full_firewall_window_keeps_legal_tokens_unique_and_disjoint() {
+        let run = Uuid::nil();
+        let stimulus = Stimulus::Rate(4000);
+        let mut legal = BTreeSet::new();
+        let mut illegal = BTreeSet::new();
+        for seq in 1..=120_000 {
+            let token = firewall_token(run, seq, stimulus);
+            if stimulus.legal(seq) {
+                assert!(legal.insert(token));
+            } else {
+                illegal.insert(token);
+            }
+        }
+        assert_eq!(legal.len(), 12_000);
+        assert!(legal.is_disjoint(&illegal));
+    }
 
     #[test]
     fn hal_drop_switches_policy_to_acknowledge_readiness() {

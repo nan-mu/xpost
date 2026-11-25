@@ -1,6 +1,7 @@
 # Medium experiment
 
-The default `run = ["medium"]` starts with read-only readiness checks.
+Select `medium` or `all` in `xpost-test/profile.toml`.
+Both selections start with read-only readiness checks.
 The maintainer authorizes the start after implementation and preflight pass.
 The selected phase includes the device acceptance checks.
 TR3000 runs `./xpost-test` without arguments.
@@ -58,6 +59,28 @@ See [Agent operation](../../xpost-agent/README.md) for the HTTP endpoint and sta
 
 ## Planned matrix and time budget
 
+Choose the campaign size in `profile.toml`. Rebuild after each profile change.
+Use `all-plan` to print both full phases and their attempt counts.
+Use `all-preflight` to check full deployment and collector readiness from TR3000.
+
+| Full phase | Modes | Cells | Planned attempts |
+| --- | --- | ---: | ---: |
+| One | HAL, AOT | 14 | 312 |
+| Two | JIT, rBPF, one separate AOT Case | 15 | 313 |
+| Total | Four modes | 29 | 625 |
+
+Each mode runs 13 target rates from 400 to 4000 pps for each network Metrics experiment.
+Each rate uses three repeats. Send for 30 seconds and observe for one second.
+Keep the tcpdump export wait after the reply deadline.
+Set `[probe].capture_rx_iface` to the DUT-facing bridge member.
+Disable `rx-gro-list` on that member during the campaign.
+On the bench TR3000, the DUT-facing member is `phy0-ap0`.
+For systems with ethtool, use `ethtool -K phy0-ap0 rx-gro-list off` and restore the prior setting after capture.
+The runner checks the feature before writes and around each Just TX capture.
+EXB2 uses five runs per workload and 100 validated batches per run.
+Prepare both Case images before measuring the one A-to-B switch.
+Traffic and observation alone take 14,508 seconds. The full campaign has no one-hour limit.
+
 Set `medium_stage = "hal-aot"` for phase one.
 Set `run = ["medium-plan"]` to print the selected plan.
 Set `run = ["medium-preflight"]` to check readiness on TR3000.
@@ -78,21 +101,22 @@ Each phase uses one tagged Just TX and Just DROP Trace probe per mode.
 Firewall Trace uses one hit and one miss per mode.
 EXB2 measures two batches for each of seven workloads per mode.
 
-Publish phase one results and figures before phase two.
+Publish phase one reconciliation, figures, and unqualified conditions before phase two.
 Set `medium_stage = "jit-rbpf"` for phase two.
 Set `medium_resume_id` to the same campaign UUID.
 Set `medium_resume_experiment` to retry one experiment in that phase.
-Preflight and reconciliation still cover all 14 cells in the phase.
-The runner checks for valid Metrics in each phase one experiment and mode.
+Preflight and reconciliation still cover all cells in the phase.
+The runner requires a compatible terminal record for every phase one attempt.
+The runner also requires valid Metrics in each phase one experiment and mode.
 The runner resumes with compatible qualified attempts from the selected phase.
 An explicit replacement analysis identifies its predecessor in `supersedes_analysis_id`.
 Both analyses must use the same raw evidence digest.
 The terminal audit identifies the accepted run IDs for plotting.
 
-Defer `case`, `lookup`, and `dev` during these phases.
+Use `lookup` and `dev` as separate diagnostics. Medium omits Case.
 Count firmware flashes and cold installations across both phases and resumes.
 Record diagnostics, pauses, and retries separately.
-The combined execution target is 60 minutes.
+The combined medium execution target is 60 minutes.
 
 ## Procedure and result criteria
 

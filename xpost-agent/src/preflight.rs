@@ -66,6 +66,7 @@ impl Medium {
 pub enum Scope {
     #[default]
     All,
+    Full,
     HalAot,
     JitRbpf,
 }
@@ -74,6 +75,7 @@ impl Scope {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::All => "all",
+            Self::Full => "full",
             Self::HalAot => "hal-aot",
             Self::JitRbpf => "jit-rbpf",
         }
@@ -103,8 +105,8 @@ pub fn inventory(root: &Path) -> Medium {
 fn modes(program: &str, medium: bool, scope: Scope) -> &'static [Mode] {
     let case = matches!(program, "case_swap" | "case_mark");
     match (scope, case, medium) {
-        (Scope::All, true, true) => &[Mode::Aot],
-        (Scope::All, _, _) => &Mode::ALL,
+        (Scope::All | Scope::Full, true, true) => &[Mode::Aot],
+        (Scope::All | Scope::Full, _, _) => &Mode::ALL,
         (_, true, _) => &[],
         (Scope::HalAot, false, _) => &[Mode::Aot],
         (Scope::JitRbpf, false, _) => &[Mode::Jit, Mode::Rbpf],
@@ -180,7 +182,8 @@ fn inspect(root: &Path, profiles: Option<&Profiles>, scope: Scope) -> Medium {
                 mode,
                 slot,
                 None,
-                !matches!(scope, Scope::All) && trace_carrier(program, mode).is_some(),
+                (!matches!(scope, Scope::All) && trace_carrier(program, mode).is_some())
+                    || matches!(scope, Scope::Full) && matches!(program, "case_swap" | "case_mark"),
                 &mut report,
             );
             if let Some(firmware) = trace_carrier(program, mode) {
