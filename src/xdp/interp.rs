@@ -21,7 +21,7 @@
 //! - [`EBPF_STACK`]: the program's 512-byte `r10` region. Distinct from
 //!   [`super::ingress::XDP_FRAME`], which preserves the caller's registers across
 //!   the `jalr` on the AOT path.
-//! - [`ALLOW`]: map value windows, installed at lease and cleared at release.
+//! - [`MAP_VALUES`]: value windows returned by this flight's lookup calls.
 //!   Packet, md and stack windows are decided by `rbpf` itself.
 //! - `BUDGET_LEFT`: instructions remaining in this flight. Upstream has no
 //!   termination guard; rBPF's own paper names the missing CPU cap as its next
@@ -47,35 +47,36 @@ const MAX_STEPS: u32 = 200_000;
 #[unsafe(export_name = "xpost_rbpf_stack")]
 static mut EBPF_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
-/// Instructions left in the current flight.
-
-/// Map value windows the program may touch: `(start, size)` pairs.
-///
-/// Written by [`set_ranges`] at lease, before `ACTIVE` is stored, and cleared
-/// at release after `IN_FLIGHT` drains. Reads therefore never race a write.
-const MAX_RANGES: usize = 16;
-static mut RANGES: [(usize, usize); MAX_RANGES] = [(0, 0); MAX_RANGES];
-static RANGE_COUNT: AtomicU32 = AtomicU32::new(0);
-
-/// Install the map value windows for the lease that is about to be published.
-///
-/// Each pair is `(start, len)` of one value region. A program may only load and
-/// store inside these windows plus the packet, the md and its own stack.
-pub(crate) fn set_ranges(ranges: &[(usize, usize)]) {
-    let n = ranges.len().min(MAX_RANGES);
-    let table = unsafe { &mut *addr_of_mut!(RANGES) };
-    for (i, &r) in ranges[..n].iter().enumerate() {
-        table[i] = r;
-    }
-    for slot in table.iter_mut().skip(n) {
-        *slot = (0, 0);
-    }
-    RANGE_COUNT.store(n as u32, Ordering::Release);
+/// One value returned by an in-flight lookup.
+#[derive(Clone, Copy)]
+struct MapValue {
+    map: crate::map::MapIdx,
+    start: usize,
+    end: usize,
 }
 
-/// Drop every window. Called after the lease is gone.
-pub(crate) fn clear_ranges() {
-    RANGE_COUNT.store(0, Ordering::Release);
+// The ingress flight owns this table. Reset it before executing bytecode.
+// Reserve one window per saved stack word and per eBPF register.
+static mut MAP_VALUES: heapless::Vec<MapValue, { STACK_SIZE / 8 + 11 }> = heapless::Vec::new();
+
+pub(crate) fn remember_map_value(map: crate::map::MapIdx, start: usize, size: usize) {
+    let values = unsafe { &mut *addr_of_mut!(MAP_VALUES) };
+    if values
+        .iter()
+        .any(|value| value.start == start && value.map == map)
+    {
+        return;
+    }
+    let _ = values.push(MapValue {
+        map,
+        start,
+        end: start + size,
+    });
+}
+
+/// Drop windows that may move or disappear during a hash map mutation.
+pub(crate) fn forget_map_values(map: crate::map::MapIdx) {
+    unsafe { &mut *addr_of_mut!(MAP_VALUES) }.retain(|value| value.map != map);
 }
 
 /// `struct xdp_md` as eBPF bytecode sees it.
@@ -194,6 +195,7 @@ pub(crate) unsafe fn run_with(vm: &rbpf::EbpfVmMbuff<'_>, ctx: *mut XdpMd) -> i3
     // the only context that touches them.
     unsafe {
         *core::ptr::addr_of_mut!(BUDGET_LEFT) = MAX_STEPS;
+        (&mut *addr_of_mut!(MAP_VALUES)).clear();
     }
 
     let env = McuEnv::new(call_helper, check_access, step);
@@ -398,11 +400,10 @@ fn check_access(addr: u64, len: usize) -> bool {
     let Some(end) = addr.checked_add(len) else {
         return false;
     };
-    let n = RANGE_COUNT.load(Ordering::Acquire) as usize;
-    let table = unsafe { &*addr_of_mut!(RANGES) };
-    table[..n]
+    let values = unsafe { &*addr_of_mut!(MAP_VALUES) };
+    values
         .iter()
-        .any(|&(start, size)| start <= addr && end <= start.saturating_add(size))
+        .any(|value| value.start <= addr && end <= value.end)
 }
 
 /// Charge one instruction to the flight budget.
@@ -466,7 +467,6 @@ pub fn last_steps() -> u32 {
 /// program wrote, which is what makes this a useful check: the caller can
 /// compare the mutated bytes.
 pub fn selftest_run(prog: &[u8], frame: &mut [u8]) -> i32 {
-    clear_ranges();
     // No stage ran for this program, so verify here. The leased path verifies
     // once at load; a self-check has no loader.
     if !verify(prog) {

@@ -4,6 +4,7 @@
 
 use core::{
     alloc::Layout,
+    cell::UnsafeCell,
     hash::{Hash, Hasher},
 };
 
@@ -68,7 +69,7 @@ impl KeyBlob {
 
 /// Opaque value slot for [`BpfHashMap`].
 pub(crate) struct ValSlot {
-    data: [u8; MAX_VAL_BYTES],
+    data: UnsafeCell<[u8; MAX_VAL_BYTES]>,
 }
 
 impl ValSlot {
@@ -78,7 +79,9 @@ impl ValSlot {
         }
         let mut data = [0u8; MAX_VAL_BYTES];
         data[..bytes.len()].copy_from_slice(bytes);
-        Some(Self { data })
+        Some(Self {
+            data: UnsafeCell::new(data),
+        })
     }
 
     unsafe fn from_ptr(p: *const u8, len: usize) -> Option<Self> {
@@ -90,7 +93,7 @@ impl ValSlot {
     }
 
     fn as_ptr(&self) -> *mut u8 {
-        self.data.as_ptr() as *mut u8
+        self.data.get().cast()
     }
 }
 
@@ -159,10 +162,9 @@ impl BpfHashMap {
     /// Control-plane: visit each occupied entry (key/value byte slices).
     pub(crate) fn for_each<F: FnMut(&[u8], &[u8])>(&self, mut f: F) {
         for (k, v) in self.table.iter() {
-            f(
-                &k.data[..k.len as usize],
-                &v.data[..self.value_size],
-            );
+            // Control-plane access requires a stopped datapath.
+            let value = unsafe { &*v.data.get() };
+            f(&k.data[..k.len as usize], &value[..self.value_size]);
         }
     }
 }

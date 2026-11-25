@@ -703,29 +703,6 @@ impl XdpRt {
                 crate::map::set_map_aliases(binds.as_slice())?;
                 crate::map::set_fast_arrays(maps, binds.as_slice());
             }
-            // The interpreter needs the value windows; `rbpf` decides the
-            // packet, the md and the VM stack itself, but a map value pointer
-            // comes out of a helper and only this crate knows its bounds.
-            //
-            // Read the storage pointers directly: the control plane is still
-            // open here, but `MapRt::get` would run `require_stopped` and this
-            // path is about to close it.
-            #[cfg(feature = "interp")]
-            {
-                let mut ranges: heapless::Vec<(usize, usize), 16> = heapless::Vec::new();
-                for &(_, idx) in binds.iter() {
-                    if let Some(meta) = maps.meta.get(idx)
-                        && !meta.storage.ptr.is_null()
-                    {
-                        // The whole allocation, not the `size` estimate: the
-                        // estimate is a heap-budget figure and may exceed what
-                        // the map actually owns.
-                        let _ =
-                            ranges.push((meta.storage.ptr as usize, meta.storage.layout.size()));
-                    }
-                }
-                crate::xdp::interp::set_ranges(ranges.as_slice());
-            }
         } else if let Some(id) = self.slots.get(self.primary).and_then(|s| s.image)
             && !self.images[id].meta.required_maps.is_empty()
         {
@@ -806,10 +783,6 @@ impl XdpRt {
         }
         PAUSE.store(false, Ordering::Release);
         PRIMARY_ENTRY.store(0, Ordering::Release);
-        // The lease that owned these windows is over. Ingress is already
-        // quiesced above (`IN_FLIGHT == 0`), so no flight can be reading them.
-        #[cfg(feature = "interp")]
-        crate::xdp::interp::clear_ranges();
         crate::map::clear_map_aliases();
         for id in self.map_lease.refs.drain(..) {
             let _ = crate::map::remove_user_sync(id);

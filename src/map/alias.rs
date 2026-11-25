@@ -72,6 +72,10 @@ struct FastArray {
     base: AtomicUsize,
     stride: AtomicUsize,
     max_entries: AtomicUsize,
+    #[cfg(feature = "interp")]
+    value_size: AtomicUsize,
+    #[cfg(feature = "interp")]
+    map_id: AtomicUsize,
 }
 
 static FAST_ARRAYS: [FastArray; MAX_MAP_ALIASES] = [const {
@@ -80,6 +84,10 @@ static FAST_ARRAYS: [FastArray; MAX_MAP_ALIASES] = [const {
         base: AtomicUsize::new(0),
         stride: AtomicUsize::new(0),
         max_entries: AtomicUsize::new(0),
+        #[cfg(feature = "interp")]
+        value_size: AtomicUsize::new(0),
+        #[cfg(feature = "interp")]
+        map_id: AtomicUsize::new(0),
     }
 }; MAX_MAP_ALIASES];
 
@@ -98,6 +106,11 @@ pub(crate) fn set_fast_arrays(rt: &MapRt, binds: &[(usize, MapIdx)]) {
         f.base.store(arr.elem_ptr(0) as usize, Ordering::Relaxed);
         f.stride.store(arr.value_stride, Ordering::Relaxed);
         f.max_entries.store(arr.max_entries, Ordering::Relaxed);
+        #[cfg(feature = "interp")]
+        {
+            f.value_size.store(arr.value_size, Ordering::Relaxed);
+            f.map_id.store(id, Ordering::Relaxed);
+        }
         f.alias.store(addr, Ordering::Release);
         i += 1;
     }
@@ -122,7 +135,14 @@ pub(crate) fn fast_array_lookup(map: usize, key: usize) -> Option<usize> {
             return Some(0);
         }
         let base = f.base.load(Ordering::Relaxed);
-        return Some(base + idx * f.stride.load(Ordering::Relaxed));
+        let ptr = base + idx * f.stride.load(Ordering::Relaxed);
+        #[cfg(feature = "interp")]
+        crate::xdp::interp::remember_map_value(
+            f.map_id.load(Ordering::Relaxed),
+            ptr,
+            f.value_size.load(Ordering::Relaxed),
+        );
+        return Some(ptr);
     }
     None
 }

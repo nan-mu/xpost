@@ -104,9 +104,16 @@ pub(crate) fn helper_lookup(map: usize, key: usize) -> usize {
         return 0;
     };
     let key = key as *const u8;
-    match with_typed_map_ref(id, |typed| match typed {
-        TypedMapRef::Array(m) => MapOps::lookup(m, key),
-        TypedMapRef::Hash(m) => MapOps::lookup(m, key),
+    match with_typed_map_ref(id, |typed| {
+        let (result, _size) = match typed {
+            TypedMapRef::Array(m) => (MapOps::lookup(m, key), m.value_size),
+            TypedMapRef::Hash(m) => (MapOps::lookup(m, key), m.value_size),
+        };
+        #[cfg(feature = "interp")]
+        if let Ok(ptr) = result {
+            crate::xdp::interp::remember_map_value(id, ptr as usize, _size);
+        }
+        result
     }) {
         Some(Ok(p)) => p as usize,
         Some(Err(MapOpError::NotFound)) => 0,
@@ -130,7 +137,11 @@ pub(crate) fn helper_update(map: usize, key: usize, value: usize, flags: usize) 
     let value = value as *const u8;
     match with_typed_map(id, |typed| match typed {
         TypedMap::Array(m) => MapOps::update(m, key, value, flags as u64),
-        TypedMap::Hash(m) => MapOps::update(m, key, value, flags as u64),
+        TypedMap::Hash(m) => {
+            #[cfg(feature = "interp")]
+            crate::xdp::interp::forget_map_values(id);
+            MapOps::update(m, key, value, flags as u64)
+        }
     }) {
         Some(Ok(())) => 0,
         Some(Err(e)) => {
@@ -151,7 +162,11 @@ pub(crate) fn helper_delete(map: usize, key: usize) -> usize {
     let key = key as *const u8;
     match with_typed_map(id, |typed| match typed {
         TypedMap::Array(m) => MapOps::delete(m, key),
-        TypedMap::Hash(m) => MapOps::delete(m, key),
+        TypedMap::Hash(m) => {
+            #[cfg(feature = "interp")]
+            crate::xdp::interp::forget_map_values(id);
+            MapOps::delete(m, key)
+        }
     }) {
         Some(Ok(())) => 0,
         Some(Err(e)) => {

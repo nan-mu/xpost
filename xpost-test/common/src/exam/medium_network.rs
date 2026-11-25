@@ -981,6 +981,13 @@ fn analyze(
                         out.issues
                             .push("XDP runtime faults occurred during the window".into());
                     }
+                    if !cell.hal()
+                        && pair
+                            .delta("tagged_driver_fault")
+                            .is_some_and(|count| count > 0)
+                    {
+                        out.issues.push("tagged packet failed in XDP".into());
+                    }
                     if cell.experiment == Workload::Drop {
                         result.drop_counts = DropCounts::from_metrics(&pair, cell.hal());
                         if let Err(error) = result.drop_counts.require(sent) {

@@ -2,7 +2,7 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use core::ptr;
+use core::{cell::UnsafeCell, ptr};
 
 use allocator_api2::{alloc::AllocError, boxed::Box};
 
@@ -23,7 +23,7 @@ pub(crate) struct BpfArrayMap {
     pub(crate) value_stride: usize,
     pub(crate) max_entries: usize,
     /// Contiguous `max_entries * value_stride` bytes, zero-initialized.
-    data: Box<[u8], &'static talc::TalcCell<talc::source::Manual>>,
+    data: Box<UnsafeCell<[u8]>, &'static talc::TalcCell<talc::source::Manual>>,
 }
 
 impl BpfArrayMap {
@@ -33,7 +33,7 @@ impl BpfArrayMap {
         if idx >= self.max_entries {
             return ptr::null_mut();
         }
-        unsafe { self.data.as_ptr().add(idx * self.value_stride) as *mut u8 }
+        unsafe { (self.data.get() as *mut u8).add(idx * self.value_stride) }
     }
 
     /// Natural alignment for an opaque value of `value_size` bytes (no BTF).
@@ -65,7 +65,7 @@ impl BpfArrayMap {
 
     /// Control-plane: zero every element (capacity unchanged).
     pub(crate) fn clear(&mut self) {
-        self.data.fill(0);
+        self.data.get_mut().fill(0);
     }
 }
 
@@ -116,7 +116,9 @@ fn alloc_array(
     let mut vec = allocator_api2::vec::Vec::new_in(allocator());
     vec.try_reserve_exact(total).map_err(|_| AllocError)?;
     vec.resize(total, 0);
-    let data = vec.into_boxed_slice();
+    let (data, alloc) = Box::into_raw_with_allocator(vec.into_boxed_slice());
+    // UnsafeCell preserves the allocation layout and permits writes through lookups.
+    let data = unsafe { Box::from_raw_in(data as *mut UnsafeCell<[u8]>, alloc) };
     let map = BpfArrayMap {
         value_size,
         value_stride: stride,
