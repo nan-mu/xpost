@@ -140,17 +140,17 @@ impl Pair<'_> {
             "unknown protocol mode"
         );
         let start = &self.baseline;
-        tx.execute("INSERT INTO bench.clock(run_id,clock_id,domain,tick_hz,tick_bits,boot_id,precision_description) VALUES ($1,'dut','dut',$2,$3,$4::text::bench.u64,'Device perf ticks since boot')",
+        tx.execute("INSERT INTO release.bench_clock(run_id,clock_id,domain,tick_hz,tick_bits,boot_id,precision_description) VALUES ($1,'dut','dut',$2,$3,$4::text::release.bench_u64,'Device perf ticks since boot')",
             &[&start.run,&i64::from(start.hz),&i32::from(start.bits),&start.boot.to_string()]).await?;
         let mut series = BTreeMap::new();
         for name in start.counters.keys() {
             let metric = Uuid::new_v4();
-            tx.execute(&format!("INSERT INTO {mode}.metric_definition(metric_id,name,kind,unit,boundary,scope,definition_version) VALUES ($1,$2,'counter','count',$2,'dut','nms1-v1') ON CONFLICT(name,definition_version) DO NOTHING"), &[&metric,name]).await?;
-            let row = tx.query_one(&format!("SELECT metric_id FROM {mode}.metric_definition WHERE name=$1 AND definition_version='nms1-v1'"), &[name]).await?;
+            tx.execute(&format!("INSERT INTO release.{mode}_metric_definition(metric_id,name,kind,unit,boundary,scope,definition_version) VALUES ($1,$2,'counter','count',$2,'dut','nms1-v1') ON CONFLICT(name,definition_version) DO NOTHING"), &[&metric,name]).await?;
+            let row = tx.query_one(&format!("SELECT metric_id FROM release.{mode}_metric_definition WHERE name=$1 AND definition_version='nms1-v1'"), &[name]).await?;
             let metric: Uuid = row.get(0);
             let id = Uuid::new_v4();
-            tx.execute(&format!("INSERT INTO {mode}.metric_series(series_id,metric_id,kind,labels) VALUES ($1,$2,'counter','{{}}') ON CONFLICT(metric_id,labels) DO NOTHING"), &[&id,&metric]).await?;
-            let row = tx.query_one(&format!("SELECT series_id FROM {mode}.metric_series WHERE metric_id=$1 AND labels='{{}}'"), &[&metric]).await?;
+            tx.execute(&format!("INSERT INTO release.{mode}_metric_series(series_id,metric_id,kind,labels) VALUES ($1,$2,'counter','{{}}') ON CONFLICT(metric_id,labels) DO NOTHING"), &[&id,&metric]).await?;
+            let row = tx.query_one(&format!("SELECT series_id FROM release.{mode}_metric_series WHERE metric_id=$1 AND labels='{{}}'"), &[&metric]).await?;
             series.insert(name, row.get::<_, Uuid>(0));
         }
         let baseline = self.baseline.write(tx, mode, "baseline", &series).await?;
@@ -171,9 +171,9 @@ impl Snapshot<'_> {
         let raw_id = super::protocol::artifact(tx, self.run, &role, self.raw).await?;
         let id = Uuid::new_v4();
         let profile = super::protocol::hex(&self.profile);
-        tx.execute(&format!("INSERT INTO {mode}.metric_snapshot(snapshot_id,run_id,phase,epoch,boot_id,clock_id,at_tick,profile_hash,raw_artifact_id) VALUES ($1,$2,$3,$4,$5::text::bench.u64,'dut',$6::text::bench.u64,$7,$8)"), &[&id,&self.run,&phase,&i64::from(self.epoch),&self.boot.to_string(),&self.tick.to_string(),&profile,&raw_id]).await?;
+        tx.execute(&format!("INSERT INTO release.{mode}_metric_snapshot(snapshot_id,run_id,phase,epoch,boot_id,clock_id,at_tick,profile_hash,raw_artifact_id) VALUES ($1,$2,$3,$4,$5::text::release.bench_u64,'dut',$6::text::release.bench_u64,$7,$8)"), &[&id,&self.run,&phase,&i64::from(self.epoch),&self.boot.to_string(),&self.tick.to_string(),&profile,&raw_id]).await?;
         for (name, value) in &self.counters {
-            tx.execute(&format!("INSERT INTO {mode}.scalar_sample(snapshot_id,series_id,kind,value) VALUES ($1,$2,'counter',$3::text::numeric)"),
+            tx.execute(&format!("INSERT INTO release.{mode}_scalar_sample(snapshot_id,series_id,kind,value) VALUES ($1,$2,'counter',$3::text::numeric)"),
                 &[&id,&series[name],&value.to_string()]).await?;
         }
         Ok(id)

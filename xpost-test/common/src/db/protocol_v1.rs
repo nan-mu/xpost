@@ -4,7 +4,6 @@ use anyhow::{Context, Result, ensure};
 use tokio_postgres::{Client, IsolationLevel};
 
 const SQL: &str = include_str!("../../../sql/protocol_v1.sql");
-const SCHEMA_PREFIX: &str = "CREATE SCHEMA IF NOT EXISTS ";
 // The two-integer key space is separate from the campaign session locks.
 const INITIALIZATION_LOCK: i32 = 0x5850_4f53;
 
@@ -18,14 +17,6 @@ pub(super) fn declared_tables() -> Vec<String> {
                 .to_owned()
         })
         .collect()
-}
-
-pub(super) fn declared_schemas() -> Vec<&'static str> {
-    SQL.lines().filter_map(schema_statement).collect()
-}
-
-fn schema_statement(line: &str) -> Option<&str> {
-    line.strip_prefix(SCHEMA_PREFIX)?.strip_suffix(';')
 }
 
 /// Initialize a dedicated empty database, or retain an existing Protocol V1 database.
@@ -61,61 +52,35 @@ pub(crate) async fn initialize_if_empty(client: &mut Client) -> Result<bool> {
         tables.len()
     );
 
-    let identity = tx
-        .query_one(
-            "SELECT current_database()::text, has_database_privilege(current_database(), 'CREATE')",
-            &[],
-        )
-        .await?;
+    let target: String = tx
+        .query_one("SELECT current_database()::text", &[])
+        .await?
+        .get(0);
     ensure!(
-        identity.get::<_, &str>(0) == "experiments",
+        target == "experiments",
         "automatic Protocol V1 initialization requires the dedicated experiments database"
     );
 
-    let schemas = declared_schemas();
-    let rows = tx
-        .query(
-            "SELECT n.nspname::text,
-                EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace = n.oid)
-                   OR EXISTS (SELECT 1 FROM pg_proc p WHERE p.pronamespace = n.oid)
-                   OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typnamespace = n.oid),
-                has_schema_privilege(n.oid, 'USAGE'),
-                has_schema_privilege(n.oid, 'CREATE')
-         FROM pg_namespace n
-         WHERE n.nspname <> 'information_schema' AND left(n.nspname, 3) <> 'pg_'
-         ORDER BY n.nspname",
+    let schema = tx
+        .query_opt(
+            "SELECT has_schema_privilege(n.oid, 'USAGE'), has_schema_privilege(n.oid, 'CREATE'),
+                    EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace = n.oid)
+                    OR EXISTS (SELECT 1 FROM pg_proc p WHERE p.pronamespace = n.oid)
+                    OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typnamespace = n.oid)
+             FROM pg_namespace n WHERE n.nspname = 'release'",
             &[],
         )
-        .await
-        .context("inspect the dedicated database before initialization")?;
-    let mut prepared = Vec::new();
-    for row in &rows {
-        let name: &str = row.get(0);
-        ensure!(
-            !row.get::<_, bool>(1) && (name == "public" || schemas.contains(&name)),
-            "automatic Protocol V1 initialization requires an empty database; found objects or an unexpected schema in {name}"
-        );
-        if name != "public" {
-            ensure!(
-                row.get::<_, bool>(2) && row.get::<_, bool>(3),
-                "automatic Protocol V1 initialization requires USAGE and CREATE on schema {name}"
-            );
-            prepared.push(name);
-        }
-    }
-    let missing = schemas
-        .iter()
-        .filter(|name| !prepared.contains(name))
-        .copied()
-        .collect::<Vec<_>>();
+        .await?
+        .context("prepare schema release in experiments before collection")?;
     ensure!(
-        missing.is_empty() || identity.get::<_, bool>(1),
-        "automatic Protocol V1 initialization needs CREATE on experiments or empty schemas prepared by an administrator; missing schemas: {}",
-        missing.join(", ")
+        !schema.get::<_, bool>(2),
+        "automatic Protocol V1 initialization requires an empty release schema"
+    );
+    ensure!(
+        schema.get::<_, bool>(0) && schema.get::<_, bool>(1),
+        "automatic Protocol V1 initialization requires USAGE and CREATE on schema release"
     );
 
-    // Reuse the standalone SQL inside this transaction. Create missing schemas
-    // without IF NOT EXISTS so a concurrent external DDL collision aborts safely.
     let (_, ddl) = SQL
         .split_once("\nBEGIN;\n")
         .context("find Protocol V1 transaction start")?;
@@ -123,25 +88,14 @@ pub(crate) async fn initialize_if_empty(client: &mut Client) -> Result<bool> {
         .trim_end()
         .strip_suffix("\nCOMMIT;")
         .context("find Protocol V1 transaction end")?;
-    let mut statements = String::with_capacity(ddl.len());
-    for line in ddl.lines() {
-        if let Some(name) = schema_statement(line) {
-            if missing.contains(&name) {
-                statements.push_str(&format!("CREATE SCHEMA {name};\n"));
-            }
-        } else {
-            statements.push_str(line);
-            statements.push('\n');
-        }
-    }
-    tx.batch_execute(&statements)
+    tx.batch_execute(ddl)
         .await
-        .context("create Protocol V1 tables")?;
+        .context("create Protocol V1 tables in release")?;
     tx.commit()
         .await
         .context("commit Protocol V1 initialization")?;
     eprintln!(
-        "Initialized {} Protocol V1 tables in experiments",
+        "Initialized {} Protocol V1 tables in experiments.release",
         tables.len()
     );
     Ok(true)
@@ -149,24 +103,34 @@ pub(crate) async fn initialize_if_empty(client: &mut Client) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::SQL;
+    use super::{SQL, declared_tables};
 
     #[test]
-    fn the_new_protocol_declares_five_schemas_and_132_tables() {
-        let schemas = SQL
-            .lines()
-            .filter(|line| line.starts_with("CREATE SCHEMA "))
-            .count();
-        let tables = SQL
-            .lines()
-            .filter(|line| line.starts_with("CREATE TABLE "))
-            .count();
-        assert_eq!(schemas, 5, "bench plus hal, aot, jit, rbpf");
-        assert_eq!(tables, 132);
-        assert!(SQL.contains("CREATE SCHEMA IF NOT EXISTS jit;"));
+    fn the_new_protocol_declares_132_release_tables() {
+        let tables = declared_tables();
+        assert!(tables.iter().all(|name| name.starts_with("release.")));
+        assert_eq!(tables.len(), 132);
+        assert_eq!(
+            tables
+                .iter()
+                .filter(|name| name.starts_with("release.bench_"))
+                .count(),
+            12
+        );
+        for mode in ["hal", "aot", "jit", "rbpf"] {
+            let prefix = format!("release.{mode}_");
+            assert_eq!(
+                tables
+                    .iter()
+                    .filter(|name| name.starts_with(&prefix))
+                    .count(),
+                30
+            );
+        }
+        assert!(!SQL.lines().any(|line| line.starts_with("CREATE SCHEMA ")));
         assert!(SQL.contains("variant text NOT NULL CHECK (variant IN ('metrics','trace'))"));
         assert!(SQL.contains(
-            "ALTER TABLE hal.case_switch ADD CHECK(switch_kind='native_policy_select' AND source_slot IS NULL AND target_slot IS NULL AND rebind_ticks IS NULL)"
+            "ALTER TABLE release.hal_case_switch ADD CHECK(switch_kind='native_policy_select' AND source_slot IS NULL AND target_slot IS NULL AND rebind_ticks IS NULL)"
         ));
         assert!(
             !SQL.lines()
@@ -189,7 +153,7 @@ mod bootstrap_tests {
     use crate::db::{Database, protocol};
 
     #[tokio::test]
-    #[ignore = "requires an empty disposable experiments database in XPOST_CASE_TEST_DB_FILE"]
+    #[ignore = "requires a disposable experiments database with empty release schema in XPOST_CASE_TEST_DB_FILE"]
     async fn concurrent_first_writers_initialize_the_protocol_once() -> anyhow::Result<()> {
         let database = Database::load_fixture()?;
         let mut first = database.connect().await?;

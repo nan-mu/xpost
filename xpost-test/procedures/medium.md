@@ -123,7 +123,7 @@ The combined medium execution target is 60 minutes.
 ```text
 before any device write:
   check all released deployments, firmware bindings, and slot capacities
-  check the dedicated PostgreSQL database and its four-mode schema
+  check the dedicated PostgreSQL database and the Protocol V1 tables in `release`
   check target identity and support for required callbacks
 for each firmware group:
   check the installed identity when resuming
@@ -221,7 +221,7 @@ Read the run with [medium_run.sql](../sql/medium_run.sql) and its `run_id` param
 
 The read query selects the mode table for the run and returns the condition, config, result, and artifact identities.
 It also returns the Metrics snapshots or Trace events and available experiment-specific observations.
-Read the original bytes from `bench.artifact.original_bytes` with the returned artifact ID.
+Read the original bytes from `release.bench_artifact.original_bytes` with the returned artifact ID.
 The SQL fixture check wrote EXB2 rows for all four modes and read each run with this query.
 The check also exercised the network and case query paths with blocked fixture rows.
 A second DDL apply rejected the existing objects.

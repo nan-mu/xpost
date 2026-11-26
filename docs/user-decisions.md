@@ -225,3 +225,12 @@ Allow an administrator to prepare empty schemas for a writer without database-le
 Keep preflight read-only. Require existing storage when resuming a campaign.
 
 Reason. The maintainer asked the runner to create absent Protocol V1 tables automatically.
+
+## 2026-11-27 Store Protocol V1 in release
+
+Use the `release` schema in `experiments` for new Protocol V1 objects.
+Prefix shared objects with `bench_` and mode tables with their mode names.
+Initialize the empty `release` schema. Keep preflight read-only.
+
+Reason. The maintainer granted schema-level creation in `release` and selected that schema for new collection.
+This supersedes the five-schema layout for new Protocol V1 records.

@@ -81,12 +81,12 @@ pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
     // Native AOT and JIT share the carrier. Keep them adjacent when both are selected.
     selected.sort_by_key(|mode| mode.firmware());
     let mut tables = [
-        "bench.condition",
-        "bench.run",
-        "bench.artifact",
-        "bench.run_artifact",
-        "bench.clock",
-        "bench.analysis",
+        "release.bench_condition",
+        "release.bench_run",
+        "release.bench_artifact",
+        "release.bench_run_artifact",
+        "release.bench_clock",
+        "release.bench_analysis",
     ]
     .map(str::to_owned)
     .to_vec();
@@ -564,12 +564,12 @@ async fn start(db: &mut Client, attempt: &Attempt<'_>, sample: &Sample) -> Resul
     let config = attempt.config;
     let tx = db.transaction().await?;
     let parameters = json!({ "workload": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED, "medium_id": sample.medium_id, "stage": sample.medium_id.map(|_| crate::config::MediumStage::for_mode(mode)), "medium_identity": attempt.medium_identity, "retry_of": attempt.retry_of });
-    tx.execute("INSERT INTO bench.condition(condition_id,experiment,protocol_version,parameters,planned_modes) VALUES($1,'exec_bench','1',$2,ARRAY[$3]::text[])", &[&condition,&parameters,&mode]).await?;
+    tx.execute("INSERT INTO release.bench_condition(condition_id,experiment,protocol_version,parameters,planned_modes) VALUES($1,'exec_bench','1',$2,ARRAY[$3]::text[])", &[&condition,&parameters,&mode]).await?;
     let request = artifact(&tx, "exb2_input", &sample.input).await?;
     let expected = artifact(&tx, "exb2_expected", &sample.expected).await?;
     let digest = protocol::hex(&sample.profile);
-    tx.execute(&format!("INSERT INTO {mode}.exec_bench_config(config_id,condition_id,instrumentation,profile_hash,workload,work_param,batch_count,samples_per_run,input_bytes,input_protocol,wifi_enabled,fixture_artifact_id) VALUES($1,$2,'counter_only',$3,$4,$5,$6,$7,8258,'EXB2',false,$8)"), &[&config,&condition,&digest,&sample.program,&(sample.n as i32),&i64::from(ROUNDS),&sample.sampling.samples,&request]).await?;
-    tx.execute("INSERT INTO bench.run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit) VALUES($1,$2,$3,$4,'exec_bench','metrics',$5,$6,$7::text::bench.u64,$8,'running',$1,'07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113',$9)", &[&attempt.id,&condition,&config,&mode,&phase(sample.medium_id),&attempt.repeat,&SEED.to_string(),&attempt.order,&super::medium::revision()]).await?;
+    tx.execute(&format!("INSERT INTO release.{mode}_exec_bench_config(config_id,condition_id,instrumentation,profile_hash,workload,work_param,batch_count,samples_per_run,input_bytes,input_protocol,wifi_enabled,fixture_artifact_id) VALUES($1,$2,'counter_only',$3,$4,$5,$6,$7,8258,'EXB2',false,$8)"), &[&config,&condition,&digest,&sample.program,&(sample.n as i32),&i64::from(ROUNDS),&sample.sampling.samples,&request]).await?;
+    tx.execute("INSERT INTO release.bench_run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit) VALUES($1,$2,$3,$4,'exec_bench','metrics',$5,$6,$7::text::release.bench_u64,$8,'running',$1,'07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113',$9)", &[&attempt.id,&condition,&config,&mode,&phase(sample.medium_id),&attempt.repeat,&SEED.to_string(),&attempt.order,&super::medium::revision()]).await?;
     link(&tx, attempt.id, "exb2_input", request).await?;
     link(&tx, attempt.id, "exb2_expected", expected).await?;
     tx.commit().await?;
@@ -629,7 +629,7 @@ async fn finish(
     let status = evidence.status(sample.sampling);
     let qualified = status == "complete";
     let boot = evidence.boot.map(|boot| boot.to_string());
-    let n = tx.execute("UPDATE bench.run SET status=$2,boot_id=$3::text::bench.u64,issues=$4 WHERE run_id=$1 AND status='running'",
+    let n = tx.execute("UPDATE release.bench_run SET status=$2,boot_id=$3::text::release.bench_u64,issues=$4 WHERE run_id=$1 AND status='running'",
         &[&attempt.id,&status,&boot,&evidence.issues]).await?;
     ensure!(n == 1, "EXB2 attempt has no running row");
     let snapshots = match &evidence.pair {
@@ -640,9 +640,9 @@ async fn finish(
         protocol::artifact(&tx, attempt.id, "metrics_wire", raw).await?;
     }
     if snapshots.is_none() && completed > 0 {
-        tx.execute("INSERT INTO bench.clock(run_id,clock_id,domain,tick_hz,tick_bits,boot_id,precision_description) VALUES($1,'dut','dut',1000000,64,$2::text::bench.u64,'ESP HAL microseconds since boot')", &[&attempt.id,&boot]).await?;
+        tx.execute("INSERT INTO release.bench_clock(run_id,clock_id,domain,tick_hz,tick_bits,boot_id,precision_description) VALUES($1,'dut','dut',1000000,64,$2::text::release.bench_u64,'ESP HAL microseconds since boot')", &[&attempt.id,&boot]).await?;
     }
-    let insert_batch = tx.prepare(&format!("INSERT INTO {mode}.exec_batch(run_id,sample_index,clock_id,begin_tick,end_tick,batch_count,completed_iterations,seed,input_bytes,expected_bytes,actual_bytes,execution_return,status,result,digest,result_ok,qualified) VALUES($1,$2,'dut',$3::text::bench.u64,$4::text::bench.u64,$5,$6,$7::text::bench.u64,$8,$9,$10,$11,$12,$13::text::bench.u64,$14,$15,$16)")).await?;
+    let insert_batch = tx.prepare(&format!("INSERT INTO release.{mode}_exec_batch(run_id,sample_index,clock_id,begin_tick,end_tick,batch_count,completed_iterations,seed,input_bytes,expected_bytes,actual_bytes,execution_return,status,result,digest,result_ok,qualified) VALUES($1,$2,'dut',$3::text::release.bench_u64,$4::text::release.bench_u64,$5,$6,$7::text::release.bench_u64,$8,$9,$10,$11,$12,$13::text::release.bench_u64,$14,$15,$16)")).await?;
     let mut unrecorded = Vec::new();
     for (index, batch) in evidence.batches.iter().enumerate() {
         let Some(reply) = batch.reply else { continue };
@@ -702,11 +702,11 @@ async fn finish(
             })
             .unwrap_or(&sample.input),
     );
-    tx.execute("INSERT INTO bench.analysis(analysis_id,run_id,algorithm_version,source_digest,qualified,issues) VALUES($1,$2,$6,$3,$4,$5)",
+    tx.execute("INSERT INTO release.bench_analysis(analysis_id,run_id,algorithm_version,source_digest,qualified,issues) VALUES($1,$2,$6,$3,$4,$5)",
         &[&analysis,&attempt.id,&source_digest,&qualified,&evidence.issues,&exb2::ANALYSIS_VERSION]).await?;
     let baseline = snapshots.map(|(start, _)| start);
     let final_ = snapshots.map(|(_, end)| end);
-    tx.execute(&format!("INSERT INTO {mode}.exec_bench_metrics_data(run_id,config_id,baseline_snapshot_id,final_snapshot_id,analysis_id,qualified,issues,batches_expected,batches_completed,valid_batches) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"),
+    tx.execute(&format!("INSERT INTO release.{mode}_exec_bench_metrics_data(run_id,config_id,baseline_snapshot_id,final_snapshot_id,analysis_id,qualified,issues,batches_expected,batches_completed,valid_batches) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"),
         &[&attempt.id,&attempt.config,&baseline,&final_,&analysis,&qualified,&evidence.issues,&sample.sampling.samples,&completed,&valid]).await?;
     tx.commit().await?;
     Ok(())
@@ -715,13 +715,13 @@ async fn finish(
 async fn artifact(tx: &Transaction<'_>, role: &str, bytes: &[u8]) -> Result<Uuid> {
     let id = Uuid::new_v4();
     let hash = protocol::digest(bytes);
-    tx.execute("INSERT INTO bench.artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type) VALUES($1,$2,$3,$4,$5,'application/octet-stream')", &[&id,&role,&hash,&(bytes.len() as i64),&bytes]).await?;
+    tx.execute("INSERT INTO release.bench_artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type) VALUES($1,$2,$3,$4,$5,'application/octet-stream')", &[&id,&role,&hash,&(bytes.len() as i64),&bytes]).await?;
     Ok(id)
 }
 
 async fn link(tx: &Transaction<'_>, run: Uuid, role: &str, id: Uuid) -> Result<()> {
     tx.execute(
-        "INSERT INTO bench.run_artifact(run_id,role,artifact_id) VALUES($1,$2,$3)",
+        "INSERT INTO release.bench_run_artifact(run_id,role,artifact_id) VALUES($1,$2,$3)",
         &[&run, &role, &id],
     )
     .await?;
@@ -790,7 +790,7 @@ mod tests {
         let evidence = validate(attempt.id, &sample, &acquired);
         finish(client, &attempt, &sample, &evidence).await?;
         let mode = mode.as_str();
-        let row = client.query_one(&format!("SELECT r.status, c.samples_per_run, d.batches_expected, d.batches_completed, d.valid_batches, d.qualified FROM bench.run r JOIN {mode}.exec_bench_metrics_data d USING (run_id,config_id) JOIN {mode}.exec_bench_config c USING (config_id) WHERE r.run_id=$1"), &[&attempt.id]).await?;
+        let row = client.query_one(&format!("SELECT r.status, c.samples_per_run, d.batches_expected, d.batches_completed, d.valid_batches, d.qualified FROM release.bench_run r JOIN release.{mode}_exec_bench_metrics_data d USING (run_id,config_id) JOIN release.{mode}_exec_bench_config c USING (config_id) WHERE r.run_id=$1"), &[&attempt.id]).await?;
         let status = if corrupt { "failed" } else { "complete" };
         assert_eq!(row.get::<_, String>(0), status);
         assert_eq!(protocol::run_status(database, attempt.id).await, status);
@@ -802,7 +802,7 @@ mod tests {
             sampling.samples - 2 * i32::from(corrupt)
         );
         assert_eq!(row.get::<_, bool>(5), !corrupt);
-        let rows = client.query(&format!("SELECT sample_index, actual_bytes, result_ok, qualified FROM {mode}.exec_batch WHERE run_id=$1 ORDER BY sample_index"), &[&attempt.id]).await?;
+        let rows = client.query(&format!("SELECT sample_index, actual_bytes, result_ok, qualified FROM release.{mode}_exec_batch WHERE run_id=$1 ORDER BY sample_index"), &[&attempt.id]).await?;
         let expected_indices = (0..sampling.samples).filter(|&index| !corrupt || index != 70);
         assert_eq!(
             rows.iter()
@@ -818,7 +818,7 @@ mod tests {
         }
         let metrics = client
             .query_one(
-                &format!("SELECT count(*) FROM {mode}.metric_snapshot WHERE run_id=$1"),
+                &format!("SELECT count(*) FROM release.{mode}_metric_snapshot WHERE run_id=$1"),
                 &[&attempt.id],
             )
             .await?;
@@ -855,7 +855,7 @@ mod tests {
         };
         start(client, &attempt, &sample).await?;
         client.execute(
-            "INSERT INTO bench.clock(run_id,clock_id,domain,tick_hz,tick_bits,precision_description)
+            "INSERT INTO release.bench_clock(run_id,clock_id,domain,tick_hz,tick_bits,precision_description)
              VALUES ($1,'dut','dut',1000000,64,'fixture conflict')",
             &[&attempt.id],
         ).await?;
@@ -872,7 +872,7 @@ mod tests {
         assert_eq!(protocol::run_status(database, attempt.id).await, "running");
         let rows = client
             .query_one(
-                "SELECT count(*) FROM hal.exec_batch WHERE run_id=$1",
+                "SELECT count(*) FROM release.hal_exec_batch WHERE run_id=$1",
                 &[&attempt.id],
             )
             .await?;

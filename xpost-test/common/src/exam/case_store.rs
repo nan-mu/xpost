@@ -20,19 +20,19 @@ pub(super) fn hex(bytes: &[u8]) -> String {
 pub(super) async fn connect(database: &Database) -> Result<Client> {
     let mut client = database.connect().await?;
     let tables = [
-        "bench.run",
-        "bench.condition",
-        "bench.artifact",
-        "bench.run_artifact",
-        "bench.clock",
-        "bench.capture",
-        "bench.packet_fact",
-        "bench.analysis",
-        "bench.event_definition",
-        "aot.case_config",
-        "aot.case_switch",
-        "aot.case_trace_data",
-        "aot.case_event",
+        "release.bench_run",
+        "release.bench_condition",
+        "release.bench_artifact",
+        "release.bench_run_artifact",
+        "release.bench_clock",
+        "release.bench_capture",
+        "release.bench_packet_fact",
+        "release.bench_analysis",
+        "release.bench_event_definition",
+        "release.aot_case_config",
+        "release.aot_case_switch",
+        "release.aot_case_trace_data",
+        "release.aot_case_event",
     ]
     .map(str::to_owned);
     protocol::check(&mut client, &tables).await?;
@@ -60,11 +60,11 @@ impl Attempt {
         let tx = client.transaction().await?;
         let parameters = json!({ "port": 8080, "pps": PPS, "slots": [0,1], "versions": [2,1], "switches": 1, "medium_id": medium_id, "retry_of": retry_of,
             "stage": identity.and_then(|id| id["stage"].as_str()), "medium_identity": identity });
-        tx.execute("INSERT INTO bench.condition(condition_id,experiment,protocol_version,parameters,planned_modes) VALUES($1,'case','1',$2,ARRAY['aot'])", &[&condition,&parameters]).await?;
+        tx.execute("INSERT INTO release.bench_condition(condition_id,experiment,protocol_version,parameters,planned_modes) VALUES($1,'case','1',$2,ARRAY['aot'])", &[&condition,&parameters]).await?;
         let pre = PRE.as_nanos().to_string();
         let post = POST.as_nanos().to_string();
-        tx.execute("INSERT INTO aot.case_config(config_id,condition_id,instrumentation,profile_hash,target_pps,switch_count,switch_kind,quiesce_policy,pre_window_ns,post_window_ns,payload_bytes,source_mode,target_mode) VALUES($1,$2,'trace',$3,$4,1,'hot_publish','drop',$5::text::bench.u64,$6::text::bench.u64,40,'aot','aot')", &[&config,&condition,&profile,&PPS,&pre,&post]).await?;
-        tx.execute("INSERT INTO bench.run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit) VALUES($1,$2,$3,'aot','case','trace',$4,1,0,$6,'running',$1,$5,$7)", &[&run,&condition,&config,&phase,&RELEASE_COMMIT,&order,&super::medium::revision()]).await?;
+        tx.execute("INSERT INTO release.aot_case_config(config_id,condition_id,instrumentation,profile_hash,target_pps,switch_count,switch_kind,quiesce_policy,pre_window_ns,post_window_ns,payload_bytes,source_mode,target_mode) VALUES($1,$2,'trace',$3,$4,1,'hot_publish','drop',$5::text::release.bench_u64,$6::text::release.bench_u64,40,'aot','aot')", &[&config,&condition,&profile,&PPS,&pre,&post]).await?;
+        tx.execute("INSERT INTO release.bench_run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit) VALUES($1,$2,$3,'aot','case','trace',$4,1,0,$6,'running',$1,$5,$7)", &[&run,&condition,&config,&phase,&RELEASE_COMMIT,&order,&super::medium::revision()]).await?;
         tx.commit().await?;
         Ok(Self { run, config })
     }
@@ -78,7 +78,7 @@ impl Attempt {
         let tx = client.transaction().await?;
         let issues = json!(result.issues);
         let boot = result.boot.map(|n| n.to_string());
-        let updated = tx.execute("UPDATE bench.run SET status=$2, issues=$3, boot_id=$4::text::bench.u64 WHERE run_id=$1 AND status='running'", &[&self.run,&result.status(),&issues,&boot]).await?;
+        let updated = tx.execute("UPDATE release.bench_run SET status=$2, issues=$3, boot_id=$4::text::release.bench_u64 WHERE run_id=$1 AND status='running'", &[&self.run,&result.status(),&issues,&boot]).await?;
         ensure!(
             updated == 1,
             "case attempt {} has no running record to complete",
@@ -151,7 +151,7 @@ impl Attempt {
             &json!({}),
         )
         .await?;
-        tx.execute("INSERT INTO bench.analysis(analysis_id,run_id,algorithm_version,source_digest,qualified,issues)
+        tx.execute("INSERT INTO release.bench_analysis(analysis_id,run_id,algorithm_version,source_digest,qualified,issues)
             VALUES($1,$2,'case-trace-v1',$3,$4,$5)",
             &[&Uuid::new_v4(), &self.run, &hex(&Sha256::digest(&evidence)), &result.qualified(), &issues]).await?;
         tx.commit().await?;
@@ -168,9 +168,9 @@ impl Attempt {
     ) -> Result<Uuid> {
         let id = Uuid::new_v4();
         let digest = hex(&Sha256::digest(bytes));
-        tx.execute("INSERT INTO bench.artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type,metadata) VALUES($1,$2,$3,$4,$5,$6,$7)", &[&id,&role,&digest,&(bytes.len() as i64),&bytes,&media,&meta]).await?;
+        tx.execute("INSERT INTO release.bench_artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type,metadata) VALUES($1,$2,$3,$4,$5,$6,$7)", &[&id,&role,&digest,&(bytes.len() as i64),&bytes,&media,&meta]).await?;
         tx.execute(
-            "INSERT INTO bench.run_artifact(run_id,role,artifact_id) VALUES($1,$2,$3)",
+            "INSERT INTO release.bench_run_artifact(run_id,role,artifact_id) VALUES($1,$2,$3)",
             &[&self.run, &role, &id],
         )
         .await?;
@@ -190,9 +190,9 @@ impl Attempt {
                 &json!({ "interface": iface, "includes_tx": true }),
             )
             .await?;
-        tx.execute("INSERT INTO bench.clock(run_id,clock_id,domain,tick_hz,tick_bits,precision_description) VALUES($1,'pcap','host_pcap',$2,64,'pcap timestamp precision')", &[&self.run,&i64::from(data.hz)]).await?;
-        tx.execute("INSERT INTO bench.capture(capture_id,run_id,direction,interface,clock_id,precision,listening,exited_by_controller,exit_code,kernel_dropped,complete,stderr_text,artifact_id) VALUES($1,$2,'rx',$3,'pcap',$4,true,true,0,$5,$6,$7,$8)", &[&id,&self.run,&iface,&data.hz,&drop,&complete,&data.stderr,&artifact]).await?;
-        let insert = tx.prepare("INSERT INTO bench.packet_fact(capture_id,record_index,file_offset,captured_len,original_len,ts_sec,ts_subsec,timestamp_hz,observed_uuid,seq,parse_status,identity_ok,payload_ok,version_marker) VALUES($1,$2,$3,82,82,$4,$5,$6,$7,$8,'ok',true,true,$9)").await?;
+        tx.execute("INSERT INTO release.bench_clock(run_id,clock_id,domain,tick_hz,tick_bits,precision_description) VALUES($1,'pcap','host_pcap',$2,64,'pcap timestamp precision')", &[&self.run,&i64::from(data.hz)]).await?;
+        tx.execute("INSERT INTO release.bench_capture(capture_id,run_id,direction,interface,clock_id,precision,listening,exited_by_controller,exit_code,kernel_dropped,complete,stderr_text,artifact_id) VALUES($1,$2,'rx',$3,'pcap',$4,true,true,0,$5,$6,$7,$8)", &[&id,&self.run,&iface,&data.hz,&drop,&complete,&data.stderr,&artifact]).await?;
+        let insert = tx.prepare("INSERT INTO release.bench_packet_fact(capture_id,record_index,file_offset,captured_len,original_len,ts_sec,ts_subsec,timestamp_hz,observed_uuid,seq,parse_status,identity_ok,payload_ok,version_marker) VALUES($1,$2,$3,82,82,$4,$5,$6,$7,$8,'ok',true,true,$9)").await?;
         for p in &data.packets {
             tx.execute(
                 &insert,
@@ -223,17 +223,17 @@ impl Attempt {
     ) -> Result<()> {
         let boot = trace.boot_id.to_string();
         let complete = trace.dropped == 0 && trace.flags == 0;
-        tx.execute("INSERT INTO bench.clock(run_id,clock_id,domain,tick_hz,tick_bits,boot_id,precision_description) VALUES($1,'dut','dut',1000000,64,$2::text::bench.u64,'ESP HAL microseconds since boot')", &[&self.run,&boot]).await?;
-        tx.execute("INSERT INTO aot.case_trace_data(run_id,config_id,epoch,dictionary_version,boot_id,clock_id,capacity,written,dropped,flags,complete,result_checked,result_ok,raw_artifact_id,qualified,issues) VALUES($1,$2,$3,1,$4::text::bench.u64,'dut',$5,$6,$7,$8,$9,true,$10,$11,$10,$12)", &[&self.run,&self.config,&i64::from(trace.epoch),&boot,&trace.capacity,&(trace.events.len() as i32),&trace.dropped,&trace.flags,&complete,&qualified,&id,&issues]).await?;
+        tx.execute("INSERT INTO release.bench_clock(run_id,clock_id,domain,tick_hz,tick_bits,boot_id,precision_description) VALUES($1,'dut','dut',1000000,64,$2::text::release.bench_u64,'ESP HAL microseconds since boot')", &[&self.run,&boot]).await?;
+        tx.execute("INSERT INTO release.aot_case_trace_data(run_id,config_id,epoch,dictionary_version,boot_id,clock_id,capacity,written,dropped,flags,complete,result_checked,result_ok,raw_artifact_id,qualified,issues) VALUES($1,$2,$3,1,$4::text::release.bench_u64,'dut',$5,$6,$7,$8,$9,true,$10,$11,$10,$12)", &[&self.run,&self.config,&i64::from(trace.epoch),&boot,&trace.capacity,&(trace.events.len() as i32),&trace.dropped,&trace.flags,&complete,&qualified,&id,&issues]).await?;
         for (event_id, name, boundary) in [
             (1, "control", "serial switch handler"),
             (2, "quiesce", "pause to inflight drain"),
             (3, "rebind", "map binding update"),
             (4, "publish", "entry store to admission"),
         ] {
-            tx.execute("INSERT INTO bench.event_definition(experiment,dictionary_version,event_id,name,semantics,boundary) VALUES('case',1,$1,$2,$3,$3) ON CONFLICT DO NOTHING", &[&event_id,&name,&boundary]).await?;
+            tx.execute("INSERT INTO release.bench_event_definition(experiment,dictionary_version,event_id,name,semantics,boundary) VALUES('case',1,$1,$2,$3,$3) ON CONFLICT DO NOTHING", &[&event_id,&name,&boundary]).await?;
         }
-        let insert = tx.prepare("INSERT INTO aot.case_event(run_id,source,event_sequence,dictionary_version,event_id,clock_id,timestamp_raw,kind,context_id,span_id,parent_span_id,arg0,arg1) VALUES($1,'dut',$2,1,$3,'dut',$4::text::bench.u64,$5,0,$6,$7,$8,$9)").await?;
+        let insert = tx.prepare("INSERT INTO release.aot_case_event(run_id,source,event_sequence,dictionary_version,event_id,clock_id,timestamp_raw,kind,context_id,span_id,parent_span_id,arg0,arg1) VALUES($1,'dut',$2,1,$3,'dut',$4::text::release.bench_u64,$5,0,$6,$7,$8,$9)").await?;
         for event in &trace.events {
             let parent = i64::from(event.id != 1);
             tx.execute(
@@ -263,7 +263,7 @@ impl Attempt {
         capture: Option<Uuid>,
         issues: &Value,
     ) -> Result<()> {
-        tx.execute("INSERT INTO bench.clock(run_id,clock_id,domain,tick_hz,tick_bits,precision_description) VALUES($1,'runner','host_monotonic',1000000000,64,'relative to capture start')", &[&self.run]).await?;
+        tx.execute("INSERT INTO release.bench_clock(run_id,clock_id,domain,tick_hz,tick_bits,precision_description) VALUES($1,'runner','host_monotonic',1000000000,64,'relative to capture start')", &[&self.run]).await?;
         let (last, first, late) = result.transitions();
         let pcap_hz = result.capture.as_ref().map(|data| data.hz).unwrap_or(1);
         let gap = first
@@ -289,7 +289,7 @@ impl Attempt {
         };
         let from = i64::from(switch.generation_a);
         let to = i64::from(switch.generation_b);
-        tx.execute("INSERT INTO aot.case_switch(run_id,switch_index,switch_kind,source_version,target_version,source_slot,target_slot,source_generation,target_generation,host_clock_id,host_command_begin_ns,host_reply_ns,dut_clock_id,dut_begin_tick,dut_end_tick,quiesce_ticks,rebind_ticks,publish_ticks,last_old_capture_id,last_old_record_index,first_new_capture_id,first_new_record_index,reply_transition_gap_ns,old_after_new,command_ok,error_code,boot_unchanged,qualified,issues) VALUES($1,1,'hot_publish',2,1,0,1,$2,$3,'runner',$4::text::bench.u64,$5::text::bench.u64,$6,$7::text::bench.u64,$8::text::bench.u64,$9::text::bench.u64,$10::text::bench.u64,$11::text::bench.u64,$12,$13,$14,$15,$16::text::bench.u64,$17,$18,$19,$20,$21,$22)", &[&self.run,&from,&to,&switch.begin_ns.to_string(),&switch.end_ns.to_string(),&result.trace.as_ref().map(|_| "dut"),&begin_dut,&end_dut,&stage(2),&stage(3),&stage(4),&last.and(capture),&last.map(|p|p.index),&first.and(capture),&first.map(|p|p.index),&gap,&late,&switch.command_ok,&switch.error,&switch.boot_unchanged,&result.qualified(),&issues]).await?;
+        tx.execute("INSERT INTO release.aot_case_switch(run_id,switch_index,switch_kind,source_version,target_version,source_slot,target_slot,source_generation,target_generation,host_clock_id,host_command_begin_ns,host_reply_ns,dut_clock_id,dut_begin_tick,dut_end_tick,quiesce_ticks,rebind_ticks,publish_ticks,last_old_capture_id,last_old_record_index,first_new_capture_id,first_new_record_index,reply_transition_gap_ns,old_after_new,command_ok,error_code,boot_unchanged,qualified,issues) VALUES($1,1,'hot_publish',2,1,0,1,$2,$3,'runner',$4::text::release.bench_u64,$5::text::release.bench_u64,$6,$7::text::release.bench_u64,$8::text::release.bench_u64,$9::text::release.bench_u64,$10::text::release.bench_u64,$11::text::release.bench_u64,$12,$13,$14,$15,$16::text::release.bench_u64,$17,$18,$19,$20,$21,$22)", &[&self.run,&from,&to,&switch.begin_ns.to_string(),&switch.end_ns.to_string(),&result.trace.as_ref().map(|_| "dut"),&begin_dut,&end_dut,&stage(2),&stage(3),&stage(4),&last.and(capture),&last.map(|p|p.index),&first.and(capture),&first.map(|p|p.index),&gap,&late,&switch.command_ok,&switch.error,&switch.boot_unchanged,&result.qualified(),&issues]).await?;
         self.artifact(
             tx,
             "switch_reply",
@@ -480,10 +480,10 @@ mod tests {
             .unwrap_err();
         assert!(duplicate.to_string().contains("no running record"));
         for (role, bytes) in [("tcpdump", vec![1, 2, 3]), ("dut_trace", vec![9, 8, 7])] {
-            let row = client.query_one("SELECT a.original_bytes FROM bench.run_artifact r JOIN bench.artifact a USING(artifact_id) WHERE r.run_id=$1 AND r.role=$2", &[&run,&role]).await?;
+            let row = client.query_one("SELECT a.original_bytes FROM release.bench_run_artifact r JOIN release.bench_artifact a USING(artifact_id) WHERE r.run_id=$1 AND r.role=$2", &[&run,&role]).await?;
             assert_eq!(row.get::<_, Vec<u8>>(0), bytes);
         }
-        let row = client.query_one("SELECT status, switch_index, qualified, reply_transition_gap_ns::text FROM bench.run JOIN aot.case_switch USING(run_id) WHERE run_id=$1", &[&run]).await?;
+        let row = client.query_one("SELECT status, switch_index, qualified, reply_transition_gap_ns::text FROM release.bench_run JOIN release.aot_case_switch USING(run_id) WHERE run_id=$1", &[&run]).await?;
         assert_eq!(row.get::<_, String>(0), "complete");
         assert_eq!(row.get::<_, i32>(1), 1);
         assert!(row.get::<_, bool>(2));

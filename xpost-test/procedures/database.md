@@ -33,24 +33,19 @@ Plan selections and `dev` do not read the file.
 
 ## First use
 
-A new `all`, `medium`, or `exec_bench` run initializes an empty `experiments` database.
+A new `all`, `medium`, or `exec_bench` run initializes an empty `release` schema in `experiments`.
 The runner applies Protocol V1 in one transaction before it records observations.
-It retains a complete Protocol V1 schema. It stops if it finds partial or historical objects.
-An existing campaign resume requires its original schema and records.
+It retains a complete installation and refuses to initialize a partially populated `release` schema.
+A campaign resume requires its original Protocol V1 records in `release`.
 
-The writer can prepare missing schemas if it has `CREATE` on `experiments`.
-For narrower privilege, an administrator prepares the five empty schemas.
-The writer then needs `USAGE` and `CREATE` on those schemas only.
-The writer owns the tables that it creates.
+The schema contains 12 shared `bench_` tables.
+Each mode uses its own 30 tables with the mode name as a prefix.
+For example, `release.bench_run` tracks attempts and `release.hal_exec_batch` holds HAL batches.
 
-### Prepare empty schemas in pgAdmin
+### Prepare the schema in pgAdmin
 
 Use an authorized database administrator session. Open Query Tool on `experiments`.
-Inspect the target for historical or partial objects before running the SQL.
-If all five schemas already contain Protocol V1, keep the existing tables and grants.
-If a schema contains unexpected objects, stop and inspect it.
-
-On an empty target, run this SQL to prepare the five schemas and grant access.
+On a new target, prepare an empty `release` schema for the writer.
 
 ```sql
 BEGIN;
@@ -60,33 +55,28 @@ BEGIN
         RAISE EXCEPTION 'Expected database experiments';
     END IF;
 END $$;
-CREATE SCHEMA IF NOT EXISTS bench;
-CREATE SCHEMA IF NOT EXISTS hal;
-CREATE SCHEMA IF NOT EXISTS aot;
-CREATE SCHEMA IF NOT EXISTS jit;
-CREATE SCHEMA IF NOT EXISTS rbpf;
-GRANT USAGE, CREATE ON SCHEMA bench, hal, aot, jit, rbpf TO experiment_rw;
+CREATE SCHEMA IF NOT EXISTS release;
+GRANT USAGE, CREATE ON SCHEMA release TO experiment_rw;
 COMMIT;
 ```
 
-For an administrator-owned Protocol V1 installation, apply [protocol_v1.sql](../sql/protocol_v1.sql) to the empty target.
-Grant the writer `USAGE` on the five schemas.
-Grant `SELECT` and `INSERT` on their tables and `UPDATE` on `bench.run`.
-Grant `EXECUTE` on `bench.valid_bounds(bigint[])`.
+The writer owns the objects it creates. Database-level CREATE is unnecessary.
+For administrator-owned objects, apply [protocol_v1.sql](../sql/protocol_v1.sql) to the empty schema.
+Grant the writer `USAGE` on `release`.
+Grant `SELECT` and `INSERT` on its Protocol V1 tables.
+Grant `UPDATE` on `release.bench_run` and `EXECUTE` on `release.bench_valid_bounds(bigint[])`.
 
 ### Read-only privileges and readiness
 
 The `db-preflight` selection reports the database name and login role.
-It reports database-level `CREATE` as `can_create_schemas`.
-It lists prepared schemas that grant both `USAGE` and `CREATE`.
-It checks 12 `bench` tables and 30 tables per mode across four modes.
+It checks the writer's access to `release` and verifies all 132 tables.
 A preflight reports missing tables without creating them.
 
 ## Check the runner
 
 1. Set `run = ["db-preflight"]` in `xpost-test/profile.toml`.
 2. Rebuild the runner for TR3000. Use the normal build and deployment script.
-3. Check exit status and database identity. Expect `experiments`, `experiment_rw`, and 132 tables.
+3. Check exit status and database identity. Expect `experiments`, `experiment_rw`, and 132 tables in `release`.
 4. Use `all-preflight` for the separate deployment, capture, and database checks before a campaign.
 
 Both preflight selections use the bare `./xpost-test` command.

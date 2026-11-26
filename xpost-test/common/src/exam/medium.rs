@@ -810,21 +810,21 @@ async fn attempt_rows(
         "SELECT r.experiment,r.mode,r.variant,r.repeat_no,r.status,c.parameters,r.run_id,r.plan_order,
         COALESCE((SELECT CASE WHEN count(*)=1 THEN bool_and(a.qualified AND
             (r.status <> 'inconclusive' OR EXISTS (
-                SELECT 1 FROM bench.analysis previous
+                SELECT 1 FROM release.bench_analysis previous
                 WHERE previous.run_id=a.run_id AND previous.source_digest=a.source_digest
                   AND previous.created_at <= a.created_at
                   AND previous.analysis_id <> a.analysis_id
                   AND a.issues @> jsonb_build_array(jsonb_build_object('supersedes_analysis_id',previous.analysis_id))
             ))) ELSE false END
-          FROM bench.analysis a WHERE a.run_id=r.run_id AND NOT EXISTS (
-            SELECT 1 FROM bench.analysis newer
+          FROM release.bench_analysis a WHERE a.run_id=r.run_id AND NOT EXISTS (
+            SELECT 1 FROM release.bench_analysis newer
             WHERE newer.run_id=a.run_id AND newer.source_digest=a.source_digest
               AND newer.created_at >= a.created_at
               AND newer.analysis_id <> a.analysis_id
               AND newer.issues @> jsonb_build_array(jsonb_build_object('supersedes_analysis_id',a.analysis_id))
           )),false),
-        EXISTS(SELECT 1 FROM bench.run_artifact ra WHERE ra.run_id=r.run_id AND ra.role='case_publish_intent'),r.issues
-        FROM bench.run r JOIN bench.condition c USING(condition_id)
+        EXISTS(SELECT 1 FROM release.bench_run_artifact ra WHERE ra.run_id=r.run_id AND ra.role='case_publish_intent'),r.issues
+        FROM release.bench_run r JOIN release.bench_condition c USING(condition_id)
         WHERE r.phase='formal' AND c.parameters->>'medium_id'=$1
         ORDER BY r.plan_order",
         &[&campaign.to_string()],
@@ -1077,15 +1077,15 @@ fn protocol_tables(plan: &[Group]) -> Vec<String> {
         "packet_fact",
         "analysis",
     ]
-    .map(|name| format!("bench.{name}"))
+    .map(|name| format!("release.bench_{name}"))
     .into_iter()
     .collect::<BTreeSet<_>>();
     for cell in plan.iter().flat_map(|group| &group.cells) {
         let (mode, experiment, variant) = (cell.mode, cell.experiment, cell.variant);
-        tables.insert(format!("{mode}.{experiment}_config"));
-        tables.insert(format!("{mode}.{experiment}_{variant}_data"));
+        tables.insert(format!("release.{mode}_{experiment}_config"));
+        tables.insert(format!("release.{mode}_{experiment}_{variant}_data"));
         if variant == "trace" {
-            tables.insert(format!("{mode}.{experiment}_event"));
+            tables.insert(format!("release.{mode}_{experiment}_event"));
         } else {
             for table in [
                 "metric_definition",
@@ -1095,7 +1095,7 @@ fn protocol_tables(plan: &[Group]) -> Vec<String> {
                 "histogram_sample",
                 "histogram_bucket",
             ] {
-                tables.insert(format!("{mode}.{table}"));
+                tables.insert(format!("release.{mode}_{table}"));
             }
         }
         let records = match experiment {
@@ -1104,7 +1104,11 @@ fn protocol_tables(plan: &[Group]) -> Vec<String> {
             "case" => &["case_switch"],
             _ => &["probe_result"],
         };
-        tables.extend(records.iter().map(|table| format!("{mode}.{table}")));
+        tables.extend(
+            records
+                .iter()
+                .map(|table| format!("release.{mode}_{table}")),
+        );
     }
     tables.into_iter().collect()
 }
@@ -1358,19 +1362,19 @@ mod tests {
             } else {
                 "inconclusive"
             };
-            tx.execute("INSERT INTO bench.condition(condition_id,experiment,protocol_version,parameters,planned_modes)
+            tx.execute("INSERT INTO release.bench_condition(condition_id,experiment,protocol_version,parameters,planned_modes)
                 VALUES ($1,'firewall','1',$2,ARRAY['hal'])", &[&condition,&parameters]).await?;
             let fixture = Uuid::new_v4();
             let fixture_digest = "b".repeat(64);
-            tx.execute("INSERT INTO bench.artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type)
+            tx.execute("INSERT INTO release.bench_artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type)
                 VALUES($1,'fixture',$2,0,''::bytea,'application/octet-stream')", &[&fixture,&fixture_digest]).await?;
             let profile_hash = "c".repeat(64);
-            tx.execute("INSERT INTO hal.firewall_config(config_id,condition_id,instrumentation,profile_hash,target_pps,
+            tx.execute("INSERT INTO release.hal_firewall_config(config_id,condition_id,instrumentation,profile_hash,target_pps,
                 send_window_ns,drain_ns,payload_bytes,blacklist_capacity,blacklist_entries,legal_numerator,
                 legal_denominator,lookup_case,map_fixture_artifact_id)
                 VALUES($1,$2,'counter_only',$3,400,5000000000,250000000,42,256,1,1,10,'mixed',$4)",
                 &[&config,&condition,&profile_hash,&fixture]).await?;
-            tx.execute("INSERT INTO bench.run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid)
+            tx.execute("INSERT INTO release.bench_run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid)
                 VALUES($1,$2,$3,'hal','firewall','metrics','formal',1,0,$4,$5,$1)",
                 &[&run,&condition,&config,&scenario,&status]).await?;
             let original = Uuid::new_v4();
@@ -1384,7 +1388,7 @@ mod tests {
                     json!([{"supersedes_analysis_id":original}]),
                 ),
             ] {
-                tx.execute("INSERT INTO bench.analysis(analysis_id,run_id,algorithm_version,source_digest,qualified,issues)
+                tx.execute("INSERT INTO release.bench_analysis(analysis_id,run_id,algorithm_version,source_digest,qualified,issues)
                     VALUES($1,$2,'fixture',$3,$4,$5)", &[&id,&run,&digest,&qualified,&notes]).await?;
             }
         }
@@ -1427,10 +1431,15 @@ mod tests {
             super::MediumStage::HalAot,
         ));
         super::protocol::check(&mut client, &tables).await?;
-        let error = super::protocol::check(&mut client, &["aot.missing_fixture_table".into()])
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("aot.missing_fixture_table"));
+        let error =
+            super::protocol::check(&mut client, &["release.aot_missing_fixture_table".into()])
+                .await
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("release.aot_missing_fixture_table")
+        );
         Ok(())
     }
 }
