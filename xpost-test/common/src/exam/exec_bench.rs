@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::agent::{AgentClient, ExecBatch};
 use crate::config::FileConfig;
-use crate::db::{Database, metrics, protocol};
+use crate::db::{Database, metrics, protocol, protocol_v1};
 
 use super::exb2::{self, BUF, ROUNDS, SEED, Sampling};
 use super::medium::{Actions, Resume};
@@ -110,6 +110,7 @@ pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
     }
     let database = Database::load()?;
     let mut db = database.connect().await?;
+    protocol_v1::initialize_if_empty(&mut db).await?;
     protocol::check(&mut db, &tables).await?;
     let mut loaded = String::new();
     let mut image = None;

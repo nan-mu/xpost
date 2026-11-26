@@ -6,6 +6,7 @@ The `xpost-serial` crate defines the wire types.
 
 The runner uses `profile.toml` for selection and `config/` for experiment settings.
 It reads `/root/.db` when it needs PostgreSQL.
+A new collection initializes Protocol V1 in an empty `experiments` database.
 See the [experiment database procedure](../../procedures/database.md).
 
 # Runner entry

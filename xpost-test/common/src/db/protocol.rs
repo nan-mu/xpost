@@ -5,13 +5,25 @@ use sha2::{Digest, Sha256};
 use tokio_postgres::{Client, Transaction};
 use uuid::Uuid;
 
-use super::Database;
+use super::{
+    Database,
+    protocol_v1::{declared_schemas, declared_tables},
+};
 
 pub async fn check_database() -> Result<()> {
     let mut client = Database::load()?.connect().await?;
     let tables = declared_tables();
     let identity = client
-        .query_one("SELECT current_database()::text, current_user::text", &[])
+        .query_one(
+            "SELECT current_database()::text, current_user::text,
+                    has_database_privilege(current_database(), 'CREATE'),
+                    ARRAY(SELECT n.nspname::text FROM pg_namespace n
+                          WHERE n.nspname::text = ANY($1)
+                            AND has_schema_privilege(n.oid, 'USAGE')
+                            AND has_schema_privilege(n.oid, 'CREATE')
+                          ORDER BY n.nspname)",
+            &[&declared_schemas()],
+        )
         .await
         .context("read protocol database identity")?;
     println!(
@@ -20,24 +32,13 @@ pub async fn check_database() -> Result<()> {
             "database": identity.get::<_, &str>(0),
             "role": identity.get::<_, &str>(1),
             "expected_tables": tables.len(),
+            "can_create_schemas": identity.get::<_, bool>(2),
+            "writable_protocol_schemas": identity.get::<_, Vec<String>>(3),
         })
     );
     check(&mut client, &tables).await?;
     println!("Protocol V1 tables and privileges verified");
     Ok(())
-}
-
-pub(super) fn declared_tables() -> Vec<String> {
-    include_str!("../../../sql/protocol_v1.sql")
-        .lines()
-        .filter_map(|line| line.strip_prefix("CREATE TABLE "))
-        .map(|line| {
-            line.split_whitespace()
-                .next()
-                .expect("Protocol V1 table name")
-                .to_owned()
-        })
-        .collect()
 }
 
 pub async fn run_status(database: &Database, run: Uuid) -> String {

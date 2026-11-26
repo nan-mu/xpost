@@ -217,3 +217,11 @@ Retire the standalone `lookup` selection.
 
 Reason. The diagnostic uses the historical writer and has no equivalent Protocol V1 entry.
 The maintainer chose retirement during the database refactor.
+
+## 2026-11-27 Automatic Protocol V1 initialization
+
+Initialize Protocol V1 when a new collection opens the empty `experiments` database.
+Allow an administrator to prepare empty schemas for a writer without database-level CREATE.
+Keep preflight read-only. Require existing storage when resuming a campaign.
+
+Reason. The maintainer asked the runner to create absent Protocol V1 tables automatically.

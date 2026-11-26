@@ -15,7 +15,7 @@ use super::{exb2::Sampling, medium_network::NetworkPlan};
 use crate::{
     agent::{AgentClient, DeploymentReport},
     config::{FileConfig, MediumStage},
-    db::{Database, protocol},
+    db::{Database, protocol, protocol_v1},
 };
 
 const MODES: [&str; 4] = ["hal", "aot", "jit", "rbpf"];
@@ -194,7 +194,7 @@ pub async fn run(cfg: &FileConfig, volume: Volume) -> Result<()> {
         cfg.medium_stage == MediumStage::HalAot || cfg.medium_resume_id.is_some(),
         "JIT/rBPF requires the HAL/AOT campaign ID"
     );
-    let (ready, settings) = preflight(cfg, volume).await?;
+    let (ready, settings) = preflight(cfg, volume, cfg.medium_resume_id.is_none()).await?;
     println!("{}", serde_json::to_string(&ready)?);
     ensure!(
         ready.unavailable.is_empty(),
@@ -858,7 +858,7 @@ fn terminal_attempt(status: &str, issues: &Value) -> bool {
 }
 
 pub async fn check(cfg: &FileConfig, volume: Volume) -> Result<()> {
-    let (ready, _) = preflight(cfg, volume).await?;
+    let (ready, _) = preflight(cfg, volume, false).await?;
     println!("{}", serde_json::to_string_pretty(&ready)?);
     ensure!(
         ready.unavailable.is_empty(),
@@ -868,7 +868,11 @@ pub async fn check(cfg: &FileConfig, volume: Volume) -> Result<()> {
     Ok(())
 }
 
-async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<(Readiness, Database)> {
+async fn preflight(
+    cfg: &FileConfig,
+    volume: Volume,
+    initialize_database: bool,
+) -> Result<(Readiness, Database)> {
     let planned = plan(volume, cfg.medium_stage);
     if let Some(experiment) = &cfg.medium_resume_experiment {
         ensure!(
@@ -951,9 +955,12 @@ async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<(Readiness, Datab
     );
     let settings = Database::load()?;
     let mut database = settings.connect().await?;
-    protocol::check(&mut database, &tables).await?;
     check_host(cfg)?;
     super::medium_network::check_capture_path(cfg)?;
+    if initialize_database {
+        protocol_v1::initialize_if_empty(&mut database).await?;
+    }
+    protocol::check(&mut database, &tables).await?;
     if let Some(id) = cfg.medium_resume_id {
         Resume::load(&database, id, &identities).await?;
         if cfg.medium_stage == MediumStage::JitRbpf {

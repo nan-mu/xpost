@@ -31,27 +31,26 @@ The parser accepts whitespace and a comment after a quoted value.
 The connection uses PostgreSQL without TLS. Use the trusted experiment network.
 Plan selections and `dev` do not read the file.
 
-## First initialization in pgAdmin
+## First use
 
-1. Use an authorized database administrator session. Open Query Tool on `experiments`.
-2. Run the inventory query below. Check the returned database name. Check that the writer role exists.
-3. Check the user schemas and relations. An empty target has no experiment objects.
-4. If Protocol V1 objects exist, compare the five schemas against a disposable database initialized with the same DDL. Use pgAdmin Schema Diff.
-5. Stop if the target has historical tables, partial initialization, or a structural difference. Report the conflicting objects.
-6. On an empty target, open and execute [protocol_v1.sql](../sql/protocol_v1.sql) in Query Tool once. The file uses one transaction.
-7. If the five schemas already match the DDL, proceed to the grants. Check the target database before applying the grants.
+A new `all`, `medium`, or `exec_bench` run initializes an empty `experiments` database.
+The runner applies Protocol V1 in one transaction before it records observations.
+It retains a complete Protocol V1 schema. It stops if it finds partial or historical objects.
+An existing campaign resume requires its original schema and records.
 
-```sql
-SELECT current_database() AS target_database,
-       EXISTS (SELECT FROM pg_roles WHERE rolname = 'experiment_rw' AND rolcanlogin) AS writer_role;
+The writer can prepare missing schemas if it has `CREATE` on `experiments`.
+For narrower privilege, an administrator prepares the five empty schemas.
+The writer then needs `USAGE` and `CREATE` on those schemas only.
+The writer owns the tables that it creates.
 
-SELECT n.nspname AS schema, c.relname AS relation, c.relkind AS kind
-FROM pg_namespace AS n
-LEFT JOIN pg_class AS c ON c.relnamespace = n.oid
-WHERE n.nspname <> 'information_schema'
-  AND left(n.nspname, 3) <> 'pg_'
-ORDER BY n.nspname, c.relname;
-```
+### Prepare empty schemas in pgAdmin
+
+Use an authorized database administrator session. Open Query Tool on `experiments`.
+Inspect the target for historical or partial objects before running the SQL.
+If all five schemas already contain Protocol V1, keep the existing tables and grants.
+If a schema contains unexpected objects, stop and inspect it.
+
+On an empty target, run this SQL to prepare the five schemas and grant access.
 
 ```sql
 BEGIN;
@@ -61,17 +60,27 @@ BEGIN
         RAISE EXCEPTION 'Expected database experiments';
     END IF;
 END $$;
-GRANT USAGE ON SCHEMA bench, hal, aot, jit, rbpf TO experiment_rw;
-GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA bench, hal, aot, jit, rbpf TO experiment_rw;
-GRANT UPDATE ON TABLE bench.run TO experiment_rw;
-GRANT EXECUTE ON FUNCTION bench.valid_bounds(bigint[]) TO experiment_rw;
+CREATE SCHEMA IF NOT EXISTS bench;
+CREATE SCHEMA IF NOT EXISTS hal;
+CREATE SCHEMA IF NOT EXISTS aot;
+CREATE SCHEMA IF NOT EXISTS jit;
+CREATE SCHEMA IF NOT EXISTS rbpf;
+GRANT USAGE, CREATE ON SCHEMA bench, hal, aot, jit, rbpf TO experiment_rw;
 COMMIT;
 ```
 
-The runner checks its login and table access with `db-preflight`.
-This selection uses a read-only transaction for table and privilege checks.
+For an administrator-owned Protocol V1 installation, apply [protocol_v1.sql](../sql/protocol_v1.sql) to the empty target.
+Grant the writer `USAGE` on the five schemas.
+Grant `SELECT` and `INSERT` on their tables and `UPDATE` on `bench.run`.
+Grant `EXECUTE` on `bench.valid_bounds(bigint[])`.
+
+### Read-only privileges and readiness
+
+The `db-preflight` selection reports the database name and login role.
+It reports database-level `CREATE` as `can_create_schemas`.
+It lists prepared schemas that grant both `USAGE` and `CREATE`.
 It checks 12 `bench` tables and 30 tables per mode across four modes.
-It prints the database and role even if tables or privileges are missing.
+A preflight reports missing tables without creating them.
 
 ## Check the runner
 
