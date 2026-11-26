@@ -6,10 +6,13 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-//! Opaque carrier for function-call XDP: lease an image, bridge map bytes into
-//! [`xpost::ext::exec_call::invoke`], and expose `SerialHandler` map/perf/exec
-//! verbs. This App does **not** interpret workload opcodes or buffer layouts —
-//! those live in the XDP image and in host / xpost-test parsing.
+//! Opaque carrier for function-call XDP. Pass the EXB2 buffer to the leased
+//! image in one invocation.
+
+#[cfg(feature = "diag")]
+mod diagnostics;
+#[path = "../exec_metrics.rs"]
+mod exec_metrics;
 
 use core::convert::Infallible;
 use core::ptr::addr_of_mut;
@@ -21,10 +24,12 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
 use exec_bench::mem_map::SLOT_A_LEN;
 use log::{error, info};
-use xpost::app_ctrl::{self, AppMapError, AppXdpError};
-use xpost::map::{BPF_ANY, HEAP_SIZE, MapRt};
+use xpost::app_ctrl::{self, AppXdpError};
+use xpost::map::{HEAP_SIZE, MapRt};
 use xpost::xdp::{ReportItem, Slot, XdpRt};
-use xpost_serial::reply::{MapError, OkReply, ServerError};
+use xpost_serial::command::EXEC_BATCH_BYTES;
+use xpost_serial::reply::{OkReply, ServerError};
+use xpost_serial::server::exec_batch::{EXEC_BATCH_LINE_BYTES, ExecBatch};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
 #[panic_handler]
@@ -37,12 +42,6 @@ extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-/// Map value size for `workload` (XDP ELF metadata from libbpf-mcu).
-const VALUE_LEN: usize = 32;
-const MAP_NAME: &str = "workload";
-const KEY_IN: u8 = 0;
-const KEY_OUT: u8 = 1;
-
 #[unsafe(link_section = ".bss")]
 static mut MAP_HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
@@ -53,7 +52,7 @@ static xdp_slot: Slot<SLOT_A_LEN> = Slot::new([0u8; SLOT_A_LEN]);
 
 static mut XDP_COPY_BUFFER: [u8; SLOT_A_LEN] = [0; SLOT_A_LEN];
 
-static mut INVOKE_BUF: [u8; VALUE_LEN] = [0u8; VALUE_LEN];
+static mut EXEC_BATCH: ExecBatch = ExecBatch::new();
 
 #[allow(
     clippy::large_stack_frames,
@@ -66,13 +65,11 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     let flash = peripherals.FLASH;
+    let boot_id = esp_hal::rng::Rng::new().random().max(1);
+    exec_metrics::init(boot_id);
+    xpost::xdp::set_boot_id(boot_id);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
-
-    // Interpreter self-check: two flights on a hand-built frame, before the
-    // runtime exists so the result is on the wire even if boot fails later.
-    #[cfg(all(feature = "diag", feature = "interp"))]
-    interp_selftest();
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -81,7 +78,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let (usb_rx, _usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
 
-    // Lease before App serial so unsolicited `OK init` means invoke-ready.
+    // XdpRt initialization requires a map runtime guard.
     let map_heap: &'static mut [u8] = unsafe { &mut *addr_of_mut!(MAP_HEAP) };
     let mut maps = MapRt::init(map_heap).await.expect("MapRt::init");
     let slots = [unsafe { xdp_slot.as_xdp_slot(true) }];
@@ -109,9 +106,11 @@ async fn main(spawner: Spawner) -> ! {
         }
     }
     if n_images > 0 {
-        // Leave the control plane open so the host can write the carrier map.
-        // `run_exec` leases only around `invoke`.
-        match rt.switch(0, 0, Some(&maps)) {
+        #[cfg(feature = "diag")]
+        let map_bindings = Some(&maps);
+        #[cfg(not(feature = "diag"))]
+        let map_bindings = None;
+        match rt.switch(0, 0, map_bindings) {
             Ok(()) => info!("xdp switched, not leased"),
             Err(e) => error!("xdp switch failed: {e:?}"),
         }
@@ -121,9 +120,9 @@ async fn main(spawner: Spawner) -> ! {
     drop(rt);
     drop(maps);
 
-    // The sweep needs the host to seed the input first, so it runs on the first
-    // `enable exec` rather than at boot. See `on_enable_exec`.
-    spawner.spawn(control_serial(usb_rx).unwrap());
+    // The single serial task owns the staging buffer for the rest of this boot.
+    let batch = unsafe { &mut *addr_of_mut!(EXEC_BATCH) };
+    spawner.spawn(control_serial(usb_rx, batch, boot_id).unwrap());
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
@@ -133,9 +132,11 @@ async fn main(spawner: Spawner) -> ! {
 serial_task! {
     fn control_serial(
         rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+        batch: &'static mut ExecBatch,
+        boot_id: u32,
     ) {
         let mut rx = rx;
-        SerialHandler::builder(
+        let builder = SerialHandler::builder(
             move || match rx.read_byte() {
                 Ok(b) => Some(b),
                 Err(_) => None,
@@ -144,7 +145,7 @@ serial_task! {
                 esp_println::Printer::write_bytes(bytes);
                 Ok::<(), Infallible>(())
             },
-            [0u8; 128],
+            [0u8; EXEC_BATCH_LINE_BYTES],
         )
         .on_ping(|reply: ReplyWriter<'_>| reply.ok(OkReply::Ping))
         .on_enable_xdp(|reply: ReplyWriter<'_>| match app_ctrl::enable_xdp() {
@@ -155,461 +156,39 @@ serial_task! {
             Ok(()) => reply.ok(OkReply::DisableXdp),
             Err(e) => reply_xdp_err(reply, e),
         })
-        .on_enable_exec(|reply: ReplyWriter<'_>| {
-            // In a diagnostic build, `enable exec` also runs the scale sweep and
-            // reports the mean of many calls, because one call is too short to
-            // time. The normal result path still runs, so the host's `OK finish`
-            // wait is unchanged.
-            #[cfg(feature = "diag")]
-            {
-                scale_sweep();
-                workload_bench();
-            }
-            match run_exec() {
-                Ok(()) => reply.ok(OkReply::EnableExec),
-                Err(e) => reply_map_err(reply, e),
-            }
-        })
-        .on_disable_exec(|reply: ReplyWriter<'_>| match app_ctrl::disable_xdp() {
-            // Exec shares the leased image; disable releases the lease.
-            Ok(()) => reply.ok(OkReply::DisableExec),
-            Err(e) => reply_xdp_err(reply, e),
-        })
-        .on_clear_map(|name: &str, reply: ReplyWriter<'_>| match app_ctrl::clear_map(name) {
-            Ok(()) => reply.ok(OkReply::ClearMap),
-            Err(e) => reply_map_err(reply, e),
-        })
-        .on_get_map(|name: &str, reply: ReplyWriter<'_>| match app_ctrl::lock_map(name) {
-            Ok((maps, idx)) => match maps.map_blob_len(idx) {
-                Ok(len) => reply.get_map(len, |write| {
-                    let _ = maps.write_map_blob(idx, |chunk| {
-                        let _ = write(chunk);
-                    });
-                }),
-                Err(e) => reply_map_err(reply, e.into()),
-            },
-            Err(e) => reply_map_err(reply, e),
-        })
-        .on_update_map(
-            |name: &str, key: &[u8], value: &[u8], reply: ReplyWriter<'_>| {
-                match update_bytes(name, key, value) {
-                    Ok(()) => reply.ok(OkReply::UpdateMap),
-                    Err(e) => reply_map_err(reply, e),
-                }
-            },
-        )
-        .on_clear_perf(|reply: ReplyWriter<'_>| {
-            xpost::ext::perf::clear_perf();
-            reply.ok(OkReply::ClearPerf);
-        })
-        .on_get_perf(|reply: ReplyWriter<'_>| {
-            // The interpreter arm reports in the `xpost-perf` format, which
-            // carries its own metric names. The fixed slot layout it replaces
-            // has no slot for the engine call alone, and the two empty slots
-            // belong to the HAL firmware.
-            let n = xpost::ext::perf::interp_report::payload_len();
-            reply.get_perf(n, |write| {
-                xpost::ext::perf::interp_report::report(write);
-            });
-        })
-        .build()
+        .on_exec_batch(move |command, reply| batch.handle(command, reply, boot_id, run_exec_batch));
+        #[cfg(feature = "diag")]
+        let builder = diagnostics::register(builder);
+        exec_metrics::register(builder).build()
     }
 }
 
-/// `incr` workload bytecode, from `libbpf-mcu/tests/xdp/incr.c`.
-///
-/// Reads `u32` at packet offset 4, adds one, writes it at offset 8. Returns
-/// `XDP_PASS` (2) when the frame is long enough and `XDP_ABORTED` (0) when the
-/// bounded read would run past `data_end`.
-#[cfg(feature = "diag")]
-const INCR_EBPF: [u8; 240] = [
-    0xb4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x61, 0x12, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x61, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xbf, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x07, 0x03, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x2d, 0x23, 0x17, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x1c, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa6, 0x02, 0x15, 0x00, 0x04, 0x00, 0x00, 0x00,
-    0x71, 0x12, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x02, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
-    0x71, 0x13, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4c, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x71, 0x13, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x03, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
-    0x4c, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x71, 0x13, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x64, 0x03, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x4c, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x04, 0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xbc, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x74, 0x03, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x73, 0x31, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0xbc, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x74, 0x03, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
-    0x73, 0x31, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x73, 0x21, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x74, 0x02, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x73, 0x21, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0xb4, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
-
-/// Prove the interpreter runs real eBPF bytecode on this chip.
-///
-/// Runs `incr` over a hand-built frame whose `u32` at offset 4 is `0x41`. The
-/// expected output at offset 8 is `0x42`. Three outcomes are reported:
-///
-/// - [`xpost_type::XdpAction::Pass`] and the byte at offset 8 is `0x42`: the
-///   interpreter ran the program and it mutated the frame as designed.
-/// - Anything else: the run refused or produced a different result, and the log
-///   line carries both numbers so the failure is diagnosable from the wire.
-#[cfg(all(feature = "diag", feature = "interp"))]
-fn interp_selftest() {
-    // The workload computes on packet bytes 8..12 and passes packet 4..8
-    // through untouched, so the fixture seeds both regions with different
-    // values. A run that touches the wrong one shows up immediately.
-    const PASS_THROUGH: u32 = 0x00c0_ffee;
-    const INPUT: u32 = 0x41;
-    const EXPECT: u32 = INPUT + 1;
-
-    let mut frame = [0u8; 64];
-    frame[4..8].copy_from_slice(&PASS_THROUGH.to_le_bytes());
-    frame[8..12].copy_from_slice(&INPUT.to_le_bytes());
-
-    let act = xpost::xdp::selftest_run(&INCR_EBPF, &mut frame);
-
-    let through = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
-    let out = u32::from_le_bytes([frame[8], frame[9], frame[10], frame[11]]);
-    let ok = act == xpost_type::XdpAction::Pass as i32
-        && through == PASS_THROUGH
-        && out == EXPECT;
-    info!(
-        "interp selftest: act={act} in={INPUT:#x} out={out:#x} through={through:#x} ok={ok}"
-    );
-
-    // Clock cost. Every segment boundary in `run_exec` and every aggregate in
-    // the perf report reads this clock, so its price bounds what the reported
-    // numbers can resolve. A timer read that costs more than the work it times
-    // makes the work invisible.
-    let t0 = inst_us();
-    for _ in 0..1000 {
-        core::hint::black_box(inst_us());
-    }
-    let per_read = inst_us().wrapping_sub(t0);
-    info!("clock probe: 1000 reads = {per_read} us ({:.1} us/read)", per_read as f64 / 1000.0);
-
-    // Empty-flight cost. The leased path is entered and left without any
-    // program work when the bytecode is a single `exit`, so this isolates the
-    // carrier: IN_FLIGHT claim, engine dispatch, window validation, release.
-    let exit_only: [u8; 8] = [0x95, 0, 0, 0, 0, 0, 0, 0];
-    let mut buf = [0u8; 64];
-    let t1 = inst_us();
-    for _ in 0..100 {
-        core::hint::black_box(xpost::xdp::selftest_run(&exit_only, &mut buf));
-    }
-    let empty_total = inst_us().wrapping_sub(t1);
-    info!(
-        "empty flight: 100 runs = {empty_total} us ({:.1} us/run)",
-        empty_total as f64 / 100.0
-    );
-
-    // Same loop for the real program, so the two per-run figures are measured
-    // the same way.
-    let mut buf2 = [0u8; 64];
-    buf2[8..12].copy_from_slice(&INPUT.to_le_bytes());
-    let t2 = inst_us();
-    for _ in 0..100 {
-        buf2[8] = INPUT as u8;
-        core::hint::black_box(xpost::xdp::selftest_run(&INCR_EBPF, &mut buf2));
-    }
-    let incr_total = inst_us().wrapping_sub(t2);
-    info!(
-        "incr flight: 100 runs = {incr_total} us ({:.1} us/run)",
-        incr_total as f64 / 100.0
-    );
-
-    // Perf hooks, measured on their own. The leased path calls
-    // `xdp_invocations` before the flight and `xdp_action` after it, and the
-    // perf report measures the interval between the two. If these hooks cost
-    // more than the work, the reported figure describes the hooks.
-    {
-        let mut buf3 = [0u8; 64];
-        let t3 = inst_us();
-        let mut before = 0u32;
-        let mut engine = 0u32;
-        let mut after = 0u32;
-        for _ in 0..50 {
-            let (a, b, c, _) =
-                xpost::xdp::test_flight_split(&mut buf3);
-            before = before.saturating_add(a);
-            engine = engine.saturating_add(b);
-            after = after.saturating_add(c);
-        }
-        let total = inst_us().wrapping_sub(t3);
-        info!(
-            "leased split x50: before_hook={before} engine={engine} after_hook={after} outer={total} us"
-        );
-    }
-}
-
-/// Sweep `buf`'s loop count through the leased path and report the mean per run.
-///
-/// `buf` copies `param` bytes one at a time, so `param` is the work and the mean
-/// must grow with it. A flat line means the rig measures its own overhead; a
-/// large intercept means a fixed cost that would swamp small workloads;
-/// non-linear growth means the interpreter does not do one pass per pass.
-///
-/// Batched because one microsecond of clock resolution divided over a thousand
-/// runs is a nanosecond per run. Each run is a full flight through
-/// `ingress::run`, so the lease check and the `IN_FLIGHT` claim are included in
-/// every sample.
-/// Sweep a workload's work size through the leased path.
-///
-/// The installed image decides which workload runs, so the host swaps the image
-/// between resets. `buf` is the only workload whose work size is a free
-/// parameter: it copies `param` bytes one at a time, so time must grow linearly
-/// with it. `fib` runs a loop `param` times, bounded at 47. The rest clamp their
-/// parameter hard enough that a sweep says little.
-///
-/// The frame is sized for the largest parameter, so an engine that reads
-/// `data_end` sees the whole packet. The AOT images read the same range from the
-/// carrier slice, so both engines sweep identical work.
-///
-/// Batched because one microsecond of clock resolution divided over two hundred
-/// runs is a few nanoseconds per run.
-/// Sweep the installed workload over its work size.
-///
-/// Every workload in exec_bench expresses its work in the `param` field at value
-/// offset 4, so one firmware sweeps them all: the host writes a value whose
-/// first field is the opcode, installs the matching image, and the size list is
-/// chosen from that opcode.
-///
-/// # Why every workload gets a figure
-///
-/// The workloads differ in how much of `param` they use:
-///
-/// - `buf` copies `param` bytes and `fib` loops `param` times, so both span
-///   ranges wide enough for a slope to stand well clear of the intercept.
-/// - `memcpy` stops at 12, `fletcher32` at 20, `bsort` at 6. Their sources
-///   clamp hard, so the range is narrow but the slope is still a slope.
-/// - `incr`, `square` and `bitswap` do a fixed amount of work and only pass
-///   `param` through. Their figures are flat by construction, and the flat line
-///   is the result: it says what each engine costs for that fixed work, and it
-///   is the cleanest measurement of the intercept the other figures have to
-///   subtract.
-#[cfg(feature = "diag")]
-fn scale_sweep() {
-    use xpost_perf::sweep;
-    // The opcode comes from the value the host seeded, so this firmware needs no
-    // per-workload build.
-    let mut head = [0u8; 8];
-    {
-        let (maps, idx) = match app_ctrl::lock_map(MAP_NAME) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("sweep: map: {e:?}");
-                return;
-            }
-        };
-        if let Err(e) = maps.hash_lookup(idx, &[KEY_IN], &mut head) {
-            error!("sweep: lookup: {e:?}");
-            return;
+fn run_exec_batch(buf: &mut [u8; EXEC_BATCH_BYTES]) -> Result<(u64, u64, u32), ServerError> {
+    let publish = app_ctrl::enable_xdp_stamped().map_err(|error| match error {
+        AppXdpError::Busy => ServerError::Busy,
+        AppXdpError::NoRt | AppXdpError::Logic => ServerError::Logic,
+    })?;
+    exec_metrics::begin_invocation();
+    let begin = exec_metrics::now();
+    #[cfg(not(feature = "diag"))]
+    let (action, _) = xpost::ext::exec_call::invoke(buf);
+    // The lease-only path skips the diagnostic Trace hooks.
+    #[cfg(feature = "diag")]
+    let action = xpost::ext::exec_call::invoke_batch(buf, 1)
+        .map_or(xpost_type::XdpAction::Aborted, |(_, action)| action);
+    let end = exec_metrics::now();
+    exec_metrics::end_invocation(action);
+    if publish != 0 {
+        if let Err(err) = app_ctrl::disable_xdp() {
+            error!("exec batch lease release failed: {err:?}");
         }
     }
-    let opcode = u32::from_le_bytes([head[0], head[1], head[2], head[3]]);
-    let Some(params) = sweep::params_for(opcode) else {
-        error!("sweep: unknown opcode {opcode}");
-        return;
-    };
-    match app_ctrl::enable_xdp() {
-        Ok(()) => {}
-        Err(e) => {
-            error!("sweep: cannot lease: {e:?}");
-            return;
-        }
-    }
-    let mut frame = [0u8; 8 + 1024 + 4];
-    for &param in params {
-        let n = sweep::frame_len_for(opcode, param);
-        sweep::fill_op(&mut frame[..n], opcode, param);
-        match xpost::ext::exec_call::invoke_batch(&mut frame[..n], sweep::RUNS) {
-            Some((mean_ns, act)) => {
-                info!(
-                    "sweep op={opcode} param={param} runs={} mean_ns={mean_ns} act={act}",
-                    sweep::RUNS
-                );
-            }
-            None => info!("sweep op={opcode} param={param} runs={} refused", sweep::RUNS),
-        }
-    }
-    #[cfg(feature = "interp")]
-    info!("sweep steps={}", xpost::xdp::interp_take_steps());
-    let _ = app_ctrl::disable_xdp();
-}
-
-/// Repeat the input already in the carrier map many times and report the mean.
-///
-/// The host writes the workload's input with `update map workload 0 <hex>` and
-/// installs the matching image, so this measures whatever pair is in place. One
-/// fixed input per workload, the same size the exam uses.
-///
-/// Repeating makes the number usable: a call takes tens of microseconds and the
-/// clock resolves one, so a single call cannot be read with precision. Two
-/// thousand calls divide that uncertainty and average over the cache and
-/// interrupt noise a single sample carries.
-#[cfg(feature = "diag")]
-fn workload_bench() {
-    const RUNS: u32 = 2000;
-    let mut value = [0u8; VALUE_LEN];
-    {
-        let (maps, idx) = match app_ctrl::lock_map(MAP_NAME) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("bench: map: {e:?}");
-                return;
-            }
-        };
-        if let Err(e) = maps.hash_lookup(idx, &[KEY_IN], &mut value) {
-            error!("bench: lookup: {e:?}");
-            return;
-        }
-    }
-    match app_ctrl::enable_xdp() {
-        Ok(()) => {}
-        Err(e) => {
-            error!("bench: cannot lease: {e:?}");
-            return;
-        }
-    }
-    match xpost::ext::exec_call::invoke_batch(&mut value, RUNS) {
-        Some((mean_ns, act)) => info!("bench runs={RUNS} mean_ns={mean_ns} act={act}"),
-        None => info!("bench runs={RUNS} refused"),
-    }
-    let _ = app_ctrl::disable_xdp();
-}
-
-fn reply_map_err(reply: ReplyWriter<'_>, e: AppMapError) {
-    match e {
-        AppMapError::Busy => reply.error(&ServerError::Busy),
-        AppMapError::NoRt | AppMapError::Logic => reply.error(&ServerError::Logic),
-        AppMapError::NameNotFound => reply.error(&MapError::NameNotFound),
-        AppMapError::InvalidName => reply.error(&MapError::InvalidName),
-        AppMapError::InvalidKey => reply.error(&MapError::InvalidKey),
-        AppMapError::InvalidValue => reply.error(&MapError::InvalidValue),
-        AppMapError::Full => reply.error(&MapError::Full),
-        AppMapError::Unsupported => reply.error(&MapError::Unsupported),
-    }
+    Ok((begin, end, action as u32))
 }
 
 fn reply_xdp_err(reply: ReplyWriter<'_>, e: AppXdpError) {
     match e {
         AppXdpError::Busy => reply.error(&ServerError::Busy),
         AppXdpError::NoRt | AppXdpError::Logic => reply.error(&ServerError::Logic),
-    }
-}
-
-fn key_u8(key: &[u8]) -> Option<u8> {
-    match key {
-        b"0" => Some(0),
-        b"1" => Some(1),
-        [0] | [1] => Some(key[0]),
-        _ => None,
-    }
-}
-
-fn hex_nibble(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// Decode `VALUE_LEN*2` hex digits into 32 raw bytes; otherwise pad/truncate copy.
-fn decode_value_token(value: &[u8]) -> Option<[u8; VALUE_LEN]> {
-    let mut val = [0u8; VALUE_LEN];
-    if value.len() == VALUE_LEN * 2 {
-        for i in 0..VALUE_LEN {
-            let hi = hex_nibble(value[i * 2])?;
-            let lo = hex_nibble(value[i * 2 + 1])?;
-            val[i] = (hi << 4) | lo;
-        }
-        return Some(val);
-    }
-    let n = value.len().min(VALUE_LEN);
-    val[..n].copy_from_slice(&value[..n]);
-    Some(val)
-}
-
-/// Opaque HASH update: wire `key`/`value` tokens are raw bytes (or hex for 32B).
-/// Other maps fall back to [`app_ctrl::update_map`].
-fn update_bytes(name: &str, key: &[u8], value: &[u8]) -> Result<(), AppMapError> {
-    if name != MAP_NAME {
-        return app_ctrl::update_map(name, key, value);
-    }
-    let slot = key_u8(key).ok_or(AppMapError::InvalidKey)?;
-    let (mut maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
-    let vs = maps.hash_value_size(idx)?;
-    if vs != VALUE_LEN {
-        return Err(AppMapError::Unsupported);
-    }
-    let val = decode_value_token(value).ok_or(AppMapError::InvalidValue)?;
-    maps.hash_update(idx, &[slot], &val, BPF_ANY)
-        .map_err(AppMapError::from)
-}
-
-/// Carrier path: copy map[0] while the control plane is open, lease only for
-/// `invoke`, then release and copy the buffer to map[1].
-/// No opcode / layout interpretation. After that map write succeeds, this App
-/// logs `OK finish` outside `invoke`.
-fn run_exec() -> Result<(), AppMapError> {
-    let buf: &mut [u8; VALUE_LEN] = unsafe { &mut *addr_of_mut!(INVOKE_BUF) };
-    buf.fill(0);
-    let t_start = inst_us();
-
-    {
-        let (maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
-        let n = maps.hash_lookup(idx, &[KEY_IN], buf).map_err(|e| match e {
-            xpost::map::MapUseError::NotFound => AppMapError::InvalidKey,
-            other => AppMapError::from(other),
-        })?;
-        if n > VALUE_LEN {
-            return Err(AppMapError::Logic);
-        }
-    }
-    let t_load = inst_us();
-
-    app_ctrl::enable_xdp().map_err(map_xdp_err)?;
-    let t_lease = inst_us();
-    let (act, _) = xpost::ext::exec_call::invoke(buf);
-    let aborted = act == xpost_type::XdpAction::Aborted;
-    let t_engine = inst_us();
-    app_ctrl::disable_xdp().map_err(map_xdp_err)?;
-    if aborted {
-        return Err(AppMapError::Logic);
-    }
-    let t_release = inst_us();
-
-    {
-        let (mut maps, idx) = app_ctrl::lock_map(MAP_NAME)?;
-        maps.hash_update(idx, &[KEY_OUT], buf, BPF_ANY)
-            .map_err(AppMapError::from)?;
-    }
-    let t_store = inst_us();
-
-    // The AOT baseline reports one `execution` figure for the whole of this
-    // function's middle, and all eight workloads measured the same value. These
-    // four segments split it, so the fixed cost is visible next to the work.
-    info!(
-        "exec seg: load={} lease={} engine={} release={} store={} total={}",
-        t_load.wrapping_sub(t_start),
-        t_lease.wrapping_sub(t_load),
-        t_engine.wrapping_sub(t_lease),
-        t_release.wrapping_sub(t_engine),
-        t_store.wrapping_sub(t_release),
-        t_store.wrapping_sub(t_start),
-    );
-    info!("OK finish");
-    Ok(())
-}
-
-/// Device microseconds since boot. One source for every segment boundary, so
-/// the differences are comparable.
-fn inst_us() -> u32 {
-    esp_hal::time::Instant::now().duration_since_epoch().as_micros() as u32
-}
-
-fn map_xdp_err(err: AppXdpError) -> AppMapError {
-    match err {
-        AppXdpError::Busy => AppMapError::Busy,
-        AppXdpError::NoRt => AppMapError::NoRt,
-        AppXdpError::Logic => AppMapError::Logic,
     }
 }

@@ -1,15 +1,15 @@
-# exec_bench_hal (native HAL arm)
+# HAL EXB2 firmware
 
-Same host pipeline as `exec_bench` (map / enable exec / `OK finish` / perf),
-without an XDP lease. `enable exec` runs [`run_hal`](src/lib.rs) on the
-opaque map input bytes, writes the result, records `xdp_end`, then logs
-`OK finish` with `info!` (UART `INFO - OK finish`).
+The firmware runs the selected EXB2 kernel once per buffer. It uses the same
+serial staging and Metrics commands as [XPOST EXB2 firmware](../exec_bench).
 
-See [`../exec_bench/HOST_DESIGN.md`](../exec_bench/HOST_DESIGN.md) for the full
-pipeline. Opcode checks live in xpost-test, not in serial.
+The build needs RISC-V Clang in `PATH`. Set `EXB2_CLANG` to select a compiler.
 
-```bash
-cargo build --release
+```sh
+cargo build --release --locked
 ```
 
-Flash: agent `POST /v1/flash/fw {"name":"exec-bench-hal"}`.
+## Diagnostics
+
+Build with `--features diag` for the boot-time scale sweep. The
+[workload sweep script](../../xpost-test/scripts/sweep_all3.py) reads these logs.

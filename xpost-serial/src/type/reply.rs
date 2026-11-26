@@ -18,6 +18,21 @@ pub enum OkReply<'a> {
     DisableXdp,
     EnableExec,
     DisableExec,
+    ExecBatchReset,
+    ExecBatchWrite,
+    /// `OK exec batch invoke <boot_id> <begin_tick> <end_tick> <action>`.
+    /// Ticks are DUT microseconds. `action` is an XDP action code.
+    ExecBatchInvoke {
+        boot_id: u32,
+        begin_tick: u64,
+        end_tick: u64,
+        /// XDP action on an XPOST carrier, or the direct entry status on HAL.
+        action: u32,
+    },
+    /// `OK exec batch read <n>` + exactly `n` payload bytes.
+    ExecBatchRead {
+        blob: &'a [u8],
+    },
     ClearMap,
     ClearPerf,
     /// `OK get map <n>` + `n` blob bytes (same framing as [`Self::GetPerf`]).
@@ -29,6 +44,32 @@ pub enum OkReply<'a> {
     GetPerf {
         blob: &'a [u8],
     },
+    /// `OK perf prepare <epoch> <boot_id>`. `boot_id` is a decimal `u64`.
+    PerfPrepare {
+        epoch: u32,
+        boot_id: u64,
+    },
+    /// `OK perf arm <tick>`. `tick` is a decimal `u64`.
+    PerfArm {
+        tick: u64,
+    },
+    /// `OK perf freeze <tick> <flags> <len> <digest>`.
+    ///
+    /// `tick` is a decimal `u64`. The other three fields are `u32`.
+    PerfFreeze {
+        tick: u64,
+        flags: u32,
+        len: u32,
+        digest: u32,
+    },
+    /// `OK perf read <total> <digest> <n>` + exactly `n` payload bytes.
+    PerfRead {
+        total: u32,
+        digest: u32,
+        blob: &'a [u8],
+    },
+    /// `OK perf release`
+    PerfRelease,
     /// `OK xdp flash <slot> <generation> <mcu_us>`.
     ///
     /// `mcu_us` is the device microsecond counter at publish. It is 0 when the
@@ -146,6 +187,12 @@ pub enum PerfError {
     Unsupported,
     /// `ERR perf buffer-too-small`: bounded storage cannot hold the report.
     BufferTooSmall,
+    /// `ERR perf epoch`: the epoch is not the one prepare installed.
+    Epoch,
+    /// `ERR perf offset`: `offset` is past the end of the export.
+    Offset,
+    /// `ERR perf phase`: the command does not belong to the current phase.
+    Phase,
 }
 
 impl ErrReply for PerfError {}

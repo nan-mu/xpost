@@ -1,790 +1,521 @@
-//! One firmware, two cold images, tcpdump text in Postgres.
+//! Case (AOT Trace).
 //!
-//! `case_swap` writes destination `203.0.113.10` and returns `XDP_TX`.
-//! `case_mark` writes destination `203.0.113.77` and returns `XDP_TX`.
-//! Both increment `rxcnt[17]` and leave the UDP payload unchanged.
+//! 1. Verify both XDP ELFs. Open the protocol database and register the run ID.
+//! 2. Flash one firmware and cold-install both images. Warm both SRAM slots.
+//! 3. Check tagged CAS2 replies from each slot. Restore A as active and B as staged.
+//! 4. Start tcpdump and send JTX1 probes. Arm a Trace epoch after stable A output.
+//! 5. Publish B once. Observe valid B replies and retain a bounded capture tail.
+//! 6. Freeze and export Trace. Save raw pcap, Trace, and switch status under one run ID.
 //!
-//! Map access stays outside the leased window. Warmup watches the wire, then
-//! the exam disables XDP, drains, clears `rxcnt`, and reads the baseline.
-//! It enables only to send `CASE0`..`CASE3`, disables, drains, and reads the
-//! result. Those payloads are five bytes, so a firmware `ACK\n` cannot satisfy
-//! the check. The firmware ELF is flashed once. tcpdump writes no pcap.
+//! Packet time, runner command time, Agent reception time, and DUT ticks have separate clocks.
 
-use std::net::Ipv4Addr;
-use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+use anyhow::{Context, Result, ensure};
+use sha2::{Digest, Sha256};
+use tokio::time::Instant;
+use uuid::Uuid;
 
 use crate::agent::AgentClient;
-use crate::config::{FileConfig, format_mac};
-use crate::db::{self, CaseObs, PgOpts};
-use crate::pipeline::{self, BudgetEta, READY_BUDGET, RoundUi, status};
+use crate::config::FileConfig;
+use crate::pipeline::{READY_BUDGET, RoundUi, status};
 
-const FW: &str = "case-cag";
-pub(crate) const PORT: u16 = 8080;
-pub(crate) const SENT: usize = 4;
-const IPPROTO_UDP: u32 = 17;
-pub(crate) const STIM_SRC: Ipv4Addr = Ipv4Addr::new(192, 168, 110, 50);
-pub(crate) const DST_A: &str = "203.0.113.10";
-pub(crate) const MARK_DST: &str = "203.0.113.77";
-const READY_TRIES: u32 = 40;
-const DUMP_CAP: usize = 64 * 1024;
-const DRAIN: Duration = Duration::from_secs(1);
-const REPEATS: usize = 100;
-pub(crate) const PAYLOAD_LEN: usize = 5;
+use super::{
+    case_capture::{Capture, POST, PRE},
+    case_store::{self, Attempt, Observation, Switch},
+    case_trace,
+    medium::Actions,
+};
 
-struct Step {
-    seq: i32,
-    xdp: &'static str,
-    map: &'static str,
-    slot: u32,
-    action: &'static str,
-    dst: &'static str,
-    capability: &'static str,
-    expect: &'static str,
+const FIRMWARE: &str = "case-xdp";
+const SLOT_A: &str = "case_swap";
+const SLOT_B: &str = "case_mark_idle";
+
+pub(super) fn planned_input(cfg: &FileConfig, slot_b_sha256: &str) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "direction": "A-to-B", "pps": super::case_capture::PPS,
+        "pre_window_ns": PRE.as_nanos() as u64, "post_window_ns": POST.as_nanos() as u64,
+        "capture_interface": cfg.probe.iface, "capture_clock": "host-realtime",
+        "dut_ip": cfg.target.esp_ip, "dut_mac": cfg.esp_mac_bytes()?,
+        "slot_b_sha256": slot_b_sha256, "analysis_version": "case-trace-v1",
+    }))
 }
 
-const STEPS: &[Step] = &[
-    Step {
-        seq: 1,
-        xdp: "case_swap",
-        map: "rxcnt",
-        slot: IPPROTO_UDP,
-        action: "XDP_TX",
-        dst: DST_A,
-        capability: "count, rewrite",
-        expect: "While XDP is disabled, rxcnt[17] is cleared and read. The scored window then sends CASE0..CASE3 and returns XDP_TX with Ethernet MACs swapped and IPv4 destination 203.0.113.10. Each token appears in a DUT-sourced frame of UDP length 5. rxcnt[17] increases by at least 4; a larger delta is not one-count-per-packet. Router forwards of that destination are not DUT replies.",
-    },
-    Step {
-        seq: 2,
-        xdp: "case_mark",
-        map: "rxcnt",
-        slot: IPPROTO_UDP,
-        action: "XDP_TX",
-        dst: MARK_DST,
-        capability: "count, rewrite",
-        expect: "While XDP is disabled, rxcnt[17] is cleared and read. The scored window then sends CASE0..CASE3 and returns XDP_TX with Ethernet MACs swapped and IPv4 destination 203.0.113.77. Each token appears in a DUT-sourced frame of UDP length 5. rxcnt[17] increases by at least 4; a larger delta is not one-count-per-packet. Router forwards of that destination are not DUT replies.",
-    },
-];
-
-pub async fn run_case(cfg: &FileConfig) -> Result<()> {
+pub(super) async fn run_case(
+    cfg: &FileConfig,
+    expected_fw: &str,
+    medium_id: Uuid,
+    identity: &serde_json::Value,
+    retry_of: Option<Uuid>,
+    order: i32,
+    actions: &mut Actions,
+) -> Result<()> {
     let endpoint = cfg
         .agent
         .resolved_endpoint()
-        .context("case needs [agent].endpoint in config/default.toml")?;
+        .context("case needs [agent].endpoint")?;
     let agent = AgentClient::new(endpoint);
-    let pg_opts = PgOpts { formal: true };
-    let client = db::connect_and_ensure(pg_opts).await?;
-    let exam_id = db::insert_exam(&client, Some("case")).await?;
-    eprintln!("case exam={exam_id} firmware={FW}");
-
-    let ui = RoundUi::new();
-    let mut eta = BudgetEta::new();
-    eta.add_flashes(1);
-    ui.begin_round();
-    ui.check_pending(&format!("烧录 `{FW}`"));
-    ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
-    ui.check_pending("DUT ready");
-    status::flash_idle(&ui, &agent, FW, Duration::from_secs(300), &mut eta).await?;
-    status::settle_checklist(&ui, &agent, READY_BUDGET).await?;
-
-    for step in STEPS {
-        run_step(cfg, &agent, &client, exam_id, step).await?;
+    agent.health().await.context("case Agent health")?;
+    let digest_a = agent
+        .preflight_xdp(SLOT_A)
+        .await
+        .context("prepare Slot A")?;
+    let digest_b = agent
+        .preflight_xdp(SLOT_B)
+        .await
+        .context("prepare Slot B")?;
+    ensure!(
+        identity["container_sha256"].as_str() == Some(&digest_a)
+            && identity["input"]["slot_b_sha256"].as_str() == Some(&digest_b),
+        "case preflight changed since campaign planning"
+    );
+    let mut client = case_store::connect(&cfg.postgres).await?;
+    let run = Uuid::new_v4();
+    let profile = case_store::hex(&Sha256::digest(b"case-aot-trace-v0.1.1"));
+    let attempt = match Attempt::start(
+        &mut client,
+        run,
+        "formal",
+        &profile,
+        Some(medium_id),
+        Some(identity),
+        retry_of,
+        order,
+    )
+    .await
+    {
+        Ok(attempt) => attempt,
+        Err(error) => {
+            let state = crate::db::protocol::run_status(&cfg.postgres, run).await;
+            emit_result(
+                run,
+                "blocked",
+                &Observation::default(),
+                &state,
+                Some(format!("{error:#}")),
+                None,
+            );
+            return Err(error).context("register case attempt before device writes");
+        }
+    };
+    eprintln!("case AOT Trace run_id={run} phase=formal");
+    let mut observation = Observation::default();
+    if let Err(error) = perform(
+        cfg,
+        &agent,
+        run,
+        &profile,
+        [&digest_a, &digest_b],
+        expected_fw,
+        &mut client,
+        actions,
+        &mut observation,
+    )
+    .await
+    {
+        observation.issues.push(format!("{error:#}"));
     }
-    run_cold_latency(cfg, &agent, &client, exam_id).await?;
-    db::stop_exam(&client, exam_id).await?;
-    eprintln!("case ok exam={exam_id}");
+    let status = observation.status();
+    let mut write_error = None;
+    if let Err(error) = attempt
+        .finish(&mut client, &observation, &cfg.probe.iface)
+        .await
+    {
+        let mut state = crate::db::protocol::run_status(&cfg.postgres, run).await;
+        let mut detail = format!("{error:#}");
+        if state == "running" {
+            let retry = async {
+                let mut database = crate::db::protocol::connect(&cfg.postgres).await?;
+                attempt
+                    .finish(&mut database, &observation, &cfg.probe.iface)
+                    .await
+            }
+            .await;
+            state = if let Err(retry_error) = retry {
+                detail.push_str(&format!(". Same-run write retry: {retry_error:#}"));
+                crate::db::protocol::run_status(&cfg.postgres, run).await
+            } else {
+                status.to_owned()
+            };
+        }
+        if state != status {
+            let saved = observation
+                .preserve(run)
+                .map(|path| path.display().to_string());
+            emit_result(
+                run,
+                "write_failed",
+                &observation,
+                &state,
+                Some(detail),
+                saved.as_ref().ok().map(String::as_str),
+            );
+            return Err(error).with_context(|| match saved {
+                Ok(path) => format!("case run_id={run} database write failed. Evidence saved at {path}"),
+                Err(save) => format!("case run_id={run} database write failed. Local evidence export failed: {save:#}"),
+            });
+        }
+        write_error = Some(detail);
+    }
+    emit_result(run, status, &observation, status, write_error, None);
+    ensure!(
+        observation.qualified(),
+        "case run_id={run}: {}",
+        observation.issues.join("; ")
+    );
+    eprintln!("case AOT Trace complete run_id={run} switch_index=1 direction=A→B");
     Ok(())
 }
 
-async fn run_step(
+fn emit_result(
+    run: Uuid,
+    status: &str,
+    observation: &Observation,
+    database_status: &str,
+    write_error: Option<String>,
+    evidence: Option<&str>,
+) {
+    let switch = observation.switch.as_ref();
+    let trace = observation.trace.as_ref();
+    let (last_a, first_b, late) = observation.transitions();
+    println!(
+        "XPOST_RESULT {}",
+        serde_json::json!({
+            "run_id": run.to_string(), "experiment": "case", "mode": "aot", "variant": "trace",
+            "input": { "direction": "A-to-B", "pps": super::case_capture::PPS },
+            "repeat": 1, "status": status, "database_status": database_status, "write_error": write_error,
+            "publish": switch.map(|reply| if reply.command_ok { "confirmed" } else { "unconfirmed" }),
+            "trace_exported": observation.trace_bytes.is_some(), "freeze_receipt": observation.freeze_receipt, "pcap_exported": observation.capture.is_some(),
+            "host_command_ns": switch.map(|reply| reply.end_ns - reply.begin_ns),
+            "dut_control_us": trace.and_then(|value| value.events.last()?.tick.checked_sub(value.events.first()?.tick)),
+            "last_a_seq": last_a.map(|packet| packet.seq), "first_b_seq": first_b.map(|packet| packet.seq),
+            "old_after_new": late, "evidence": evidence, "issues": observation.issues,
+        })
+    );
+}
+
+async fn perform(
     cfg: &FileConfig,
     agent: &AgentClient,
-    client: &tokio_postgres::Client,
-    exam_id: db::ExamId,
-    step: &Step,
+    run: Uuid,
+    profile: &str,
+    digests: [&str; 2],
+    expected_fw: &str,
+    client: &mut tokio_postgres::Client,
+    actions: &mut Actions,
+    result: &mut Observation,
 ) -> Result<()> {
-    let mut events = Vec::new();
-    events.push(format!("fw={FW} xdp={} host_ms={}", step.xdp, host_ms()));
-    agent
-        .clear_xdp("*")
-        .await
-        .with_context(|| format!("clear xdp before {}", step.xdp))?;
-    events.push(format!("clear_cold {}", host_ms()));
-    agent
-        .flash_xdp(step.xdp)
-        .await
-        .with_context(|| format!("flash xdp {}", step.xdp))?;
-    events.push(format!("install {} {}", step.xdp, host_ms()));
-    agent
-        .get_init()
-        .await
-        .with_context(|| format!("OK init after {}", step.xdp))?;
-    events.push(format!("init {}", host_ms()));
-
-    // Boot leases the image. Stay out of rxcnt until that lease is released.
-    agent
-        .enable_xdp()
-        .await
-        .with_context(|| format!("enable xdp {}", step.xdp))?;
-    events.push(format!("enable_warmup {}", host_ms()));
-    let mac = format_mac(&cfg.esp_mac_bytes()?);
-    warmup(cfg, step, &mac).await?;
-
-    agent
-        .disable_xdp()
-        .await
-        .with_context(|| format!("disable xdp before baseline {}", step.xdp))?;
-    events.push(format!("disable_baseline {}", host_ms()));
-    tokio::time::sleep(DRAIN).await;
-    agent
-        .clear_map(step.map)
-        .await
-        .with_context(|| format!("clear map {}", step.map))?;
-    let before = agent.map_slot(step.map, step.slot).await?;
-    events.push(format!("map_before {before} {}", host_ms()));
-    if before != 0 {
-        bail!(
-            "case {} baseline rxcnt[{}]={before} after disable and clear",
-            step.xdp,
-            step.slot
-        );
-    }
-
-    agent
-        .enable_xdp()
-        .await
-        .with_context(|| format!("enable xdp for send {}", step.xdp))?;
-    events.push(format!("enable_send {}", host_ms()));
-    let scored: Vec<[u8; PAYLOAD_LEN]> = (0..SENT).map(payload).collect();
-    let refs: Vec<&[u8]> = scored.iter().map(|p| p.as_slice()).collect();
-    let dump = sniff(cfg, &mac, &refs, Duration::from_millis(800)).await?;
-    agent
-        .disable_xdp()
-        .await
-        .with_context(|| format!("disable xdp before read {}", step.xdp))?;
-    events.push(format!("disable_read {}", host_ms()));
-    tokio::time::sleep(DRAIN).await;
-    let after = agent.map_slot(step.map, step.slot).await?;
-    events.push(format!("map_after {after} {}", host_ms()));
-
-    let needle = step.dst.to_string();
-    let hits = payload_hits(&dump, &mac, &needle);
-    let matched = hits.iter().filter(|hit| **hit).count();
-    let saw_reply = matched == SENT;
-    let delta = after.saturating_sub(before);
-    // Retries can increment rxcnt more than once per send. Do not require equality.
-    let ok = before == 0 && delta >= SENT as u64 && saw_reply;
-    eprintln!(
-        "case seq={} xdp={} ok={ok} action={} {}[{}] {before}->{after} sent={SENT} needle={needle} payloads={matched}/{SENT}",
-        step.seq, step.xdp, step.action, step.map, step.slot
+    let ui = RoundUi::new();
+    ui.begin_round();
+    ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
+    let flash_started = Instant::now();
+    let identity = agent.flash_fw_evidence(FIRMWARE, Some(expected_fw)).await?;
+    actions.firmware_flash_s += flash_started.elapsed().as_secs_f64();
+    actions.note_flash(&identity);
+    let checked = check_flashed(&identity, digests);
+    result.flash = Some(identity);
+    result
+        .preparation
+        .push("firmware flash; cold install case_swap and case_mark_idle".into());
+    checked?;
+    status::settle_checklist(&ui, agent, READY_BUDGET).await?;
+    agent.disable_xdp().await?;
+    let gen_a = stage(agent, SLOT_A, 0).await?;
+    actions.sram_preload_confirmed += 1;
+    let gen_b = stage(agent, SLOT_B, 1).await?;
+    actions.sram_preload_confirmed += 1;
+    result.preparation.push(format!(
+        "preload A generation {gen_a}; preload B generation {gen_b}"
+    ));
+    agent.enable_xdp().await?;
+    let initial = board(agent).await?;
+    result.boot = Some(u64::from(initial.boot));
+    initial.require(0, 1, gen_b, initial.boot)?;
+    let wrong_generation = if gen_b == u32::MAX { 1 } else { gen_b + 1 };
+    let rejected = agent.switch_xdp(1, wrong_generation, "drop").await;
+    ensure!(
+        rejected.is_err(),
+        "DUT accepted a publish with the wrong generation"
     );
-    let stored = store_text(&events, &hits, &dump);
-    let excerpt: String = stored.lines().take(16).collect::<Vec<_>>().join("\n");
-    eprintln!("case tcpdump excerpt:\n{excerpt}");
+    let unchanged = board(agent).await?;
+    unchanged.require(0, 1, gen_b, initial.boot)?;
+    ensure!(
+        unchanged.last_error == 4,
+        "DUT did not report bad-generation after rejected publish"
+    );
+    result
+        .preparation
+        .push("rejected wrong B generation; A stayed active".into());
 
-    db::insert_case_obs(
-        client,
-        exam_id,
-        &CaseObs {
-            seq: step.seq,
-            xdp: step.xdp,
-            capability: step.capability,
-            action: step.action,
-            expect: step.expect,
-            map_name: step.map,
-            map_slot: step.slot as i32,
-            map_before: before as i64,
-            map_after: after as i64,
-            sent: SENT as i32,
-            saw_reply,
-            ok,
-            tcpdump: &stored,
-        },
-    )
-    .await?;
-    if !ok {
-        bail!(
-            "case {} mismatch: map {before}->{after} (want at least +{SENT} after a zero baseline), payloads {matched}/{SENT} needle={needle}",
-            step.xdp
+    // Qualification uses separate tags so its B probes cannot enter the formal window.
+    let qualification = Capture::start(cfg, Uuid::new_v4())?;
+    qualification.observe(2).await?;
+    let b = agent.switch_xdp(1, gen_b, "drop").await?;
+    check_published(&b, 0, 1, gen_b)?;
+    actions.preparation_publish_confirmed += 1;
+    qualification.observe(1).await?;
+    board(agent).await?.require(1, 0, gen_a, initial.boot)?;
+    let a = agent.switch_xdp(0, gen_a, "drop").await?;
+    check_published(&a, 1, 0, gen_a)?;
+    actions.preparation_publish_confirmed += 1;
+    qualification.stop().await?;
+    result
+        .preparation
+        .push(format!("qualify and restore A: {b}; {a}"));
+    board(agent).await?.require(0, 1, gen_b, initial.boot)?;
+
+    let capture_start = Instant::now();
+    let capture = Capture::start(cfg, run)?;
+    capture.observe(2).await?;
+    tokio::time::sleep(PRE).await;
+    let (epoch, boot) = agent.perf_prepare(run, profile, "trace").await?;
+    result
+        .preparation
+        .push(format!("Trace epoch {epoch} boot {boot}"));
+    let setup = async {
+        ensure!(
+            boot == u64::from(initial.boot),
+            "DUT boot changed before Trace prepare"
+        );
+        agent.perf_arm(epoch).await?;
+        let intent = serde_json::to_vec(&serde_json::json!({
+            "run_id": run, "epoch": epoch, "boot_id": boot,
+            "source_slot": 0, "target_slot": 1, "target_generation": gen_b,
+        }))?;
+        let tx = client.transaction().await?;
+        crate::db::protocol::artifact(&tx, run, "case_publish_intent", &intent).await?;
+        tx.commit().await.context("persist case publish intent")
+    }
+    .await;
+    if let Err(error) = setup {
+        if agent.perf_freeze(epoch).await.is_err() {
+            let _ = agent.perf_arm(epoch).await;
+            let _ = agent.perf_freeze(epoch).await;
+        }
+        if let Err(cleanup) = agent.perf_release(epoch).await {
+            result.issues.push(format!(
+                "release case Trace after setup failure: {cleanup:#}"
+            ));
+        }
+        result.capture = capture.stop().await.ok();
+        return Err(error).context("prepare Case publish");
+    }
+    let begin_ns = capture_start.elapsed().as_nanos();
+    let reply = tokio::time::timeout(Duration::from_secs(5), agent.switch_xdp(1, gen_b, "drop"))
+        .await
+        .context("switch response deadline")
+        .and_then(|result| result);
+    let end_ns = capture_start.elapsed().as_nanos();
+    let command = reply
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("publication outcome unknown: {error:#}"))
+        .and_then(|reply| check_published(reply, 0, 1, gen_b));
+    let observed = capture.observe(1).await;
+    if observed.is_ok() {
+        tokio::time::sleep(POST).await;
+    }
+    let captured = capture.stop().await;
+    let frozen = match agent.perf_freeze(epoch).await {
+        Ok(receipt) => {
+            result.freeze_receipt =
+                Some(serde_json::json!({ "epoch": epoch, "boot_id": boot, "freeze": receipt }));
+            match agent.perf_read(epoch, receipt).await {
+                Ok(bytes) => Ok(bytes),
+                Err(error) => agent
+                    .perf_read(epoch, receipt)
+                    .await
+                    .with_context(|| format!("retry original case Trace export after {error:#}")),
+            }
+        }
+        Err(error) => Err(error).context("freeze original case Trace epoch"),
+    };
+    let released = if frozen.is_ok() {
+        agent.perf_release(epoch).await
+    } else {
+        Err(anyhow::anyhow!(
+            "Trace export failed for epoch {epoch}. Check this epoch before a new publish"
+        ))
+    };
+    let state = board(agent).await;
+    let boot_unchanged = state.as_ref().is_ok_and(|now| now.boot == initial.boot);
+    let confirmed = state
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("read post-publish status: {e:#}"))
+        .and_then(|now| now.require(1, 0, gen_a, initial.boot));
+    if confirmed.is_ok() {
+        actions.measured_publish_confirmed += 1;
+    }
+    result.switch = Some(Switch {
+        generation_a: gen_a,
+        generation_b: gen_b,
+        begin_ns,
+        end_ns,
+        command_ok: command.is_ok(),
+        boot_unchanged,
+        reply: reply.ok(),
+        state_after: state.ok().map(|s| s.raw),
+        error: command.as_ref().err().map(|error| format!("{error:#}")),
+    });
+    for check in [command, observed, confirmed, released] {
+        if let Err(error) = check {
+            result.issues.push(format!("{error:#}"));
+        }
+    }
+    match captured {
+        Ok(data) => result.capture = Some(data),
+        Err(error) => result.issues.push(format!("tcpdump export: {error:#}")),
+    }
+    if let Some(capture) = &result.capture {
+        if !capture.loss_free() {
+            result
+                .issues
+                .push("tcpdump kernel loss is nonzero or unknown".into());
+        }
+        let (a, b, _) = result.transitions();
+        if a.is_none() || b.is_none() {
+            result
+                .issues
+                .push("capture lacks a valid A→B reply transition".into());
+        }
+    }
+    match frozen {
+        Ok(raw) => {
+            let trace = case_trace::decode(&raw, run, epoch, boot);
+            result.trace_bytes = Some(raw);
+            match trace {
+                Ok(trace) => {
+                    if !trace.proves_publish(gen_b) {
+                        result
+                            .issues
+                            .push("DUT Trace lacks the expected B publish boundaries".into());
+                    }
+                    result.trace = Some(trace);
+                }
+                Err(error) => result.issues.push(format!("Trace validation: {error:#}")),
+            }
+        }
+        Err(error) => result.issues.push(format!("Trace export: {error:#}")),
+    }
+    Ok(())
+}
+
+fn check_flashed(identity: &serde_json::Value, digests: [&str; 2]) -> Result<()> {
+    let firmware_hash = identity["firmware_sha256"]
+        .as_str()
+        .context("missing Firmware ELF digest")?;
+    ensure!(
+        identity["firmware_profile"] == FIRMWARE,
+        "Agent returned a different firmware profile"
+    );
+    let containers = identity["containers"]
+        .as_array()
+        .context("missing installed images")?;
+    ensure!(
+        containers.len() == 2,
+        "case requires two installed XDP ELFs"
+    );
+    for (slot, (name, digest)) in [SLOT_A, SLOT_B].into_iter().zip(digests).enumerate() {
+        ensure!(
+            containers.iter().any(|image| image["profile"] == name
+                && image["slot"].as_u64() == Some(slot as u64)
+                && image["mode"] == "aot"
+                && image["firmware_sha256"] == firmware_hash
+                && image["container_sha256"] == digest),
+            "installed case image {name} differs from preflight"
         );
     }
     Ok(())
 }
 
-async fn warmup(cfg: &FileConfig, step: &Step, mac: &str) -> Result<()> {
-    let warm = b"WARM!";
-    for i in 0..READY_TRIES {
-        let dump = sniff(cfg, mac, &[warm], Duration::from_millis(400)).await?;
-        if dump.to_ascii_lowercase().contains(&format!("{mac} >")) {
-            eprintln!("case {} link up", step.xdp);
-            return Ok(());
-        }
-        if i % 5 == 4 {
-            eprintln!("case {} still waiting for a DUT frame", step.xdp);
-        }
-    }
-    bail!("case {} saw no DUT frame during warmup", step.xdp)
-}
-
-pub(crate) async fn sniff(
-    cfg: &FileConfig,
-    mac: &str,
-    payloads: &[&[u8]],
-    after: Duration,
-) -> Result<String> {
-    let mut child = Command::new("tcpdump")
-        .args([
-            "-e",
-            "-n",
-            "-l",
-            "-tt",
-            "-X",
-            "-i",
-            &cfg.probe.iface,
-            "udp",
-            "and",
-            "port",
-            "8080",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawn tcpdump")?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    send_payloads(cfg, payloads).await?;
-    tokio::time::sleep(after).await;
-    child.start_kill().ok();
-    let mut stdout = child.stdout.take().context("tcpdump stdout")?;
-    let mut stderr = child.stderr.take().context("tcpdump stderr")?;
-    let mut out = String::new();
-    let mut err = String::new();
-    let _ = child.wait().await;
-    stdout.read_to_string(&mut out).await.context("read tcpdump stdout")?;
-    stderr.read_to_string(&mut err).await.context("read tcpdump stderr")?;
-    let mut text = format!("# dut_mac {mac}\n{out}");
-    if !err.is_empty() {
-        text.push_str("\n# stderr\n");
-        text.push_str(&err);
-    }
-    Ok(text)
-}
-
-pub(crate) fn unix_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
-
-/// `agent_rx` alone, for a reply that carries no device stamp.
-pub(crate) fn rx_stamp(msg: &str) -> Result<f64> {
-    let (_, tail) = msg
-        .trim()
-        .split_once(" agent_rx=")
-        .with_context(|| format!("agent_rx missing: {msg}"))?;
-    tail.trim()
-        .parse()
-        .with_context(|| format!("agent_rx in {msg}"))
-}
-
-/// `get xdp` fields: boot, active, staged, generation, updating, severe, drop,
-/// pass, last_error. A slot role of 255 is empty.
-pub(crate) fn xdp_fields(msg: &str) -> Result<[u32; 9]> {
-    let mut out = [0u32; 9];
-    let mut words = msg.split_whitespace();
-    for want in ["OK", "get", "xdp"] {
-        if words.next() != Some(want) {
-            bail!("not a get xdp reply: {msg}");
-        }
-    }
-    for slot in out.iter_mut() {
-        *slot = words
+async fn stage(agent: &AgentClient, name: &str, slot: u8) -> Result<u32> {
+    let reply = agent.flash_xdp_slot(name, slot).await?;
+    let mut fields = reply
+        .strip_prefix("OK xdp flash ")
+        .context("invalid preload reply")?
+        .split_whitespace();
+    ensure!(
+        fields
             .next()
-            .with_context(|| format!("short get xdp: {msg}"))?
-            .parse()
-            .with_context(|| format!("get xdp field in {msg}"))?;
-    }
-    Ok(out)
+            .context("missing preload slot")?
+            .parse::<u8>()?
+            == slot,
+        "preload acknowledged another slot"
+    );
+    let generation = fields
+        .next()
+        .context("missing preload generation")?
+        .parse()?;
+    ensure!(generation != 0, "preload returned zero generation");
+    Ok(generation)
 }
 
-/// `mcu_us` is the device clock in the reply. `agent_rx` is the agent host
-/// clock when that reply was read, appended as `agent_rx=<unix seconds>`.
-pub(crate) fn reply_stamps(msg: &str) -> Result<(u32, f64)> {
-    let (head, tail) = msg
-        .trim()
-        .split_once(" agent_rx=")
-        .with_context(|| format!("agent_rx missing: {msg}"))?;
-    let mcu_us = head
-        .split_whitespace()
-        .last()
-        .context("mcu_us")?
-        .parse()
-        .with_context(|| format!("mcu_us in {msg}"))?;
-    let agent_rx = tail
-        .trim()
-        .parse()
-        .with_context(|| format!("agent_rx in {msg}"))?;
-    Ok((mcu_us, agent_rx))
+fn check_published(reply: &str, from: u8, to: u8, generation: u32) -> Result<()> {
+    let expected = format!("OK xdp switch 1 0 0 {from} {to} {generation} ");
+    ensure!(
+        reply.starts_with(&expected),
+        "unexpected publish result {reply}"
+    );
+    Ok(())
 }
 
-/// One tcpdump and one 2 ms CASE0 sender for a whole repeat loop.
-pub(crate) struct LiveTap {
-    stop: Arc<AtomicBool>,
-    text: Arc<Mutex<String>>,
-    err: Arc<Mutex<String>>,
-    child: tokio::process::Child,
-    sender: Option<tokio::task::JoinHandle<Result<()>>>,
-    reader: Option<tokio::task::JoinHandle<()>>,
-    err_reader: Option<tokio::task::JoinHandle<()>>,
+struct Status {
+    boot: u32,
+    active: u32,
+    staged: u32,
+    staged_generation: u32,
+    updating: u32,
+    severe: u32,
+    last_error: u32,
+    raw: String,
 }
 
-impl LiveTap {
-    pub(crate) async fn open(cfg: &FileConfig) -> Result<Self> {
-        let mut child = tokio::process::Command::new("tcpdump")
-            .args([
-                "-e",
-                "-n",
-                "-l",
-                "-tt",
-                "-X",
-                "-i",
-                &cfg.probe.iface,
-                "udp",
-                "and",
-                "port",
-                "8080",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("spawn tcpdump")?;
-        let mut stdout = child.stdout.take().context("tcpdump stdout")?;
-        let mut stderr = child.stderr.take().context("tcpdump stderr")?;
-        let text = Arc::new(Mutex::new(String::new()));
-        let sink = Arc::clone(&text);
-        let reader = tokio::spawn(async move {
-            let mut buf = [0u8; 4096];
-            loop {
-                match stdout.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let chunk = String::from_utf8_lossy(&buf[..n]);
-                        sink.lock().unwrap().push_str(&chunk);
-                    }
-                }
-            }
-        });
-        let err = Arc::new(Mutex::new(String::new()));
-        let err_sink = Arc::clone(&err);
-        let err_reader = tokio::spawn(async move {
-            let mut buf = [0u8; 4096];
-            loop {
-                match stderr.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let chunk = String::from_utf8_lossy(&buf[..n]);
-                        err_sink.lock().unwrap().push_str(&chunk);
-                    }
-                }
-            }
-        });
-        let stop = Arc::new(AtomicBool::new(false));
-        let sender_stop = Arc::clone(&stop);
-        let iface = cfg.probe.iface.clone();
-        let src_mac = match cfg.src_mac_override()? {
-            Some(m) => m,
-            None => pipeline::iface_mac(&iface)?,
-        };
-        let dst_mac = cfg.esp_mac_bytes()?;
-        let esp = cfg.target.esp_ip;
-        let sport = cfg.target.stim_sport;
-        let sender = tokio::task::spawn_blocking(move || {
-            let raw = pipeline::RawTx::open(&iface, src_mac, dst_mac, esp, PORT, sport)?;
-            raw.announce_neighbor(STIM_SRC)?;
-            let mut next_arp = std::time::Instant::now();
-            while !sender_stop.load(Ordering::Relaxed) {
-                if next_arp.elapsed() >= Duration::from_secs(1) {
-                    raw.announce_neighbor(STIM_SRC)?;
-                    next_arp = std::time::Instant::now();
-                }
-                raw.send_udp(STIM_SRC, esp, PORT, b"CASE0")?;
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            Ok(())
-        });
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        Ok(Self {
-            stop,
-            text,
-            err,
-            child,
-            sender: Some(sender),
-            reader: Some(reader),
-            err_reader: Some(err_reader),
-        })
-    }
-
-    pub(crate) fn count_before(&self, mac: &str, needle: &str, before: f64) -> usize {
-        frame_times(&self.text.lock().unwrap(), mac, needle)
-            .into_iter()
-            .filter(|ts| *ts < before)
-            .count()
-    }
-
-    /// Byte offset into the capture buffer. Take it before the command so the
-    /// rows stored for this repeat include the frames that came before the
-    /// switch as well as the one that proves it.
-    pub(crate) fn mark(&self) -> usize {
-        self.text.lock().unwrap().len()
-    }
-
-    /// Captured stdout from `mark` on, starting at a whole line. Frames whose
-    /// header began before the mark are dropped, so every block is complete.
-    pub(crate) fn capture(&self, mark: usize) -> String {
-        let text = self.text.lock().unwrap();
-        let mut start = mark.min(text.len());
-        if start > 0 && !text.is_char_boundary(start) {
-            return String::new();
-        }
-        if start > 0 && !text[..start].ends_with('\n') {
-            match text[start..].find('\n') {
-                Some(nl) => start += nl + 1,
-                None => return String::new(),
-            }
-        }
-        let mut out = text[start..].to_string();
-        // The reader may be mid-packet at snapshot time. Keep whole lines only.
-        if !out.ends_with('\n')
-            && let Some(nl) = out.rfind('\n')
-        {
-            out.truncate(nl + 1);
-        }
-        out
-    }
-
-    /// Drop everything before `mark` so polling stays bounded over 100 repeats.
-    pub(crate) fn trim(&self, mark: usize) {
-        let mut text = self.text.lock().unwrap();
-        let mut cut = mark.min(text.len());
-        if cut > 0 && !text.is_char_boundary(cut) {
-            return;
-        }
-        if cut > 0 && !text[..cut].ends_with('\n') {
-            match text[cut..].find('\n') {
-                Some(nl) => cut += nl + 1,
-                None => return,
-            }
-        }
-        text.drain(..cut);
-    }
-
-    /// tcpdump diagnostics, if it wrote any. Errors here explain a missing frame.
-    pub(crate) fn stderr_text(&self) -> String {
-        self.err.lock().unwrap().clone()
-    }
-
-    pub(crate) async fn wait_frame(&self, mac: &str, needle: &str, after: f64) -> Result<f64> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if let Some(ts) = frame_times(&self.text.lock().unwrap(), mac, needle)
-                .into_iter()
-                .filter(|ts| *ts >= after)
-                .reduce(f64::min)
-            {
-                return Ok(ts);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                bail!("no DUT frame {needle} at or after {after:.6}");
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
-
-    pub(crate) async fn close(mut self) -> Result<()> {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.await;
-        }
-        self.child.start_kill().ok();
-        let _ = self.child.wait().await;
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.await;
-        }
-        if let Some(err_reader) = self.err_reader.take() {
-            let _ = err_reader.await;
-        }
+impl Status {
+    fn require(&self, active: u32, staged: u32, generation: u32, boot: u32) -> Result<()> {
+        ensure!(
+            self.boot != 0
+                && self.boot == boot
+                && self.active == active
+                && self.staged == staged
+                && self.staged_generation == generation
+                && self.updating == 0
+                && self.severe == 0,
+            "DUT slot state differs: {}",
+            self.raw
+        );
         Ok(())
     }
 }
 
-/// An early `?` must not leave the 2 ms sender and tcpdump running into the
-/// next exam of the same process. `close` is still the orderly path.
-impl Drop for LiveTap {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        self.child.start_kill().ok();
-    }
-}
-
-fn frame_times(dump: &str, mac: &str, needle: &str) -> Vec<f64> {
-    let src = format!("{mac} >");
-    let mut out = Vec::new();
-    for pkt in packets(dump) {
-        let Some(header) = pkt.lines().next() else {
-            continue;
-        };
-        if !header.to_ascii_lowercase().contains(&src.to_ascii_lowercase()) {
-            continue;
-        }
-        if !header.contains(needle) || !header.contains(&format!("UDP, length {PAYLOAD_LEN}")) {
-            continue;
-        }
-        if let Some(ts) = frame_ts(header) {
-            out.push(ts);
-        }
-    }
-    out
-}
-
-async fn run_cold_latency(
-    cfg: &FileConfig,
-    agent: &AgentClient,
-    client: &tokio_postgres::Client,
-    exam_id: db::ExamId,
-) -> Result<()> {
-    // Both cold images are linked at slot 0, so the timed loop reuses one slot.
-    // The cold table is not erased and the DUT does not reboot inside the loop.
-    agent.clear_xdp("*").await.context("clear cold table")?;
-    agent.flash_xdp("case_swap").await.context("install case_swap")?;
-    agent.flash_xdp("case_mark").await.context("install case_mark")?;
-    agent.get_init().await.context("OK init after both images")?;
-    agent.disable_xdp().await.context("drop the lease before warmup")?;
-    let _ = agent
-        .flash_xdp_slot("case_swap", 0)
-        .await
-        .context("warm up slot 0 with case_swap")?;
-    agent.enable_xdp().await.context("lease slot 0")?;
-    let mac = format_mac(&cfg.esp_mac_bytes()?);
-    let tap = LiveTap::open(cfg).await?;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let armed = unix_secs();
-    if tap.count_before(&mac, DST_A, armed + 1.0) == 0 {
-        let _ = tap.close().await;
-        bail!("cold latency did not see destination {DST_A} before the first replace");
-    }
-    for rep in 1..=REPEATS {
-        let (name, dst) = if rep % 2 == 1 {
-            ("case_mark", MARK_DST)
-        } else {
-            ("case_swap", DST_A)
-        };
-        // One slot: stop the program, overwrite that slot's bytes, start it.
-        let start = unix_secs();
-        let mark = tap.mark();
-        let stopped = agent
-            .disable_xdp()
-            .await
-            .context("stop XDP before overwriting slot 0")?;
-        // Test-clock ack for each command, so every stage sits on one clock.
-        let stopped_ms = (unix_secs() - start) * 1_000.0;
-        let disable_rx = rx_stamp(&stopped)?;
-        let copied = agent
-            .flash_xdp_slot(name, 0)
-            .await
-            .with_context(|| format!("cold rep {rep} copy {name} into slot 0"))?;
-        let copied_ms = (unix_secs() - start) * 1_000.0;
-        let started = agent
-            .enable_xdp()
-            .await
-            .with_context(|| format!("cold rep {rep} start slot 0"))?;
-        let started_ms = (unix_secs() - start) * 1_000.0;
-        let (mcu_us, agent_rx) = reply_stamps(&started)?;
-        let status = agent.xdp_status().await.context("get xdp after start")?;
-        let f = xdp_fields(&status)?;
-        if f[1] != 0 || f[2] != 255 {
-            let _ = tap.close().await;
-            bail!("cold rep {rep} touched more than slot 0: {status}");
-        }
-        let end = tap.wait_frame(&mac, dst, start).await.with_context(|| {
-            format!("cold rep {rep} end {dst}\n{stopped}\n{copied}\n{started}")
-        })?;
-        // Every stage below is the test process clock. The two agent receive
-        // times are the agent host clock and are stored absolute, not subtracted.
-        let end_ms = (end - start) * 1_000.0;
-        eprintln!(
-            "STAGE cold rep={rep}/{REPEATS} image={name} mcu_us={mcu_us} start={start:.6} stopped_ms={stopped_ms:.3} copied_ms={copied_ms:.3} started_ms={started_ms:.3} disable_rx={disable_rx:.6} agent_rx={agent_rx:.6} end_ms={end_ms:.3}"
-        );
-        let window = tap.capture(mark);
-        tap.trim(mark);
-        let mut report = format!(
-            "# dut_mac {mac}\n# image {name} slot 0\n# start={start:.6} stopped_ms={stopped_ms:.3} copied_ms={copied_ms:.3} started_ms={started_ms:.3} end_ms={end_ms:.3} mcu_us={mcu_us} disable_rx={disable_rx:.6} agent_rx={agent_rx:.6} end={end:.6}\n{stopped}\n{copied}\n{started}\n{window}"
-        );
-        let err = tap.stderr_text();
-        if !err.is_empty() {
-            report.push_str("\n# tcpdump stderr\n");
-            report.push_str(&err);
-        }
-        let report = report;
-        db::insert_case_obs(
-            client,
-            exam_id,
-            &CaseObs {
-                seq: 10 + rep as i32 - 1,
-                xdp: name,
-                capability: "cold replace, one slot",
-                action: "XDP_TX",
-                expect: "start is the test clock when disable is issued. stopped_ms, copied_ms and started_ms are the test clock offsets when the disable, copy and enable commands returned, so the stages are: issue, stopped, copied, started, last old frame, end. Only slot 0 is used; slot 1 stays empty and the cold table is not erased inside the loop. mcu_us is the device clock when enable published the entry. disable_rx and agent_rx are agent host clock instants, stored absolute. end is the first DUT frame with the new destination at or after start.",
-                map_name: "",
-                map_slot: 0,
-                map_before: 0,
-                map_after: 0,
-                sent: SENT as i32,
-                saw_reply: true,
-                ok: true,
-                tcpdump: &report,
-            },
-        )
-        .await?;
-    }
-    tap.close().await?;
-    Ok(())
-}
-
-fn frame_ts(header: &str) -> Option<f64> {
-    let (stamp, _) = header.split_once(' ')?;
-    stamp.parse().ok()
-}
-
-async fn send_payloads(cfg: &FileConfig, payloads: &[&[u8]]) -> Result<()> {
-    let iface = cfg.probe.iface.clone();
-    let src_mac = match cfg.src_mac_override()? {
-        Some(m) => m,
-        None => pipeline::iface_mac(&iface)?,
+async fn board(agent: &AgentClient) -> Result<Status> {
+    let raw = agent.xdp_status().await?;
+    let fields = raw
+        .strip_prefix("OK get xdp ")
+        .context("invalid slot status reply")?
+        .split_whitespace()
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let [
+        boot,
+        active,
+        staged,
+        staged_generation,
+        updating,
+        severe,
+        _,
+        _,
+        last_error,
+    ] = fields.as_slice()
+    else {
+        anyhow::bail!("invalid slot status length");
     };
-    let dst_mac = cfg.esp_mac_bytes()?;
-    let esp = cfg.target.esp_ip;
-    let sport = cfg.target.stim_sport;
-    let owned: Vec<Vec<u8>> = payloads.iter().map(|p| p.to_vec()).collect();
-    tokio::task::spawn_blocking(move || {
-        let raw = pipeline::RawTx::open(&iface, src_mac, dst_mac, esp, PORT, sport)?;
-        raw.announce_neighbor(STIM_SRC)?;
-        for payload in &owned {
-            raw.send_udp(STIM_SRC, esp, PORT, payload)?;
-        }
-        Ok::<(), anyhow::Error>(())
+    Ok(Status {
+        boot: *boot,
+        active: *active,
+        staged: *staged,
+        staged_generation: *staged_generation,
+        updating: *updating,
+        severe: *severe,
+        last_error: *last_error,
+        raw,
     })
-    .await
-    .context("stimulus thread")?
-}
-
-pub(crate) fn payload(i: usize) -> [u8; PAYLOAD_LEN] {
-    let mut body = *b"CASE0";
-    body[4] = b'0' + u8::try_from(i).unwrap_or(0);
-    body
-}
-
-/// DUT-sourced frames whose header has the rewrite and whose dump contains `CASEn`.
-pub(crate) fn payload_hits(dump: &str, mac: &str, needle: &str) -> [bool; SENT] {
-    let src = format!("{mac} >");
-    let mut hits = [false; SENT];
-    for pkt in packets(dump) {
-        let Some(header) = pkt.lines().next() else {
-            continue;
-        };
-        if !header.to_ascii_lowercase().contains(&src.to_ascii_lowercase()) {
-            continue;
-        }
-        if !header.contains(needle) || !header.contains(&format!("UDP, length {PAYLOAD_LEN}")) {
-            continue;
-        }
-        // The fifth payload byte sits on the next hex line. Join only the ASCII columns.
-        let ascii = ascii_columns(&pkt);
-        for (i, hit) in hits.iter_mut().enumerate() {
-            if ascii.contains(&format!("CASE{i}")) {
-                *hit = true;
-            }
-        }
-    }
-    hits
-}
-
-fn ascii_columns(pkt: &str) -> String {
-    let mut ascii = String::new();
-    for line in pkt.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("0x") {
-            continue;
-        }
-        if let Some((_, tail)) = trimmed.rsplit_once("  ") {
-            ascii.push_str(tail.trim());
-        }
-    }
-    ascii
-}
-
-fn packets(dump: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    for line in dump.lines() {
-        if line_is_frame(line) && !cur.is_empty() {
-            out.push(std::mem::take(&mut cur));
-        }
-        if line_is_frame(line) || !cur.is_empty() {
-            cur.push_str(line);
-            cur.push('\n');
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
-fn line_is_frame(line: &str) -> bool {
-    let Some((sec, rest)) = line.split_once('.') else {
-        return false;
-    };
-    let Some((frac, tail)) = rest.split_once(' ') else {
-        return false;
-    };
-    !sec.is_empty()
-        && sec.bytes().all(|b| b.is_ascii_digit())
-        && !frac.is_empty()
-        && frac.bytes().all(|b| b.is_ascii_digit())
-        && !tail.is_empty()
-}
-
-fn store_text(events: &[String], hits: &[bool; SENT], dump: &str) -> String {
-    let mut text = String::from(
-        "# host control times are not a measured datapath interruption\n",
-    );
-    for event in events {
-        text.push_str("# ");
-        text.push_str(event);
-        text.push('\n');
-    }
-    text.push_str("# payloads");
-    for (i, hit) in hits.iter().enumerate() {
-        text.push_str(&format!(" CASE{i}={}", if *hit { "yes" } else { "no" }));
-    }
-    text.push('\n');
-    text.push_str(dump);
-    if text.len() > DUMP_CAP {
-        text.truncate(DUMP_CAP);
-        text.push_str("\n[truncated]\n");
-    }
-    text
-}
-
-fn host_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
 }

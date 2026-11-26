@@ -7,6 +7,9 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+#[cfg(feature = "perf-trace")]
+mod trace_capture;
+
 use core::convert::Infallible;
 use core::ptr::addr_of_mut;
 
@@ -25,7 +28,7 @@ use static_cell::StaticCell;
 use xpost::app_ctrl::{self, AppMapError, AppXdpError};
 use xpost::map::{HEAP_SIZE, MapRt};
 use xpost::xdp::{ReportItem, Slot, XdpRt};
-#[allow(unused_imports)] // PerfError only when neither perf-cag nor perf-t
+#[allow(unused_imports)] // PerfError only when neither perf-metrics nor perf-trace
 use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
@@ -69,12 +72,16 @@ static UDP_TX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
 static UDP_RX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 static UDP_TX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 
+#[path = "../../../medium-wifi.rs"]
+mod medium_wifi;
+
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
+    medium_wifi::retain_marker();
     // Quiet USB: info/trace during XDP_TX stress contends with the agent session
     // and shows up as host send gaps (formal: 80–145 ms) that poison loss medians.
     esp_println::logger::init_logger(log::LevelFilter::Error);
@@ -100,7 +107,10 @@ async fn main(spawner: Spawner) -> ! {
     let map_heap: &'static mut [u8] = unsafe { &mut *addr_of_mut!(MAP_HEAP) };
     let mut maps = MapRt::init(map_heap).await.expect("MapRt::init");
 
-    xpost::xdp::set_boot_id(boot_entropy());
+    let boot_id = boot_entropy();
+    xpost::xdp::set_boot_id(boot_id);
+    #[cfg(feature = "perf-trace")]
+    trace_capture::init(boot_id);
     let slots = [unsafe { xdp_slot.as_xdp_slot(true) }, unsafe {
         xdp_slot_idle.as_xdp_slot(false)
     }];
@@ -274,7 +284,7 @@ serial_task! {
         rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
     ) {
         let mut rx = rx;
-        SerialHandler::builder(
+        let builder = SerialHandler::builder(
             move || match rx.read_byte() {
                 Ok(b) => Some(b),
                 Err(_) => None,
@@ -318,25 +328,25 @@ serial_task! {
             },
         )
         .on_clear_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(any(feature = "perf-cag", feature = "perf-t"))]
+            #[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
             {
                 xpost::ext::perf::clear_perf();
                 reply.ok(OkReply::ClearPerf);
             }
-            #[cfg(not(any(feature = "perf-cag", feature = "perf-t")))]
+            #[cfg(not(any(feature = "perf-metrics", feature = "perf-trace")))]
             {
                 reply.error(&PerfError::Unavailable);
             }
         })
         .on_get_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(any(feature = "perf-cag", feature = "perf-t"))]
+            #[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
             {
                 let n = xpost::ext::perf::report_payload_len();
                 reply.get_perf(n, |write| {
                     xpost::ext::perf::report_perf(write);
                 });
             }
-            #[cfg(not(any(feature = "perf-cag", feature = "perf-t")))]
+            #[cfg(not(any(feature = "perf-metrics", feature = "perf-trace")))]
             {
                 reply.error(&PerfError::Unavailable);
             }
@@ -352,7 +362,12 @@ serial_task! {
             }
         })
         .on_xdp_switch(|slot: u8, generation: u32, pass: bool, reply: ReplyWriter<'_>| {
-            match app_ctrl::switch_xdp(slot, generation, pass) {
+            #[cfg(feature = "perf-trace")]
+            let begin = trace_capture::now();
+            let result = app_ctrl::switch_xdp(slot, generation, pass);
+            #[cfg(feature = "perf-trace")]
+            trace_capture::switch(begin, slot, generation, result.as_ref().ok());
+            match result {
                 Ok(report) => reply.ok(switch_reply(&report)),
                 Err(e) => reply_xdp_err(reply, e),
             }
@@ -360,8 +375,15 @@ serial_task! {
         .on_get_xdp_status(|reply: ReplyWriter<'_>| match app_ctrl::xdp_status() {
             Ok(status) => reply.ok(status_reply(&status)),
             Err(e) => reply_xdp_err(reply, e),
-        })
-        .build()
+        });
+        #[cfg(feature = "perf-trace")]
+        let builder = builder
+            .on_perf_prepare(trace_capture::prepare)
+            .on_perf_arm(trace_capture::arm)
+            .on_perf_freeze(trace_capture::freeze)
+            .on_perf_read(trace_capture::read)
+            .on_perf_release(trace_capture::release);
+        builder.build()
     }
 }
 

@@ -10,11 +10,11 @@ use std::path::Path;
 use esp_idf_part::PartitionTable;
 
 use crate::client::DEFAULT_IMAGE_CAPACITY;
-use std::io;
 use crate::client::flash::XdpTable;
+use std::io;
 
 /// Parse board `partitions.csv` into a binary partition table.
-pub(crate) fn partition_table_bin(path: &Path) -> io::Result<Vec<u8>> {
+pub fn partition_table_bin(path: &Path) -> io::Result<Vec<u8>> {
     let table = load_partition_table(path)?;
     table
         .to_bin()
@@ -24,16 +24,25 @@ pub(crate) fn partition_table_bin(path: &Path) -> io::Result<Vec<u8>> {
 /// Resolve an [`XdpTable`] span from a named row in `partitions.csv`.
 pub fn xdp_table_from_csv(path: &Path, partition: &str) -> io::Result<XdpTable> {
     let table = load_partition_table(path)?;
-    let part = table.find(partition).ok_or_else(|| {
-        std::io::Error::other(format!(
-            "partitions.csv {}: no row named `{partition}`",
-            path.display()
-        ))
-    })?;
+    xdp_table(&table, partition)
+        .map_err(|e| io::Error::other(format!("partitions.csv {}: {e}", path.display())))
+}
+
+/// Resolve the XDP span from the partition table bytes prepared for flashing.
+pub fn xdp_table_from_bin(bytes: &[u8], partition: &str) -> io::Result<XdpTable> {
+    let table = PartitionTable::try_from_bytes(bytes)
+        .map_err(|e| io::Error::other(format!("decode binary partition table: {e}")))?;
+    xdp_table(&table, partition)
+}
+
+fn xdp_table(table: &PartitionTable, partition: &str) -> io::Result<XdpTable> {
+    let part = table
+        .find(partition)
+        .ok_or_else(|| io::Error::other(format!("no partition named `{partition}`")))?;
     let len = part.size();
     if len == 0 {
         return Err(std::io::Error::other(format!(
-            "partitions.csv `{partition}` Size must be > 0"
+            "partition `{partition}` Size must be > 0"
         )));
     }
     Ok(XdpTable {
@@ -44,8 +53,9 @@ pub fn xdp_table_from_csv(path: &Path, partition: &str) -> io::Result<XdpTable> 
 }
 
 fn load_partition_table(path: &Path) -> io::Result<PartitionTable> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| std::io::Error::other(format!("read partition table {}: {e}", path.display())))?;
+    let text = fs::read_to_string(path).map_err(|e| {
+        std::io::Error::other(format!("read partition table {}: {e}", path.display()))
+    })?;
     PartitionTable::try_from_str(text)
         .map_err(|e| std::io::Error::other(format!("partition table {}: {e}", path.display())))
 }
@@ -73,6 +83,8 @@ mod tests {
         )
         .unwrap();
         let table = xdp_table_from_csv(&path, "xdp").unwrap();
+        let snapshot = partition_table_bin(&path).unwrap();
+        assert_eq!(xdp_table_from_bin(&snapshot, "xdp").unwrap(), table);
         assert_eq!(table.base, 0x310000);
         assert_eq!(table.len, 0x10000);
         let _ = fs::remove_dir_all(&dir);

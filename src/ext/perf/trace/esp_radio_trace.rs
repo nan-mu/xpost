@@ -5,13 +5,42 @@
 //! the impl still builds when `perf-trace` is off but C/A/G are on.
 
 use xpost_type::{EspRadioTrace, XdpAction};
+#[cfg(all(feature = "perf-counter", feature = "perf-report"))]
+use xpost_type::{RxEvent, RxTag, RxVerdict};
 
 use crate::xdp::ingress::XdpProg;
 
 #[cfg(feature = "perf-trace")]
 use crate::ext::perf::trace::EventKind;
 
+macro_rules! observe {
+    ($point:ident, $detail:expr) => {
+        #[cfg(all(feature = "perf-counter", feature = "perf-report"))]
+        super::network::observe(super::network::Point::$point, $detail);
+    };
+}
+
 impl EspRadioTrace for XdpProg {
+    #[cfg(all(feature = "perf-counter", feature = "perf-report"))]
+    fn rx_start(&self, frame: &[u8]) -> Option<RxTag> {
+        super::network::start(frame)
+    }
+
+    #[cfg(all(feature = "perf-counter", feature = "perf-report"))]
+    #[esp_hal::ram]
+    fn rx_run<'a>(
+        &self,
+        frame: &'a mut [u8],
+        _tag: Option<RxTag>,
+    ) -> (XdpAction, &'a mut [u8], RxVerdict) {
+        crate::xdp::ingress::run_observed(frame)
+    }
+
+    #[cfg(all(feature = "perf-counter", feature = "perf-report"))]
+    fn rx_event(&self, tag: Option<RxTag>, event: RxEvent) {
+        super::network::rx_event(tag, event);
+    }
+
     fn rx_packets(&self, len: usize) {
         #[cfg(feature = "perf-counter")]
         self.counter.bump_rx_packets();
@@ -57,8 +86,7 @@ impl EspRadioTrace for XdpProg {
             let _ = t0;
         }
         #[cfg(feature = "perf-trace")]
-        self.trace
-            .push(EventKind::XdpEnd, action as i32 as u32, 0);
+        self.trace.push(EventKind::XdpEnd, action as i32 as u32, 0);
         #[cfg(all(feature = "perf-trace", not(feature = "perf-aggregate")))]
         let _ = action;
     }
@@ -104,6 +132,7 @@ impl EspRadioTrace for XdpProg {
     }
 
     fn tx_submission_begin(&self) {
+        observe!(DriverTxSubmitBegin, 0);
         #[cfg(feature = "perf-aggregate")]
         {
             let now = crate::ext::perf::aggregate::AggregateSet::now_ticks();
@@ -114,6 +143,7 @@ impl EspRadioTrace for XdpProg {
     }
 
     fn tx_submitted(&self) {
+        observe!(DriverTxSubmitted, 0);
         #[cfg(feature = "perf-counter")]
         self.counter.bump_tx_submitted();
         #[cfg(feature = "perf-aggregate")]
@@ -126,6 +156,7 @@ impl EspRadioTrace for XdpProg {
     }
 
     fn tx_failed(&self, rc: i32) {
+        observe!(DriverTxSubmitFailed, rc as u32);
         #[cfg(feature = "perf-counter")]
         self.counter.bump_tx_failed(rc);
         #[cfg(feature = "perf-aggregate")]
@@ -140,11 +171,15 @@ impl EspRadioTrace for XdpProg {
     }
 
     fn tx_completed(&self, ok: bool) {
+        if ok {
+            observe!(DriverTxCompleted, 0);
+        } else {
+            observe!(DriverTxCompletionFailed, 0);
+        }
         #[cfg(feature = "perf-counter")]
         self.counter.bump_tx_completed(ok);
         #[cfg(feature = "perf-trace")]
-        self.trace
-            .push(EventKind::TxCompleted, u32::from(ok), 0);
+        self.trace.push(EventKind::TxCompleted, u32::from(ok), 0);
     }
 
     fn tx_fail_bad_buf(&self) {

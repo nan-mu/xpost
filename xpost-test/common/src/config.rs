@@ -1,5 +1,5 @@
 //! Compile-time TOML for the `xpost-test` binary:
-//! `config/default.toml` + `just_tx.toml` + `just_drop.toml` + `firewall.toml`
+//! `profile.toml` + `config/default.toml` + `just_tx.toml` + `just_drop.toml` + `firewall.toml`
 //! + `exec_bench.toml`.
 //!
 //! Files are embedded at compile time; after editing, rebuild and scp to TR3000.
@@ -9,13 +9,15 @@
 //! ./xpost-test
 //! ```
 //!
-//! No env vars, no CLI args. `default.toml` `run = [...]` selects **experiment
+//! No env vars, no CLI args. `profile.toml` `run = [...]` selects **experiment
 //! names** only; steps are hard-coded in Rust.
 //!
 //! # `run` values
 //!
 //! | Name | What | Postgres tables |
 //! |------|------|-----------------|
+//! | `all` | Full campaign, selected phase | Dedicated protocol database |
+//! | `medium` | Selected phase after preflight | Dedicated protocol database |
 //! | `just_drop` | Formal XDP PPS grid + Trace | `exam` + `just_drop_*` + `xdp_*` / `trace_event` |
 //! | `just_tx` | Formal XDP pps grid RTT + Trace | `exam` + `just_tx_config`(sent/ok) / `just_tx_data` + perf |
 //! | `firewall` | Hash blacklist size×hit/miss PPS grid + Trace | `exam` + `firewall_*` + perf |
@@ -43,6 +45,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 const EMBEDDED_DEFAULT: &str = include_str!("../../config/default.toml");
+const EMBEDDED_PROFILE: &str = include_str!("../../profile.toml");
 const EMBEDDED_JUST_TX: &str = include_str!("../../config/just_tx.toml");
 const EMBEDDED_JUST_DROP: &str = include_str!("../../config/just_drop.toml");
 const EMBEDDED_FIREWALL: &str = include_str!("../../config/firewall.toml");
@@ -62,13 +65,50 @@ pub fn postgres() -> &'static PostgresConfig {
         .expect("postgres config: call install_postgres after FileConfig::embedded")
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MediumStage {
+    #[default]
+    HalAot,
+    JitRbpf,
+}
+
+impl MediumStage {
+    pub const fn modes(self) -> [&'static str; 2] {
+        match self {
+            Self::HalAot => ["hal", "aot"],
+            Self::JitRbpf => ["jit", "rbpf"],
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HalAot => "hal-aot",
+            Self::JitRbpf => "jit-rbpf",
+        }
+    }
+
+    pub const fn for_mode(mode: &str) -> &'static str {
+        if matches!(mode.as_bytes(), b"hal" | b"aot") {
+            Self::HalAot.as_str()
+        } else {
+            Self::JitRbpf.as_str()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct FileConfig {
     #[serde(default = "default_version")]
     pub version: String,
     /// Ordered experiments for bare `./xpost-test`.
-    #[serde(default = "default_run")]
     pub run: Vec<String>,
+    #[serde(default)]
+    pub medium_resume_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub medium_resume_experiment: Option<String>,
+    #[serde(default)]
+    pub medium_stage: MediumStage,
     pub postgres: PostgresConfig,
     pub probe: ProbeConfig,
     #[serde(rename = "dut")]
@@ -89,10 +129,6 @@ fn default_version() -> String {
     "0".into()
 }
 
-fn default_run() -> Vec<String> {
-    vec!["dev".into()]
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct PostgresConfig {
     pub host: String,
@@ -102,6 +138,8 @@ pub struct PostgresConfig {
     pub password: String,
     #[serde(default = "default_pg_dbname")]
     pub dbname: String,
+    #[serde(default)]
+    pub protocol_dbname: Option<String>,
     #[serde(default = "default_formal_schema")]
     pub formal_schema: String,
 }
@@ -194,24 +232,21 @@ impl Default for FirewallConfig {
     }
 }
 
-/// Knobs for exec_bench formal (`exec_bench.toml`).
+/// EXB2 modes. Legacy `arms` remains a read alias.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExecBenchConfig {
-    #[serde(default = "default_true")]
-    pub formal: bool,
-    #[serde(default = "default_exec_arms")]
-    pub arms: Vec<String>,
+    #[serde(default = "default_exec_modes", alias = "arms")]
+    pub modes: Vec<String>,
 }
 
-fn default_exec_arms() -> Vec<String> {
-    vec!["ebpf".into(), "hal".into()]
+fn default_exec_modes() -> Vec<String> {
+    ["hal", "aot", "jit", "rbpf"].map(str::to_owned).to_vec()
 }
 
 impl Default for ExecBenchConfig {
     fn default() -> Self {
         Self {
-            formal: true,
-            arms: default_exec_arms(),
+            modes: default_exec_modes(),
         }
     }
 }
@@ -219,6 +254,7 @@ impl Default for ExecBenchConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProbeConfig {
     pub iface: String,
+    pub capture_rx_iface: Option<String>,
     #[serde(default)]
     pub src_mac: Option<String>,
 }
@@ -250,14 +286,22 @@ fn default_stim_sport() -> u16 {
 struct DefaultFile {
     #[serde(default = "default_version")]
     version: String,
-    #[serde(default = "default_run")]
-    run: Vec<String>,
     postgres: PostgresConfig,
     probe: ProbeConfig,
     #[serde(rename = "dut")]
     target: TargetConfig,
     #[serde(default)]
     agent: AgentConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileFile {
+    run: Vec<String>,
+    medium_resume_id: Option<uuid::Uuid>,
+    medium_resume_experiment: Option<String>,
+    #[serde(default)]
+    medium_stage: MediumStage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,6 +330,8 @@ struct ExecBenchFile {
 
 impl FileConfig {
     pub fn embedded() -> Result<Self> {
+        let profile: ProfileFile =
+            toml::from_str(EMBEDDED_PROFILE).context("parse profile.toml")?;
         let def: DefaultFile =
             toml::from_str(EMBEDDED_DEFAULT).context("parse config/default.toml")?;
         let just_tx: JustTxFile =
@@ -298,7 +344,10 @@ impl FileConfig {
             toml::from_str(EMBEDDED_EXEC_BENCH).context("parse config/exec_bench.toml")?;
         let cfg = Self {
             version: def.version,
-            run: def.run,
+            run: profile.run,
+            medium_resume_id: profile.medium_resume_id,
+            medium_resume_experiment: profile.medium_resume_experiment,
+            medium_stage: profile.medium_stage,
             postgres: def.postgres,
             probe: def.probe,
             target: def.target,
@@ -314,14 +363,30 @@ impl FileConfig {
 
     fn validate(&self) -> Result<()> {
         if self.run.is_empty() {
-            bail!("default.toml `run` must list at least one experiment");
+            bail!("profile.toml `run` must list at least one experiment");
+        }
+        if self.run.len() != 1
+            && self.run.iter().any(|name| {
+                matches!(
+                    name.as_str(),
+                    "medium"
+                        | "medium-plan"
+                        | "medium-preflight"
+                        | "all"
+                        | "all-plan"
+                        | "all-preflight"
+                )
+            })
+        {
+            bail!("campaign selections require a single-entry run list");
         }
         for name in &self.run {
             match name.as_str() {
-                "just_tx" | "just_drop" | "firewall" | "exec_bench" | "lookup" | "dev"
-                | "formal-clear" | "case" | "hot_swap" => {}
+                "all" | "all-plan" | "all-preflight" | "medium" | "medium-plan"
+                | "medium-preflight" | "just_tx" | "just_drop" | "firewall" | "exec_bench"
+                | "lookup" | "dev" | "formal-clear" => {}
                 other => bail!(
-                    "unknown experiment {other:?} in default.toml `run`; use just_tx / just_drop / firewall / exec_bench / lookup / dev / formal-clear / case / hot_swap"
+                    "unknown experiment {other:?} in profile.toml `run`; use all / all-plan / all-preflight / medium / medium-plan / medium-preflight / just_tx / just_drop / firewall / exec_bench / lookup / dev / formal-clear"
                 ),
             }
         }
@@ -365,4 +430,21 @@ fn parse_mac(s: &str) -> Result<[u8; 6]> {
         out[i] = u8::from_str_radix(p, 16).with_context(|| format!("MAC octet {p:?}"))?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn retired_case_selections_are_rejected_before_dispatch() {
+        for selection in ["hot_swap", "case-smoke"] {
+            let mut cfg = super::FileConfig::embedded().unwrap();
+            cfg.run = vec![selection.into()];
+            assert!(
+                cfg.validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unknown experiment")
+            );
+        }
+    }
 }

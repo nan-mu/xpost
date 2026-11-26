@@ -1,12 +1,7 @@
 #![no_std]
+#![cfg(feature = "diag")]
 
-//! Native HAL twin of `exec_bench` (no `xpost` runtime).
-//!
-//! Re-export [`hal_perf`] for the always-on CAGT report and App serial map wire.
-//! Workload bytes are interpreted here, not in `xpost-serial`.
-
-pub use hal_perf as cag;
-pub use hal_perf::wire;
+//! Workload kernels for the HAL diagnostic sweep.
 
 const HEADER: usize = 8;
 const OP_INCR: u32 = 0;

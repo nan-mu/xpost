@@ -36,28 +36,30 @@ The root Cargo workspace contains the root package, `esp-radio`, `xpost-macros`,
 
 `examples/exec_bench` runs an XDP image through `exec_call` and does not start Wi-Fi. A build without `interp` executes the RV32IMC machine code in the XDP ELF. A build with `--features interp` executes the eBPF object through `rbpf`. `diag` is a Cargo feature. It turns on the scale sweep in the exec_bench figure under Experiments.
 
-`exec_bench` reserves a 12 KiB SRAM slot for the image payload. Its cold storage accepts a complete XDP ELF of up to 16 KiB. The encoder uses the same complete file limit. The firmware manifest declares the slot and cold storage capacities.
+`exec_bench` reserves a 12 KiB SRAM slot for the image payload. Its cold storage accepts a complete XDP ELF of up to 16 KiB. The host encoder allocates the calculated container length. The firmware manifest declares the slot and cold storage capacities.
 
 ## Build firmware
 
 Build from the example directory. A network example also needs `WIFI_SSID` and `WIFI_PASS` in that directory's `.env`. `WIFI_PASSWORD` is an alias for `WIFI_PASS`.
 
 ```bash
-cargo build --release --features perf-cag
+cargo build --release --features perf-metrics
 ```
 
-The command above is for `examples/just_xdp`. `perf-cag` enables the counter, the aggregate, and the gauge. `perf-t` enables the counter and trace. There is no default feature. Build `xpost-test` in `xpost-test/` and run that binary. It reads `run` from `xpost-test/config/default.toml` and calls the agent to flash.
+The command above is for `examples/just_xdp`. `perf-metrics` enables the counter, the aggregate, and the gauge. `perf-trace` enables the counter and trace. There is no default feature. Build `xpost-test` in `xpost-test/` and run that binary. It reads `run` from `xpost-test/config/default.toml` and calls the agent to flash.
 
 The HAL network examples are `examples/just_tx_hal`, `examples/just_drop_hal`, and `examples/firewall_hal`.
 
 ## Host agent
 
-`xpost-agent` owns the USB serial port. It serves HTTP `/health`, `/v1/*`, and MCP `/mcp` on one port. Startup only opens the USB session. `xpost-test` later asks the agent, over HTTP, to flash a firmware ELF or an XDP ELF.
+`xpost-agent` owns the USB connection and serves HTTP `/health` and `/v1/*`. Run the service in the foreground. Use its CLI to send device commands. TR3000 continues to use HTTP directly. See [Agent operation](xpost-agent/README.md).
+
+The Agent resolves XDP ELFs from the pinned producer release. See [Deployment design](docs/deployment-design.md).
 
 Run the command from `xpost-agent/`.
 
 ```bash
-cargo run --release -- --bind 127.0.0.1:9240
+cargo run --release --locked -- serve
 ```
 
 ## Layout
@@ -72,7 +74,7 @@ xpost-macros/    map derives and flash_layout!
 xpost-perf/      shared sweep sizes and the versioned perf report
 examples/        board firmware, one Cargo workspace each
 xpost-serial/    serial protocol library
-xpost-agent/     host daemon
+xpost-agent/     foreground HTTP service and CLI
 xpost-build/     xpost-link and the XDP ELF packer
 xpost-test/      host experiment runner
 ```
@@ -127,12 +129,6 @@ HAL is `examples/exec_bench_hal`. AOT is `examples/exec_bench` running the RV32I
 
 ![exec_bench on HAL, AOT, and the interpreter](docs/figures/exec-bench-sweeps.png)
 
-### case and hot_swap
+### case
 
-`case` loads two images into `examples/case_xdp`, one at a time. For the active image the host sends four UDP packets, `CASE0` through `CASE3`, and checks the board's transmit on a packet capture. `case_swap` is correct when the Ethernet addresses are exchanged, the IPv4 destination is `203.0.113.10`, and the payload is unchanged. `case_mark` is correct when the Ethernet addresses are exchanged, the IPv4 destination is `203.0.113.77`, and the payload is unchanged. `hot_swap` then switches between the two images. The image being left stays staged, so the switch does not copy it again.
-
-Each point on the figure is one stage. Its value is the number of milliseconds from the first command until the agent's reply for that stage. Cold replace stops the old image, overwrites the slot, and enables the new one. Hot switch only publishes an image that is already staged. The dashed segment crosses the stop and overwrite stages, which the hot path does not run.
-
-`xpost-test/common/src/exam/case.rs` and `xpost-test/common/src/exam/hot_swap.rs` drive the host.
-
-![cold replace and hot switch](docs/figures/update-latency.png)
+`case` checks both v0.1.1 policies in their SRAM slots. It restores A as active and B as staged before the timed window. The runner publishes B once and keeps the tcpdump capture and DUT Trace under the same run ID. See the [medium procedure](xpost-test/procedures/medium.md) for the packet and timing criteria.

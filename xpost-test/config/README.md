@@ -9,6 +9,10 @@ Embedded by `common` at build time (`include_str!`). Edit → `cargo build --rel
 | `just_drop.toml` | same |
 | `firewall.toml` | `formal`, `arms`, `sizes`, `traffic` |
 
-Allowed `run` values: `just_tx` | `just_drop` | `firewall` | `dev` | `formal-clear`.
+The default `run = ["medium"]` checks medium readiness. Use it alone.
+See the [medium procedure](../procedures/medium.md).
+
+Explicit experiment selections are `just_tx`, `just_drop`, `firewall`, `exec_bench`, `case`, `medium-plan`, and `medium-preflight`.
+Use `dev` or `lookup` for diagnostics. Use `formal-clear` only for an explicit database clear.
 
 SQL DDL: `../sql/{formal,just_drop,just_tx,firewall}.sql` (+ optional `dev.sql`, unwired).

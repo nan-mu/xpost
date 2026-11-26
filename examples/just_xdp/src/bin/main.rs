@@ -25,7 +25,7 @@ use static_cell::StaticCell;
 use xpost::app_ctrl::{self, AppMapError, AppXdpError};
 use xpost::map::{HEAP_SIZE, MapRt};
 use xpost::xdp::{ReportItem, Slot, XdpRt};
-#[allow(unused_imports)] // PerfError only when neither perf-cag nor perf-t
+#[allow(unused_imports)] // PerfError only when neither perf-metrics nor perf-trace
 use xpost_serial::reply::{MapError, OkReply, PerfError, ServerError};
 use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
 
@@ -34,6 +34,29 @@ fn panic(panic_info: &core::panic::PanicInfo) -> ! {
     error!("{}", panic_info);
     loop {}
 }
+
+#[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
+use xpost::ext::perf::network;
+#[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
+use xpost_network_perf as session;
+
+#[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
+static NETWORK_PERF: session::NetworkPerf<
+    {
+        if cfg!(feature = "perf-trace") {
+            session::TRACE_CAPACITY
+        } else {
+            0
+        }
+    },
+    {
+        if cfg!(feature = "perf-metrics") {
+            session::METRICS_BYTES
+        } else {
+            0
+        }
+    },
+> = session::NetworkPerf::new(network::XDP_POINTS);
 
 extern crate alloc;
 
@@ -64,12 +87,16 @@ static UDP_TX_META: StaticCell<[PacketMetadata; 4]> = StaticCell::new();
 static UDP_RX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 static UDP_TX_BUF: StaticCell<[u8; 1536]> = StaticCell::new();
 
+#[path = "../../../medium-wifi.rs"]
+mod medium_wifi;
+
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
+    medium_wifi::retain_marker();
     // Quiet USB: info/trace during XDP_TX stress contends with the agent session
     // and shows up as host send gaps (formal: 80–145 ms) that poison loss medians.
     esp_println::logger::init_logger(log::LevelFilter::Error);
@@ -77,6 +104,14 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     let flash = peripherals.FLASH;
+    #[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
+    {
+        xpost::xdp::set_boot_id(NETWORK_PERF.init());
+        network::install(
+            |frame| NETWORK_PERF.driver_rx(frame, 0),
+            |tag, point, detail| NETWORK_PERF.driver_event(tag, point, detail),
+        );
+    }
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
     // Wi-Fi dynamic RX/TX buffers come from this heap; must match examples/just_tx_hal.
@@ -269,7 +304,7 @@ serial_task! {
         rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
     ) {
         let mut rx = rx;
-        SerialHandler::builder(
+        let builder = SerialHandler::builder(
             move || match rx.read_byte() {
                 Ok(b) => Some(b),
                 Err(_) => None,
@@ -313,30 +348,32 @@ serial_task! {
             },
         )
         .on_clear_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(any(feature = "perf-cag", feature = "perf-t"))]
+            #[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
             {
                 xpost::ext::perf::clear_perf();
                 reply.ok(OkReply::ClearPerf);
             }
-            #[cfg(not(any(feature = "perf-cag", feature = "perf-t")))]
+            #[cfg(not(any(feature = "perf-metrics", feature = "perf-trace")))]
             {
                 reply.error(&PerfError::Unavailable);
             }
         })
         .on_get_perf(|reply: ReplyWriter<'_>| {
-            #[cfg(any(feature = "perf-cag", feature = "perf-t"))]
+            #[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
             {
                 let n = xpost::ext::perf::report_payload_len();
                 reply.get_perf(n, |write| {
                     xpost::ext::perf::report_perf(write);
                 });
             }
-            #[cfg(not(any(feature = "perf-cag", feature = "perf-t")))]
+            #[cfg(not(any(feature = "perf-metrics", feature = "perf-trace")))]
             {
                 reply.error(&PerfError::Unavailable);
             }
-        })
-        .build()
+        });
+        #[cfg(any(feature = "perf-metrics", feature = "perf-trace"))]
+        let builder = session::register!(builder, NETWORK_PERF);
+        builder.build()
     }
 }
 

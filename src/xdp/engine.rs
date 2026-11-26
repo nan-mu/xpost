@@ -53,7 +53,7 @@ pub(crate) fn image_len(engine: Engine) -> usize {
 
 /// Enter the leased image for one flight.
 ///
-/// Returns the program's `r0` as an `xdp_action`. The caller in
+/// Return the program's `r0` or a native entry fault. The caller in
 /// [`super::ingress`] validates the resulting packet window; this function only
 /// runs the program.
 ///
@@ -65,10 +65,10 @@ pub(crate) fn image_len(engine: Engine) -> usize {
 ///   caller's frame.
 /// - The caller must own `IN_FLIGHT` for the whole call.
 #[inline(always)]
-pub(crate) unsafe fn flight(engine: Engine, base: usize, ctx: *mut XdpMd) -> i32 {
+pub(crate) unsafe fn flight(engine: Engine, base: usize, ctx: *mut XdpMd) -> Option<i32> {
     match engine {
         Engine::Aot => unsafe { super::ingress::inner_xdp(base, ctx) },
         #[cfg(feature = "interp")]
-        Engine::Interp { len } => unsafe { super::interp::run(base, len, ctx) },
+        Engine::Interp { len } => Some(unsafe { super::interp::run(base, len, ctx) }),
     }
 }

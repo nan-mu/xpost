@@ -1,22 +1,20 @@
-//! Long-running HTTP/MCP daemon front-end for [`xpost_serial`].
+//! Long-running foreground HTTP service front-end for [`xpost_serial`].
 //!
-//! # HTTP / MCP control-plane contract (frozen)
+//! # HTTP control-plane contract
 //!
-//! **Frozen source:** `~/.cursor/plans/agent_map_xdp_ops_f4bae6b6.plan.md`
-//! (section from intro through **MCP / CLI**; marked `FROZEN ABOVE`).
-//! That plan is the API shape; this rustdoc restates it for implementors.
-//! App wire verbs are [`xpost_serial::command::Command`] /
-//! [`xpost_serial::reply::OkReply`] (current crate — plan’s older multiline
-//! `get map` text is superseded by header+blob; HTTP JSON below is unchanged).
+//! The route implementations in `http.rs` define the current API.
+//! This module documents their shared operations and JSON envelopes.
+//! App wire verbs are [`xpost_serial::command::Command`] and
+//! [`xpost_serial::reply::OkReply`].
 //!
-//! Run (daemon, cwd = `xpost-agent/`):
+//! Run from `xpost-agent/`:
 //! ```text
-//! cargo run --release -- --bind 0.0.0.0:9240
-//! cargo run --release -- --bind 0.0.0.0:9240 --log-dir target/xpost-agent
+//! cargo run --release --locked -- serve --bind 0.0.0.0:9240
+//! cargo run --release --locked -- serve --bind 0.0.0.0:9240 --log-dir target/xpost-agent
 //! ```
-//! Same port: `/health` + `/v1/*` + Streamable HTTP `/mcp`. No auth/TLS.
+//! The service exposes `/health` and `/v1/*` without authentication.
 //! Long ops ~1200s. USB under `spawn_blocking` + `Mutex` on
-//! [`xpost_serial::SerialHandler`]. Startup only opens the shared USB session;
+//! [`xpost_serial::SerialHandler`]. Startup verifies the board with espflash Board Info.
 //! App/flash work runs on request.
 //! Agent is **USB-only**; stim/probe is **not** an agent API (`xpost-test` sends).
 //!
@@ -27,24 +25,33 @@
 //! ## Envelope
 //!
 //! Default: `{ "ok": bool, "message": string }`. Business/DUT failure → HTTP 200
-//! + `ok:false`. Map decode failure → **502**. MCP tools = same ops, no probe.
+//! + `ok:false`. Map decode failure → **502**.
+//! Successful firmware flash and cold XDP installation also return `flash`.
+//! `flash` has `firmware_profile`, `firmware_sha256`, and `containers`.
+//! Each container has `program`, `mode`, `profile`, and `container_sha256`.
+//! SHA-256 values use lowercase hex. A HAL flash returns an empty container list.
+//! Hot slot copies keep their existing reply.
+//! `GET /v1/preflight/medium` returns the release inventory and target readiness.
+//! `GET /v1/preflight/xdp/{name}` returns the prepared container SHA-256.
+//! Both preflight paths perform host checks only.
 //!
 //! ## Route table (frozen)
 //!
 //! | Method | Path | Body | Behavior |
 //! |--------|------|------|----------|
 //! | GET | `/health` | — | liveness |
-//! | GET | `/v1/status` | — | `idle` |
+//! | GET | `/v1/status` | — | `idle`, `busy`, or `stopping` |
 //! | GET | `/v1/dut_status` | — | UART `ready` / `booting` (uses `ping`) |
 //! | GET | `/v1/get/init` | — | host wait for unsolicited `OK init` |
-//! | POST | `/v1/flash/fw` | `{"name"}` | build+flash firmware, then co-flash `fw.xdp[]` |
-//! | POST | `/v1/flash/xdp` | `{"name","slot"?}` | no slot: write the cold table and reset. `slot`: copy that installed image into the slot, no reset |
+//! | POST | `/v1/flash/fw` | `{"name","expected_sha256"?}` | Build and verify firmware and linked containers. Flash the retained bytes. |
+//! | POST | `/v1/flash/xdp` | `{"name","slot"?,"firmware"?,"expected_sha256"?}` | Check identity and install. Provide both firmware fields to replace the only cold image. Provide a slot to preload. |
 //! | POST | `/v1/clear/xdp` | `{"name": "*"\|"prog"\|["a","b"]}` | remove image(s); `*`=all; missing name → err |
 //! | GET | `/v1/get/xdp` | — | list installed XDP images |
 //! | POST | `/v1/enable/xdp` | `{}` | App `EnableXdp` |
 //! | POST | `/v1/disable/xdp` | `{}` | App `DisableXdp` |
 //! | POST | `/v1/xdp/switch` | `{"slot","generation","policy"}` | App `xdp switch`; policy `drop` or `pass` |
 //! | GET | `/v1/xdp/status` | — | App `get xdp` boot id and slot roles |
+//! | POST | `/v1/exec/batch` | `{"input_hex"}` | Upload, invoke, and read one 8258 B EXB2 buffer. |
 //! | POST | `/v1/enable/exec` | `{}` | App `EnableExec` |
 //! | POST | `/v1/disable/exec` | `{}` | App `DisableExec` |
 //! | POST | `/v1/get/finish` | `{}` | host-only wait for `OK finish` |
@@ -53,9 +60,13 @@
 //! | POST | `/v1/update/map/{map_name}` | see below | App `UpdateMap` (single or batch) |
 //! | POST | `/v1/clear/perf` | `{}` | App `ClearPerf` |
 //! | GET | `/v1/get/perf` | — | App `GetPerf` → b64 in `message` (or rich JSON) |
+//! | POST | `/v1/perf/prepare` | `{"uuid","variant","profile"}` | App `perf prepare` |
+//! | POST | `/v1/perf/arm` | `{"epoch"}` | App `perf arm` |
+//! | POST | `/v1/perf/freeze` | `{"epoch"}` | App `perf freeze` |
+//! | POST | `/v1/perf/read` | `{"epoch","offset","max_bytes"}` | App `perf read` |
+//! | POST | `/v1/perf/release` | `{"epoch"}` | App `perf release` |
 //! | POST | `/v1/get/serial` | `{"since_unix_ms","until_unix_ms"}` | transcript time window |
 //! | POST | `/v1/run` | `{"cmd"}` | one App line, first `OK`/`ERR` only — **not** for get map/perf |
-//! | — | `/mcp` | — | tools with the same semantics |
 //!
 //! Non-App (espflash / cold table only — no UART App line): `flash/fw`,
 //! `flash/xdp`, `clear/xdp`, `get/xdp`.
@@ -102,12 +113,6 @@
 //! `message` like `OK get perf <n> b64=…`, or equivalent structured fields
 //! with the same payload). Clients decode with the existing report layout.
 //!
-//! ## MCP / CLI names (frozen)
-//!
-//! `flash_fw`, `flash_xdp`, `clear_xdp`, `get_xdp`, `enable_xdp`,
-//! `disable_xdp`, `enable_exec`, `disable_exec`, `get_finish`, `clear_map`,
-//! `get_map`, `update_map`, `clear_perf`, `get_perf`, `get_serial`, `run`,
-//! `get_status` / `dut_status`. **No probe.**
 //!
 //! ## Serial mapping (current `xpost-serial`)
 //!
@@ -121,10 +126,12 @@
 //! | `get/map/{name}` | `Command::GetMap { name }` |
 //! | `update/map/{name}` | `Command::UpdateMap { name, key, value }` |
 //! | `clear/perf` / `get/perf` | `Command::ClearPerf` / `GetPerf` |
+//! | `perf/prepare` | `Command::PerfPrepare` |
+//! | `perf/arm` / `perf/freeze` / `perf/release` | `Command::PerfArm` / `PerfFreeze` / `PerfRelease` |
+//! | `perf/read` | `Command::PerfRead` |
 //! | `run` | parse line → `Command` (debug only) |
 //!
-//! Flat ERR domains (`ServerError` / `MapError` / `PerfError` / `SyntaxError`)
-//! surface in `message` / MCP errors.
+//! Error details appear in `message`.
 //!
 //! ## Client notes (`xpost-test`)
 //!
@@ -134,48 +141,126 @@
 //!   map/perf framing.
 //! - Map seeding via agent serial `update/map`, not UDP MapCrud.
 
+mod client;
+mod config;
+mod deployment;
+mod device_lock;
+#[cfg(feature = "test-device")]
+mod fixture;
 mod http;
-mod mcp;
 mod ops;
+mod preflight;
 mod profiles;
+mod release;
 mod state;
 mod util;
 
-use std::path::PathBuf;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
-use anyhow::Result;
-use clap::Parser;
+use anyhow::{Result, ensure};
+use clap::{Parser, Subcommand};
 
-/// Default rotating serial transcript directory (passed to xpost-serial).
-const DEFAULT_LOG_DIR: &str = "target/xpost-agent";
+use crate::config::{Location, ServeArgs};
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(
-    name = "xpost-agent",
-    about = "Long-running HTTP/MCP daemon over xpost-serial (USB)"
+    version,
+    about = "Serve USB device operations or send typed HTTP commands"
 )]
 struct Cli {
-    /// Bind address for `/health`, `/v1/*`, and `/mcp`.
-    #[arg(long)]
-    bind: String,
+    /// Select an explicit HTTP origin for a remote operation.
+    #[arg(long, global = true)]
+    endpoint: Option<String>,
+    #[command(subcommand)]
+    command: Command,
+}
 
-    /// Directory for rotating `serial.log` (xpost-serial transcript).
-    #[arg(long, default_value = DEFAULT_LOG_DIR)]
-    log_dir: PathBuf,
+#[derive(Subcommand)]
+enum Command {
+    /// Run the HTTP service in the foreground.
+    Serve(ServeArgs),
+    /// Check release deployments without USB. Use --remote to query HTTP.
+    Preflight {
+        /// Prepare one named profile against its existing Firmware ELF.
+        #[arg(long, conflicts_with = "inventory")]
+        xdp: Option<String>,
+        /// Check the release archive inventory without target firmware.
+        #[arg(long, conflicts_with = "remote")]
+        inventory: bool,
+        /// Check only the selected medium phase.
+        #[arg(long, value_enum, conflicts_with_all = ["inventory","xdp"])]
+        stage: Option<preflight::Scope>,
+        /// Query the service's host-only preflight route.
+        #[arg(long)]
+        remote: bool,
+    },
+    #[command(flatten)]
+    Device(client::DeviceCommand),
 }
 
 fn main() -> ExitCode {
-    match run() {
+    match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("xpost-agent: {e:#}");
+        Err(error) => {
+            eprintln!("xpost-agent: {error:#}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
-    http::serve_http(&cli.bind, &cli.log_dir)
+fn run(cli: Cli) -> Result<()> {
+    match cli.command {
+        Command::Device(command) => client::run(command, cli.endpoint.as_deref()),
+        Command::Serve(args) => {
+            ensure!(cli.endpoint.is_none(), "serve uses --bind");
+            http::serve_http(&args.bind, &args.log_dir, Location::resolve()?)
+        }
+        Command::Preflight {
+            xdp,
+            stage,
+            remote: true,
+            ..
+        } => client::preflight(xdp, stage, cli.endpoint.as_deref()),
+        Command::Preflight {
+            xdp,
+            stage,
+            inventory,
+            ..
+        } => {
+            ensure!(
+                cli.endpoint.is_none(),
+                "use preflight --remote with --endpoint"
+            );
+            let root = Location::resolve()?.root()?;
+            if inventory {
+                let report = preflight::inventory(&root);
+                print_json(&report)?;
+                ensure!(report.deployment_ready(), "release inventory failed");
+                return Ok(());
+            }
+            let profiles = state::load_profiles(&root)?;
+            if let Some(name) = xdp {
+                return print_json(&preflight::profile(&root, &profiles, &name)?);
+            }
+            let report = preflight::medium_scope(&root, &profiles, stage.unwrap_or_default());
+            print_json(&report)?;
+            ensure!(
+                report.deployment_ready(),
+                "medium deployment preflight failed: {}/{} verified release deployments, {} target layouts, {} issues",
+                report.deployments.len(),
+                report.required,
+                report.prepared.len(),
+                report.issues.len()
+            );
+            Ok(())
+        }
+    }
+}
+
+fn print_json(value: &impl serde::Serialize) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer(&mut stdout, value)?;
+    writeln!(stdout)?;
+    Ok(())
 }

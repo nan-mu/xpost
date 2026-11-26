@@ -2,6 +2,7 @@
 //! [`crate::r#type::command::Command`].
 
 use std::fmt;
+use std::sync::Arc;
 
 /// Lifecycle markers written to the transcript around a flash op.
 pub enum FlashEvent {
@@ -10,19 +11,32 @@ pub enum FlashEvent {
     Failed { op: FlashOp, msg: String },
 }
 
+#[derive(Clone)]
+pub struct FirmwareExpectation {
+    pub elf: Vec<u8>,
+    pub sha256: [u8; 32],
+    pub partition_table: Vec<u8>,
+}
+
 /// Flash worker inbox / lifecycle payload.
+#[derive(Clone)]
 pub enum FlashOp {
     Fw {
-        firmware: String,
-        partitions: String,
+        snapshot: FirmwareExpectation,
     },
     Xdp {
         name: String,
-        path: String,
+        bytes: Arc<[u8]>,
+        expectation: FirmwareExpectation,
+        replace_single: bool,
     },
     Clear {
         /// Empty = clear all (`*`).
         names: Vec<String>,
+    },
+    /// Read the installed firmware identity and one cold image without writing flash.
+    Attest {
+        expectation: FirmwareExpectation,
     },
     /// Read the XDP table through an exclusive download-mode session.
     List,
@@ -41,28 +55,7 @@ impl FlashOp {
             Self::Clear { names } if names.is_empty() => "clear xdp *".into(),
             Self::Clear { names } => format!("clear xdp {}", names.join(",")),
             Self::List => "get xdp".into(),
-        }
-    }
-}
-
-impl Clone for FlashOp {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Fw {
-                firmware,
-                partitions,
-            } => Self::Fw {
-                firmware: firmware.clone(),
-                partitions: partitions.clone(),
-            },
-            Self::Xdp { name, path } => Self::Xdp {
-                name: name.clone(),
-                path: path.clone(),
-            },
-            Self::Clear { names } => Self::Clear {
-                names: names.clone(),
-            },
-            Self::List => Self::List,
+            Self::Attest { .. } => "attest deployment".into(),
         }
     }
 }

@@ -20,7 +20,7 @@ pub use error::{Interrupted, ParseError, RequestError, RequestTimeout, Result};
 pub use flash::{
     DEFAULT_XDP_PARTITION, FlashConfig, FlashResult, InstallOutcome, XdpEntry, XdpTable,
 };
-pub use ops::{Chip, FlashOp};
+pub use ops::{Chip, FirmwareExpectation, FlashOp};
 pub use port::Port;
 #[cfg(all(test, feature = "dev"))]
 pub use port::{MemoryClient, MemoryPair, MemoryServer};
@@ -110,6 +110,16 @@ impl SerialHandler {
         self.record.lock().all_lines()
     }
 
+    /// Read espflash Board Info once and restore App mode.
+    pub fn board_info(&self) -> io::Result<espflash::flasher::DeviceInfo> {
+        let mut download = self.port().open_download()?;
+        let info = download.board_info();
+        let reset = download.reset_to_app();
+        let info = info?;
+        reset?;
+        Ok(info)
+    }
+
     /// Stop the flash worker (if any) and release this handler.
     pub fn shutdown(self) {
         if let Some(flash) = self.flash {
@@ -128,7 +138,10 @@ impl SerialHandler {
     /// Like [`Self::request`], plus the time the reader thread read the reply
     /// line. That is the instant the host received the MCU reply, not the later
     /// moment the caller formats it.
-    pub fn request_at<'a, E>(&'a self, cmd: &Command<'_>) -> core::result::Result<(OkReply<'a>, SystemTime), E>
+    pub fn request_at<'a, E>(
+        &'a self,
+        cmd: &Command<'_>,
+    ) -> core::result::Result<(OkReply<'a>, SystemTime), E>
     where
         E: RequestError,
     {
@@ -138,19 +151,19 @@ impl SerialHandler {
 
     /// Run a download-mode [`FlashOp`] (not an App-mode wire reply).
     pub fn flash(&self, op: FlashOp) -> io::Result<FlashResult> {
-        self.flash_with_image_capacity(op, None)
+        self.flash_with_table(op, None)
     }
 
-    /// Run a flash operation with an optional XDP ELF size limit for this request.
-    pub fn flash_with_image_capacity(
+    /// Run a flash operation with a retained target `xdp` span and size limit.
+    pub fn flash_with_table(
         &self,
         op: FlashOp,
-        image_capacity: Option<usize>,
+        target: Option<flash::XdpTable>,
     ) -> io::Result<FlashResult> {
         self.flash
             .as_ref()
             .ok_or_else(|| io::Error::other("flash worker not available on this link"))?
-            .call(op, image_capacity)
+            .call(op, target)
     }
 
     pub fn lines_in_range(&self, since: SystemTime, until: SystemTime) -> io::Result<Vec<String>> {

@@ -1,23 +1,14 @@
 # Compile-time xpost-test defaults (embedded via include_str!).
 # TR3000 path: rebuild, scp binary, then always:
 #   ./xpost-test
-# No env vars, no CLI flags. Edit `run` to choose which experiments run.
+# Select the experiment in ../profile.toml.
 #
-# Mac side: cd xpost-agent && cargo run --release -- --bind 0.0.0.0:9240
-# Agent HTTP: /health, /v1/* (harness), /mcp (Cursor MCP). endpoint = host:port (http:// inferred).
+# On the Mac, run cargo run --release --locked -- serve --bind 0.0.0.0:9240 from xpost-agent/.
+# The runner connects via HTTP. Set endpoint to host:port or a URL.
 #
-# Experiment knobs: just_tx.toml / just_drop.toml only (formal).
-# Debug: run = ["dev"] — HAL smoke for just_tx/just_drop/firewall (no XDP, no DB).
-# Wipe: run = ["formal-clear"] → TRUNCATE exam CASCADE.
+# Medium status and release audit: see procedures/medium.md.
 
 version = "1"
-
-# Ordered experiments for bare `./xpost-test`.
-# HAL smoke: `dev`. Formal: just_tx / just_drop / firewall / exec_bench. Wipe: formal-clear.
-# `case` flashes examples/case_xdp once, then reflashes case_swap and case_mark.
-# `hot_swap` uses that same firmware. Both images stay installed, and activate publishes the idle slot.
-# Capture is tcpdump stdout stored in formal.case_obs. No pcap file.
-run = ["just_tx", "just_drop", "firewall", "exec_bench", "case", "hot_swap"]
 
 [postgres]
 host = "192.168.110.96"
@@ -26,12 +17,16 @@ user = "nan"
 password = "22332233"
 dbname = "postgres"
 formal_schema = "formal"
+# Medium uses a separate database initialized with sql/protocol_v1.sql.
+protocol_dbname = "xpost_medium"
 
 [agent]
 endpoint = "192.168.110.96:9240"
 
 [probe]
 iface = "br-lan"
+# Disable rx-gro-list on this bridge member during Just TX capture.
+capture_rx_iface = "phy0-ap0"
 # Optional Ethernet source MAC override (default: iface hardware address)
 # src_mac = "00:11:22:33:44:55"
 

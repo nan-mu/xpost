@@ -67,6 +67,20 @@ pub struct SwitchReport {
     /// `esp_hal` microseconds since boot, taken after the new entry is visible
     /// and before new flights are admitted. Zero when this reply did not publish.
     pub mcu_us: u32,
+    #[cfg(feature = "perf-trace")]
+    pub timing: Option<SwitchTiming>,
+}
+
+/// DUT microsecond timestamps for one successful publish.
+#[cfg(feature = "perf-trace")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SwitchTiming {
+    pub quiesce_begin: u64,
+    pub quiesce_end: u64,
+    pub rebind_begin: u64,
+    pub rebind_end: u64,
+    pub publish_begin: u64,
+    pub before_admission: u64,
 }
 
 /// Admission plus slot summary. Slot `None` means that role is empty.
@@ -84,24 +98,20 @@ pub struct XdpStatus {
 }
 
 impl XdpRt {
-/// Copy `id` into `slot`.
-///
-/// The slot is filled and left `Staged`. This does not change `PRIMARY_ENTRY`,
-/// `ACTIVE`, or map aliases, and the returned `mcu_us` is 0 because nothing is
-/// published. A dropped lease can fill every slot, including the primary
-/// index. A slot that is `Active` is refused: replacing a running image means
-/// `disable`, copy, `enable`.
-pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapError> {
+    /// Copy `id` into `slot`.
+    ///
+    /// The slot is filled and left `Staged`. This does not change `PRIMARY_ENTRY`,
+    /// `ACTIVE`, or map aliases, and the returned `mcu_us` is 0 because nothing is
+    /// published. A dropped lease can fill every slot, including the primary
+    /// index. A slot that is `Active` is refused: replacing a running image means
+    /// `disable`, copy, `enable`.
+    pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapError> {
         if self.severe {
             return Err(self.fail(XdpSwapError::RollbackFailed));
         }
         self.preflight(id, slot, true)?;
         let (aot_abs, image_len, digest, dst, capacity) = {
-            let meta = &self
-                .images
-                .get(id)
-                .ok_or(XdpSwapError::UnknownImage)?
-                .meta;
+            let meta = &self.images.get(id).ok_or(XdpSwapError::UnknownImage)?.meta;
             let slot_state = self.slots.get(slot).ok_or(XdpSwapError::UnknownSlot)?;
             (
                 meta.aot_abs(),
@@ -111,6 +121,19 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
                 slot_state.slot.len(),
             )
         };
+        // The interpreter needs each map's linked address. Collected before the
+        // read because the borrow of `self.images` ends here; the addresses are
+        // small integers, so a fixed array holds them without an allocation.
+        #[cfg(feature = "interp")]
+        let mut binds: heapless::Vec<usize, { crate::xdp::state::MAX_REQUIRED_MAPS }> =
+            heapless::Vec::new();
+        #[cfg(feature = "interp")]
+        {
+            let meta = &self.images.get(id).ok_or(XdpSwapError::UnknownImage)?.meta;
+            for (_, addr) in meta.aot_binds.iter() {
+                let _ = binds.push(*addr);
+            }
+        }
         if image_len > capacity {
             return Err(self.fail(XdpSwapError::ImageTooLarge));
         }
@@ -120,19 +143,13 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
         if let Err(e) = self.table.read(aot_abs, buf) {
             return Err(self.fail(e.into()));
         }
-        // Verify before publishing: the interpreter executes these bytes and
-        // skips its own per-run scan, so the checks have to happen here.
-        #[cfg(feature = "interp")]
-        {
-            if !crate::xdp::interp::verify(buf) {
-                return Err(self.fail(XdpSwapError::Arch));
-            }
-            if crate::xdp::interp::rejects_ctx_writes(buf) {
-                return Err(self.fail(XdpSwapError::Arch));
-            }
-        }
+        // Check the stored image before the interpreter rewrites its map references.
         if xpost_elf::sha256(buf) != digest {
             return Err(self.fail(XdpSwapError::Digest));
+        }
+        #[cfg(feature = "interp")]
+        if !crate::xdp::interp::prepare_slot(buf, binds.as_slice()) {
+            return Err(self.fail(XdpSwapError::Arch));
         }
         let generation = self.alloc_generation();
         let buf = &self.copy_buffer[..image_len];
@@ -141,14 +158,23 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
             core::ptr::write_bytes(dst.add(image_len), 0, capacity - image_len);
         }
         Self::fence_instruction_cache();
+        // Read back what actually landed in the slot and run the interpreter's
+        // checks against those bytes, not against the scratch copy: a failed
+        // copy must be caught here rather than at run time.
         let copied = unsafe { core::slice::from_raw_parts(dst, image_len) };
         if copied != buf {
             return Err(self.fail(XdpSwapError::Digest));
         }
-        let slot_state = self
-            .slots
-            .get_mut(slot)
-            .ok_or(XdpSwapError::UnknownSlot)?;
+        #[cfg(feature = "interp")]
+        {
+            if !crate::xdp::interp::verify(copied) {
+                return Err(self.fail(XdpSwapError::Arch));
+            }
+            if crate::xdp::interp::rejects_ctx_writes(copied) {
+                return Err(self.fail(XdpSwapError::Arch));
+            }
+        }
+        let slot_state = self.slots.get_mut(slot).ok_or(XdpSwapError::UnknownSlot)?;
         slot_state.loaded_len = image_len;
         slot_state.image = Some(id);
         slot_state.phase = SlotPhase::Staged { generation };
@@ -158,7 +184,10 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
             image.meta.set_location(XdpLocation::Slot { index: slot });
         }
         self.last_error = 0;
-        Ok(StageReport { generation, mcu_us: 0 })
+        Ok(StageReport {
+            generation,
+            mcu_us: 0,
+        })
     }
 
     /// Quiesce, publish `slot`'s staged image, or restore the previous entry.
@@ -174,11 +203,7 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
         if self.severe {
             return Err(self.fail(XdpSwapError::RollbackFailed));
         }
-        let phase = self
-            .slots
-            .get(slot)
-            .ok_or(XdpSwapError::UnknownSlot)?
-            .phase;
+        let phase = self.slots.get(slot).ok_or(XdpSwapError::UnknownSlot)?.phase;
         match phase {
             SlotPhase::Staged { generation: staged } if staged == generation => {}
             SlotPhase::Staged { .. } => return Err(self.fail(XdpSwapError::BadGeneration)),
@@ -323,10 +348,14 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
         let pass_before = QUIESCE_PASSES.load(Ordering::Relaxed);
         self.updating = true;
         QUIESCE_PASS.store(matches!(policy, QuiescePolicy::Pass), Ordering::SeqCst);
+        #[cfg(feature = "perf-trace")]
+        let quiesce_begin = now_us();
         PAUSE.store(true, Ordering::SeqCst);
         while IN_FLIGHT.load(Ordering::SeqCst) != 0 {
             core::hint::spin_loop();
         }
+        #[cfg(feature = "perf-trace")]
+        let quiesce_end = now_us();
         let Some(lock) = crate::map::MAP_RT.try_get() else {
             self.leave_quiesce();
             return Err(self.fail(XdpSwapError::MapsRequired));
@@ -338,6 +367,8 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
                 return Err(self.fail(XdpSwapError::Busy));
             }
         };
+        #[cfg(feature = "perf-trace")]
+        let rebind_begin = now_us();
         if let Err(e) = self.publish_binds(&mut maps, &pairs) {
             return match self.restore_binds(&maps, old_binds.as_slice()) {
                 Ok(()) => {
@@ -363,7 +394,11 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
                 }
             };
         }
+        #[cfg(feature = "perf-trace")]
+        let rebind_end = now_us();
         let entry = self.slots[slot].slot.base();
+        #[cfg(feature = "perf-trace")]
+        let publish_begin = now_us();
         PRIMARY_ENTRY.store(entry, Ordering::Release);
         if from_slot != slot
             && let Some(prev) = self.slots.get_mut(from_slot)
@@ -379,11 +414,11 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
         if let Some(image) = self.images.get_mut(id) {
             image.meta.set_location(XdpLocation::Slot { index: slot });
         }
-        let stamped = mcu_now();
+        let admitted = now_us();
         self.leave_quiesce();
         self.last_error = 0;
         let _ = ACTIVE.load(Ordering::Relaxed);
-        Ok(self.report(
+        let report = self.report(
             true,
             false,
             from_slot,
@@ -391,8 +426,21 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
             generation,
             drop_before,
             pass_before,
-            stamped,
-        ))
+            admitted as u32,
+        );
+        #[cfg(feature = "perf-trace")]
+        let report = SwitchReport {
+            timing: Some(SwitchTiming {
+                quiesce_begin,
+                quiesce_end,
+                rebind_begin,
+                rebind_end,
+                publish_begin,
+                before_admission: admitted,
+            }),
+            ..report
+        };
+        Ok(report)
     }
 
     fn leave_quiesce(&mut self) {
@@ -418,9 +466,15 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
             from_slot,
             to_slot,
             generation,
-            quiesce_drop: QUIESCE_DROPS.load(Ordering::Relaxed).saturating_sub(drop_before) as u32,
-            quiesce_pass: QUIESCE_PASSES.load(Ordering::Relaxed).saturating_sub(pass_before) as u32,
+            quiesce_drop: QUIESCE_DROPS
+                .load(Ordering::Relaxed)
+                .saturating_sub(drop_before) as u32,
+            quiesce_pass: QUIESCE_PASSES
+                .load(Ordering::Relaxed)
+                .saturating_sub(pass_before) as u32,
             mcu_us,
+            #[cfg(feature = "perf-trace")]
+            timing: None,
         }
     }
 
@@ -512,7 +566,13 @@ pub fn stage(&mut self, id: XdpId, slot: SlotId) -> Result<StageReport, XdpSwapE
 }
 
 pub(crate) fn mcu_now() -> u32 {
-    esp_hal::time::Instant::now().duration_since_epoch().as_micros() as u32
+    now_us() as u32
+}
+
+fn now_us() -> u64 {
+    esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_micros()
 }
 fn map_ready(result: Result<(), ReadyError>) -> Result<(), XdpSwapError> {
     result.map_err(|e| match e {

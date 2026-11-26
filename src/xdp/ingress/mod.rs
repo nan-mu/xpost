@@ -31,7 +31,7 @@ pub(crate) use prog::XdpProg;
 
 use core::sync::atomic::Ordering;
 
-use xpost_type::XdpAction;
+use xpost_type::{RxVerdict, XdpAction};
 
 use crate::xdp::{
     ingress::ctx::XdpMd,
@@ -58,6 +58,7 @@ struct PacketWindow {
 struct RunResult {
     action: i32,
     window: PacketWindow,
+    verdict: RxVerdict,
 }
 
 /// Lease flight for the crate-mounted [`XdpProg`](prog::XdpProg).
@@ -68,14 +69,20 @@ struct RunResult {
 /// A hot-update [`PAUSE`](crate::xdp::state::PAUSE) applies the quiesce policy
 /// without entering either image. Those frames are counted in `get xdp`.
 #[esp_hal::ram]
-pub(crate) fn run<'a>(frame: &'a mut [u8]) -> (xpost_type::XdpAction, &'a mut [u8]) {
-    use xpost_type::XdpAction;
+pub(crate) fn run(frame: &mut [u8]) -> (XdpAction, &mut [u8]) {
+    let (action, window, _) = run_observed(frame);
+    (action, window)
+}
 
+/// Observe the policy verdict while retaining the driver action and window.
+#[esp_hal::ram]
+pub(crate) fn run_observed(frame: &mut [u8]) -> (XdpAction, &mut [u8], RxVerdict) {
     if !ACTIVE.load(Ordering::Acquire) {
-        return (XdpAction::Pass, frame);
+        return (XdpAction::Pass, frame, RxVerdict::Bypass);
     }
-    let Some(result) = xdp(frame) else {
-        return (XdpAction::Drop, frame);
+    let result = match xdp(frame) {
+        Ok(result) => result,
+        Err(verdict) => return (XdpAction::Drop, frame, verdict),
     };
     let act = XdpAction::from(result.action);
     let window = result.window;
@@ -83,17 +90,17 @@ pub(crate) fn run<'a>(frame: &'a mut [u8]) -> (xpost_type::XdpAction, &'a mut [u
     if !valid {
         #[cfg(feature = "perf-counter")]
         crate::ext::perf::counter::inc_bad_md();
-        return (XdpAction::Drop, frame);
+        return (XdpAction::Drop, frame, RxVerdict::Fault);
     }
-    (act, &mut frame[..window.len])
+    (act, &mut frame[..window.len], result.verdict)
 }
 
 /// Claim `IN_FLIGHT`, validate lease/entry, [`inner_xdp`] the image, return md window.
 ///
-/// Returns `None` when the flight cannot start or the md length is corrupt.
-/// Each path bumps a runtime-error counter. Caller drops the frame.
+/// Return a fault when the flight cannot start or the packet metadata is invalid.
+/// The caller drops faults and reports quiesce separately.
 #[esp_hal::ram]
-fn xdp(data: &mut [u8]) -> Option<RunResult> {
+fn xdp(data: &mut [u8]) -> Result<RunResult, RxVerdict> {
     let mut ctx_md = XdpMd::from_buf(data);
     let ctx_ptr = &mut ctx_md as *mut XdpMd;
 
@@ -106,7 +113,7 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
     {
         #[cfg(feature = "perf-counter")]
         crate::ext::perf::counter::inc_reentry();
-        return None;
+        return Err(RxVerdict::Fault);
     }
     // Dekker pair with `XdpRt::activate`: PAUSE store, then wait IN_FLIGHT==0,
     // then store PRIMARY_ENTRY. A flight that passes this load runs the entry
@@ -117,8 +124,9 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
         IN_FLIGHT.store(0, Ordering::Release);
         if QUIESCE_PASS.load(Ordering::SeqCst) {
             QUIESCE_PASSES.fetch_add(1, Ordering::Relaxed);
-            return Some(RunResult {
+            return Ok(RunResult {
                 action: XdpAction::Pass as i32,
+                verdict: RxVerdict::Bypass,
                 window: PacketWindow {
                     data: data.as_mut_ptr(),
                     len: data.len(),
@@ -126,7 +134,7 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
             });
         }
         QUIESCE_DROPS.fetch_add(1, Ordering::Relaxed);
-        return None;
+        return Err(RxVerdict::Bypass);
     }
     // Dekker pair with `XdpRt::release` (ACTIVE=false → wait IN_FLIGHT==0):
     // either we see ACTIVE=false here, or release waits for this flight.
@@ -146,7 +154,7 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
                 IN_FLIGHT.store(0, Ordering::Release);
                 #[cfg(feature = "perf-counter")]
                 crate::ext::perf::counter::inc_inactive_skip();
-                return None;
+                return Err(RxVerdict::Fault);
             }
         };
         (PRIMARY_ENTRY.load(Ordering::SeqCst), engine)
@@ -157,29 +165,32 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
         IN_FLIGHT.store(0, Ordering::Release);
         #[cfg(feature = "perf-counter")]
         crate::ext::perf::counter::inc_inactive_skip();
-        return None;
+        return Err(RxVerdict::Fault);
     }
     // Timed here, around the engine call only. The perf aggregates bracket a
     // wider interval that includes the counter and trace hooks on both sides,
     // and those hooks cost more than a small program does, so a figure taken
     // between them describes the hooks rather than the work.
+    #[cfg(feature = "perf-aggregate")]
     let t0 = crate::ext::perf::aggregate::AggregateSet::now_ticks();
     let action = unsafe { super::engine::flight(engine, entry, ctx_ptr) };
-    let engine_us = crate::ext::perf::aggregate::AggregateSet::now_ticks().wrapping_sub(t0);
     #[cfg(feature = "perf-aggregate")]
-    crate::ext::perf::aggregate::record_engine(engine_us);
-    #[cfg(not(feature = "perf-aggregate"))]
-    let _ = engine_us;
+    {
+        let engine_us = crate::ext::perf::aggregate::AggregateSet::now_ticks().wrapping_sub(t0);
+        crate::ext::perf::aggregate::record_engine(engine_us);
+    }
     IN_FLIGHT.store(0, Ordering::Release);
+    let action = action.ok_or(RxVerdict::Fault)?;
 
     let data = ctx_md.data;
     let Some(len) = (ctx_md.data_end as usize).checked_sub(data as usize) else {
         #[cfg(feature = "perf-counter")]
         crate::ext::perf::counter::inc_bad_md();
-        return None;
+        return Err(RxVerdict::Fault);
     };
-    Some(RunResult {
+    Ok(RunResult {
         action,
+        verdict: RxVerdict::Policy,
         window: PacketWindow { data, len },
     })
 }
@@ -192,7 +203,7 @@ fn xdp(data: &mut [u8]) -> Option<RunResult> {
 /// `entry` must be a live IRAM XDP entry; `ctx` must remain valid for the call.
 /// Caller must own `IN_FLIGHT` for the whole call (protects `XDP_FRAME`).
 #[inline(always)]
-pub(crate) unsafe fn inner_xdp(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
+pub(crate) unsafe fn inner_xdp(entry: usize, ctx: *mut ctx::XdpMd) -> Option<i32> {
     stack::paint_canary();
 
     let sp: usize;
@@ -202,7 +213,7 @@ pub(crate) unsafe fn inner_xdp(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
     if sp & 15 != 0 {
         #[cfg(feature = "perf-counter")]
         crate::ext::perf::counter::inc_stack_misalign();
-        return xpost_type::XdpAction::Drop as i32;
+        return None;
     }
 
     let result: i32;
@@ -252,5 +263,5 @@ pub(crate) unsafe fn inner_xdp(entry: usize, ctx: *mut ctx::XdpMd) -> i32 {
         );
     }
     debug_assert!(stack::check_canary(), "XDP shared-stack canary corrupted");
-    result
+    Some(result)
 }

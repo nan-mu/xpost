@@ -35,3 +35,6 @@ examples/*/config.toml
 
 # Local measurement scratch (e.g. flash/switch timelines)
 /.audit/
+
+# Verified local artifact snapshots
+/.cache/xpost-agent/

@@ -1,460 +1,728 @@
-//! 测量 DUT 上 **无 Wi-Fi 的 `exec` 入口** 做一次函数计算（相对 HAL 对照）。
+//! EXB2 batches with DUT Metrics snapshots.
 //!
-//! eBPF 臂加载 `libbpf-mcu/tests/xdp/<name>.c` 打出的 XDP ELF。HAL 臂在
-//! `exec_bench_hal::run_hal` 上跑同一 32 字节布局。每格结束后读 `get perf`。
-//! 报告必须含 Trace。`xdp_begin` 与 `xdp_end` 各至少一次。缺少则本格 `bail`。
-//! 调用区间是 `xdp_end.t_us - xdp_begin.t_us`。
-//!
-//! ```text
-//! exec_bench:
-//!   for fw in {ebpf, hal}:
-//!     agent flash fw
-//!     for workload in {incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort}:
-//!       if ebpf:
-//!         agent clear xdp *
-//!         agent flash xdp workload
-//!         agent get init
-//!       agent clear perf
-//!       agent update map(workload) key 0
-//!       agent enable exec
-//!       agent get finish
-//!       agent disable exec
-//!       agent get map(workload)
-//!       agent get perf
-//!       upload to db
-//! ```
-//!
-//! 主机只走 agent map 协议（`update map` / `get map` 的 32 字节 hex），不解释
-//! opcode。固件约定值布局为 `[0..4]` LE opcode、`[4..8]` LE param、`[8..]` payload。
-//! eBPF 臂把 map[0] 拷进 `exec_call::invoke`，再把结果写回 map[1]。
-//! 写回成功后，App 在 `invoke` 之外用 `info!` 打出 `OK finish`，只供主机等待。
-//! HAL 臂对同一 32 字节做 `run_hal`，写入结果表，再写下 `xdp_end`，然后打出同一行。
-//! 写结果失败时只结束 Trace，不打印该行。该行不在 `xdp_begin` 与 `xdp_end` 之间。
-//! workload 先 `clear xdp *` 再 `flash xdp`，使新容器落在 offset 0。
-//!
-//! **数据处理**
-//!
-//! 每格写入 `exec_bench_config` + `exec_bench_data`（DDL：`sql/exec_bench.sql`）。
-//! eBPF 的 `get perf` 写入共享 `xdp_*` 表，并把 Trace 写入 `trace_event`
-//!（collector 标签 `xdp_t`）。HAL 的 CAGT 写入 `exec_bench_hal_*`，Trace 写入
-//! 同一 `trace_event`（`config_id` 指向 HAL 格）。
-//! 格失败则 `bail`，该格不入库。
-//!
-//! `exec_bench_config`：
-//! - `exam_id` — 本轮 `exam` 行
-//! - `firmware` — 当前臂（`ebpf` / `hal`，实验列名，不是 SQL `firmware` 枚举）
-//! - `workload` — XDP stem / opcode 名（`incr` … `bsort`）
-//! - `input` — 写入 map[0] 的 32 字节
-//! - `started_at` / `stopped_at` — 该格 `enable exec` 到 `disable exec` 的墙钟
-//!
-//! `exec_bench_data`（每格一行，`rep` 为 1 到 5）：
-//! - `config_id` — 所属 `exec_bench_config`
-//! - `rep` — 重复序号
-//! - `ok` — `enable`/`finish` 成功且 map[1] 与期望 32 字节一致
-//! - `output` — `agent get map(workload)` 读到的 map[1] 32 字节
+//! Flash each carrier once. Install one XDP ELF per program and mode.
+//! Send 8258 bytes and invoke once for each batch. The workload runs its own rounds.
+//! Check the firmware's return code and the complete output against v0.1.1.
+//! Arm Metrics before the first batch. Freeze after the last batch.
+//! Save the raw buffers, counter boundaries, and invocation ticks under one run ID.
 
-use std::time::{Duration, Instant, SystemTime};
+use anyhow::{Context, Result, bail, ensure};
+use serde_json::{Value, json};
+use tokio_postgres::{Client, Transaction};
+use uuid::Uuid;
 
-use anyhow::{Context, Result, bail};
+use crate::agent::{AgentClient, ExecBatch};
+use crate::config::{FileConfig, PostgresConfig};
+use crate::db::{metrics, protocol};
 
-use crate::agent::AgentClient;
-use crate::config::FileConfig;
-use crate::db::{self, Firmware, PgOpts};
-use crate::pipeline::{status, BudgetEta, READY_BUDGET, RoundUi};
+use super::exb2::{self, BUF, ROUNDS, SEED, Sampling};
+use super::medium::{Actions, Resume};
 
-const FLASH_IDLE: Duration = Duration::from_secs(300);
-const MAP_NAME: &str = "workload";
-const KEY_IN: &str = "0";
-/// Dump encoding for 1-byte key `1` (see `format_hash_key`).
-const KEY_OUT_DUMP: &str = "01";
-const FW_EBPF: &str = "exec-bench-ebpf";
-const FW_HAL: &str = "exec-bench-hal";
-const MAP_VALUE_LEN: usize = 32;
-const KIND_XDP_BEGIN: u8 = 2;
-const KIND_XDP_END: u8 = 3;
-
-fn require_exec_trace(arm: Arm, name: &str, decoded: &db::DecodedReport) -> Result<()> {
-    if decoded.mask & db::MASK_T == 0 {
-        bail!(
-            "{}/{}: get/perf missing Trace section (mask={:#x})",
-            arm.as_db(),
-            name,
-            decoded.mask
-        );
-    }
-    let Some(tr) = decoded.trace.as_ref() else {
-        bail!("{}/{}: Trace section decoded empty", arm.as_db(), name);
-    };
-    let has = |kind: u8| tr.events.iter().any(|e| e.kind == kind);
-    if !has(KIND_XDP_BEGIN) {
-        bail!("{}/{}: Trace has no xdp_begin", arm.as_db(), name);
-    }
-    if !has(KIND_XDP_END) {
-        bail!("{}/{}: Trace has no xdp_end", arm.as_db(), name);
-    }
-    Ok(())
-}
-
-/// Wire fixtures for `update map` / `get map` (64 hex chars = 32 bytes).
-/// Names match cold XDP image stems under the eBPF profile.
-const WORKLOADS: &[Workload] = &[
-    Workload {
-        name: "incr",
-        input_hex: "0000000000000000000000000000000000000000000000000000000000000000",
-        expect_hex: "0000000000000000010000000000000000000000000000000000000000000000",
-    },
-    Workload {
-        name: "square",
-        input_hex: "0100000000000000030000000000000000000000000000000000000000000000",
-        expect_hex: "0100000000000000090000000000000000000000000000000000000000000000",
-    },
-    Workload {
-        name: "bitswap",
-        input_hex: "02000000000000005a5aa5a50000000000000000000000000000000000000000",
-        expect_hex: "0200000000000000a5a55a5a0000000000000000000000000000000000000000",
-    },
-    Workload {
-        name: "fib",
-        input_hex: "030000001e000000000000000000000000000000000000000000000000000000",
-        expect_hex: "030000001e00000028b20c000000000000000000000000000000000000000000",
-    },
-    Workload {
-        name: "buf",
-        input_hex: "0400000010000000031425364758697a8b9cadbecfe0f1020000000000000000",
-        expect_hex: "0400000010000000031527394b5d6f8193a5b7c9dbedff11a007000000000000",
-    },
-    Workload {
-        name: "memcpy",
-        input_hex: "0500000008000000031425364758697a00000000000000000000000000000000",
-        expect_hex: "0500000008000000031425364758697a031425364758697a0000000000000000",
-    },
-    Workload {
-        name: "fletcher32",
-        input_hex: "0600000010000000031425364758697a8b9cadbecfe0f1020000000000000000",
-        expect_hex: "0600000010000000031425364758697a8b9cadbecfe0f102d35ba10300000000",
-    },
-    Workload {
-        name: "bsort",
-        input_hex: "07000000060000009d601517e4e6dd782b6da6da72f36e3cb979379e00000000",
-        expect_hex: "0700000006000000000000009d60151772f36e3ce4e6dd78b979379e2b6da6da",
-    },
-];
-
-#[derive(Clone, Copy)]
-struct Workload {
-    name: &'static str,
-    input_hex: &'static str,
-    expect_hex: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Arm {
-    Ebpf,
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Mode {
     Hal,
+    Aot,
+    Jit,
+    Rbpf,
 }
 
-impl Arm {
-    pub fn parse(s: &str) -> Result<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "ebpf" | "xdp" => Ok(Self::Ebpf),
+impl Mode {
+    pub(super) fn parse(name: &str) -> Result<Self> {
+        match name {
             "hal" => Ok(Self::Hal),
-            other => bail!("exec_bench arm must be ebpf|hal, got {other}"),
+            "aot" | "ebpf" | "xdp" => Ok(Self::Aot),
+            "jit" => Ok(Self::Jit),
+            "rbpf" => Ok(Self::Rbpf),
+            _ => bail!("unknown EXB2 mode `{name}`"),
         }
     }
 
-    pub fn as_db(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
-            Self::Ebpf => "ebpf",
             Self::Hal => "hal",
+            Self::Aot => "aot",
+            Self::Jit => "jit",
+            Self::Rbpf => "rbpf",
         }
     }
 
-    pub fn fw_profile(self) -> &'static str {
+    fn firmware(self) -> &'static str {
         match self {
-            Self::Ebpf => FW_EBPF,
-            Self::Hal => FW_HAL,
+            Self::Hal => "exec-bench-hal",
+            Self::Aot | Self::Jit => "exec-bench-aot",
+            Self::Rbpf => "exec-bench-rbpf",
         }
     }
 
-    pub fn as_firmware(self) -> Firmware {
+    fn deployment(self, program: &str) -> Option<String> {
         match self {
-            Self::Ebpf => Firmware::XdpT,
-            Self::Hal => Firmware::Hal,
+            Self::Hal => None,
+            Self::Aot => Some(program.to_owned()),
+            _ => Some(format!("{program}_{}", self.as_str())),
         }
     }
 }
 
-pub struct ExecBenchOpts {
-    pub formal: bool,
-}
-
-fn arms_from_cfg(arms: &[String]) -> Result<Vec<Arm>> {
-    let mut out = Vec::new();
-    for a in arms {
-        out.push(Arm::parse(a)?);
-    }
-    if out.is_empty() {
-        bail!("exec_bench.toml `arms` must list at least one of ebpf|hal");
-    }
-    out.dedup();
-    Ok(out)
-}
-
-fn hex_decode(s: &str) -> Result<Vec<u8>> {
-    let s = s.trim();
-    if s.len() % 2 != 0 {
-        bail!("odd hex length {}", s.len());
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let hi = hex_nibble(bytes[i]).with_context(|| format!("hex digit {:?}", bytes[i] as char))?;
-        let lo =
-            hex_nibble(bytes[i + 1]).with_context(|| format!("hex digit {:?}", bytes[i + 1] as char))?;
-        out.push((hi << 4) | lo);
-        i += 2;
-    }
-    Ok(out)
-}
-
-fn hex_nibble(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn map_value_bytes(hex: &str) -> Result<Vec<u8>> {
-    let bytes = hex_decode(hex)?;
-    if bytes.len() != MAP_VALUE_LEN {
-        bail!("map value must be {MAP_VALUE_LEN} bytes, got {}", bytes.len());
-    }
-    Ok(bytes)
-}
-
-pub async fn run_exec_bench(cfg: &FileConfig, opts: ExecBenchOpts) -> Result<()> {
+pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
     let endpoint = cfg
         .agent
         .resolved_endpoint()
-        .context("exec_bench needs [agent].endpoint in config/default.toml")?;
-    let agent = AgentClient::new(endpoint.clone());
-    let formal = opts.formal;
-    let arms = arms_from_cfg(&cfg.exec_bench.arms)?;
-    let workloads = WORKLOADS;
-
-    RoundUi::banner(&format!(
-        "exec_bench arms={:?} workloads={} formal={formal} agent={endpoint}",
-        arms.iter().map(|a| a.as_db()).collect::<Vec<_>>(),
-        workloads.len(),
-    ));
-
-    let pg_opts = PgOpts { formal };
-    let mut pg = Some(db::connect_and_ensure(pg_opts).await?);
-
-    let mut eta = BudgetEta::new();
-    eta.add_flashes(arms.len());
-    // Rough: one flash_xdp per eBPF workload + settle budget per cell.
-    let ebpf_cells = if arms.contains(&Arm::Ebpf) {
-        workloads.len()
-    } else {
-        0
-    };
-    eta.add_flashes(ebpf_cells);
-    eta.add_fixed(
-        READY_BUDGET.saturating_mul(
-            (arms.len() * workloads.len() * super::repeat::ROUNDS as usize) as u32,
-        ),
-    );
-
-    let ui = RoundUi::new();
-    let exam_id = if let Some(client) = pg.as_mut() {
-        ui.check_start("INSERT exam");
-        let id = db::insert_exam(client, Some("exec_bench")).await?;
-        ui.check_ok(&format!("exam={id}"));
-        Some(id)
-    } else {
-        None
-    };
-
-    for arm in &arms {
-        flash_fw(cfg, &agent, &ui, &mut eta, arm.fw_profile()).await?;
-
-        for wl in workloads {
-            if *arm == Arm::Ebpf {
-                // Clear first so the new name is Created at offset 0 (sector-aligned).
-                agent
-                    .clear_xdp("*")
-                    .await
-                    .context("clear/xdp before flash_xdp")?;
-                agent
-                    .flash_xdp(wl.name)
-                    .await
-                    .with_context(|| format!("flash/xdp {}", wl.name))?;
-                agent
-                    .get_init()
-                    .await
-                    .with_context(|| format!("OK init after flash/xdp {}", wl.name))?;
-            }
-
-            let input = map_value_bytes(wl.input_hex)?;
-            let expect = map_value_bytes(wl.expect_hex)?;
-
-            for rep in 1..=super::repeat::ROUNDS {
-            agent.clear_perf().await.context("clear/perf")?;
-            agent
-                .update_map_batch(MAP_NAME, &[(KEY_IN.to_string(), wl.input_hex.to_string())])
-                .await
-                .context("update/map workload")?;
-
-            let started_at = SystemTime::now();
-            let wall0 = Instant::now();
-            let enable = agent.enable_exec().await;
-            let finish = match &enable {
-                Ok(_) => agent.get_finish().await,
-                Err(e) => Err(anyhow::anyhow!("enable exec: {e:#}")),
-            };
-            let _ = agent.disable_exec().await;
-            let stopped_at = SystemTime::now();
-            let wall = wall0.elapsed();
-
-            let mut output: Option<Vec<u8>> = None;
-            let mut ok = false;
-            match (&enable, &finish) {
-                (Ok(_), Ok(msg)) => {
-                    if !msg.contains("OK finish") && msg != "OK finish" {
-                        // Agent may return the transcript line or a short OK.
-                        log::info!("get_finish message: {msg}");
-                    }
-                    match read_output(&agent).await {
-                        Ok(bytes) => {
-                            ok = bytes.as_slice() == expect.as_slice();
-                            output = Some(bytes);
-                        }
-                        Err(e) => {
-                            eprintln!("    WARN: {arm:?}/{} get map: {e:#}", wl.name);
-                        }
-                    }
-                }
-                _ => {
-                    eprintln!(
-                        "    WARN: {:?}/{} enable/finish failed: enable={enable:?} finish={finish:?}",
-                        arm.as_db(),
-                        wl.name
-                    );
-                }
-            }
-
-            ui.permanent(&format!(
-                "    {}/{} rep={rep}: ok={ok} wall_ms={} out_len={}",
-                arm.as_db(),
-                wl.name,
-                wall.as_millis(),
-                output.as_ref().map(|b| b.len()).unwrap_or(0),
-            ));
-
-            if !ok {
-                bail!(
-                    "exec_bench {}/{} rep={rep} failed (enable={:?} finish={:?})",
-                    arm.as_db(),
-                    wl.name,
-                    enable.as_ref().map(|_| "ok").map_err(|e| format!("{e:#}")),
-                    finish.as_ref().map(|m| m.as_str()).map_err(|e| format!("{e:#}")),
-                );
-            }
-
-            if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
-                ui.check_start(&format!("写入 {}/{}", arm.as_db(), wl.name));
-                let cfg_id = db::insert_exec_bench_config(
-                    client,
-                    exam_id,
-                    arm.as_db(),
-                    wl.name,
-                    &input,
-                    started_at,
-                    stopped_at,
-                )
-                .await?;
-                db::insert_exec_bench_data(client, cfg_id, rep, ok, output.as_deref()).await?;
-                let msg = agent.get_perf().await.context("get/perf")?;
-                if msg.is_empty() {
-                    bail!("{}/{}: get/perf empty after ok cell", arm.as_db(), wl.name);
-                }
-                let decoded = db::decode_report_msg(&msg)?;
-                require_exec_trace(*arm, wl.name, &decoded)?;
-                db::write_perf(
-                    client,
-                    exam_id,
-                    cfg_id,
-                    arm.as_firmware(),
-                    db::PerfExperiment::ExecBench,
-                    &decoded,
-                )
-                .await?;
-                ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
-            }
-
-            eta.consume_fixed(Duration::from_secs(5));
-            ui.set_eta(&eta.fmt());
+        .context("exec_bench needs [agent].endpoint")?;
+    let agent = AgentClient::new(endpoint);
+    agent.health().await?;
+    let mut selected = Vec::new();
+    for mode in &cfg.exec_bench.modes {
+        let mode = Mode::parse(mode)?;
+        if !selected.contains(&mode) {
+            selected.push(mode);
+        }
+    }
+    ensure!(!selected.is_empty(), "select at least one EXB2 mode");
+    // Native AOT and JIT share the carrier. Keep them adjacent when both are selected.
+    selected.sort_by_key(|mode| mode.firmware());
+    let mut tables = [
+        "bench.condition",
+        "bench.run",
+        "bench.artifact",
+        "bench.run_artifact",
+        "bench.clock",
+        "bench.analysis",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    for mode in &selected {
+        for table in [
+            "exec_bench_config",
+            "exec_batch",
+            "exec_bench_metrics_data",
+            "metric_definition",
+            "metric_series",
+            "metric_snapshot",
+            "scalar_sample",
+        ] {
+            tables.push(format!("{}.{table}", mode.as_str()));
+        }
+        for program in exb2::PROGRAMS {
+            if let Some(profile) = mode.deployment(program) {
+                agent.preflight_xdp(&profile).await?;
             }
         }
     }
-
-    if let (Some(client), Some(exam_id)) = (pg.as_mut(), exam_id) {
-        db::stop_exam(client, exam_id).await?;
+    let mut db = protocol::connect(&cfg.postgres).await?;
+    protocol::check(&mut db, &tables).await?;
+    let mut loaded = String::new();
+    let mut image = None;
+    let mut order = 0;
+    for mode in selected {
+        if image != Some(mode.firmware()) {
+            let flash = agent.flash_fw_evidence(mode.firmware(), None).await?;
+            loaded = flash["firmware_sha256"]
+                .as_str()
+                .context("missing Firmware ELF digest")?
+                .to_owned();
+            agent.get_init().await?;
+            image = Some(mode.firmware());
+        }
+        run_mode(
+            &agent,
+            &mut db,
+            &cfg.postgres,
+            mode,
+            &loaded,
+            None,
+            &mut order,
+            Sampling::MEDIUM,
+            None,
+        )
+        .await?;
     }
-    RoundUi::banner(&format!(
-        "exec_bench done arms={} workloads={}",
-        arms.len(),
-        workloads.len()
-    ));
     Ok(())
 }
 
-async fn read_output(agent: &AgentClient) -> Result<Vec<u8>> {
-    let map = agent.get_map(MAP_NAME).await?;
-    for e in &map.entries {
-        if e.key == KEY_OUT_DUMP || e.key == "1" {
-            if e.value.chars().all(|c| c.is_ascii_hexdigit()) && e.value.len() == MAP_VALUE_LEN * 2
-            {
-                return hex_decode(&e.value);
+pub(super) async fn run_mode(
+    agent: &AgentClient,
+    db: &mut Client,
+    database: &PostgresConfig,
+    mode: Mode,
+    firmware_hash: &str,
+    medium_id: Option<Uuid>,
+    order: &mut i32,
+    sampling: exb2::Sampling,
+    mut formal: Option<(&Resume, &mut Option<String>, &mut Actions)>,
+) -> Result<()> {
+    let profile = parse_sha256(firmware_hash)?;
+    for (task, program) in exb2::PROGRAMS.into_iter().enumerate() {
+        let repeats = (1..=sampling.runs)
+            .filter(|&repeat| {
+                formal.as_ref().is_none_or(|(resume, _, _)| {
+                    resume.should_run("exec_bench", mode.as_str(), "metrics", program, repeat)
+                })
+            })
+            .collect::<Vec<_>>();
+        if repeats.is_empty() {
+            continue;
+        }
+        if let Some(name) = mode.deployment(program) {
+            let loaded = formal.as_ref().and_then(|(_, loaded, _)| loaded.as_deref());
+            if loaded != Some(&name) {
+                let install_started = std::time::Instant::now();
+                agent
+                    .bind_xdp(&name, mode.firmware(), firmware_hash)
+                    .await?;
+                if let Some((_, loaded, actions)) = &mut formal {
+                    actions.cold_install_confirmed += 1;
+                    actions.cold_install_s += install_started.elapsed().as_secs_f64();
+                    **loaded = Some(name);
+                }
+                agent.get_init().await?;
             }
-            // Decimal u64 dump (legacy ≤8): not enough for 32B verify.
-            bail!("output value not hex-32: {:?}", e.value);
+        }
+        let (n, input, expected) = exb2::request(task);
+        let sample = Sample {
+            mode,
+            program,
+            n,
+            input,
+            expected,
+            profile,
+            medium_id,
+            sampling,
+        };
+        for repeat in repeats {
+            let attempt = Attempt {
+                id: Uuid::new_v4(),
+                order: *order,
+                repeat,
+                config: Uuid::new_v4(),
+                retry_of: formal.as_ref().and_then(|(resume, _, _)| {
+                    resume.retry_of("exec_bench", mode.as_str(), "metrics", program, repeat)
+                }),
+                medium_identity: formal.as_ref().and_then(|(resume, _, _)| {
+                    resume.identity("exec_bench", mode.as_str(), "metrics", program, repeat)
+                }),
+            };
+            *order += 1;
+            run_attempt(agent, db, database, &sample, &attempt).await?;
         }
     }
-    bail!("get/map {MAP_NAME} missing output key {KEY_OUT_DUMP}");
+    Ok(())
 }
 
-async fn flash_fw(
-    cfg: &FileConfig,
-    agent: &AgentClient,
-    ui: &RoundUi,
-    eta: &mut BudgetEta,
-    profile: &str,
-) -> Result<()> {
-    ui.begin_round();
-    ui.set_eta(&eta.fmt());
-    ui.check_pending(&format!("烧录 `{profile}`"));
-    ui.check_pending(&format!("settle ≤{}s", READY_BUDGET.as_secs()));
-    ui.check_pending("DUT ready");
+fn parse_sha256(hex: &str) -> Result<[u8; 32]> {
+    ensure!(
+        hex.len() == 64 && hex.as_bytes().iter().all(u8::is_ascii_hexdigit),
+        "invalid Firmware ELF digest"
+    );
+    let mut digest = [0; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * index..][..2], 16)?;
+    }
+    Ok(digest)
+}
 
-    if let Err(e) = status::flash_idle(ui, agent, profile, FLASH_IDLE, eta).await {
-        ui.clear_temp_for_error();
-        return Err(e);
+struct Sample {
+    mode: Mode,
+    program: &'static str,
+    n: u32,
+    input: Vec<u8>,
+    expected: Vec<u8>,
+    profile: [u8; 32],
+    medium_id: Option<Uuid>,
+    sampling: Sampling,
+}
+
+struct Attempt<'a> {
+    id: Uuid,
+    order: i32,
+    repeat: i32,
+    config: Uuid,
+    retry_of: Option<Uuid>,
+    medium_identity: Option<&'a Value>,
+}
+
+async fn run_attempt(
+    agent: &AgentClient,
+    db: &mut Client,
+    database: &PostgresConfig,
+    sample: &Sample,
+    attempt: &Attempt<'_>,
+) -> Result<()> {
+    if let Err(error) = start(db, attempt, sample).await {
+        let state = protocol::run_status(database, attempt.id).await;
+        println!(
+            "XPOST_RESULT {}",
+            result_event(
+                attempt,
+                sample,
+                "blocked",
+                &state,
+                None,
+                &json!([format!("{error:#}")])
+            )
+        );
+        return Err(error);
     }
-    eta.consume_fixed(READY_BUDGET);
-    if let Err(e) = status::settle_checklist(ui, agent, READY_BUDGET).await {
-        ui.clear_temp_for_error();
-        return Err(e);
+    let acquired = collect(agent, attempt.id, sample).await;
+    let evidence = validate(attempt.id, sample, &acquired);
+    let status = evidence.status(sample.sampling);
+    let mut terminal = finish(db, attempt, sample, &evidence).await;
+    let mut event = result_event(
+        attempt,
+        sample,
+        status,
+        status,
+        Some(&evidence),
+        &evidence.issues,
+    );
+    if let Err(error) = &terminal {
+        let initial_error = format!("{error:#}");
+        let mut state = protocol::run_status(database, attempt.id).await;
+        if state == "running"
+            && let Ok(mut recovered) = protocol::connect(database).await
+        {
+            terminal = finish(&mut recovered, attempt, sample, &evidence).await;
+            state = protocol::run_status(database, attempt.id).await;
+            if state == status {
+                *db = recovered;
+            }
+        }
+        event["database_status"] = json!(state);
+        event["write_error"] = json!(initial_error);
+        if state != status {
+            event["status"] = json!("write_failed");
+            event["qualified"] = json!(false);
+            let saved = preserve(attempt.id, sample, &evidence, &event);
+            event["evidence"] = match saved {
+                Ok(path) => json!(path),
+                Err(save) => json!(format!("local export failed: {save:#}")),
+            };
+            println!("XPOST_RESULT {event}");
+            terminal.with_context(|| format!("persist EXB2 run_id={}", attempt.id))?;
+            bail!("unconfirmed EXB2 database status for {}", attempt.id);
+        }
     }
-    ui.set_eta(&eta.fmt());
-    ui.check_activate("DUT ready");
-    ui.check_ok(profile);
-    ui.end_round();
-    let _ = cfg;
+    println!("XPOST_RESULT {event}");
+    ensure!(
+        acquired.session_released,
+        "EXB2 run_id={} perf session needs recovery: {}",
+        attempt.id,
+        evidence.issues,
+    );
+    Ok(())
+}
+
+#[derive(Default)]
+struct Acquired {
+    batches: Vec<Result<ExecBatch>>,
+    counters: Option<Vec<u8>>,
+    boundaries: Option<(u32, u64, u64, u64)>,
+    session_released: bool,
+    issues: Vec<String>,
+}
+
+async fn collect(agent: &AgentClient, run: Uuid, sample: &Sample) -> Acquired {
+    let mut acquired = Acquired::default();
+    let result: Result<()> = async {
+        let (epoch, boot) = agent
+            .perf_prepare(run, &protocol::hex(&sample.profile), "metrics")
+            .await?;
+        let arm = agent.perf_arm(epoch).await;
+        if arm.is_ok() {
+            let input = protocol::hex(&sample.input);
+            for _ in 0..sample.sampling.samples {
+                acquired.batches.push(agent.exb2(&input).await);
+            }
+        }
+        if let Err(error) = &arm {
+            acquired.issues.push(format!("Metrics arm: {error:#}"));
+        }
+        let frozen = agent.perf_freeze(epoch).await?;
+        if let Ok(arm) = arm {
+            acquired.boundaries = Some((epoch, boot, arm, frozen.tick));
+        }
+        if frozen.flags != 0 {
+            acquired
+                .issues
+                .push(format!("Metrics firmware flags: {}", frozen.flags));
+        }
+        let read = agent.perf_read(epoch, frozen).await;
+        if let Ok(bytes) = read {
+            acquired.counters = Some(bytes);
+        } else if let Err(error) = read {
+            acquired.issues.push(format!("Metrics read: {error:#}"));
+        }
+        agent.perf_release(epoch).await?;
+        acquired.session_released = true;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        acquired.issues.push(format!("Metrics session: {error:#}"));
+    }
+    acquired
+}
+
+fn validate<'a>(run: Uuid, sample: &Sample, acquired: &'a Acquired) -> Completed<'a> {
+    let mut issues = acquired.issues.clone();
+    let counters = acquired.counters.as_deref();
+    let pair = counters.and_then(|bytes| {
+        let validated = metrics::decode(bytes).and_then(|pair| {
+            let (epoch, boot, arm, freeze) = acquired
+                .boundaries
+                .context("Metrics has no session boundaries")?;
+            pair.require(run, epoch, boot, &sample.profile, arm)?;
+            ensure!(
+                pair.final_.tick == freeze,
+                "Metrics freeze tick differs from export"
+            );
+            ensure!(
+                pair.baseline.hz == 1_000_000 && pair.baseline.bits == 64,
+                "invalid EXB2 Metrics clock"
+            );
+            Ok(pair)
+        });
+        match validated {
+            Ok(pair) => Some(pair),
+            Err(error) => {
+                issues.push(format!("{error:#}"));
+                None
+            }
+        }
+    });
+    if let Some(pair) = &pair
+        && !all_pass(pair, sample.sampling.samples as u64)
+    {
+        issues.push(format!(
+            "EXB2 Metrics does not show exactly {} successful invocation(s)",
+            sample.sampling.samples
+        ));
+    }
+    // The run-wide totals must account for all sequential requests with zero faults.
+    // If they disagree, a reply alone cannot establish counter attribution.
+    let metrics_ok = pair.is_some() && issues.is_empty();
+    let boot = pair.as_ref().map(|pair| pair.baseline.boot).or_else(|| {
+        acquired
+            .batches
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .map(|reply| u64::from(reply.boot_id))
+            .find(|boot| *boot != 0)
+    });
+    let mut previous_end = None;
+    let mut batches = Vec::with_capacity(acquired.batches.len());
+    for (index, result) in acquired.batches.iter().enumerate() {
+        let mut batch = Batch::default();
+        match result {
+            Ok(reply) => {
+                batch.reply = Some(reply);
+                batch.result_ok = verified(sample, reply);
+                batch.recordable = boot == Some(u64::from(reply.boot_id))
+                    && reply.output.len() == BUF
+                    && reply.begin_tick <= reply.end_tick
+                    && field(reply, 40) <= ROUNDS;
+                if !batch.result_ok {
+                    issues.push(format!(
+                        "EXB2 batch {index}: return, clock, or complete output mismatched"
+                    ));
+                }
+                if let Some(pair) = &pair {
+                    let in_window = u64::from(reply.boot_id) == pair.baseline.boot
+                        && pair.baseline.tick <= reply.begin_tick
+                        && reply.begin_tick <= reply.end_tick
+                        && reply.end_tick <= pair.final_.tick
+                        && previous_end.is_none_or(|end| end <= reply.begin_tick);
+                    if in_window {
+                        previous_end = Some(reply.end_tick);
+                    } else {
+                        issues.push(format!("EXB2 batch {index}: invocation is outside its ordered Metrics clock window"));
+                    }
+                    batch.qualified = metrics_ok && in_window && batch.result_ok;
+                }
+            }
+            Err(error) => issues.push(format!("EXB2 batch {index} invocation: {error:#}")),
+        }
+        batches.push(batch);
+    }
+    Completed {
+        batches,
+        boot,
+        counters,
+        pair,
+        issues: json!(issues),
+    }
+}
+
+fn result_event(
+    attempt: &Attempt<'_>,
+    sample: &Sample,
+    status: &str,
+    database_status: &str,
+    evidence: Option<&Completed<'_>>,
+    issues: &Value,
+) -> Value {
+    let (completed, valid) = evidence.map_or((0, 0), Completed::counts);
+    let batches = evidence.map_or(&[][..], |evidence| &evidence.batches);
+    let single = if sample.sampling.samples == 1 {
+        batches.first().and_then(|batch| batch.reply)
+    } else {
+        None
+    };
+    let batch_us = if sample.sampling.samples == 1 {
+        json!(single.and_then(|reply| reply.end_tick.checked_sub(reply.begin_tick)))
+    } else if valid > 0 {
+        let total: u128 = batches
+            .iter()
+            .filter(|batch| batch.qualified)
+            .filter_map(|batch| batch.reply)
+            .map(|reply| u128::from(reply.end_tick - reply.begin_tick))
+            .sum();
+        json!(total as f64 / f64::from(valid))
+    } else {
+        Value::Null
+    };
+    let us_per_round = if status == "complete" {
+        batch_us.as_f64().map(|us| us / f64::from(ROUNDS))
+    } else {
+        None
+    };
+    json!({ "run_id": attempt.id.to_string(), "experiment": "exec_bench", "mode": sample.mode.as_str(),
+        "variant": "metrics", "phase": phase(sample.medium_id), "medium_id": sample.medium_id, "stage": sample.medium_id.map(|_| crate::config::MediumStage::for_mode(sample.mode.as_str())), "retry_of": attempt.retry_of, "input": { "program": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED },
+        "repeat": attempt.repeat, "status": status, "database_status": database_status, "issues": issues,
+        "batch_us": batch_us, "us_per_round": us_per_round, "execution_return": single.map(|reply| reply.execution_return),
+        "batches_expected": sample.sampling.samples, "batches_completed": completed,
+        "valid_batches": valid, "qualified": status == "complete",
+    })
+}
+
+fn preserve(run: Uuid, sample: &Sample, evidence: &Completed<'_>, event: &Value) -> Result<String> {
+    use std::fs;
+    let root = std::path::Path::new("exb2-evidence");
+    fs::create_dir_all(root)?;
+    let path = root.join(run.to_string());
+    fs::create_dir(&path)?;
+    fs::write(path.join("input.bin"), &sample.input)?;
+    fs::write(path.join("expected.bin"), &sample.expected)?;
+    let mut manifest = Vec::new();
+    for (index, batch) in evidence.batches.iter().enumerate() {
+        if let Some(reply) = batch.reply {
+            let name = if sample.sampling.samples == 1 {
+                "actual.bin".into()
+            } else {
+                format!("actual-{index}.bin")
+            };
+            fs::write(path.join(&name), &reply.output)?;
+            let mut entry = reply_facts(index, reply);
+            entry["actual_path"] = json!(name);
+            entry["qualified"] = json!(batch.qualified);
+            manifest.push(entry);
+        }
+    }
+    fs::write(
+        path.join("batches.json"),
+        serde_json::to_vec_pretty(&manifest)?,
+    )?;
+    if let Some(counters) = evidence.counters {
+        fs::write(path.join("metrics.bin"), counters)?;
+    }
+    fs::write(path.join("attempt.json"), serde_json::to_vec_pretty(event)?)?;
+    Ok(path.display().to_string())
+}
+
+fn phase(medium_id: Option<Uuid>) -> &'static str {
+    if medium_id.is_some() {
+        "formal"
+    } else {
+        "pilot"
+    }
+}
+
+fn all_pass(pair: &metrics::Pair<'_>, count: u64) -> bool {
+    [
+        ("exec_batch_invocations", count),
+        ("exec_batch_action_pass", count),
+        ("exec_batch_action_aborted", 0),
+        ("exec_batch_action_drop", 0),
+        ("exec_batch_action_tx", 0),
+    ]
+    .into_iter()
+    .all(|(name, expected)| pair.delta(name) == Some(expected))
+}
+
+fn verified(sample: &Sample, reply: &ExecBatch) -> bool {
+    let expected_action = if sample.mode == Mode::Hal { 0 } else { 2 };
+    reply.boot_id != 0
+        && reply.begin_tick <= reply.end_tick
+        && reply.execution_return == expected_action
+        && reply.output == sample.expected
+}
+
+async fn start(db: &mut Client, attempt: &Attempt<'_>, sample: &Sample) -> Result<()> {
+    let mode = sample.mode.as_str();
+    let condition = Uuid::new_v4();
+    let config = attempt.config;
+    let tx = db.transaction().await?;
+    let parameters = json!({ "workload": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED, "medium_id": sample.medium_id, "stage": sample.medium_id.map(|_| crate::config::MediumStage::for_mode(mode)), "medium_identity": attempt.medium_identity, "retry_of": attempt.retry_of });
+    tx.execute("INSERT INTO bench.condition(condition_id,experiment,protocol_version,parameters,planned_modes) VALUES($1,'exec_bench','1',$2,ARRAY[$3]::text[])", &[&condition,&parameters,&mode]).await?;
+    let request = artifact(&tx, "exb2_input", &sample.input).await?;
+    let expected = artifact(&tx, "exb2_expected", &sample.expected).await?;
+    let digest = protocol::hex(&sample.profile);
+    tx.execute(&format!("INSERT INTO {mode}.exec_bench_config(config_id,condition_id,instrumentation,profile_hash,workload,work_param,batch_count,samples_per_run,input_bytes,input_protocol,wifi_enabled,fixture_artifact_id) VALUES($1,$2,'counter_only',$3,$4,$5,$6,$7,8258,'EXB2',false,$8)"), &[&config,&condition,&digest,&sample.program,&(sample.n as i32),&i64::from(ROUNDS),&sample.sampling.samples,&request]).await?;
+    tx.execute("INSERT INTO bench.run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit) VALUES($1,$2,$3,$4,'exec_bench','metrics',$5,$6,$7::text::bench.u64,$8,'running',$1,'07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113',$9)", &[&attempt.id,&condition,&config,&mode,&phase(sample.medium_id),&attempt.repeat,&SEED.to_string(),&attempt.order,&super::medium::revision()]).await?;
+    link(&tx, attempt.id, "exb2_input", request).await?;
+    link(&tx, attempt.id, "exb2_expected", expected).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[derive(Default)]
+struct Batch<'a> {
+    reply: Option<&'a ExecBatch>,
+    recordable: bool,
+    result_ok: bool,
+    qualified: bool,
+}
+
+struct Completed<'a> {
+    batches: Vec<Batch<'a>>,
+    boot: Option<u64>,
+    counters: Option<&'a [u8]>,
+    pair: Option<metrics::Pair<'a>>,
+    issues: Value,
+}
+
+impl Completed<'_> {
+    fn counts(&self) -> (i32, i32) {
+        let completed = self.batches.iter().filter(|batch| batch.recordable).count();
+        let valid = self.batches.iter().filter(|batch| batch.qualified).count();
+        (completed as i32, valid as i32)
+    }
+
+    fn status(&self, sampling: Sampling) -> &'static str {
+        if self.counts().1 == sampling.samples {
+            "complete"
+        } else {
+            "failed"
+        }
+    }
+}
+
+fn field(reply: &ExecBatch, offset: usize) -> u32 {
+    u32::from_le_bytes(reply.output[offset..offset + 4].try_into().unwrap())
+}
+
+fn reply_facts(index: usize, reply: &ExecBatch) -> Value {
+    json!({ "sample_index": index, "boot_id": reply.boot_id, "begin_tick": reply.begin_tick,
+        "end_tick": reply.end_tick, "execution_return": reply.execution_return })
+}
+
+async fn finish(
+    db: &mut Client,
+    attempt: &Attempt<'_>,
+    sample: &Sample,
+    evidence: &Completed<'_>,
+) -> Result<()> {
+    let mode = sample.mode.as_str();
+    let tx = db.transaction().await?;
+    let (completed, valid) = evidence.counts();
+    let status = evidence.status(sample.sampling);
+    let qualified = status == "complete";
+    let boot = evidence.boot.map(|boot| boot.to_string());
+    let n = tx.execute("UPDATE bench.run SET status=$2,boot_id=$3::text::bench.u64,issues=$4 WHERE run_id=$1 AND status='running'",
+        &[&attempt.id,&status,&boot,&evidence.issues]).await?;
+    ensure!(n == 1, "EXB2 attempt has no running row");
+    let snapshots = match &evidence.pair {
+        Some(pair) => Some(pair.write(&tx, mode).await?),
+        None => None,
+    };
+    if let Some(raw) = evidence.counters {
+        protocol::artifact(&tx, attempt.id, "metrics_wire", raw).await?;
+    }
+    if snapshots.is_none() && completed > 0 {
+        tx.execute("INSERT INTO bench.clock(run_id,clock_id,domain,tick_hz,tick_bits,boot_id,precision_description) VALUES($1,'dut','dut',1000000,64,$2::text::bench.u64,'ESP HAL microseconds since boot')", &[&attempt.id,&boot]).await?;
+    }
+    let insert_batch = tx.prepare(&format!("INSERT INTO {mode}.exec_batch(run_id,sample_index,clock_id,begin_tick,end_tick,batch_count,completed_iterations,seed,input_bytes,expected_bytes,actual_bytes,execution_return,status,result,digest,result_ok,qualified) VALUES($1,$2,'dut',$3::text::bench.u64,$4::text::bench.u64,$5,$6,$7::text::bench.u64,$8,$9,$10,$11,$12,$13::text::bench.u64,$14,$15,$16)")).await?;
+    let mut unrecorded = Vec::new();
+    for (index, batch) in evidence.batches.iter().enumerate() {
+        let Some(reply) = batch.reply else { continue };
+        if sample.sampling.samples == 1 || !batch.recordable {
+            let role = if sample.sampling.samples == 1 {
+                "exb2_actual".into()
+            } else {
+                format!("exb2_actual_{index}")
+            };
+            protocol::artifact(&tx, attempt.id, &role, &reply.output).await?;
+            if !batch.recordable {
+                let mut facts = reply_facts(index, reply);
+                facts["actual_role"] = json!(role);
+                unrecorded.push(facts);
+            }
+        }
+        if batch.recordable {
+            let result = (u64::from(field(reply, 48)) << 32) | u64::from(field(reply, 44));
+            tx.execute(
+                &insert_batch,
+                &[
+                    &attempt.id,
+                    &(index as i32),
+                    &reply.begin_tick.to_string(),
+                    &reply.end_tick.to_string(),
+                    &i64::from(ROUNDS),
+                    &i64::from(field(reply, 40)),
+                    &SEED.to_string(),
+                    &sample.input,
+                    &sample.expected,
+                    &reply.output,
+                    &i64::from(reply.execution_return),
+                    &i64::from(field(reply, 36)),
+                    &result.to_string(),
+                    &i64::from(field(reply, 52)),
+                    &batch.result_ok,
+                    &batch.qualified,
+                ],
+            )
+            .await?;
+        }
+    }
+    if !unrecorded.is_empty() {
+        let bytes = serde_json::to_vec(&unrecorded)?;
+        protocol::artifact(&tx, attempt.id, "exb2_unrecorded_replies", &bytes).await?;
+    }
+
+    let analysis = Uuid::new_v4();
+    let source_digest = protocol::digest(
+        evidence
+            .counters
+            .or_else(|| {
+                evidence
+                    .batches
+                    .iter()
+                    .find_map(|batch| batch.reply.map(|reply| reply.output.as_slice()))
+            })
+            .unwrap_or(&sample.input),
+    );
+    tx.execute("INSERT INTO bench.analysis(analysis_id,run_id,algorithm_version,source_digest,qualified,issues) VALUES($1,$2,$6,$3,$4,$5)",
+        &[&analysis,&attempt.id,&source_digest,&qualified,&evidence.issues,&exb2::ANALYSIS_VERSION]).await?;
+    let baseline = snapshots.map(|(start, _)| start);
+    let final_ = snapshots.map(|(_, end)| end);
+    tx.execute(&format!("INSERT INTO {mode}.exec_bench_metrics_data(run_id,config_id,baseline_snapshot_id,final_snapshot_id,analysis_id,qualified,issues,batches_expected,batches_completed,valid_batches) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"),
+        &[&attempt.id,&attempt.config,&baseline,&final_,&analysis,&qualified,&evidence.issues,&sample.sampling.samples,&completed,&valid]).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn artifact(tx: &Transaction<'_>, role: &str, bytes: &[u8]) -> Result<Uuid> {
+    let id = Uuid::new_v4();
+    let hash = protocol::digest(bytes);
+    tx.execute("INSERT INTO bench.artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type) VALUES($1,$2,$3,$4,$5,'application/octet-stream')", &[&id,&role,&hash,&(bytes.len() as i64),&bytes]).await?;
+    Ok(id)
+}
+
+async fn link(tx: &Transaction<'_>, run: Uuid, role: &str, id: Uuid) -> Result<()> {
+    tx.execute(
+        "INSERT INTO bench.run_artifact(run_id,role,artifact_id) VALUES($1,$2,$3)",
+        &[&run, &role, &id],
+    )
+    .await?;
     Ok(())
 }
 
@@ -462,37 +730,177 @@ async fn flash_fw(
 mod tests {
     use super::*;
 
-    fn hex_encode(bytes: &[u8]) -> String {
-        const HEX: &[u8] = b"0123456789abcdef";
-        let mut out = String::with_capacity(bytes.len() * 2);
-        for &b in bytes {
-            out.push(HEX[(b >> 4) as usize] as char);
-            out.push(HEX[(b & 0xf) as usize] as char);
-        }
-        out
+    #[test]
+    fn full_run_qualifies_batches_individually_under_exact_perf_totals() {
+        let sample = fixture_sample(Mode::Hal, Sampling::FULL);
+        let run = Uuid::new_v4();
+        let mut acquired = fixture_acquisition(run, &sample, 100);
+        acquired.batches[51].as_mut().unwrap().output[BUF - 1] ^= 1;
+        acquired.batches[70].as_mut().unwrap().output.pop();
+        acquired.batches[80] = Err(anyhow::anyhow!("missing reply"));
+        let evidence = validate(run, &sample, &acquired);
+        assert_eq!(evidence.counts(), (98, 97));
+        assert_eq!(evidence.status(sample.sampling), "failed");
+        assert!(!evidence.batches[51].qualified);
+        assert!(evidence.batches[81].qualified);
+
+        let acquired = fixture_acquisition(run, &sample, 101);
+        assert_eq!(validate(run, &sample, &acquired).counts(), (100, 0));
     }
 
-    #[test]
-    fn fixtures_are_32_byte_hex() {
-        for wl in WORKLOADS {
-            let input = map_value_bytes(wl.input_hex).unwrap();
-            let expect = map_value_bytes(wl.expect_hex).unwrap();
-            assert_eq!(input.len(), MAP_VALUE_LEN, "{}", wl.name);
-            assert_eq!(expect.len(), MAP_VALUE_LEN, "{}", wl.name);
-            assert_ne!(
-                wl.input_hex, wl.expect_hex,
-                "{} input must differ from expect",
-                wl.name
-            );
+    #[tokio::test]
+    #[ignore = "requires a disposable protocol database XPOST_CASE_TEST_PG"]
+    async fn exb2_attempt_roundtrips_in_all_four_protocol_schemas() -> Result<()> {
+        let dsn = std::env::var("XPOST_CASE_TEST_PG")?;
+        let (mut client, session) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls).await?;
+        tokio::spawn(session);
+        for mode in [Mode::Hal, Mode::Aot, Mode::Jit, Mode::Rbpf] {
+            for sampling in [Sampling::MEDIUM, Sampling::FULL] {
+                roundtrip(&mut client, mode, sampling, false).await?;
+            }
+        }
+        roundtrip(&mut client, Mode::Hal, Sampling::FULL, true).await?;
+        Ok(())
+    }
+
+    async fn roundtrip(
+        client: &mut Client,
+        mode: Mode,
+        sampling: Sampling,
+        corrupt: bool,
+    ) -> Result<()> {
+        let sample = fixture_sample(mode, sampling);
+        let attempt = Attempt {
+            id: Uuid::new_v4(),
+            order: 0,
+            repeat: 1,
+            config: Uuid::new_v4(),
+            retry_of: None,
+            medium_identity: None,
+        };
+        start(client, &attempt, &sample).await?;
+        let mut acquired = fixture_acquisition(attempt.id, &sample, sampling.samples as u64);
+        if corrupt {
+            acquired.batches[51].as_mut().unwrap().output[BUF - 1] ^= 1;
+            acquired.batches[70].as_mut().unwrap().output.pop();
+        }
+        let evidence = validate(attempt.id, &sample, &acquired);
+        finish(client, &attempt, &sample, &evidence).await?;
+        let mode = mode.as_str();
+        let row = client.query_one(&format!("SELECT r.status, c.samples_per_run, d.batches_expected, d.batches_completed, d.valid_batches, d.qualified FROM bench.run r JOIN {mode}.exec_bench_metrics_data d USING (run_id,config_id) JOIN {mode}.exec_bench_config c USING (config_id) WHERE r.run_id=$1"), &[&attempt.id]).await?;
+        let status = if corrupt { "failed" } else { "complete" };
+        assert_eq!(row.get::<_, String>(0), status);
+        assert_eq!(row.get::<_, i32>(1), sampling.samples);
+        assert_eq!(row.get::<_, i32>(2), sampling.samples);
+        assert_eq!(row.get::<_, i32>(3), sampling.samples - i32::from(corrupt));
+        assert_eq!(
+            row.get::<_, i32>(4),
+            sampling.samples - 2 * i32::from(corrupt)
+        );
+        assert_eq!(row.get::<_, bool>(5), !corrupt);
+        let rows = client.query(&format!("SELECT sample_index, actual_bytes, result_ok, qualified FROM {mode}.exec_batch WHERE run_id=$1 ORDER BY sample_index"), &[&attempt.id]).await?;
+        let expected_indices = (0..sampling.samples).filter(|&index| !corrupt || index != 70);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.get::<_, i32>(0))
+                .collect::<Vec<_>>(),
+            expected_indices.collect::<Vec<_>>()
+        );
+        for row in rows {
+            let good = !corrupt || row.get::<_, i32>(0) != 51;
+            assert_eq!(row.get::<_, Vec<u8>>(1) == sample.expected, good);
+            assert_eq!(row.get::<_, bool>(2), good);
+            assert_eq!(row.get::<_, bool>(3), good);
+        }
+        let metrics = client
+            .query_one(
+                &format!("SELECT count(*) FROM {mode}.metric_snapshot WHERE run_id=$1"),
+                &[&attempt.id],
+            )
+            .await?;
+        assert_eq!(metrics.get::<_, i64>(0), 2);
+        let event = result_event(
+            &attempt,
+            &sample,
+            status,
+            status,
+            Some(&evidence),
+            &evidence.issues,
+        );
+        assert_eq!(event["batch_us"].as_f64(), Some(15.0));
+        assert_eq!(
+            event["valid_batches"],
+            sampling.samples - 2 * i32::from(corrupt)
+        );
+        assert_eq!(event["us_per_round"].as_f64(), (!corrupt).then_some(5.0));
+        Ok(())
+    }
+
+    fn fixture_sample(mode: Mode, sampling: Sampling) -> Sample {
+        let (n, input, expected) = exb2::request(0);
+        Sample {
+            mode,
+            program: "noop",
+            n,
+            input,
+            expected,
+            profile: [0x2a; 32],
+            medium_id: None,
+            sampling,
         }
     }
 
-    #[test]
-    fn hex_roundtrip_incr() {
-        let wl = &WORKLOADS[0];
-        let buf = map_value_bytes(wl.input_hex).unwrap();
-        let h = hex_encode(&buf);
-        assert_eq!(h, wl.input_hex);
-        assert_eq!(hex_decode(&h).unwrap(), buf);
+    fn fixture_acquisition(run: Uuid, sample: &Sample, invocations: u64) -> Acquired {
+        let freeze = 110 + 20 * sample.sampling.samples as u64;
+        Acquired {
+            batches: (0..sample.sampling.samples as u64)
+                .map(|index| {
+                    Ok(ExecBatch {
+                        boot_id: 11,
+                        begin_tick: 110 + 20 * index,
+                        end_tick: 125 + 20 * index,
+                        execution_return: if sample.mode == Mode::Hal { 0 } else { 2 },
+                        output: sample.expected.clone(),
+                    })
+                })
+                .collect(),
+            counters: Some(
+                [
+                    synthetic(run, sample, 1, 100, 7),
+                    synthetic(run, sample, 2, freeze, 7 + invocations),
+                ]
+                .concat(),
+            ),
+            boundaries: Some((3, 11, 100, freeze)),
+            session_released: true,
+            issues: Vec::new(),
+        }
+    }
+
+    fn synthetic(run: Uuid, sample: &Sample, phase: u8, tick: u64, count: u64) -> Vec<u8> {
+        let mut pfr = b"PFR1\x02\0\0\0\x05\0".to_vec();
+        for (name, count) in [
+            ("exec_batch_invocations", count),
+            ("exec_batch_action_pass", count),
+            ("exec_batch_action_aborted", 0),
+            ("exec_batch_action_drop", 0),
+            ("exec_batch_action_tx", 0),
+        ] {
+            pfr.push(name.len() as u8);
+            pfr.extend_from_slice(name.as_bytes());
+            pfr.push(1);
+            pfr.extend_from_slice(&count.to_le_bytes());
+        }
+        let mut frame = b"NMS1\x01\0".to_vec();
+        frame.extend([phase, 64]);
+        frame.extend((pfr.len() as u32).to_le_bytes());
+        frame.extend(run.as_bytes());
+        frame.extend(3_u32.to_le_bytes());
+        frame.extend(11_u64.to_le_bytes());
+        frame.extend(sample.profile);
+        frame.extend(tick.to_le_bytes());
+        frame.extend(1_000_000_u32.to_le_bytes());
+        frame.extend(pfr);
+        frame
     }
 }

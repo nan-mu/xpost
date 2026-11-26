@@ -21,6 +21,9 @@ pub mod gauge;
 #[cfg(feature = "perf-trace")]
 pub mod trace;
 
+#[cfg(all(feature = "perf-counter", feature = "perf-report"))]
+pub mod network;
+
 #[cfg(any(
     feature = "perf-counter",
     feature = "perf-aggregate",
@@ -38,7 +41,7 @@ mod report;
 /// Not gated on `interp`: the engine timing it reports is recorded in
 /// `ingress::run` for both engines, so the AOT arm needs the same report to be
 /// comparable on one wire.
-#[cfg(all(feature = "perf-aggregate", feature = "perf-report"))]
+#[cfg(all(feature = "perf-aggregate", feature = "perf-report", feature = "perf-trace"))]
 pub mod interp_report;
 
 /// EspRadioTrace impl — file under `trace/`, linked here for any `perf-*`.

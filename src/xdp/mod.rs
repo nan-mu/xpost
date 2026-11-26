@@ -1,8 +1,8 @@
 //! XDP execution runtime. Control-plane mutation is serialized by `XDP_RT`;
 //! RX sees only the atomically published entry in `state`.
 
-pub(crate) mod image;
 pub(crate) mod engine;
+pub(crate) mod image;
 pub(crate) mod ingress;
 #[cfg(feature = "interp")]
 pub(crate) mod interp;
@@ -48,7 +48,7 @@ pub unsafe fn test_flight_bare(ctx: *mut ingress::ctx::XdpMd) -> Option<i32> {
     let engine = engine::Engine::Interp {
         len: state::PRIMARY_LEN.load(Ordering::Relaxed),
     };
-    Some(unsafe { engine::flight(engine, entry, ctx) })
+    unsafe { engine::flight(engine, entry, ctx) }
 }
 
 /// Run the sequence `[vm construction, engine call]` with the construction
@@ -116,7 +116,11 @@ pub fn test_prog() -> &'static ingress::XdpProg {
 pub fn test_flight_split(buf: &mut [u8]) -> (u32, u32, u32, i32) {
     use xpost_type::EspRadioTrace;
     let prog = test_prog();
-    let now = || esp_hal::time::Instant::now().duration_since_epoch().as_micros() as u32;
+    let now = || {
+        esp_hal::time::Instant::now()
+            .duration_since_epoch()
+            .as_micros() as u32
+    };
     let t0 = now();
     prog.xdp_invocations();
     let t1 = now();
@@ -124,18 +128,25 @@ pub fn test_flight_split(buf: &mut [u8]) -> (u32, u32, u32, i32) {
     let t2 = now();
     prog.xdp_action(act);
     let t3 = now();
-    (t1.wrapping_sub(t0), t2.wrapping_sub(t1), t3.wrapping_sub(t2), act as i32)
+    (
+        t1.wrapping_sub(t0),
+        t2.wrapping_sub(t1),
+        t3.wrapping_sub(t2),
+        act as i32,
+    )
 }
+pub use crate::{RtMutex, RtMutexGuard};
+pub(crate) use image::XdpMeta;
+pub use image::{Complete, Incomplete, XdpBuilder, XdpLocation, XdpMaps};
 /// Run one eBPF program outside a lease, for a firmware self-check.
 ///
 /// Only available with the `interp` feature. The leased datapath reaches the
 /// same entry through the engine seam; this wrapper installs no map windows.
 #[cfg(feature = "interp")]
 pub use interp::selftest_run;
+#[cfg(feature = "perf-trace")]
+pub use swap::SwitchTiming;
 pub use swap::{QuiescePolicy, StageReport, SwitchReport, XdpStatus};
-pub use crate::{RtMutex, RtMutexGuard};
-pub(crate) use image::XdpMeta;
-pub use image::{Complete, Incomplete, XdpBuilder, XdpLocation, XdpMaps};
 /// Locked [`XdpRt`].
 pub type XdpRtGuard<'a> = RtMutexGuard<'a, XdpRt>;
 pub use slot::{Slot, XdpSlot};
@@ -152,7 +163,10 @@ use crate::{
     xdp::{
         map::MapLease,
         ready::ReadyError,
-        state::{ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PAUSE, PRIMARY_ENGINE, PRIMARY_ENTRY, PRIMARY_LEN},
+        state::{
+            ACTIVE, IN_FLIGHT, MAX_IMAGES, MAX_SLOTS, PAUSE, PRIMARY_ENGINE, PRIMARY_ENTRY,
+            PRIMARY_LEN,
+        },
     },
 };
 pub type XdpId = usize;
@@ -493,12 +507,6 @@ impl XdpRt {
             meta.check_helper_address()?;
             meta.check_slot_address(&slot_state.slot)?;
         }
-        #[cfg(feature = "interp")]
-        {
-            // Checked where the bytes arrive, in `stage`; `pre_lease` cannot
-            // scan them because it holds `&self` and the table read needs
-            // `&mut`.
-        }
         self.check_required_maps(meta, maps)?;
         Ok(())
     }
@@ -560,6 +568,20 @@ impl XdpRt {
             self.primary = prev_primary;
             return Err(XdpSwitchError::ImageTooLarge);
         }
+        #[cfg(feature = "interp")]
+        let (digest, binds) = {
+            let meta = &self
+                .images
+                .get(id)
+                .ok_or(XdpSwitchError::UnknownImage)?
+                .meta;
+            let mut binds: heapless::Vec<usize, { crate::xdp::state::MAX_REQUIRED_MAPS }> =
+                heapless::Vec::new();
+            for (_, address) in meta.aot_binds.iter() {
+                let _ = binds.push(*address);
+            }
+            (meta.digest, binds)
+        };
         let Some(buf) = self.copy_buffer.get_mut(..image_len) else {
             self.primary = prev_primary;
             return Err(XdpSwitchError::ScratchTooSmall);
@@ -568,6 +590,11 @@ impl XdpRt {
         if let Err(e) = self.table.read(aot_abs, buf) {
             self.primary = prev_primary;
             return Err(e.into());
+        }
+        #[cfg(feature = "interp")]
+        if xpost_elf::sha256(buf) != digest || !interp::prepare_slot(buf, binds.as_slice()) {
+            self.primary = prev_primary;
+            return Err(XdpSwitchError::Arch);
         }
         unsafe {
             core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, image_len);
@@ -602,7 +629,6 @@ impl XdpRt {
     pub fn image_name(&self, id: XdpId) -> Option<&str> {
         self.images.get(id).map(|img| img.meta.name.as_str())
     }
-
 
     /// Enable the datapath: [`Self::pre_lease`], install VMR aliases / map users, publish entry.
     ///
@@ -676,29 +702,6 @@ impl XdpRt {
             if !binds.is_empty() {
                 crate::map::set_map_aliases(binds.as_slice())?;
                 crate::map::set_fast_arrays(maps, binds.as_slice());
-            }
-            // The interpreter needs the value windows; `rbpf` decides the
-            // packet, the md and the VM stack itself, but a map value pointer
-            // comes out of a helper and only this crate knows its bounds.
-            //
-            // Read the storage pointers directly: the control plane is still
-            // open here, but `MapRt::get` would run `require_stopped` and this
-            // path is about to close it.
-            #[cfg(feature = "interp")]
-            {
-                let mut ranges: heapless::Vec<(usize, usize), 16> = heapless::Vec::new();
-                for &(_, idx) in binds.iter() {
-                    if let Some(meta) = maps.meta.get(idx)
-                        && !meta.storage.ptr.is_null()
-                    {
-                        // The whole allocation, not the `size` estimate: the
-                        // estimate is a heap-budget figure and may exceed what
-                        // the map actually owns.
-                        let _ = ranges
-                            .push((meta.storage.ptr as usize, meta.storage.layout.size()));
-                    }
-                }
-                crate::xdp::interp::set_ranges(ranges.as_slice());
             }
         } else if let Some(id) = self.slots.get(self.primary).and_then(|s| s.image)
             && !self.images[id].meta.required_maps.is_empty()
@@ -780,10 +783,6 @@ impl XdpRt {
         }
         PAUSE.store(false, Ordering::Release);
         PRIMARY_ENTRY.store(0, Ordering::Release);
-        // The lease that owned these windows is over. Ingress is already
-        // quiesced above (`IN_FLIGHT == 0`), so no flight can be reading them.
-        #[cfg(feature = "interp")]
-        crate::xdp::interp::clear_ranges();
         crate::map::clear_map_aliases();
         for id in self.map_lease.refs.drain(..) {
             let _ = crate::map::remove_user_sync(id);

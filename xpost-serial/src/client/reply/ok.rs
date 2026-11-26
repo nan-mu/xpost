@@ -5,14 +5,10 @@
 //!   signatures live here; bodies still in [`super::map`] / [`super::perf`]
 //!   until rewritten.
 
-use winnow::{
-    ascii::space1,
-    combinator::opt,
-    error::EmptyError,
-    Parser,
-};
+use winnow::{Parser, ascii::space1, combinator::opt, error::EmptyError};
 
 use crate::client::error::ParseError;
+use crate::r#type::command::EXEC_BATCH_READ_MAX_BYTES;
 use crate::r#type::reply::OkReply;
 
 // —— fixed OK ————————————————————————————————————————————————————————————————
@@ -52,10 +48,16 @@ fixed_ok! {
     parse_enable_exec_reply => EnableExec: [b"enable", b"exec"];
     /// `OK disable exec`
     parse_disable_exec_reply => DisableExec: [b"disable", b"exec"];
+    /// `OK exec batch reset`
+    parse_exec_batch_reset_reply => ExecBatchReset: [b"exec", b"batch", b"reset"];
+    /// `OK exec batch write`
+    parse_exec_batch_write_reply => ExecBatchWrite: [b"exec", b"batch", b"write"];
     /// `OK clear map`
     parse_clear_map_reply => ClearMap: [b"clear", b"map"];
     /// `OK clear perf`
     parse_clear_perf_reply => ClearPerf: [b"clear", b"perf"];
+    /// `OK perf release`
+    parse_perf_release_reply => PerfRelease: [b"perf", b"release"];
     /// `OK update map`
     parse_update_map_reply => UpdateMap: [b"update", b"map"];
     /// `OK init` — unsolicited settle line (not a command reply).
@@ -99,11 +101,13 @@ fn strip_ansi_sgr(input: &[u8]) -> Vec<u8> {
 
 // —— variable OK (length-prefixed blob) ——————————————————————————————————————
 
-fn parse_u32_line<'a>(input: &'a [u8], prefix: &[u8], n: usize) -> Result<(&'a [u8], [u32; 10]), ParseError> {
+fn parse_u32_line<'a>(
+    input: &'a [u8],
+    prefix: &[u8],
+    n: usize,
+) -> Result<(&'a [u8], [u32; 10]), ParseError> {
     let line = input.strip_suffix(b"\n").unwrap_or(input);
-    let rest = line
-        .strip_prefix(prefix)
-        .ok_or(ParseError::InvalidSyntax)?;
+    let rest = line.strip_prefix(prefix).ok_or(ParseError::InvalidSyntax)?;
     let mut nums = [0u32; 10];
     let mut rest = rest;
     for i in 0..n {
@@ -138,6 +142,23 @@ fn take_u32(input: &[u8]) -> Result<(u32, &[u8]), ParseError> {
     Ok((n, &input[i..]))
 }
 
+fn take_u64(input: &[u8]) -> Result<(u64, &[u8]), ParseError> {
+    if input.is_empty() || !input[0].is_ascii_digit() {
+        return Err(ParseError::InvalidSyntax);
+    }
+    let mut n: u64 = 0;
+    let mut i = 0;
+    while i < input.len() && input[i].is_ascii_digit() {
+        let d = u64::from(input[i] - b'0');
+        n = n
+            .checked_mul(10)
+            .and_then(|n| n.checked_add(d))
+            .ok_or(ParseError::InvalidSyntax)?;
+        i += 1;
+    }
+    Ok((n, &input[i..]))
+}
+
 fn u8_at(nums: &[u32; 10], i: usize) -> Result<u8, ParseError> {
     u8::try_from(nums[i]).map_err(|_| ParseError::InvalidSyntax)
 }
@@ -152,9 +173,7 @@ pub fn parse_enable_xdp_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
     if rest.is_empty() {
         return Ok(OkReply::EnableXdp);
     }
-    let rest = rest
-        .strip_prefix(b" ")
-        .ok_or(ParseError::InvalidSyntax)?;
+    let rest = rest.strip_prefix(b" ").ok_or(ParseError::InvalidSyntax)?;
     let (value, tail) = take_u32(rest)?;
     if !tail.is_empty() {
         return Err(ParseError::InvalidSyntax);
@@ -201,6 +220,148 @@ pub fn parse_get_xdp_status_reply(input: &[u8]) -> Result<OkReply<'_>, ParseErro
         quiesce_drop: nums[6],
         quiesce_pass: nums[7],
         last_error: u8_at(&nums, 8)?,
+    })
+}
+
+fn one_space(input: &[u8]) -> Result<&[u8], ParseError> {
+    input.strip_prefix(b" ").ok_or(ParseError::InvalidSyntax)
+}
+
+/// `OK exec batch invoke <boot_id> <begin_tick> <end_tick> <action>`.
+pub fn parse_exec_batch_invoke_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let line = input.strip_suffix(b"\n").unwrap_or(input);
+    let rest = line
+        .strip_prefix(b"OK exec batch invoke")
+        .ok_or(ParseError::InvalidSyntax)?;
+    let (boot_id, rest) = take_u32(one_space(rest)?)?;
+    let (begin_tick, rest) = take_u64(one_space(rest)?)?;
+    let (end_tick, rest) = take_u64(one_space(rest)?)?;
+    let (action, rest) = take_u32(one_space(rest)?)?;
+    if !rest.is_empty() {
+        return Err(ParseError::InvalidSyntax);
+    }
+    Ok(OkReply::ExecBatchInvoke {
+        boot_id,
+        begin_tick,
+        end_tick,
+        action,
+    })
+}
+
+/// Declared payload length from an `OK exec batch read` header line.
+pub fn parse_exec_batch_read_len(line: &[u8]) -> Option<usize> {
+    let (_, nums) = parse_u32_line(line, b"OK exec batch read", 1).ok()?;
+    let len = nums[0] as usize;
+    (len <= EXEC_BATCH_READ_MAX_BYTES).then_some(len)
+}
+
+/// `OK exec batch read <n>\n` + exactly `n` payload bytes.
+pub fn parse_exec_batch_read_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let nl = input
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .ok_or(ParseError::InvalidSyntax)?;
+    let n = parse_exec_batch_read_len(&input[..nl]).ok_or(ParseError::InvalidSyntax)?;
+    let blob = &input[nl + 1..];
+    if blob.len() != n {
+        return Err(ParseError::BadShape("exec-batch-read"));
+    }
+    Ok(OkReply::ExecBatchRead { blob })
+}
+
+/// `OK perf prepare <epoch> <boot_id>`.
+pub fn parse_perf_prepare_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let line = input.strip_suffix(b"\n").unwrap_or(input);
+    let rest = line
+        .strip_prefix(b"OK perf prepare")
+        .ok_or(ParseError::InvalidSyntax)?;
+    let rest = one_space(rest)?;
+    let (epoch, rest) = take_u32(rest)?;
+    let rest = one_space(rest)?;
+    let (boot_id, rest) = take_u64(rest)?;
+    if !rest.is_empty() {
+        return Err(ParseError::InvalidSyntax);
+    }
+    Ok(OkReply::PerfPrepare { epoch, boot_id })
+}
+
+/// `OK perf arm <tick>`.
+pub fn parse_perf_arm_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let line = input.strip_suffix(b"\n").unwrap_or(input);
+    let rest = line
+        .strip_prefix(b"OK perf arm")
+        .ok_or(ParseError::InvalidSyntax)?;
+    let rest = one_space(rest)?;
+    let (tick, rest) = take_u64(rest)?;
+    if !rest.is_empty() {
+        return Err(ParseError::InvalidSyntax);
+    }
+    Ok(OkReply::PerfArm { tick })
+}
+
+/// `OK perf freeze <tick> <flags> <len> <digest>`.
+pub fn parse_perf_freeze_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let line = input.strip_suffix(b"\n").unwrap_or(input);
+    let rest = line
+        .strip_prefix(b"OK perf freeze")
+        .ok_or(ParseError::InvalidSyntax)?;
+    let rest = one_space(rest)?;
+    let (tick, rest) = take_u64(rest)?;
+    let rest = one_space(rest)?;
+    let (flags, rest) = take_u32(rest)?;
+    let rest = one_space(rest)?;
+    let (len, rest) = take_u32(rest)?;
+    let rest = one_space(rest)?;
+    let (digest, rest) = take_u32(rest)?;
+    if !rest.is_empty() {
+        return Err(ParseError::InvalidSyntax);
+    }
+    Ok(OkReply::PerfFreeze {
+        tick,
+        flags,
+        len,
+        digest,
+    })
+}
+
+/// Header fields of `OK perf read <total> <digest> <n>`, without the payload.
+pub fn parse_perf_read_header(line: &[u8]) -> Result<(u32, u32, usize), ParseError> {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    let rest = line
+        .strip_prefix(b"OK perf read")
+        .ok_or(ParseError::InvalidSyntax)?;
+    let rest = one_space(rest)?;
+    let (total, rest) = take_u32(rest)?;
+    let rest = one_space(rest)?;
+    let (digest, rest) = take_u32(rest)?;
+    let rest = one_space(rest)?;
+    let (n, rest) = take_u32(rest)?;
+    if !rest.is_empty() {
+        return Err(ParseError::InvalidSyntax);
+    }
+    Ok((total, digest, n as usize))
+}
+
+/// Declared payload length from an `OK perf read` header line.
+pub fn parse_perf_read_len(line: &[u8]) -> Option<usize> {
+    parse_perf_read_header(line).ok().map(|(_, _, n)| n)
+}
+
+/// `OK perf read <total> <digest> <n>\n` + exactly `n` payload bytes.
+pub fn parse_perf_read_reply(input: &[u8]) -> Result<OkReply<'_>, ParseError> {
+    let nl = input
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .ok_or(ParseError::InvalidSyntax)?;
+    let (total, digest, n) = parse_perf_read_header(&input[..nl])?;
+    let blob = &input[nl + 1..];
+    if blob.len() != n {
+        return Err(ParseError::BadShape("perf-read"));
+    }
+    Ok(OkReply::PerfRead {
+        total,
+        digest,
+        blob,
     })
 }
 

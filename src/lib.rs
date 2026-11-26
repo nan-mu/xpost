@@ -53,7 +53,7 @@
 //! Firmware (cwd = `examples/<app>`):
 //!
 //! ```bash
-//! cargo build --release --features perf-cag
+//! cargo build --release --features perf-metrics
 //! ```
 //!
 //! Host agent (cwd = `xpost-agent/`):

@@ -335,6 +335,7 @@ dependencies = [
  "aya",
  "aya-build",
  "aya-log",
+ "base64 0.22.1",
  "cargo_metadata 0.19.2",
  "env_logger",
  "libc",
@@ -343,6 +344,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-postgres",
  "toml",
@@ -1860,6 +1862,7 @@ checksum = "97277d36b9c3ace13e58fa6e753f8b0bbbf302a18dd193240d70f9e29681059a"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
@@ -2144,6 +2147,10 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "xpost-manifest"
+version = "0.1.0"
 
 [[package]]
 name = "yoke"

@@ -45,7 +45,10 @@ pub(crate) struct SharedRecordInner {
 
 impl SharedRecordInner {
     /// Rotating transcript under `log_dir` (`serial.log` + `.N`).
-    pub fn create_rotating(log_dir: impl AsRef<Path>, tee_stdout: bool) -> io::Result<SharedRecord> {
+    pub fn create_rotating(
+        log_dir: impl AsRef<Path>,
+        tee_stdout: bool,
+    ) -> io::Result<SharedRecord> {
         Ok(Arc::new(Self {
             inner: Mutex::new(Record::create_rotating(log_dir, tee_stdout)?),
             notify: Notify::new(),
@@ -399,10 +402,7 @@ impl Record {
         Ok(out)
     }
 
-    pub(crate) fn ok_from_found<E>(
-        &self,
-        found: &Found,
-    ) -> core::result::Result<OkReply<'_>, E>
+    pub(crate) fn ok_from_found<E>(&self, found: &Found) -> core::result::Result<OkReply<'_>, E>
     where
         E: From<crate::client::error::ParseError>,
     {
@@ -413,6 +413,22 @@ impl Record {
             Found::DisableXdp => OkReply::DisableXdp,
             Found::EnableExec => OkReply::EnableExec,
             Found::DisableExec => OkReply::DisableExec,
+            Found::ExecBatchReset => OkReply::ExecBatchReset,
+            Found::ExecBatchWrite => OkReply::ExecBatchWrite,
+            Found::ExecBatchInvoke {
+                boot_id,
+                begin_tick,
+                end_tick,
+                action,
+            } => OkReply::ExecBatchInvoke {
+                boot_id: *boot_id,
+                begin_tick: *begin_tick,
+                end_tick: *end_tick,
+                action: *action,
+            },
+            Found::ExecBatchRead { blob_idx } => OkReply::ExecBatchRead {
+                blob: self.blob_at(*blob_idx)?,
+            },
             Found::ClearMap => OkReply::ClearMap,
             Found::ClearPerf => OkReply::ClearPerf,
             Found::UpdateMap => OkReply::UpdateMap,
@@ -422,6 +438,32 @@ impl Record {
             Found::GetPerf { blob_idx } => OkReply::GetPerf {
                 blob: self.blob_at(*blob_idx)?,
             },
+            Found::PerfPrepare { epoch, boot_id } => OkReply::PerfPrepare {
+                epoch: *epoch,
+                boot_id: *boot_id,
+            },
+            Found::PerfArm { tick } => OkReply::PerfArm { tick: *tick },
+            Found::PerfFreeze {
+                tick,
+                flags,
+                len,
+                digest,
+            } => OkReply::PerfFreeze {
+                tick: *tick,
+                flags: *flags,
+                len: *len,
+                digest: *digest,
+            },
+            Found::PerfRead {
+                total,
+                digest,
+                blob_idx,
+            } => OkReply::PerfRead {
+                total: *total,
+                digest: *digest,
+                blob: self.blob_at(*blob_idx)?,
+            },
+            Found::PerfRelease => OkReply::PerfRelease,
             Found::Init => OkReply::Init,
             Found::Finish => OkReply::Finish,
             Found::XdpFlash {
@@ -495,10 +537,7 @@ impl Record {
 }
 
 fn open_append(path: &Path) -> io::Result<(File, u64)> {
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
     let len = file.metadata()?.len();
     Ok((file, len))
 }

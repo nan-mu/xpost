@@ -4,13 +4,12 @@ mod fw;
 mod partitions;
 mod xdp;
 
-pub use partitions::xdp_table_from_csv;
+pub use partitions::{partition_table_bin, xdp_table_from_bin, xdp_table_from_csv};
 pub use xdp::{
     InstallOutcome, XdpEntry, XdpTable, list_entries, plan_install, xdp_name_from_bytes,
-    xdp_name_from_file,
 };
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -18,11 +17,11 @@ use futures::FutureExt;
 use futures::executor::block_on;
 use tokio::sync::{mpsc, oneshot};
 
-use std::io;
 use crate::client::POST_FLASH_INIT_CAPTURE;
 use crate::client::ops::{FlashEvent, FlashOp};
 use crate::client::port::Port;
 use crate::client::record::{SharedRecord, WriteRecord};
+use std::io;
 
 /// Default partition label for the XDP flash span (`partitions.csv` Name column).
 pub const DEFAULT_XDP_PARTITION: &str = "xdp";
@@ -30,7 +29,7 @@ pub const DEFAULT_XDP_PARTITION: &str = "xdp";
 enum FlashReq {
     Op {
         op: FlashOp,
-        image_capacity: Option<usize>,
+        target: Option<XdpTable>,
         resp: oneshot::Sender<io::Result<FlashResult>>,
     },
     Shutdown,
@@ -42,6 +41,10 @@ pub enum FlashResult {
     Done,
     Install(InstallOutcome),
     List(Vec<XdpEntry>),
+    Attested {
+        firmware_matches: bool,
+        image_sha256: Option<[u8; 32]>,
+    },
 }
 
 /// Internal flash worker handle (owned by [`crate::client::SerialHandler`]).
@@ -51,24 +54,16 @@ pub(crate) struct FlashWorker {
 }
 
 impl FlashWorker {
-    pub(crate) fn call(
-        &self,
-        op: FlashOp,
-        image_capacity: Option<usize>,
-    ) -> io::Result<FlashResult> {
-        block_on(self.call_async(op, image_capacity))
+    pub(crate) fn call(&self, op: FlashOp, target: Option<XdpTable>) -> io::Result<FlashResult> {
+        block_on(self.call_async(op, target))
     }
 
-    async fn call_async(
-        &self,
-        op: FlashOp,
-        image_capacity: Option<usize>,
-    ) -> io::Result<FlashResult> {
+    async fn call_async(&self, op: FlashOp, target: Option<XdpTable>) -> io::Result<FlashResult> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
             .send(FlashReq::Op {
                 op,
-                image_capacity,
+                target,
                 resp: resp_tx,
             })
             .map_err(|_| std::io::Error::other("flash task closed"))?;
@@ -129,10 +124,7 @@ impl FlashConfig {
     /// Resolve [`XdpTable`] from [`Self::partitions`] / [`Self::partition`].
     pub fn xdp_table(&self) -> io::Result<XdpTable> {
         let mut table = xdp_table_from_csv(&self.partitions, &self.partition)?;
-        table.image_capacity = self
-            .image_capacity
-            .min(table.len as usize)
-            .min(xpost_elf::MAX_CONTAINER_SIZE);
+        table.image_capacity = self.image_capacity.min(table.len as usize);
         Ok(table)
     }
 }
@@ -156,20 +148,18 @@ async fn worker(
     while let Some(req) = rx.recv().await {
         match req {
             FlashReq::Shutdown => break,
-            FlashReq::Op {
-                op,
-                image_capacity,
-                resp,
-            } => {
-                let mut cfg = cfg.clone();
-                cfg.image_capacity = image_capacity.unwrap_or(cfg.image_capacity);
+            FlashReq::Op { op, target, resp } => {
+                let cfg = cfg.clone();
                 let port = Arc::clone(&port);
                 let record = Arc::clone(&record);
-                let result = tokio::task::spawn_blocking(move || run_op(&port, &cfg, &record, &op))
-                    .map(|join| {
-                        join.unwrap_or_else(|e| Err(std::io::Error::other(format!("flash join: {e}"))))
-                    })
-                    .await;
+                let result =
+                    tokio::task::spawn_blocking(move || run_op(&port, &cfg, target, &record, &op))
+                        .map(|join| {
+                            join.unwrap_or_else(|e| {
+                                Err(std::io::Error::other(format!("flash join: {e}")))
+                            })
+                        })
+                        .await;
                 let _ = resp.send(result);
             }
         }
@@ -179,6 +169,7 @@ async fn worker(
 fn run_op(
     port: &Port,
     cfg: &FlashConfig,
+    target: Option<XdpTable>,
     record: &SharedRecord,
     op: &FlashOp,
 ) -> io::Result<FlashResult> {
@@ -190,24 +181,54 @@ fn run_op(
         FlashEvent::Begin(op.clone()).write_to(&mut rec);
     }
     record.mark_init_after(SystemTime::now());
+    let table = || target.map_or_else(|| cfg.xdp_table(), Ok);
+    let partition = if target.is_some() {
+        DEFAULT_XDP_PARTITION
+    } else {
+        cfg.partition.as_str()
+    };
     let result = match op {
-        FlashOp::Fw {
-            firmware,
-            partitions,
-        } => fw::flash_fw(port, Path::new(firmware), Path::new(partitions))
+        FlashOp::Fw { snapshot } => fw::flash_fw(port, snapshot).map(|_| FlashResult::Done),
+        FlashOp::Xdp {
+            name,
+            bytes,
+            expectation,
+            replace_single,
+        } => table()
+            .and_then(|table| {
+                xdp::install(
+                    port,
+                    table,
+                    partition,
+                    name,
+                    bytes,
+                    expectation,
+                    *replace_single,
+                )
+            })
+            .map(FlashResult::Install),
+        FlashOp::Clear { names } => table()
+            .and_then(|table| xdp::clear(port, table, names))
             .map(|_| FlashResult::Done),
-        FlashOp::Xdp { name, path } => {
-            xdp::install(port, cfg, name, Path::new(path)).map(FlashResult::Install)
-        }
-        FlashOp::Clear { names } => xdp::clear(port, cfg, names).map(|_| FlashResult::Done),
-        FlashOp::List => xdp::list(port, cfg).map(FlashResult::List),
+        FlashOp::Attest { expectation } => table()
+            .and_then(|table| xdp::attest(port, table, partition, expectation))
+            .map(|(firmware_matches, image_sha256)| FlashResult::Attested {
+                firmware_matches,
+                image_sha256,
+            }),
+        FlashOp::List => table()
+            .and_then(|table| xdp::list(port, table))
+            .map(FlashResult::List),
     };
     // Download held the USB fd through reset; a fast App `OK init` would be lost
     // unless we reopen UART before GetInit. Re-mark so only this boot counts.
     if result.is_ok()
         && matches!(
             op,
-            FlashOp::Fw { .. } | FlashOp::Xdp { .. } | FlashOp::Clear { .. }
+            FlashOp::Fw { .. }
+                | FlashOp::Xdp { .. }
+                | FlashOp::Clear { .. }
+                | FlashOp::Attest { .. }
         )
     {
         record.mark_init_after(SystemTime::now());
@@ -233,7 +254,9 @@ fn run_op(
                 rec.flash(&format!("FLASH install {o:?}"));
                 FlashEvent::End(op.clone()).write_to(&mut rec);
             }
-            Ok(FlashResult::Done) => FlashEvent::End(op.clone()).write_to(&mut rec),
+            Ok(FlashResult::Done | FlashResult::Attested { .. }) => {
+                FlashEvent::End(op.clone()).write_to(&mut rec)
+            }
             Err(e) => FlashEvent::Failed {
                 op: op.clone(),
                 msg: e.to_string(),

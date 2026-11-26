@@ -116,8 +116,8 @@ impl WindowStats {
 
 fn profile_for(fw: Firmware) -> &'static str {
     match fw {
-        Firmware::XdpCag => "just-tx-cag",
-        Firmware::XdpT => "just-tx-t",
+        Firmware::XdpMetrics => "just-tx-metrics",
+        Firmware::XdpTrace => "just-tx-trace",
         Firmware::Hal => "just-tx-hal",
     }
 }
@@ -143,7 +143,7 @@ fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
     let mut out = Vec::new();
     for a in arms {
         match PpsPath::parse(a)? {
-            PpsPath::Xdp => out.push(Firmware::XdpCag),
+            PpsPath::Xdp => out.push(Firmware::XdpMetrics),
             PpsPath::Hal => out.push(Firmware::Hal),
         }
     }
@@ -170,7 +170,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
 
     // Arms from just_tx.toml; xdp_t always last.
     let arms = if opts.lookup_pair {
-        vec![Firmware::XdpCag]
+        vec![Firmware::XdpMetrics]
     } else {
         arms_from_cfg(&cfg.just_tx.arms)?
     };
@@ -232,7 +232,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
             plan.seed
         ));
         let ordered = if opts.lookup_pair {
-            vec![Firmware::XdpCag]
+            vec![Firmware::XdpMetrics]
         } else {
             plan.order_firmware(&arms)
         };
@@ -240,7 +240,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
         ui.begin_round();
         ui.set_eta(&eta.fmt());
         let profile = if opts.lookup_pair {
-            "just-tx-cag-lookup"
+            "just-tx-metrics-lookup"
         } else {
             profile_for(*fw)
         };
@@ -313,7 +313,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                 ui.check_ok(&format!(
                     "config={cfg_id} ok={ok}/{} mask={:#x}",
                     stats.sent,
-                    decoded.mask
+                    decoded.mask()
                 ));
             }
             eta.consume_fixed(WARMUP + window + DRAIN);
@@ -330,11 +330,11 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
     }
 
     // Trace arm (XDP): skip when `arms` is HAL-only.
-    let want_xdp_t = arms.iter().any(|a| matches!(a, Firmware::XdpCag));
+    let want_xdp_t = arms.iter().any(|a| matches!(a, Firmware::XdpMetrics));
     if want_xdp_t && !opts.skip_trace {
         ui.begin_round();
         ui.set_eta(&eta.fmt());
-        let fw = Firmware::XdpT;
+        let fw = Firmware::XdpTrace;
         let profile = profile_for(fw);
         let path = PpsPath::Xdp;
         ui.check_pending(&format!("烧录 `{profile}`"));
@@ -422,7 +422,7 @@ pub async fn run_just_tx(cfg: &FileConfig, harness: &mut Harness, opts: JustTxOp
                 &decoded,
             )
             .await?;
-            let n_ev = decoded.trace.as_ref().map(|t| t.events.len()).unwrap_or(0);
+            let n_ev = decoded.trace().as_ref().map(|t| t.events.len()).unwrap_or(0);
             ui.check_ok(&format!("trace events={n_ev}"));
         }
         ui.end_round();

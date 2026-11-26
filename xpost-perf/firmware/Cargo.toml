@@ -1,0 +1,15 @@
+[package]
+name = "xpost-network-perf"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+critical-section = "1.2.0"
+embeprom = { version = "=0.3.0", default-features = false }
+esp-hal = { version = "~1.1.0", default-features = false, features = ["esp32c3", "unstable"] }
+xpost-perf = { path = ".." }
+xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
+xpost-type = { path = "../../xpost-type" }

@@ -82,7 +82,7 @@ fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
     let mut out = Vec::new();
     for a in arms {
         match PpsPath::parse(a)? {
-            PpsPath::Xdp => out.push(Firmware::XdpCag),
+            PpsPath::Xdp => out.push(Firmware::XdpMetrics),
             PpsPath::Hal => out.push(Firmware::Hal),
         }
     }
@@ -95,9 +95,9 @@ fn arms_from_cfg(arms: &[String]) -> Result<Vec<Firmware>> {
 
 fn profile_for(fw: Firmware, lookup: bool) -> &'static str {
     match (fw, lookup) {
-        (Firmware::XdpCag, true) => "firewall-cag-lookup",
-        (Firmware::XdpCag, false) => "firewall-cag",
-        (Firmware::XdpT, _) => "firewall-t",
+        (Firmware::XdpMetrics, true) => "firewall-metrics-lookup",
+        (Firmware::XdpMetrics, false) => "firewall-metrics",
+        (Firmware::XdpTrace, _) => "firewall-trace",
         (Firmware::Hal, _) => "firewall-hal",
     }
 }
@@ -146,7 +146,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
     let window = WINDOW_S;
     let grid: &[f64] = opts.rates.unwrap_or(SWEEP_PPS);
     let arms = if opts.lookup {
-        vec![Firmware::XdpCag]
+        vec![Firmware::XdpMetrics]
     } else {
         arms_from_cfg(&cfg.firewall.arms)?
     };
@@ -312,7 +312,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                     &decoded,
                 )
                 .await?;
-                ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask));
+                ui.check_ok(&format!("config={cfg_id} mask={:#x}", decoded.mask()));
             }
             let _ = agent.clear_map(MAP_NAME).await;
             eta.consume_fixed(window);
@@ -322,7 +322,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
     }
 
     if !opts.skip_trace {
-        let fw = Firmware::XdpT;
+        let fw = Firmware::XdpTrace;
         let profile = profile_for(fw, false);
         flash_ready(cfg, &agent, &ui, &mut eta, profile).await?;
         let rules = blacklist_ips(esp, 8, &[esp, host_ip]);
@@ -379,7 +379,7 @@ pub async fn run_firewall(cfg: &FileConfig, opts: FirewallOpts) -> Result<()> {
                 &decoded,
             )
             .await?;
-            let n_ev = decoded.trace.as_ref().map(|t| t.events.len()).unwrap_or(0);
+            let n_ev = decoded.trace().as_ref().map(|t| t.events.len()).unwrap_or(0);
             ui.check_ok(&format!("trace events={n_ev}"));
         }
     }

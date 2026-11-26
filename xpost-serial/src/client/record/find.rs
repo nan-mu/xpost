@@ -18,6 +18,17 @@ pub(crate) enum Found {
     DisableXdp,
     EnableExec,
     DisableExec,
+    ExecBatchReset,
+    ExecBatchWrite,
+    ExecBatchInvoke {
+        boot_id: u32,
+        begin_tick: u64,
+        end_tick: u64,
+        action: u32,
+    },
+    ExecBatchRead {
+        blob_idx: usize,
+    },
     ClearMap,
     ClearPerf,
     UpdateMap,
@@ -27,6 +38,25 @@ pub(crate) enum Found {
     GetPerf {
         blob_idx: usize,
     },
+    PerfPrepare {
+        epoch: u32,
+        boot_id: u64,
+    },
+    PerfArm {
+        tick: u64,
+    },
+    PerfFreeze {
+        tick: u64,
+        flags: u32,
+        len: u32,
+        digest: u32,
+    },
+    PerfRead {
+        total: u32,
+        digest: u32,
+        blob_idx: usize,
+    },
+    PerfRelease,
     Init,
     Finish,
     XdpFlash {
@@ -88,19 +118,23 @@ where
 {
     let guard = record.lock();
     match cmd {
-        Command::GetMap { .. } => scan_blob_framed::<E>(
+        Command::GetMap { .. } => {
+            scan_blob_framed::<E>(&guard, cmd, after, reply::parse_get_map_len, |idx| {
+                Found::GetMap { blob_idx: idx }
+            })
+        }
+        Command::GetPerf => {
+            scan_blob_framed::<E>(&guard, cmd, after, reply::parse_get_perf_len, |idx| {
+                Found::GetPerf { blob_idx: idx }
+            })
+        }
+        Command::PerfRead { .. } => scan_perf_read::<E>(&guard, cmd, after),
+        Command::ExecBatchRead { .. } => scan_blob_framed::<E>(
             &guard,
             cmd,
             after,
-            reply::parse_get_map_len,
-            |idx| Found::GetMap { blob_idx: idx },
-        ),
-        Command::GetPerf => scan_blob_framed::<E>(
-            &guard,
-            cmd,
-            after,
-            reply::parse_get_perf_len,
-            |idx| Found::GetPerf { blob_idx: idx },
+            reply::parse_exec_batch_read_len,
+            |blob_idx| Found::ExecBatchRead { blob_idx },
         ),
         other => scan_simple::<E>(&guard, other, after),
     }
@@ -114,6 +148,13 @@ fn scan_simple<E>(
 where
     E: RequestError,
 {
+    // `get finish` is the one command whose reply the device prints before the
+    // host asks for it, so the newest matching line is the one that belongs to
+    // this run. Every other command takes the first match after `after`, because
+    // its reply cannot exist yet.
+    let newest_only = matches!(cmd, Command::GetFinish);
+    let mut last: Option<(Found, SystemTime)> = None;
+    let mut scanned = 0usize;
     for idx in guard.indices_after(after) {
         let Some(entry) = guard.entry(idx) else {
             continue;
@@ -125,14 +166,26 @@ where
         let Some(line) = guard.payload(*payload) else {
             continue;
         };
+        scanned += 1;
         if let Some(err) = wire_err_line(line, cmd) {
             return Err(err);
         }
         if let Some(found) = match_simple(cmd, line) {
-            return Ok(Some((found, at)));
+            if !newest_only {
+                return Ok(Some((found, at)));
+            }
+            last = Some((found, at));
+        } else if newest_only && scanned <= 40 {
+            // Only reachable while diagnosing a finish wait that finds nothing:
+            // printing the tail makes it obvious whether the line is present
+            // with an unexpected shape or absent entirely.
+            eprintln!(
+                "[find] skip line {:?}",
+                String::from_utf8_lossy(&line[..line.len().min(60)])
+            );
         }
     }
-    Ok(None)
+    Ok(last)
 }
 
 /// Header line then a following [`Entry::Blob`].
@@ -172,13 +225,50 @@ where
     Ok(None)
 }
 
+fn scan_perf_read<E>(
+    guard: &std::sync::MutexGuard<'_, crate::client::record::Record>,
+    cmd: &Command<'_>,
+    after: SystemTime,
+) -> core::result::Result<Option<(Found, SystemTime)>, E>
+where
+    E: RequestError,
+{
+    let mut header: Option<(SystemTime, u32, u32)> = None;
+    for idx in guard.indices_after(after) {
+        match guard.entry(idx) {
+            Some(entry @ Entry::Uart { payload, .. }) => {
+                let at = entry.at();
+                let Some(line) = guard.payload(*payload) else {
+                    continue;
+                };
+                if let Some(err) = wire_err_line(line, cmd) {
+                    return Err(err);
+                }
+                if let Ok((total, digest, _)) = reply::parse_perf_read_header(line) {
+                    header = Some((at, total, digest));
+                }
+            }
+            Some(Entry::Blob { .. }) => {
+                if let Some((at, total, digest)) = header {
+                    return Ok(Some((
+                        Found::PerfRead {
+                            total,
+                            digest,
+                            blob_idx: idx,
+                        },
+                        at,
+                    )));
+                }
+            }
+            None => {}
+        }
+    }
+    Ok(None)
+}
+
 fn wire_err_line<E>(line: &[u8], cmd: &Command<'_>) -> Option<E>
 where
-    E: From<ParseError>
-        + From<ServerError>
-        + From<MapError>
-        + From<PerfError>
-        + From<SyntaxError>,
+    E: From<ParseError> + From<ServerError> + From<MapError> + From<PerfError> + From<SyntaxError>,
 {
     if !trim_ascii(line).starts_with(b"ERR ") {
         return None;
@@ -218,6 +308,19 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
         OkReply::DisableXdp => Some(Found::DisableXdp),
         OkReply::EnableExec => Some(Found::EnableExec),
         OkReply::DisableExec => Some(Found::DisableExec),
+        OkReply::ExecBatchReset => Some(Found::ExecBatchReset),
+        OkReply::ExecBatchWrite => Some(Found::ExecBatchWrite),
+        OkReply::ExecBatchInvoke {
+            boot_id,
+            begin_tick,
+            end_tick,
+            action,
+        } => Some(Found::ExecBatchInvoke {
+            boot_id,
+            begin_tick,
+            end_tick,
+            action,
+        }),
         OkReply::ClearMap => Some(Found::ClearMap),
         OkReply::ClearPerf => Some(Found::ClearPerf),
         OkReply::UpdateMap => Some(Found::UpdateMap),
@@ -274,6 +377,23 @@ fn match_simple(cmd: &Command<'_>, line: &[u8]) -> Option<Found> {
             quiesce_pass,
             last_error,
         }),
-        OkReply::GetMap { .. } | OkReply::GetPerf { .. } => None,
+        OkReply::PerfPrepare { epoch, boot_id } => Some(Found::PerfPrepare { epoch, boot_id }),
+        OkReply::PerfArm { tick } => Some(Found::PerfArm { tick }),
+        OkReply::PerfFreeze {
+            tick,
+            flags,
+            len,
+            digest,
+        } => Some(Found::PerfFreeze {
+            tick,
+            flags,
+            len,
+            digest,
+        }),
+        OkReply::PerfRelease => Some(Found::PerfRelease),
+        OkReply::GetMap { .. }
+        | OkReply::GetPerf { .. }
+        | OkReply::PerfRead { .. }
+        | OkReply::ExecBatchRead { .. } => None,
     }
 }

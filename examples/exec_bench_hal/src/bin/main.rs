@@ -6,28 +6,25 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-//! Native HAL twin of `exec_bench`: same host pipeline (map / enable exec /
-//! `OK finish` / perf), no XDP lease and no `xpost` runtime. Workload bytes are
-//! opaque at the serial boundary; [`exec_bench_hal::run_hal`] interprets them.
+//! Native HAL twin of `exec_bench`. Run the selected EXB2 kernel directly.
 
-use core::cell::RefCell;
+#[cfg(feature = "diag")]
+mod diagnostics;
+mod exb2;
+#[path = "../../../exec_bench/src/exec_metrics.rs"]
+mod exec_metrics;
+
 use core::convert::Infallible;
 use core::ptr::addr_of_mut;
 
-use critical_section::Mutex;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb_serial_jtag::UsbSerialJtag;
-use heapless::FnvIndexMap;
-use log::{error, info};
-use xpost_serial::reply::{MapError, OkReply, ServerError};
-use xpost_serial::server::{ReplyWriter, SerialHandler, serial_task};
-
-use exec_bench_hal::{cag, run_hal, wire};
-#[cfg(feature = "diag")]
-use xpost_perf::sweep;
+use log::error;
+use xpost_serial::server::exec_batch::{EXEC_BATCH_LINE_BYTES, ExecBatch};
+use xpost_serial::server::{SerialHandler, serial_task};
 
 #[panic_handler]
 fn panic(panic_info: &core::panic::PanicInfo) -> ! {
@@ -35,20 +32,9 @@ fn panic(panic_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-extern crate alloc;
-
 esp_bootloader_esp_idf::esp_app_desc!();
 
-const MAP_NAME: &str = "workload";
-const VALUE_LEN: usize = 32;
-const KEY_IN: u8 = 0;
-const KEY_OUT: u8 = 1;
-const MAP_CAP: u32 = 2;
-
-static WORKLOAD: Mutex<RefCell<FnvIndexMap<u8, [u8; VALUE_LEN], 2>>> =
-    Mutex::new(RefCell::new(FnvIndexMap::new()));
-
-static mut RUN_BUF: [u8; VALUE_LEN] = [0u8; VALUE_LEN];
+static mut EXEC_BATCH: ExecBatch = ExecBatch::new();
 
 #[allow(
     clippy::large_stack_frames,
@@ -60,8 +46,8 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 66320);
+    let boot_id = esp_hal::rng::Rng::new().random().max(1);
+    exec_metrics::init(boot_id);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_interrupt =
@@ -72,12 +58,14 @@ async fn main(spawner: Spawner) -> ! {
     // Host re-marks GetInit and reopens UART after espflash reset (~3s capture).
     // Emit `OK init` inside that window; immediate spawn races and is lost.
     Timer::after(Duration::from_millis(800)).await;
-    spawner.spawn(control_serial(usb_rx).unwrap());
+    // The single serial task owns the staging buffer for the rest of this boot.
+    let batch = unsafe { &mut *addr_of_mut!(EXEC_BATCH) };
+    spawner.spawn(control_serial(usb_rx, batch, boot_id).unwrap());
 
     // Scale sweep, for the three-engine comparison. Runs after the serial task
     // starts so a reset still produces the boot banner first.
     #[cfg(feature = "diag")]
-    hal_scale_sweep();
+    diagnostics::scale_sweep();
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
@@ -87,9 +75,11 @@ async fn main(spawner: Spawner) -> ! {
 serial_task! {
     fn control_serial(
         rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+        batch: &'static mut ExecBatch,
+        boot_id: u32,
     ) {
         let mut rx = rx;
-        SerialHandler::builder(
+        let builder = SerialHandler::builder(
             move || match rx.read_byte() {
                 Ok(b) => Some(b),
                 Err(_) => None,
@@ -98,225 +88,9 @@ serial_task! {
                 esp_println::Printer::write_bytes(bytes);
                 Ok::<(), Infallible>(())
             },
-            [0u8; 128],
+            [0u8; EXEC_BATCH_LINE_BYTES],
         )
-        .on_ping(|reply: ReplyWriter<'_>| reply.ok(OkReply::Ping))
-        .on_enable_xdp(|reply: ReplyWriter<'_>| reply.error(&ServerError::Unsupported))
-        .on_disable_xdp(|reply: ReplyWriter<'_>| reply.error(&ServerError::Unsupported))
-        .on_enable_exec(|reply: ReplyWriter<'_>| match run_exec() {
-            Ok(()) => reply.ok(OkReply::EnableExec),
-            Err(e) => reply.error(&e),
-        })
-        .on_disable_exec(|reply: ReplyWriter<'_>| {
-            // No lease to release; keep verb symmetry with the eBPF arm.
-            reply.ok(OkReply::DisableExec);
-        })
-        .on_clear_map(|name: &str, reply: ReplyWriter<'_>| {
-            if name != MAP_NAME {
-                reply.error(&MapError::NameNotFound);
-                return;
-            }
-            critical_section::with(|cs| WORKLOAD.borrow(cs).borrow_mut().clear());
-            reply.ok(OkReply::ClearMap);
-        })
-        .on_get_map(|name: &str, reply: ReplyWriter<'_>| {
-            if name != MAP_NAME {
-                reply.error(&MapError::NameNotFound);
-                return;
-            }
-            critical_section::with(|cs| {
-                let map = WORKLOAD.borrow(cs).borrow();
-                let size = map.len() as u32;
-                let mut len = wire::hash_header_len(size, MAP_CAP);
-                for (k, v) in map.iter() {
-                    len += wire::hash_entry_len(&[*k], v);
-                }
-                reply.get_map(len, |write| {
-                    let mut emit = |chunk: &[u8]| {
-                        let _ = write(chunk);
-                    };
-                    wire::write_hash_header(size, MAP_CAP, &mut emit);
-                    for (k, v) in map.iter() {
-                        wire::write_hash_entry(&[*k], v, &mut emit);
-                    }
-                });
-            });
-        })
-        .on_update_map(
-            |name: &str, key: &[u8], value: &[u8], reply: ReplyWriter<'_>| {
-                match update_bytes(name, key, value) {
-                    Ok(()) => reply.ok(OkReply::UpdateMap),
-                    Err(e) => reply.error(&e),
-                }
-            },
-        )
-        .on_clear_perf(|reply: ReplyWriter<'_>| {
-            cag::clear_perf();
-            reply.ok(OkReply::ClearPerf);
-        })
-        .on_get_perf(|reply: ReplyWriter<'_>| {
-            let n = cag::report_payload_len();
-            reply.get_perf(n, |write| {
-                cag::report_perf(write);
-            });
-        })
-        .build()
-    }
-}
-
-fn key_u8(key: &[u8]) -> Option<u8> {
-    match key {
-        b"0" => Some(0),
-        b"1" => Some(1),
-        [0] | [1] => Some(key[0]),
-        _ => None,
-    }
-}
-
-fn hex_nibble(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn decode_value_token(value: &[u8]) -> Option<[u8; VALUE_LEN]> {
-    let mut val = [0u8; VALUE_LEN];
-    if value.len() == VALUE_LEN * 2 {
-        for i in 0..VALUE_LEN {
-            let hi = hex_nibble(value[i * 2])?;
-            let lo = hex_nibble(value[i * 2 + 1])?;
-            val[i] = (hi << 4) | lo;
-        }
-        return Some(val);
-    }
-    let n = value.len().min(VALUE_LEN);
-    val[..n].copy_from_slice(&value[..n]);
-    Some(val)
-}
-
-fn update_bytes(name: &str, key: &[u8], value: &[u8]) -> Result<(), MapError> {
-    if name != MAP_NAME {
-        return Err(MapError::NameNotFound);
-    }
-    let slot = key_u8(key).ok_or(MapError::InvalidKey)?;
-    let val = decode_value_token(value).ok_or(MapError::InvalidValue)?;
-    let ok = critical_section::with(|cs| {
-        WORKLOAD.borrow(cs).borrow_mut().insert(slot, val).is_ok()
-    });
-    if ok {
-        Ok(())
-    } else {
-        Err(MapError::Full)
-    }
-}
-
-/// Same pipeline step as eBPF `enable exec`: map[0] → compute → result map,
-/// then `xdp_end`, then `info!("OK finish")` (host `GetFinish`, not a serial reply).
-fn run_exec() -> Result<(), MapError> {
-    let mut in_val = [0u8; VALUE_LEN];
-    let found = critical_section::with(|cs| {
-        let map = WORKLOAD.borrow(cs).borrow();
-        match map.get(&KEY_IN) {
-            Some(v) => {
-                in_val.copy_from_slice(v);                true
-            }
-            None => false,
-        }
-    });
-    if !found {
-        return Err(MapError::KeyNotFound);
-    }
-
-    let buf: &mut [u8; VALUE_LEN] = unsafe { &mut *addr_of_mut!(RUN_BUF) };
-    buf.copy_from_slice(&in_val);
-
-    // Diagnostic build: repeat the call so the mean is readable. One call takes
-    // a few microseconds and the clock resolves one, so a single sample is
-    // mostly quantization noise. Two thousand calls divide that uncertainty and
-    // average over interrupt and cache noise.
-    #[cfg(feature = "diag")]
-    {
-        const RUNS: u32 = 2000;
-        let t0 = cag::now_ticks();
-        for _ in 0..RUNS {
-            let mut scratch: [u8; VALUE_LEN] = in_val;
-            let _ = run_hal(&mut scratch);
-        }
-        let total_us = cag::now_ticks().saturating_sub(t0);
-        let mean_ns = total_us.saturating_mul(1000) / RUNS as u64;
-        info!("bench runs={RUNS} mean_ns={mean_ns} act=XDP_PASS");
-    }
-
-    cag::bump_xdp_invocations();
-    cag::push_xdp_begin();
-    let t0 = cag::now_ticks();
-    let ran = run_hal(buf);
-    cag::record_execution(cag::now_ticks().saturating_sub(t0));
-    if ran.is_err() {
-        cag::bump_xdp_aborted();
-        cag::push_xdp_end(0);
-        return Err(MapError::InvalidValue);
-    }
-    cag::bump_xdp_pass();
-
-    let out = *buf;
-    let ok = critical_section::with(|cs| {
-        WORKLOAD.borrow(cs).borrow_mut().insert(KEY_OUT, out).is_ok()
-    });
-    if !ok {
-        cag::push_xdp_end(0);
-        return Err(MapError::Full);
-    }
-
-    cag::push_xdp_end(cag::TRACE_XDP_PASS);
-    info!("OK finish");
-    Ok(())
-}
-
-/// Sweep a workload's work size through the HAL path.
-///
-/// Same work sizes and run count as the two XDP engines, so the three sweeps
-/// describe identical work. `run_hal` takes any length of buffer, so the frame
-/// here is sized for the largest parameter rather than the 32-byte carrier the
-/// App path uses.
-///
-/// The measurement brackets `run_hal` only, matching how the arm reports
-/// `execution`.
-#[cfg(feature = "diag")]
-fn hal_scale_sweep() {
-    hal_sweep_one(sweep::OP_INCR, "incr");
-    hal_sweep_one(sweep::OP_SQUARE, "square");
-    hal_sweep_one(sweep::OP_BITSWAP, "bitswap");
-    hal_sweep_one(sweep::OP_FIB, "fib");
-    hal_sweep_one(sweep::OP_BUF, "buf");
-    hal_sweep_one(sweep::OP_MEMCPY, "memcpy");
-    hal_sweep_one(sweep::OP_FLETCHER32, "fletcher32");
-    hal_sweep_one(sweep::OP_BSORT, "bsort");
-}
-
-/// One workload's sweep.
-///
-/// Sizes come from the shared list, so this measures the same work the two XDP
-/// engines measure. `fib` clamps at 47 and `bsort` at 6, which their lists
-/// already respect.
-#[cfg(feature = "diag")]
-fn hal_sweep_one(opcode: u32, name: &str) {
-    let Some(params) = sweep::params_for(opcode) else {
-        return;
-    };
-    let mut frame = [0u8; 8 + 1024 + 4];
-    for &param in params {
-        let n = sweep::frame_len_for(opcode, param);
-        sweep::fill_op(&mut frame[..n], opcode, param);
-        let t0 = cag::now_ticks();
-        for _ in 0..sweep::RUNS {
-            let _ = run_hal(&mut frame[..n]);
-        }
-        let total_us = cag::now_ticks().saturating_sub(t0);
-        let mean_ns = total_us.saturating_mul(1000) / sweep::RUNS as u64;
-        info!("sweep wl={name} param={param} runs={} mean_ns={mean_ns}", sweep::RUNS);
+        .on_exec_batch(move |command, reply| batch.handle(command, reply, boot_id, |buf| Ok(exb2::run(buf))));
+        exec_metrics::register(builder).build()
     }
 }

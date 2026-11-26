@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::release::{Mode, TAG};
+
 /// `{ cwd, command }` run before flash (paths relative to workspace root).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct BuildSpec {
@@ -31,17 +33,25 @@ pub struct FwProfile {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct XdpProfile {
     pub name: String,
     pub fw: String,
-    pub artifact: String,
-    pub build: BuildSpec,
+    /// Producer stem (`-c`), not the profile name.
+    pub program: String,
+    /// `aot`, `jit`, or `rbpf`. No default.
+    pub mode: Mode,
+    #[serde(default)]
+    pub slot: u8,
     #[serde(default)]
     pub target: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProfilesFile {
+    #[serde(default)]
+    xdp_release: Option<String>,
     #[serde(default)]
     fw: Vec<FwProfile>,
     #[serde(default)]
@@ -64,7 +74,7 @@ impl Profiles {
 
     pub fn parse(text: &str) -> Result<Self> {
         let file: ProfilesFile = toml::from_str(text).context("profiles.toml")?;
-        build_registry(file.fw, file.xdp)
+        build_registry(file.xdp_release, file.fw, file.xdp)
     }
 
     pub fn fw(&self, name: &str) -> Option<&FwProfile> {
@@ -109,18 +119,14 @@ impl Profiles {
             None => Ok(None),
         }
     }
-
-    /// Resolve the install limit from the firmware linked to this XDP profile.
-    pub fn xdp_image_capacity(&self, xdp: &XdpProfile) -> Result<Option<usize>> {
-        let fw = self
-            .fw(&xdp.fw)
-            .with_context(|| format!("xdp `{}` links missing fw `{}`", xdp.name, xdp.fw))?;
-        Ok(fw.xdp_image_capacity)
-    }
 }
 
 /// Parse + validate fw/xdp lists into a registry.
-pub fn build_registry(fws: Vec<FwProfile>, xdps: Vec<XdpProfile>) -> Result<Profiles> {
+pub fn build_registry(
+    xdp_release: Option<String>,
+    fws: Vec<FwProfile>,
+    xdps: Vec<XdpProfile>,
+) -> Result<Profiles> {
     let mut fw_map = HashMap::new();
     for p in fws {
         validate_build(&p.build, &format!("fw `{}`", p.name))?;
@@ -142,12 +148,10 @@ pub fn build_registry(fws: Vec<FwProfile>, xdps: Vec<XdpProfile>) -> Result<Prof
 
     let mut xdp_map = HashMap::new();
     for p in xdps {
-        validate_build(&p.build, &format!("xdp `{}`", p.name))?;
-        if p.name.trim().is_empty() {
-            bail!("xdp entry with empty name");
-        }
-        if p.artifact.trim().is_empty() {
-            bail!("xdp `{}`: empty artifact", p.name);
+        validate_segment(&p.name, "name", "xdp")?;
+        validate_segment(&p.program, "program", &format!("xdp `{}`", p.name))?;
+        if p.slot > 1 {
+            bail!("xdp `{}`: slot must be 0 or 1", p.name);
         }
         if p.fw.trim().is_empty() {
             bail!("xdp `{}`: empty fw link", p.name);
@@ -183,7 +187,7 @@ pub fn build_registry(fws: Vec<FwProfile>, xdps: Vec<XdpProfile>) -> Result<Prof
             }
             let x = &xdp_map[xn];
             // Canonical owner is xdp.fw; other fws may co-flash the same xdp when
-            // they share that owner's partition_table (e.g. just-tx-cag / just-tx-t).
+            // they share that owner's partition_table (e.g. just-tx-metrics / just-tx-trace).
             if x.fw != *fname {
                 let Some(owner) = fw_map.get(&x.fw) else {
                     bail!("xdp `{xn}` links missing fw `{}`", x.fw);
@@ -196,6 +200,10 @@ pub fn build_registry(fws: Vec<FwProfile>, xdps: Vec<XdpProfile>) -> Result<Prof
                 }
             }
         }
+    }
+
+    if (!xdp_map.is_empty() || xdp_release.is_some()) && xdp_release.as_deref() != Some(TAG) {
+        bail!("profiles.toml: xdp_release must be {TAG}");
     }
 
     Ok(Profiles {
@@ -221,6 +229,19 @@ fn validate_target(target: &str) -> Result<()> {
     }
 }
 
+fn validate_segment(value: &str, field: &str, ctx: &str) -> Result<()> {
+    if value.trim().is_empty()
+        || value == "."
+        || value == ".."
+        || value
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c == ':' || c.is_control())
+    {
+        bail!("{ctx}: {field} must be a single path segment");
+    }
+    Ok(())
+}
+
 /// Map profile `target` string to serial [`Chip`](xpost_serial::Chip).
 pub fn chip_for_target(target: &str) -> Result<xpost_serial::Chip> {
     match target {
@@ -244,6 +265,8 @@ mod tests {
     use super::*;
 
     const FIXTURE: &str = r#"
+xdp_release = "v0.1.1"
+
 [[fw]]
 name = "board-cag"
 target = "esp32c3"
@@ -255,9 +278,33 @@ xdp = ["just_drop"]
 [[xdp]]
 name = "just_drop"
 fw = "board-cag"
-artifact = "build/just_drop/just_drop.elf"
-build = { cwd = ".", command = ["pixi", "run", "build", "--firmware", "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp", "-c", "just_drop"] }
+program = "just_drop"
+mode = "aot"
 "#;
+
+    #[test]
+    fn reject_legacy_build_and_invalid_segments() {
+        let legacy = FIXTURE.replace(
+            "mode = \"aot\"",
+            "mode = \"aot\"\nbuild = { cwd = \".\", command = [\"echo\"] }",
+        );
+        assert!(Profiles::parse(&legacy).is_err());
+        for bad in [".", "..", "a/b", "a\\b", "a:b", "a\n b", ""] {
+            let mut p: ProfilesFile = toml::from_str(FIXTURE).unwrap();
+            p.xdp[0].name = bad.into();
+            assert!(
+                build_registry(p.xdp_release, p.fw, p.xdp).is_err(),
+                "name {bad:?}"
+            );
+            let mut p: ProfilesFile = toml::from_str(FIXTURE).unwrap();
+            p.xdp[0].program = bad.into();
+            assert!(
+                build_registry(p.xdp_release, p.fw, p.xdp).is_err(),
+                "program {bad:?}"
+            );
+        }
+        assert!(Profiles::parse(&FIXTURE.replace("mode = \"aot\"", "")).is_err());
+    }
 
     #[test]
     fn parse_empty() {
@@ -275,26 +322,34 @@ build = { cwd = ".", command = ["pixi", "run", "build", "--firmware", "examples/
         assert_eq!(fw.build.command[0], "cargo");
         let x = p.xdp("just_drop").unwrap();
         assert_eq!(x.fw, "board-cag");
-        assert_eq!(x.build.command[0], "pixi");
-        assert_eq!(fw.partition_table, "examples/just_xdp/partitions.csv");
+        assert_eq!(x.program, "just_drop");
+        assert_eq!(x.mode, Mode::Aot);
+        assert_eq!(
+            p.fw(&x.fw).unwrap().partition_table,
+            "examples/just_xdp/partitions.csv"
+        );
     }
 
     #[test]
     fn exec_bench_cold_install_uses_the_firmware_capacity() {
         let profiles = Profiles::parse(include_str!("../../profiles.toml")).unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let exec = profiles.xdp("bsort").unwrap();
-        let install_limit = profiles.xdp_image_capacity(exec).unwrap().unwrap();
         let board: toml::Table = include_str!("../../examples/exec_bench/Cargo.toml")
             .parse()
             .unwrap();
-        let capacity = board["package"]["metadata"]["xpost"]["xdp_table"]["image_capacity"]
+        let install_limit = board["package"]["metadata"]["xpost"]["xdp_table"]["image_capacity"]
             .as_integer()
-            .unwrap();
-        assert_eq!(install_limit, capacity as usize);
+            .unwrap() as usize;
         assert_eq!(install_limit, 16 * 1024);
+        for name in ["bsort", "bsort_rbpf"] {
+            let exec = profiles.xdp(name).unwrap();
+            assert_eq!(
+                profiles.fw(&exec.fw).unwrap().xdp_image_capacity,
+                Some(install_limit)
+            );
+        }
         let mut config = xpost_serial::FlashConfig::from_partitions_csv(
-            root.join(profiles.default_partition_table().unwrap()),
+            root.join(&profiles.fw("exec-bench-aot").unwrap().partition_table),
         )
         .unwrap();
         assert_eq!(config.xdp_table().unwrap().image_capacity, 4 * 1024);
@@ -303,17 +358,18 @@ build = { cwd = ".", command = ["pixi", "run", "build", "--firmware", "examples/
         assert_eq!(table.image_capacity, install_limit);
         assert_eq!(table.len, 64 * 1024);
         let network = profiles.xdp("just_tx").unwrap();
-        assert_eq!(profiles.xdp_image_capacity(network).unwrap(), None);
+        assert_eq!(profiles.fw(&network.fw).unwrap().xdp_image_capacity, None);
     }
 
     #[test]
     fn reject_unknown_fw_link() {
         let toml = r#"
+xdp_release = "v0.1.1"
 [[xdp]]
 name = "just_drop"
 fw = "missing"
-artifact = "build/just_drop/just_drop.elf"
-build = { cwd = ".", command = ["pixi", "run", "build"] }
+program = "just_drop"
+mode = "aot"
 "#;
         let err = Profiles::parse(toml).unwrap_err().to_string();
         assert!(err.contains("unknown fw"), "{err}");
@@ -358,6 +414,7 @@ build = { cwd = ".", command = ["echo"] }
     #[test]
     fn allow_shared_xdp_same_partition() {
         let toml = r#"
+xdp_release = "v0.1.1"
 [[fw]]
 name = "a"
 target = "esp32c3"
@@ -377,8 +434,8 @@ xdp = ["x"]
 [[xdp]]
 name = "x"
 fw = "a"
-artifact = "build/x/x.elf"
-build = { cwd = ".", command = ["pixi", "run", "build"] }
+program = "x"
+mode = "aot"
 "#;
         let p = Profiles::parse(toml).unwrap();
         assert_eq!(p.fw("a").unwrap().xdp, vec!["x"]);
@@ -389,6 +446,7 @@ build = { cwd = ".", command = ["pixi", "run", "build"] }
     #[test]
     fn reject_shared_xdp_different_partition() {
         let toml = r#"
+xdp_release = "v0.1.1"
 [[fw]]
 name = "a"
 target = "esp32c3"
@@ -408,8 +466,8 @@ xdp = ["x"]
 [[xdp]]
 name = "x"
 fw = "a"
-artifact = "build/x/x.elf"
-build = { cwd = ".", command = ["pixi", "run", "build"] }
+program = "x"
+mode = "aot"
 "#;
         let err = Profiles::parse(toml).unwrap_err().to_string();
         assert!(err.contains("different partition_table"), "{err}");
@@ -420,24 +478,7 @@ build = { cwd = ".", command = ["pixi", "run", "build"] }
         let p = Profiles::parse(FIXTURE).unwrap();
         let fw = p.fw("board-cag").unwrap();
         assert_eq!(fw.build.cwd, "examples/just_xdp");
-        assert_eq!(
-            fw.build.command,
-            vec!["cargo", "build", "--release"]
-        );
-        let x = p.xdp("just_drop").unwrap();
-        assert_eq!(x.build.cwd, ".");
-        assert_eq!(
-            x.build.command,
-            vec![
-                "pixi",
-                "run",
-                "build",
-                "--firmware",
-                "examples/just_xdp/target/riscv32imc-unknown-none-elf/release/just_xdp",
-                "-c",
-                "just_drop",
-            ]
-        );
+        assert_eq!(fw.build.command, vec!["cargo", "build", "--release"]);
     }
 
     #[test]
@@ -457,6 +498,7 @@ build = { cwd = ".", command = ["echo"] }
     #[test]
     fn reject_xdp_target_mismatch() {
         let toml = r#"
+xdp_release = "v0.1.1"
 [[fw]]
 name = "board"
 target = "esp32c3"
@@ -468,8 +510,8 @@ build = { cwd = ".", command = ["echo"] }
 name = "x"
 fw = "board"
 target = "esp32s3"
-artifact = "build/x/x.elf"
-build = { cwd = ".", command = ["pixi", "run", "build"] }
+program = "x"
+mode = "aot"
 "#;
         let err = Profiles::parse(toml).unwrap_err().to_string();
         // unknown target on xdp, or mismatch — either is a rejection
@@ -477,5 +519,41 @@ build = { cwd = ".", command = ["pixi", "run", "build"] }
             err.contains("unknown target") || err.contains("!="),
             "{err}"
         );
+    }
+
+    #[test]
+    fn reject_unknown_xdp_mode() {
+        let toml = r#"
+xdp_release = "v0.1.1"
+[[fw]]
+name = "board"
+target = "esp32c3"
+partition_table = "p.csv"
+artifact = "a.elf"
+build = { cwd = ".", command = ["echo"] }
+
+[[xdp]]
+name = "x"
+fw = "board"
+program = "x"
+mode = "hal"
+"#;
+        let err = format!("{:#}", Profiles::parse(toml).unwrap_err());
+        assert!(err.contains("unknown variant `hal`"), "{err}");
+    }
+
+    #[test]
+    fn parse_repo_profiles() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../profiles.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let profiles = Profiles::parse(&text).unwrap();
+        let idle = profiles.xdp("case_mark_idle").unwrap();
+        assert_eq!(idle.program, "case_mark");
+        assert_eq!(idle.mode, Mode::Aot);
+        assert_eq!(idle.slot, 1);
+        let rbpf = profiles.xdp("noop_rbpf").unwrap();
+        assert_eq!(rbpf.program, "noop");
+        assert_eq!(rbpf.mode, Mode::Rbpf);
+        assert_eq!(profiles.xdp("noop").unwrap().mode, Mode::Aot);
     }
 }

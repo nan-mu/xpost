@@ -32,6 +32,7 @@ where
     let req_timeout = match cmd {
         Command::GetInit => GET_INIT_TIMEOUT,
         Command::GetFinish => GET_FINISH_TIMEOUT,
+        Command::ExecBatchInvoke => GET_FINISH_TIMEOUT,
         Command::GetMap { .. } => GET_MAP_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     };
@@ -43,12 +44,14 @@ where
     }
     // GetInit / GetFinish: open reader only — never serialize / write a UART verb.
     // GetInit: lower bound is last flash Begin (else 15s lookback if never flashed).
-    // GetFinish: short lookback so `OK finish` printed during `enable exec` is accepted.
+    // GetFinish: the device prints `OK finish` right after its `enable exec`
+    // reply, which is before this request exists. A lower bound of "now minus a
+    // window" therefore lands after the line being sought, and the finder skips
+    // everything older. The search instead takes the newest matching line, so
+    // when the line arrived does not matter.
     let after = match cmd {
         Command::GetInit => record.init_after(),
-        Command::GetFinish => SystemTime::now()
-            .checked_sub(Duration::from_millis(500))
-            .unwrap_or(SystemTime::UNIX_EPOCH),
+        Command::GetFinish => SystemTime::UNIX_EPOCH,
         _ => uart.write_command(cmd.to_string().as_str())?,
     };
 
@@ -77,11 +80,20 @@ pub(crate) fn ok_label(ok: &crate::r#type::reply::OkReply<'_>) -> &'static str {
         OkReply::DisableXdp => "OK disable xdp",
         OkReply::EnableExec => "OK enable exec",
         OkReply::DisableExec => "OK disable exec",
+        OkReply::ExecBatchReset => "OK exec batch reset",
+        OkReply::ExecBatchWrite => "OK exec batch write",
+        OkReply::ExecBatchInvoke { .. } => "OK exec batch invoke",
+        OkReply::ExecBatchRead { .. } => "OK exec batch read",
         OkReply::ClearMap => "OK clear map",
         OkReply::ClearPerf => "OK clear perf",
         OkReply::GetMap { .. } => "OK get map",
         OkReply::UpdateMap => "OK update map",
         OkReply::GetPerf { .. } => "OK get perf",
+        OkReply::PerfPrepare { .. } => "OK perf prepare",
+        OkReply::PerfArm { .. } => "OK perf arm",
+        OkReply::PerfFreeze { .. } => "OK perf freeze",
+        OkReply::PerfRead { .. } => "OK perf read",
+        OkReply::PerfRelease => "OK perf release",
         OkReply::Init => "OK init",
         OkReply::Finish => "OK finish",
         OkReply::XdpFlash { .. } => "OK xdp flash",

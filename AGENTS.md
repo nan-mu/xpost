@@ -1,543 +1,140 @@
 # xpost
 
-The `xpost` crate provides an XDP runtime for Rust MCU applications.
-This repository also contains board examples and host tools.
-The Phase 1 target is ESP32-C3 with RV32IMC.
+## Project Architecture
 
-## Artifact names
+`xpost` provides an XDP runtime for Rust MCU applications.
+The target is ESP32-C3 with RV32IMC.
 
-Use these names in documents and logs:
+- The root crate owns runtime loading, maps, helpers, and ingress execution.
+- `esp-radio` owns the radio driver and its ingress hooks.
+- `xpost-type` owns shared actions and traits.
+- `xpost-elf` owns XDP ELF encoding and the XPM1 memory contract.
+- `xpost-serial` owns the wire protocol, transport, and device identity check.
+- `xpost-agent` builds firmware and prepares deployment bytes.
+- `xpost-test` owns experiment procedures, measurements, and database records.
+- `libbpf-mcu` produces XDP artifacts and their reports.
 
-- **Firmware ELF**: The board application.
-  Network examples initialize Wi-Fi. The `exec_bench` examples do not initialize Wi-Fi.
-  XDP firmware includes `XdpRt`.
-  HAL firmware has no xpost runtime.
-  Typical path: `examples/<app>/.../release/<app>`.
-- **XDP ELF** (`xdp.elf`): The cold-region XDP container with `.xpost.meta` and `.xpost.image` sections.
-  Typical path: `../build/<stem>/<stem>.elf`.
-- **`esp32c3.elf`**: The libbpf-mcu AOT debug ELF.
-  Typical path: `../build/<stem>/esp32c3.elf`.
-  Do not use this file for cold installation.
+The host tools and firmware examples have separate Cargo workspaces.
+Read each workspace's Cargo configuration before building it.
+Use `xpost-type` for current traits.
 
-Use **XDP ELF** or **`xdp.elf`** instead of "Compact ELF" in documents and logs.
+Read `docs/user-decisions.md` before work and before decisions that it covers.
+If new facts contradict a recorded final decision, ask the user before proceeding.
+Append new final decisions with the date and reason.
+Preserve earlier entries when a later decision supersedes them.
+Do not record ordinary code facts as user decisions.
 
-## Repository layout
+## Artifact Contract
 
-- The root crate provides maps, helpers, IRAM slots, RX processing, and the optional `exec-call` interface.
-- `esp-radio` is the local radio driver with XDP ingress and performance hooks.
-- `xpost-type` provides the shared XDP actions and traits.
-- `xpost-elf` provides XDP ELF encoding/decoding and the XPM1 memory-map contract.
-- `xpost-macros` provides map derives and the `flash_layout!` wire-layout macro.
-- The firmware applications under `examples/` have separate Cargo workspaces.
-  `examples/hal_perf` is a shared library for HAL CAGT reports and map wire helpers.
-  `examples/exec_bench` runs XDP images through function calls without Wi-Fi.
-  `examples/exec_bench_hal` runs the native Rust comparison without the xpost runtime.
-  `examples/esp32c3` is a Wi-Fi starter project, outside the formal profile registry.
-- `xpost-serial` provides the serial protocol library.
-- `xpost-agent` provides the host daemon.
-- `rbpf/` is a local fork of the eBPF interpreter (see `rbpf/README.md`, "Local fork: MCU ABI").
-  It is its own Cargo workspace, so add it to `exclude`, not `members`.
-  The `mcu` feature carries the hook surface.
-  The default `std` build keeps upstream behaviour.
-  Read its README before describing helper, map, or stack behaviour on the interpreter path.
-- `xpost-build` provides build tools, including `xpost-link` and `xpost-compact-elf`.
-  Preserve these executable names. Call their cold-install artifacts XDP ELFs.
-- `xpost-test` controls the complete test procedure.
-- Git history keeps the benchmark analysis package. The work tree does not include its tracked files. New figures do not use that package.
+Read [Deployment design](docs/deployment-design.md) when changing release selection, firmware binding, cold installation, or SRAM preload.
 
-The root workspace members are `.`, `esp-radio`, `xpost-macros`, `xpost-elf`, and `xpost-type`.
-It excludes `xpost-build`, `xpost-agent`, `xpost-serial`, `xpost-test`, and `examples`.
-The four excluded packages have separate Cargo workspaces.
-The root defaults to `riscv32imc-unknown-none-elf`.
-`xpost-agent` and `xpost-serial` override it with `aarch64-apple-darwin`.
-`xpost-build` has no target override.
-Use an explicit host `--target` when building or testing it directly.
-`xpost-trait/` contains older traits. Current workspace members and dependencies do not reference it.
-Use `xpost-type`.
-The `xpost-test` workspace contains `common` and `ebpf`.
-The `common` package provides the ABI library and the `xpost-test` binary.
-The `ebpf` package uses aya: TC egress timestamps and XDP ingress timestamps, with TC ingress as an attach fallback.
-The host modules are `agent`, `config`, `db`, `pipeline`, and `exam`.
+The Agent uses `libbpf-mcu v0.1.1` and the pinned asset digests.
+Use the v3 index to select deployment members.
+The Agent does not build XDP.
+Use `fw.artifact` for the linked Firmware ELF.
+Check all linked images before the first device write.
+Send the same retained bytes to the serial worker.
+For cold installation, check the device firmware and partition table on every attempt.
+Keep those checks and the XDP write in one exclusive download session.
 
-## Agent access
+Use `xpost-agent preflight` to check the medium inventory and target layouts.
+See [Medium experiment](xpost-test/procedures/medium.md) for device readiness and experiment limits.
 
-The `xpost-agent` daemon controls the shared USB connection.
-It serves HTTP `/health` and `/v1/*`, and Streamable HTTP MCP `/mcp`, on one port.
-Startup opens the USB session only.
-App and flash operations run when a request arrives.
+## Agent Operations
 
-**AI agents must use MCP for direct operations on `xpost-agent`.**
+Use the `xpost-agent` CLI for direct device operations.
+Read `xpost-agent --help` before you send a command.
+Check the exit code.
+Keep the foreground service in its execution session.
+After the experiment, press Ctrl+C to release the device.
+Use `--bind 0.0.0.0:9240` only on the trusted experiment network.
+The `xpost-test` program uses the existing HTTP client.
 
-1. Read the available MCP tool list, tool descriptions, and input schemas before a call.
-2. Use the specified input format.
-3. Check the returned result.
+See [Agent operation](xpost-agent/README.md) for startup and device commands.
 
-If MCP is unavailable, stop the affected Agent operations.
-Report the reason.
-Do not use HTTP or direct serial calls as an alternative.
-Do not start the daemon automatically to inspect its API.
-Apply these rules to cold-table operations too.
-These rules cover direct AI operations.
-The `xpost-test` program continues to use HTTP internally.
-It does not hold the USB connection while the Agent runs.
+## Runtime Invariants
 
-The Mac connected to the ESP through USB hosts the daemon.
-The startup command is:
+Use bare-metal firmware without ESP-IDF.
+Preserve XPM1 and the board's partition layout.
+Load container image bytes into slots without parsing the firmware ELF on the device.
+Keep the fixed two-slot design.
+Do not add a third resident image slot.
+HAL firmware must not initialize the XDP runtime or map runtime.
 
-```bash
-cd xpost-agent && cargo run --release -- --bind 0.0.0.0:9240
+Keep map storage and helper dispatch in the runtime.
+Treat interpreter map pointers as helper results, not interpreter-owned maps.
+Read `rbpf/README.md` before changing interpreter helper, map, memory, or stack behavior.
+Preserve the MCU interpreter's allocator-free design.
+Preserve its verifier, instruction budget, and per-access permission validation.
+Do not add eBPF-to-eBPF calls or an RV32 JIT to that interpreter.
+Keep control-plane errors separate from helper errno values.
+
+## Testing
+
+The root workspace defaults to `riscv32imc-unknown-none-elf`.
+Use an explicit host target for host crate tests.
+Select the host target for the current machine.
+The following commands use `aarch64-apple-darwin` as a Mac example.
+
+```sh
+cargo test --manifest-path xpost-agent/Cargo.toml --target aarch64-apple-darwin
+cargo test --manifest-path xpost-serial/Cargo.toml --target aarch64-apple-darwin --features dev,client,server
+bash xpost-test/docker-toolchain-resolve.sh
 ```
 
-Example Cursor MCP URL: `http://127.0.0.1:9240/mcp`.
+Install the Docker toolchain dispatcher before the first `xpost-test` build:
 
-For `flash/fw`, the Agent uses the `build` entry in `profiles.toml` before it writes the firmware.
-The build runs in `examples/<app>` with `cargo build --release` and the profile's feature arguments, if any.
-For profiles with `fw.xdp[]`, it then clears the cold table and builds and installs the linked XDP images.
-HAL profiles have an empty or omitted `xdp` list and skip this step.
-Network XDP profiles build through `pixi run build --firmware ... -c <name>` in `../libbpf-mcu`.
-The exec XDP profiles use the same command with firmware `examples/exec_bench/.../exec_bench`.
-Each exec name is its own `libbpf-mcu/tests/xdp/<name>.c` (incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort).
-Check `libbpf-mcu/make/ninja/{bpf,esp32c3}.ninja` before describing the compiler pipeline.
-Current rules compile BPF and RV32IMC separately from C. The installed image comes from the RV32IMC build.
-Do not describe this build as translating eBPF bytecode into RV32IMC.
+```sh
+bash xpost-test/.cargo/docker-toolchain/install.sh
+```
 
-Each listed network firmware project reads `WIFI_SSID` and `WIFI_PASS` from its own `.env` file:
+Repeat this command after dispatcher changes.
+Each worktree uses its own shim through the shared dispatcher.
+Do not copy the toolchain configuration between worktrees.
 
-- `examples/just_xdp/`
-- `examples/firewall/`
-- `examples/just_drop_hal/`
-- `examples/just_tx_hal/`
-- `examples/firewall_hal/`
+Check formatting with rustfmt for changed Rust workspaces.
+Use meaningful tests for validation failures and device write ordering.
+Do not report device tests as passed unless they ran.
 
-These build scripts also accept `WIFI_PASSWORD` as an alias for `WIFI_PASS`.
-The HAL build scripts allow nonempty process environment values to override `.env` credentials.
+Use the formal runner when the user requests a system experiment.
+The default medium selection requests a read-only preflight from the Agent.
+It exits before device writes or database access if preflight finds a blocker.
+Run this script from the repository root:
 
-## Serial protocol
-
-The `xpost-serial` crate is a library only.
-Its shared `r#type` module defines the wire protocol.
-Host tools enable the `client` feature.
-Firmware enables the `server` feature, which provides `SerialHandler` and `serial_task!`.
-Examples use `default-features = false, features = ["server"]`.
-There are no default features.
-`client` and `server` are mutually exclusive unless the build enables `dev`.
-The in-memory protocol tests run from `xpost-serial/` with `cargo test --features "dev,client,server"`.
-
-The App wire types are `xpost_serial::command::Command` and `xpost_serial::reply::OkReply`.
-The App commands are:
-
-- `ping`
-- `enable xdp` and `disable xdp`
-- `enable exec` and `disable exec`
-- `clear map`, `get map`, and `update map`
-- `clear perf` and `get perf`
-
-A successful `get map` or `get perf` response contains an `OK get ... <n>` header and `n` blob bytes.
-The map blob is an ASCII snapshot, generated by `xpost::map::dump` for XDP firmware and `hal_perf::wire` for HAL firmware.
-The perf blob uses the `ext::perf` layout.
-HAL reports use the compatible CAGT layout from `examples/hal_perf`.
-`Command::GetInit` waits for unsolicited `OK init` on the host.
-`Command::GetFinish` waits for unsolicited `OK finish` on the host.
-Neither command sends a UART request.
-`enable exec` runs one computation in the exec firmware.
-The App logs `OK finish` with `info!` after Trace records `xdp_end`.
-esp-println writes that record as `INFO - OK finish`.
-`GetFinish` waits for that line.
-The line is outside `xdp_begin` and `xdp_end`.
-Cold installation selects an image by its XDP name.
-
-## Test procedure
-
-**Use a formal run by default when the user asks to test, run, or check the system.**
-On TR3000, always run the binary as `./xpost-test`.
-Do not add environment variables, subcommands, or CLI flags to a formal run.
-
-The build embeds these files from `xpost-test/config/`:
-
-- `default.toml`
-- `just_tx.toml`
-- `just_drop.toml`
-- `firewall.toml`
-- `exec_bench.toml`
-
-To change experiment selection, arms, or firewall cases, edit these TOML files.
-Rate grids, stimulus durations, and pipeline steps are constants/code in `xpost-test/common/src/exam/`.
-Change that code when changing those settings.
-Rebuild the binary.
-Upload it before the next run.
-
-Use the repository fish script from the repository root:
-
-```bash
+```sh
 ./xpost-test/scripts/xpost-test.fish
 ```
 
-The script builds the binary, uploads it to TR3000, and runs it without arguments through SSH.
-The `xpost-test` target is `aarch64-unknown-linux-musl`.
-On this Mac, its path toolchain delegates Cargo to Docker.
-The default container `quirky_villani` must already be running.
-The shim stages sources under `/Users/nan/.cache/xpost-test-docker` and copies build outputs back to `xpost-test/target/`.
-The host build embeds the eBPF object.
-`TEST_SKIP_EBPF` produces a stub and is unsuitable for TR3000 runs.
-Use these manual steps only when necessary:
+On TR3000, formal execution is `./xpost-test` without arguments or added environment variables.
+Change experiment selection through configuration and source.
+Rebuild and upload before a new run.
+Do not use `TEST_SKIP_EBPF` for TR3000 runs.
+Do not execute `DROP` or `TRUNCATE` without an explicit database-clear request.
+Read test stdout and stderr from the terminal.
+Do not redirect test output to temporary files or process it with `tee` or `tail`.
+Use current source and configuration for experiment rates, repetitions, metrics, and database fields.
 
-```bash
-cd xpost-test && cargo build --release
-scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
-# On TR3000:
-./xpost-test
-```
+## Documentation
 
-Read stdout and stderr directly from the terminal.
-Do not redirect test output to `/tmp` files.
-Do not use `tee` or `tail` to process test logs.
-For long runs, use the execution tool's session support to keep the process active.
-Continue to read its terminal output.
+Use **Firmware ELF** for the board application.
+Use **XDP ELF** for the installable container.
+Preserve executable names such as `xpost-compact-elf`.
 
-### Experiment settings
-
-The `run` list in `config/default.toml` selects the experiments and their order.
-The supported entries are `just_tx`, `just_drop`, `firewall`, `exec_bench`, `lookup`, `dev`, `formal-clear`, `case`, and `hot_swap`.
-The same file contains the `[postgres]`, `[agent]`, `[dut]`, and `[probe]` settings.
-
-- Only `just_tx`: `run = ["just_tx"]`.
-- Only `firewall`: `run = ["firewall"]`.
-- Current selection: `run = ["just_tx", "just_drop", "firewall", "exec_bench", "case", "hot_swap"]`.
-- `case` flashes `examples/case_xdp` once and checks both images. `case_swap` rewrites the IPv4 destination to `203.0.113.10`. `case_mark` rewrites it to `203.0.113.77`. Both return `XDP_TX` for the same UDP payload. The latency loop then installs both images into the cold table once. That install may reboot and is not timed. The timed loop uses one slot only: each repeat stops XDP, copies the next image from the cold table over slot 0, and starts XDP again, while a 2 ms `CASE0` stream stays up for 100 repeats. Odd repeats copy `case_mark`, even repeats copy `case_swap`. Slot 1 is never touched and the cold table is not erased inside the loop. Stages, all offsets from the test clock at the `disable` command: `stopped_ms` when disable returned, `copied_ms` when the copy returned, `started_ms` when enable returned, `last old frame`, and `end` for the first DUT frame with the new destination. `mcu_us` is the device clock when `enable` published the new entry. `disable_rx` and `agent_rx` are agent clock instants when the two UART replies were read. `rxcnt` is cleared and read only while XDP is disabled, during the functional checks. Scored frames carry `CASE0` through `CASE3`. No capture file is written on TR3000.
-- `hot_swap` uses the same firmware. Cold install of `case_swap` and `case_mark_idle` may reboot and is not timed. The exam drops the lease, copies each image into its slot, and leases slot 0. A 2 ms `CASE0` stream stays up for 100 switches, alternating slot 1 and slot 0. The slot a switch leaves stays `Staged` with its original generation, so the return does not copy. Stages are `start`, `last old frame`, `end`, and `switched_ms` when the switch returned. `mcu_us` is taken when the new entry is admitted.
-- All network experiments: `run = ["just_tx", "just_drop", "firewall"]`.
-- All formal experiments: `run = ["just_tx", "just_drop", "firewall", "exec_bench", "case", "hot_swap"]`.
-
-`lookup` runs the helper side experiment.
-TX at 1400 pps flashes one `just-tx-cag-lookup` firmware per round.
-The host writes `lookup_timing` only while that image is released.
-Odd rounds run the on pass first. Even rounds run the off pass first.
-An off pass records no lookup sample.
-`just_drop` and `firewall` then run at 400, 1400, and 4000 pps with the switch on.
-
-The experiment files contain `formal` and `arms` settings.
-The three network experiment files use `formal = true` and `arms = ["hal", "xdp"]`.
-These network settings apply to the CAG and Trace stages below.
-The collector repeats the CAG grid five times.
-Each repeat stores `round`, `plan_seed`, and `hal_first`.
-Odd rounds boot HAL first.
-Even rounds boot the XDP arm first.
-Both arms in one round share one rate order.
-The collector reflashes an arm before that arm's rates.
-Trace stays one packet after the five rounds.
-The unused `rounds` field in `just_drop.toml` does not set this count.
-With the current configuration, each experiment then runs an `xdp_t` stage with one packet.
-`just_tx` skips this Trace stage for HAL-only arms.
-`just_drop` and `firewall` always append it.
-The Trace stage stores `target_pps=1` and `window_s=0`.
-
-All three network grids use 13 rates: 400–1600 pps in steps of 200, then 2000–4000 pps in steps of 400.
-Each experiment defines its own `SWEEP_PPS` and `WINDOW_S` constants.
-Legacy fields in `just_drop.toml`, including `fixed_pps`, `trace_pps`, `rounds`, and sample/instrumentation settings, are not consumed by the current config structs.
-The `just_drop` experiment reads `get map counter` into `just_drop_data`.
-The counter uses the last byte of the IPv4 source address as its bucket index.
-
-The `firewall.toml` file sets `blacklist_size = 200`.
-Each firewall CAG cell paces one stream at the target rate for 30 seconds.
-One packet in each group of 10 is a unique little-endian `u16` from a source IP outside the blacklist.
-The legal index inside that group is `plan_seed % 10`.
-The other packets rotate across the blacklist.
-The DUT stores legal tokens in the virtual map `firewall_result`, up to 16384 entries.
-`firewall_dropped` counts tokens the buffer refused.
-`drop_sample` stores that count.
-Legal flows do not ACK.
-`firewall_config.sent` stores the illegal send count.
-`legal_sent` stores the legal send count. `matched` stores the matched token count.
-Despite its name, `loss` stores the delivery ratio `matched / legal_sent`.
-`firewall_legal_ident` stores the sent and received token bytes.
-A later query recomputes the intersection from those bytes.
-The firewall Trace stage uses eight blacklist entries and sends one matching packet.
-
-`just_tx_data` stores one row per send.
-`seq` is the probe id.
-`t_rx` is null when the two kernel stamps do not form an RTT.
-`saw_tx` and `saw_rx` record each kernel stamp.
-`pkt_rx` records an AF_PACKET hit for that seq. It is not a stamp.
-`kernel_tx_ns` and `kernel_rx_ns` store raw bpf time.
-`just_tx_config.ok` counts complete RTT rows.
-`matched` counts rows with `saw_rx`.
-`pkt_matched` counts rows with `pkt_rx`.
-`stamp_drops` and `pkt_drops` count lost events on each channel.
-`lookup` marks the runtime helper-timing switch.
-The host announces the stimulus neighbor once per second.
-It does not send an ARP frame before every probe.
-
-The network XDP firmware projects are `examples/just_xdp` and `examples/firewall`.
-Their board features are `perf-cag` and `perf-t`, with no default feature.
-HAL firmware uses `examples/just_tx_hal`, `examples/just_drop_hal`, `examples/firewall_hal`, and `examples/exec_bench_hal`.
-Those crates have no Cargo perf feature.
-`hal_perf` always encodes Counter, Aggregate, Gauge, and Trace.
-The `profiles.toml` registry contains fifteen `[[fw]]` names:
-
-- XDP: `just-tx-cag`, `just-tx-t`, `just-drop-cag`, `just-drop-t`, `firewall-cag`, and `firewall-t`.
-- Lookup side runs: `just-tx-cag-lookup`, `just-drop-cag-lookup`, and `firewall-cag-lookup`.
-- HAL: `just-tx-hal`, `just-drop-hal`, and `firewall-hal`.
-- Exec: `exec-bench-ebpf` and `exec-bench-hal`.
-- Case: `case-cag` (`examples/case_xdp`). Its `xdp` list is empty. The exam installs images itself. This build does not enable `perf-cag` or `perf-t`. Packet counters, histograms, gauges, and trace rings are absent. `get perf` returns unavailable. Release builds compile out `info`, `debug`, and `trace` logs.
-
-Its network `[[xdp]]` names are `just_tx`, `just_drop`, and `firewall`.
-Its case `[[xdp]]` names are `case_swap` and `case_mark`. `case_swap.c` writes destination `203.0.113.10`. `case_mark.c` writes destination `203.0.113.77`. Both return `XDP_TX` and are linked against the `case_xdp` firmware ELF.
-Its exec `[[xdp]]` names are `incr`, `square`, `bitswap`, `fib`, `buf`, `memcpy`, `fletcher32`, and `bsort`.
-The `exec-bench-ebpf` firmware profile installs `incr` by default.
-The `exec-bench-hal` profile omits `xdp`, which defaults to an empty list.
-
-### Exec experiment
-
-`exec_bench.toml` uses `formal = true` and `arms = ["ebpf", "hal"]`.
-The host accepts `xdp` as an alias for the `ebpf` arm.
-The eight workloads and their 32-byte input/output fixtures reside in `xpost-test/common/src/exam/exec_bench.rs`.
-The configuration does not select workloads.
-Each arm installs a workload once.
-That install runs five times.
-The collector stores `rep` as 1 through 5.
-Each repetition has its own config row.
-The task selection follows the eight benchmarks in the HAVM paper (CAV 2024, Section 7, Table 1).
-Group them as arithmetic/logic (`incr`, `square`, `bitswap`, `fib`), memory access (`buf`, `memcpy`), and data processing (`fletcher32`, `bsort`).
-State the local input sizes and platform. Shared task names do not establish an identical reproduction of HAVM's experiment.
-
-The host performs these steps for each workload:
-
-1. For the eBPF arm, clear the cold table with `clear xdp *`.
-2. For that arm, install the workload XDP ELF and wait for `OK init`.
-3. Do steps 4 through 11 five times.
-4. Clear the performance report.
-5. Write the input to key `0` in map `workload`.
-6. Send `enable exec`.
-7. Wait for `OK finish`.
-8. Attempt `disable exec`.
-9. Read key `1` from map `workload`.
-10. Compare all 32 output bytes with the expected fixture.
-11. Store the successful condition and its performance report.
-
-Clearing the cold table before each exec image places the image at offset zero for flash-sector alignment.
-The host aborts on enable, finish, or output-check failure before inserting that condition.
-Performance collection occurs after condition insertion. A later failure can leave partial data in an unfinished exam.
-The collector currently ignores the result of `disable exec`.
-
-The `ebpf` database label identifies the image-loading path.
-eBPF-arm firmware compiles Counter, Aggregate, Gauge, and Trace into the report.
-`exec_call::invoke` records `xdp_invocations` / `xdp_action` (Trace `xdp_begin` / `xdp_end` and the `execution` aggregate).
-HAL `enable exec` records the same counter names plus `execution` ticks through `hal_perf`.
-It pushes Trace `xdp_begin` before `run_hal`.
-It pushes `xdp_end` after the result-map write.
-The exam writes eBPF Trace into `trace_event` (`firmware` tag `xdp_t`).
-It writes HAL CAGT into `exec_bench_hal_*` plus `trace_event`.
-It aborts collection if Trace lacks `xdp_begin` or `xdp_end`.
-This check occurs after the condition and result rows enter the database.
-`OK finish` is the host wait only.
-The App prints it with `info!` after `xdp_end` and after a successful result write.
-The logger line is `INFO - OK finish`.
-`GetFinish` strips ANSI color codes.
-It then accepts that line or a bare `OK finish` line.
-A failed result write ends Trace and does not print the line.
-On the eBPF arm the result write stays outside `invoke`.
-On the HAL arm the result write stays before `xdp_end`.
-The call interval is `xdp_end.t_us - xdp_begin.t_us`.
-This interval includes work outside the algorithm itself.
-HAL Trace includes the result-map write.
-XDP Trace ends before the carrier writes the result map.
-The HAL `execution` aggregate measures `run_hal` only.
-The XDP `execution` aggregate includes the invocation.
-Do not treat these aggregate timers as equivalent.
-Do not report the host command interval as computation latency.
-Do not report algorithm speedup ratios from these differently scoped intervals.
-
-### HAL smoke test
-
-For HAL smoke testing, set `run = ["dev"]`.
-This mode flashes `just-tx-hal`, `just-drop-hal`, and `firewall-hal` in order.
-It checks TX replies and `rxcnt`, DROP counters, and firewall blacklist hit counts plus `firewall_result` token capture.
-TX and DROP use 100 pps for two seconds.
-Firewall sends 32 hit probes and 32 miss token probes.
-It runs no XDP arm, ignores perf reports, and writes no database records or Trace report file.
-
-See the `xpost-test` rustdoc modules `overview` and `config` for the complete procedure.
-See `xpost-serial` for the serial API.
-
-### Database rules
-
-Formal collection decodes perf reports into tables associated with an exam.
-The tables include `exam`, experiment configuration and data tables, `xdp_*` and HAL perf tables, and `trace_event`.
-The collector does not store `report_raw`.
-The active schema files in `xpost-test/sql/` are `formal.sql`, `just_drop.sql`, `just_tx.sql`, `firewall.sql`, and `exec_bench.sql`.
-`dev.sql` remains in the directory but is not loaded by the current collector.
-HAL CAG tables are per experiment: `<experiment>_hal_counter`, `<experiment>_hal_agg`, and `<experiment>_hal_gauge`.
-Exec stores inputs and results in `exec_bench_config` and `exec_bench_data`.
-Its performance reports use shared `xdp_*` tables for the `ebpf` arm and `exec_bench_hal_*` tables for HAL.
-
-Starting a run must not execute `DROP` or `TRUNCATE`.
-For an explicit database clear, set `run = ["formal-clear"]`.
-Rebuild the binary.
-Upload it to TR3000.
-Run it without arguments.
-This operation executes `TRUNCATE exam CASCADE`.
-
-## Runtime constraints
-
-Use bare-metal firmware only, without ESP-IDF.
-Use static loading to place XDP ELF image bytes into slots.
-Do not parse the firmware ELF on the device.
-Preserve the ABI and linker layout shared with libbpf-mcu through the XPM1 contract and the board's `partitions.csv`.
-
-`rbpf/` is a local fork of the eBPF interpreter for the MCU path.
-Its `mcu` feature exposes three hook points in `rbpf::mcu::McuEnv`: helper dispatch, memory permission, and a per-instruction step budget.
-The fork has no map type, because a map is only a pointer a helper returned.
-Map reads and writes therefore enter the interpreter through the helper hook and the permission hook.
-Do not describe `rbpf` as providing XDP maps, verifier soundness, or a JIT for RV32IMC.
-The MCU path is the interpreter only.
-Cache the helper and permission decisions.
-Both hooks run per instruction.
-
-The `mcu` build needs no global allocator and links no `alloc`.
-Do not add `extern crate alloc`, `hashbrown`, `format!`, or `Vec` back into that path.
-Naming `extern crate alloc` alone makes the linker demand a `#[global_allocator]`.
-Diagnostics format into `rbpf::fixed::FixedStr`, which truncates at 128 bytes.
-
-`rbpf/README.md`, "Scope decisions" records four fixed decisions.
-No eBPF-to-eBPF calls.
-The rbpf verifier runs before the first instruction.
-`check_access` keeps the upstream per-access design, because this fork is a comparison baseline.
-Do not reopen these as design questions.
-
-Do not confuse this fork with RIOT-OS `rBPF`, the C implementation behind CertrBPF and HAVM.
-They differ in language, author, and host.
-Cite them separately.
-
-XDP firmware calls `xpost_build::firmware_codegen()` in `build.rs`.
-It reads `[package.metadata.xpost]` defaults from the root crate, applies board overrides, and derives the cold Flash span from `partitions.csv`.
-The `xpost-build/xpost-link` wrapper embeds the `.xpost.mem` XPM1 contract into the linked Firmware ELF for host tools.
-`just_xdp`, `firewall`, and `exec_bench` each register one primary slot. `case_xdp` registers slot `a` (`.xdp.hotload_0`, `mount = "rx"`) as the leased entry and slot `b` (`.xdp.hotload_1`, `mount = "call"`). Slot `b` runs only after `xdp switch`. XPM1 carries slot `a`. `case_swap` and `case_mark` stay linked there. `libbpf-mcu --slot-symbol xdp_slot_idle --image-name case_mark_idle` links the same `case_mark` source at slot `b`.
-
-### Maps and boot
-
-The XDP firmware starts the runtimes in this order:
-
-1. `MapRt::init` claims the talc heap.
-2. `XdpRt::init` registers slots and scans the cold XDP ELF images.
-3. Inside `XdpRt::init`, `create_required_maps` calls `MapRt::create` for missing `required_maps` and checks existing maps.
-4. A single-slot board switches image 0 into the primary slot. `case_xdp` switches the image whose link address is slot 0.
-5. The board attempts to lease the image.
-6. The board drops the runtime guards before RX or exec commands start.
-
-Without an active lease, ingress passes packets to the network stack.
-After the lease is active, a flight fault drops the frame and increments a runtime-error counter.
-Faults are a lost `IN_FLIGHT` claim, a zero entry, a bad `xdp_md` window, and a misaligned stack.
-HAL firmware uses application arrays/hash maps and does not initialize `MapRt` or `XdpRt`.
-
-When it leases an image, the runtime installs VMR-to-RMA aliases from `aot_binds` through `set_map_aliases`.
-Map names reside in `MapRt` metadata and XDP ELF descriptors.
-There is no userspace `register_map_name` path.
-`XdpRt::lease` closes the `MapRt` control plane before it publishes `ACTIVE`.
-Reads and writes then return `Busy`, including `get map`.
-BPF helpers still use the maps during a flight.
-`XdpRt::release` opens the control plane only after `IN_FLIGHT` drains and map users drop.
-
-`XdpRt::switch` is the boot-only copy. It refuses while leased. UART `xdp flash <name> <slot>` copies a cold image into a slot and does not reset. A dropped lease can fill every slot, including the primary index. A running slot is refused with `ActiveSlot`: the only way to replace a leased primary image is to stop XDP, copy, then start it again. A copied slot stays `Staged` and does not change `PRIMARY_ENTRY` or `ACTIVE`; the reply's `mcu_us` is 0. `POST /v1/flash/xdp` with `slot` sends that command. The HTTP message appends `agent_rx=<unix seconds>`, the agent clock when the MCU reply was read. A flash without `slot` still writes the cold table and resets. UART `xdp switch <slot> <generation> <drop|pass>` is the leased publish: it pauses new flights, waits until `IN_FLIGHT` is 0, rebinds aliases, stores `PRIMARY_ENTRY`, and keeps the lease. The slot it leaves stays `Staged` with the generation it was published under, so the host can publish it again without copying. `POST /v1/xdp/switch` sends it and appends the same `mcu_us` and `agent_rx`. `enable` and `disable` only open and close the lease. They do not copy cold bytes and do not move the entry between slots. `enable` replies `OK enable xdp <mcu_us>` with the device clock after `ACTIVE` becomes true; `disable` appends only `agent_rx`. `disable` sets every slot phase to Empty. The host chooses which slot to publish next. There is no retained role and no `rollback` command. The slot copy checks the digest, link address, helper, and maps. A failed publish restores the previous aliases; if that restore fails the runtime stays paused and drops new packets. `IN_FLIGHT == 0` does not drain the driver's async `XDP_TX` queue, so the previous image's map users stay. Call these from the control plane, not from the RX callback. Quiesce `drop` is the default; `pass` is selectable. Those counts are in `get xdp`, not in the 184-byte perf blob. `get xdp` is boot, active, staged, generation, updating, severe, quiesce drop, quiesce pass, and last error. This path does not reopen the `MapRt` control plane. It does not upload a new image while the firmware stays up.
-
-Control-plane errors use the small enums in `crate::error` for each public entry point.
-BPF helper errno values use `map::ops::MapOpError`.
-Keep these helper errors separate from control-plane enums.
-
-### Performance and ingress
-
-The crate mounts a private `xdp::ingress::XdpProg` that implements the `xpost_type::XdpProg` trait.
-With the `xdp` feature, esp-radio also exports this trait as `esp_radio::wifi::XdpProg`.
-Applications cannot access `XDP_PROG`.
-They read performance data through four public accessors:
-
-- `ext::perf::counter()`
-- `ext::perf::aggregate()`
-- `ext::perf::gauge()`
-- `ext::perf::trace()`
-
-The shared `report_perf` and `clear_perf` functions support the App commands `get perf` and `clear perf`.
-The `EspRadioTrace` integration resides in `ext/perf/trace/`, beside the ring storage.
-
-- `esp-radio`: `xpost::esp_radio::new` calls `wifi::new(device, config, &ingress::XDP_PROG)`.
-- `perf-counter`: Counter storage and `EspRadioTrace` hooks on the mounted program.
-- `perf-aggregate`: Stretch histograms for pipeline spans. Lookup timing is a separate feature.
-  `perf-lookup` records only `map_lookup_elem`, in systimer microseconds, into fixed edges.
-  The timer read is `lookup_ticks_us`.
-  `update map lookup_timing` sets that gate while the image is released.
-  A closed gate writes no lookup sample.
-  A zero return is `lookup_null`. It is not a proven map miss.
-  Main network builds leave `perf-lookup` off.
-  HAL `map_operation` remains its own aggregate.
-- `perf-gauge`: Current and peak values.
-- `perf-trace`: Event rings grouped by category.
-
-Trace provides the only timeline.
-Each event has a timestamp.
-Nested intervals use paired `Begin` and `End` events on the same ring.
-The application-category ring slots remain reserved and empty.
-Current HAL firmware encodes CAGT. The exec HAL firmware writes events to the radio-category ring.
-The pinned network batches predate HAL Trace collection and contain no HAL timeline.
-Formal runs at high packet rates use Counter, Aggregate, and Gauge data instead of continuous Trace collection.
-
-The `xpost-type` crate defines the shared traits for xpost and esp-radio: `EspRadioTrace: XdpProg`.
-The esp-radio crate controls RX, maps `XdpAction` to `Action`, and calls the `EspRadioTrace` hooks.
-The mounted `XdpProg::run` delegates lease checks, image invocation, and packet-window validation to `xdp::ingress::run`.
-UDP application logic remains in the firmware crate.
-With `exec-call`, `ext::exec_call::invoke(&mut [u8])` calls the same lease-controlled `xdp::ingress::run` function.
-This interface does not attach another network ingress hook.
-Without an active lease, it returns `XdpAction::Pass` and the full buffer.
-A flight fault returns `XdpAction::Drop`.
-The image uses the caller's stack. There is no dedicated XDP stack switch.
-HAL CAGT values use the same wire layout but measure application-level intervals.
-Compare measurement boundaries before comparing HAL and XDP metrics with the same name.
-
-The optional `ext::ringbuf` module is incomplete.
-Enabling the Cargo feature `ringbuf` triggers `compile_error!`.
-
-## Benchmark analysis
-
-Git history keeps the previous analysis code, report, and exam pins.
-The work tree does not include those tracked files.
-Do not restore those files for a new figure.
-Do not run the old `pixi` figure or replay tasks.
-The current analysis entry is `analysis/`.
-It reads pinned exams, audits them, and then plots.
-Do not compute a send rate from `started_at` and `stopped_at`.
-Those two instants include the drain interval.
-New TX and firewall rows store `send_begin`, `send_end`, and `drain_end`.
-`send_elapsed_ns` is the monotonic send interval.
-`export_elapsed_ns` counts management and export after drain.
-A null send interval stays missing.
-Do not fill that null with 30 seconds.
-Lookup histograms use fixed-edge version 2.
-The unit is systimer microseconds.
-A lookup row with `count` 0 has no mean and no quantile.
-
-## Documentation style
-
-Use `.agents/skills/asd-ste100/SKILL.md` for English agent instructions.
-Use `.agents/skills/ste-zh/SKILL.md` for Chinese technical text.
+Apply `.agents/skills/asd-ste100/SKILL.md` to English agent instructions.
+Apply `.agents/skills/ste-zh/SKILL.md` to Chinese technical text.
 Use one action per instruction and one term per concept.
 Preserve conditions, uncertainty, numbers, units, and machine-readable identifiers.
-Split compound instructions into separate sentences. Do not join actions with semicolons.
 Keep English instructions within 20 words and descriptions within 25 words where precision permits.
 Keep Chinese instructions within 25 characters and descriptions within 40 characters where precision permits.
 Delete vague wording, empty phrases, and marketing claims.
 Run the corresponding `scripts/ste-lint.py` or `scripts/ste-lint-zh.py` with Python.
-On hosts without `python`, use `python3`.
-Review findings manually. Preserve event names and code identifiers when the linter mistakes them for prose.
+Use `python3` when `python` is unavailable.
+Review findings manually.
+Preserve identifiers when the linter mistakes them for prose.
 
-For the report, explain each experiment before interpreting its results.
-Use pipeline pseudocode for experimental steps.
+Explain experiments before interpreting results.
 Define network and MCU terms before use.
-Write for readers with computer knowledge but no MCU or networking background.
-Keep the narrative focused on measured results and their limits.
-Exclude internal reasoning, intermediate work notes, and prompt-like instructions.
-Use readable legends that identify the compared paths and quantities.
-Do not create speedup plots without comparable timing boundaries and nonzero sample counts.
-
-## Archived measurements
-
-The 2026-09-28 formal just_tx dump is git tag `archive/just-tx-formal-20260928`.
-Do not restore `benchmark/backup/` in the working tree.
-Do not restore the deleted benchmark analysis package unless the user asks.
+Compare timing boundaries before comparing measurements.
+Do not report speedups from incompatible intervals or empty samples.
+Use `analysis/` for current analysis.
+Do not restore archived benchmark packages or run their obsolete figure tasks.

@@ -21,7 +21,7 @@
 //! - [`EBPF_STACK`]: the program's 512-byte `r10` region. Distinct from
 //!   [`super::ingress::XDP_FRAME`], which preserves the caller's registers across
 //!   the `jalr` on the AOT path.
-//! - [`ALLOW`]: map value windows, installed at lease and cleared at release.
+//! - [`MAP_VALUES`]: value windows returned by this flight's lookup calls.
 //!   Packet, md and stack windows are decided by `rbpf` itself.
 //! - `BUDGET_LEFT`: instructions remaining in this flight. Upstream has no
 //!   termination guard; rBPF's own paper names the missing CPU cap as its next
@@ -44,38 +44,39 @@ const MAX_STEPS: u32 = 200_000;
 
 /// The program's `r10` region.
 #[unsafe(link_section = ".bss")]
+#[unsafe(export_name = "xpost_rbpf_stack")]
 static mut EBPF_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
-/// Instructions left in the current flight.
-
-
-/// Map value windows the program may touch: `(start, size)` pairs.
-///
-/// Written by [`set_ranges`] at lease, before `ACTIVE` is stored, and cleared
-/// at release after `IN_FLIGHT` drains. Reads therefore never race a write.
-const MAX_RANGES: usize = 16;
-static mut RANGES: [(usize, usize); MAX_RANGES] = [(0, 0); MAX_RANGES];
-static RANGE_COUNT: AtomicU32 = AtomicU32::new(0);
-
-/// Install the map value windows for the lease that is about to be published.
-///
-/// Each pair is `(start, len)` of one value region. A program may only load and
-/// store inside these windows plus the packet, the md and its own stack.
-pub(crate) fn set_ranges(ranges: &[(usize, usize)]) {
-    let n = ranges.len().min(MAX_RANGES);
-    let table = unsafe { &mut *addr_of_mut!(RANGES) };
-    for (i, &r) in ranges[..n].iter().enumerate() {
-        table[i] = r;
-    }
-    for slot in table.iter_mut().skip(n) {
-        *slot = (0, 0);
-    }
-    RANGE_COUNT.store(n as u32, Ordering::Release);
+/// One value returned by an in-flight lookup.
+#[derive(Clone, Copy)]
+struct MapValue {
+    map: crate::map::MapIdx,
+    start: usize,
+    end: usize,
 }
 
-/// Drop every window. Called after the lease is gone.
-pub(crate) fn clear_ranges() {
-    RANGE_COUNT.store(0, Ordering::Release);
+// The ingress flight owns this table. Reset it before executing bytecode.
+// Reserve one window per saved stack word and per eBPF register.
+static mut MAP_VALUES: heapless::Vec<MapValue, { STACK_SIZE / 8 + 11 }> = heapless::Vec::new();
+
+pub(crate) fn remember_map_value(map: crate::map::MapIdx, start: usize, size: usize) {
+    let values = unsafe { &mut *addr_of_mut!(MAP_VALUES) };
+    if values
+        .iter()
+        .any(|value| value.start == start && value.map == map)
+    {
+        return;
+    }
+    let _ = values.push(MapValue {
+        map,
+        start,
+        end: start + size,
+    });
+}
+
+/// Drop windows that may move or disappear during a hash map mutation.
+pub(crate) fn forget_map_values(map: crate::map::MapIdx) {
+    unsafe { &mut *addr_of_mut!(MAP_VALUES) }.retain(|value| value.map != map);
 }
 
 /// `struct xdp_md` as eBPF bytecode sees it.
@@ -175,7 +176,10 @@ pub(crate) unsafe fn run_with(vm: &rbpf::EbpfVmMbuff<'_>, ctx: *mut XdpMd) -> i3
     // fail and it exits without touching the frame.
     let md = EbpfXdpMd::for_frame(data as *mut u8, data_end as *mut u8);
     let md_bytes = unsafe {
-        core::slice::from_raw_parts(&md as *const EbpfXdpMd as *const u8, core::mem::size_of::<EbpfXdpMd>())
+        core::slice::from_raw_parts(
+            &md as *const EbpfXdpMd as *const u8,
+            core::mem::size_of::<EbpfXdpMd>(),
+        )
     };
 
     let stack = unsafe { &mut *addr_of_mut!(EBPF_STACK) };
@@ -191,6 +195,7 @@ pub(crate) unsafe fn run_with(vm: &rbpf::EbpfVmMbuff<'_>, ctx: *mut XdpMd) -> i3
     // the only context that touches them.
     unsafe {
         *core::ptr::addr_of_mut!(BUDGET_LEFT) = MAX_STEPS;
+        (&mut *addr_of_mut!(MAP_VALUES)).clear();
     }
 
     let env = McuEnv::new(call_helper, check_access, step);
@@ -209,16 +214,91 @@ pub(crate) fn verify(prog: &[u8]) -> bool {
     rbpf::EbpfVmMbuff::verify(prog).is_ok()
 }
 
-/// Whether one instruction stores through `r1`.
+/// Why a map reference could not be resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MapPatchError {
+    /// The program is not a whole number of instructions.
+    BadLength,
+    /// An `lddw` claimed a map index the image does not declare.
+    IndexOutOfRange,
+    /// A program that references maps was loaded without a binding table.
+    NoBinds,
+}
+
+/// Replace the map index in every `lddw` with the map's linked address.
+///
+/// The bytecode says `lddw r1, <index>` with the pseudocode source bit set; the
+/// index identifies which map in the image's own declaration order. The
+/// interpreter has no map table, so the helper hook needs a plain address, and
+/// the address the AOT code would have loaded is the one `bind` carries.
+///
+/// # What this does not do
+///
+/// It does not decide whether the program may touch that map. The lease already
+/// installs the value windows those maps live in, and `check_access` refuses any
+/// address outside them. This rewrites an index into an address; the permission
+/// decision stays with the lease.
+///
+/// `binds` is the image's `aot_binds` in declaration order, which is the order
+/// the packer numbered the maps in.
+pub(crate) fn apply_map_addresses(prog: &mut [u8], binds: &[usize]) -> Result<(), MapPatchError> {
+    use rbpf::ebpf;
+    if !prog.len().is_multiple_of(ebpf::INSN_SIZE) {
+        return Err(MapPatchError::BadLength);
+    }
+    let mut i = 0usize;
+    while i < prog.len() / ebpf::INSN_SIZE {
+        let at = i * ebpf::INSN_SIZE;
+        let opc = prog[at];
+        // `lddw` is a two-instruction form, so the second half is skipped below.
+        if opc == ebpf::LD_DW_IMM {
+            let src = (prog[at + 1] >> 4) & 0x0f;
+            // src == 1 marks a map index rather than a constant.
+            if src == 1 {
+                let idx =
+                    u32::from_le_bytes([prog[at + 4], prog[at + 5], prog[at + 6], prog[at + 7]])
+                        as usize;
+                if binds.is_empty() {
+                    return Err(MapPatchError::NoBinds);
+                }
+                let addr = *binds.get(idx).ok_or(MapPatchError::IndexOutOfRange)?;
+                if addr == 0 {
+                    return Err(MapPatchError::NoBinds);
+                }
+                // Clear the high half of the 32-bit target address.
+                prog[at + 4..at + 8].copy_from_slice(&(addr as u32).to_le_bytes());
+                prog[at + 12..at + 16].copy_from_slice(&0u32.to_le_bytes());
+                // Clear the source bit: the value is now an ordinary constant.
+                prog[at + 1] &= 0x0f;
+            }
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+/// Verify cold bytecode and resolve its map indexes in the slot copy.
+pub(crate) fn prepare_slot(prog: &mut [u8], binds: &[usize]) -> bool {
+    verify(prog) && !rejects_ctx_writes(prog) && apply_map_addresses(prog, binds).is_ok()
+}
+
+/// Whether one instruction stores through `r1` while `r1` is still the context.
 ///
 /// An XDP program must treat its context as read-only: the kernel's verifier
 /// enforces that, and `rbpf` does not. A store through `r1` would let the
 /// program rewrite `data`/`data_end`, which are the pointers this module trusts
-/// when it builds the packet slice. Reject those programs when the image is
-/// leased so the flight path needs no check.
-pub(crate) fn rejects_ctx_write_insn(insn: &[u8]) -> bool {
+/// when it builds the packet slice.
+///
+/// Only a store that reaches the context counts. A program is free to rebind
+/// `r1` to a data pointer and store through it, which is what the compiler emits
+/// for `*(u8 *)(r1 + n) = v` after `r1 += offset`; treating every `r1` store as a
+/// context write rejected those programs outright. `r1_is_ctx` tracks whether the
+/// register still holds the context so far.
+pub(crate) fn rejects_ctx_write_insn(insn: &[u8], r1_is_ctx: bool) -> bool {
     use rbpf::ebpf;
-    if insn.len() < ebpf::INSN_SIZE {
+    if insn.len() < ebpf::INSN_SIZE || !r1_is_ctx {
         return false;
     }
     let opc = insn[0];
@@ -238,15 +318,57 @@ pub(crate) fn rejects_ctx_write_insn(insn: &[u8]) -> bool {
         )
 }
 
-/// [`rejects_ctx_write_insn`] over a whole program.
+/// Whether an instruction rebinds `r1` away from the context.
+///
+/// True for any instruction that writes `r1` other than a store: a move, a load,
+/// an arithmetic update, or a call (whose `r1` is an argument, and whose return
+/// lands in `r0`). Jumps do not write their destination, so they are excluded.
+fn rebinds_r1(insn: &[u8]) -> bool {
+    use rbpf::ebpf;
+    if insn.len() < ebpf::INSN_SIZE {
+        return false;
+    }
+    let opc = insn[0];
+    let dst = insn[1] & 0x0f;
+    if dst != 1 {
+        return false;
+    }
+    let is_store = matches!(
+        opc,
+        ebpf::ST_B_IMM
+            | ebpf::ST_H_IMM
+            | ebpf::ST_W_IMM
+            | ebpf::ST_DW_IMM
+            | ebpf::ST_B_REG
+            | ebpf::ST_H_REG
+            | ebpf::ST_W_REG
+            | ebpf::ST_DW_REG
+            | ebpf::ST_W_XADD
+    );
+    let is_jump = matches!(opc & 0x07, 0x05 | 0x06);
+    !is_store && !is_jump
+}
+
+/// [`rejects_ctx_write_insn`] over a whole program, tracking `r1`'s meaning.
 pub(crate) fn rejects_ctx_writes(prog: &[u8]) -> bool {
     use rbpf::ebpf;
     if !prog.len().is_multiple_of(ebpf::INSN_SIZE) {
         return false;
     }
-    (0..prog.len() / ebpf::INSN_SIZE)
-        .any(|i| rejects_ctx_write_insn(&prog[i * ebpf::INSN_SIZE..]))
+    let mut r1_is_ctx = true;
+    for i in 0..prog.len() / ebpf::INSN_SIZE {
+        let insn = &prog[i * ebpf::INSN_SIZE..];
+        if rejects_ctx_write_insn(insn, r1_is_ctx) {
+            return true;
+        }
+        if rebinds_r1(insn) {
+            r1_is_ctx = false;
+        }
+    }
+    false
 }
+
+/// [`rejects_ctx_write_insn`] over a whole program.
 
 /// Helper dispatch for `call` with `src == 0`.
 ///
@@ -278,11 +400,10 @@ fn check_access(addr: u64, len: usize) -> bool {
     let Some(end) = addr.checked_add(len) else {
         return false;
     };
-    let n = RANGE_COUNT.load(Ordering::Acquire) as usize;
-    let table = unsafe { &*addr_of_mut!(RANGES) };
-    table[..n]
+    let values = unsafe { &*addr_of_mut!(MAP_VALUES) };
+    values
         .iter()
-        .any(|&(start, size)| start <= addr && end <= start.saturating_add(size))
+        .any(|value| value.start <= addr && end <= value.end)
 }
 
 /// Charge one instruction to the flight budget.
@@ -346,7 +467,6 @@ pub fn last_steps() -> u32 {
 /// program wrote, which is what makes this a useful check: the caller can
 /// compare the mutated bytes.
 pub fn selftest_run(prog: &[u8], frame: &mut [u8]) -> i32 {
-    clear_ranges();
     // No stage ran for this program, so verify here. The leased path verifies
     // once at load; a self-check has no loader.
     if !verify(prog) {

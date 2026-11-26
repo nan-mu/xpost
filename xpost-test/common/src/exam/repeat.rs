@@ -79,11 +79,11 @@ mod tests {
 
     #[test]
     fn arm_order_puts_the_recorded_arm_first() {
-        let arms = [Firmware::Hal, Firmware::XdpCag];
+        let arms = [Firmware::Hal, Firmware::XdpMetrics];
         let plan = &plans(&[400.0])[0];
         assert!(plan.hal_first);
         assert_eq!(plan.order_firmware(&arms)[0], Firmware::Hal);
         let xdp_first = &plans(&[400.0])[1];
-        assert_eq!(xdp_first.order_firmware(&arms)[0], Firmware::XdpCag);
+        assert_eq!(xdp_first.order_firmware(&arms)[0], Firmware::XdpMetrics);
     }
 }

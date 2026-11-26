@@ -16,16 +16,21 @@ Always on TR3000, **no env / no CLI flags / no subcommands**:
 ```text
 Mac (USB ESP)                         TR3000                         Postgres
 cd xpost-agent                        ./xpost-test                   formal.*
-cargo run --release --                  │                              ▲
+cargo run --release --locked -- serve  │                              ▲
   --bind 0.0.0.0:9240                    │ flash/fw · get/map · get/perf│
-  /health /v1/* /mcp                    │ enable/disable/xdp           │
+  /health /v1/*                         │ enable/disable/xdp           │
         ▲                               │                              │
         └──────── HTTP [agent] ─────────┘                              │
                     RAW UDP stim (test-owned) ──► DUT ──► get/perf ────┘
 ```
 
-1. Mac: `cd xpost-agent && cargo run --release -- --bind 0.0.0.0:9240`
-2. Edit `config/default.toml` `run = ["just_drop"]` and/or `["just_tx"]` /
+The default `run = ["medium"]` stops at the readiness check.
+See [the medium procedure](../../../procedures/medium.md) for its status and plan.
+
+For the explicit legacy experiments and HAL smoke:
+
+1. Mac: `cd xpost-agent && cargo run --release --locked -- serve --bind 0.0.0.0:9240`
+2. Edit `profile.toml` `run = ["just_drop"]` and/or `["just_tx"]` /
    `["firewall"]` / `["dev"]` / `["formal-clear"]` (steps fixed in Rust).
 3. Rebuild → scp → on TR3000: `./xpost-test`
 

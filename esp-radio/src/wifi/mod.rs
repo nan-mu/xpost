@@ -1144,24 +1144,45 @@ fn xdp_dispatch(
     let frame = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), len as usize) };
     let prog = xdp::current();
     #[cfg(feature = "xdp-observe")]
+    use xpost_type::{RxEvent, RxVerdict};
+    #[cfg(feature = "xdp-observe")]
+    let tag = prog.rx_start(frame);
+    #[cfg(feature = "xdp-observe")]
     {
         prog.rx_packets(frame.len());
     }
-    let (action, window) = {
+    let (action, window, _normal_drop) = {
         #[cfg(feature = "xdp-observe")]
         {
             prog.xdp_invocations();
+            prog.rx_event(tag, RxEvent::RunEnter);
         }
         let _run = xdp::prof::Span::enter(xdp::prof::Site::XdpRun);
         let frame_ptr = frame.as_ptr();
         let frame_len = frame.len();
+        #[cfg(not(feature = "xdp-observe"))]
         let (xdp_act, win) = prog.run(frame);
+        #[cfg(feature = "xdp-observe")]
+        let (xdp_act, win, verdict) = prog.rx_run(frame, tag);
         #[cfg(feature = "xdp-observe")]
         {
             prog.xdp_action(xdp_act);
+            prog.rx_event(tag, RxEvent::Action(xdp_act));
+            let valid_window = xdp::valid_window(frame_ptr, frame_len, win);
+            if verdict == RxVerdict::Policy && valid_window && xdp_act != XdpAction::Aborted {
+                prog.rx_event(tag, RxEvent::PolicyReturned);
+            } else if verdict == RxVerdict::Fault || !valid_window || xdp_act == XdpAction::Aborted {
+                prog.rx_event(tag, RxEvent::Fault);
+            }
         }
         let action = xdp::map_xdp_action(xdp_act, frame_ptr, frame_len, win);
-        (action, win)
+        #[cfg(feature = "xdp-observe")]
+        let normal_drop = verdict == RxVerdict::Policy
+            && xdp_act == XdpAction::Drop
+            && xdp::valid_window(frame_ptr, frame_len, win);
+        #[cfg(not(feature = "xdp-observe"))]
+        let normal_drop = false;
+        (action, win, normal_drop)
     };
     let result = match action {
         Action::Pass => {
@@ -1186,6 +1207,7 @@ fn xdp_dispatch(
                         #[cfg(feature = "xdp-observe")]
                         {
                             prog.rx_delivered(depth);
+                            prog.rx_event(tag, RxEvent::StackQueued(depth));
                         }
                         #[cfg(not(feature = "xdp-observe"))]
                         let _ = depth;
@@ -1198,6 +1220,7 @@ fn xdp_dispatch(
                         {
                             let depth = RX_QUEUE_SIZE.load(Ordering::Relaxed);
                             prog.rx_queue_overflow(depth);
+                            prog.rx_event(tag, RxEvent::StackFull(depth));
                         }
                         include::ESP_ERR_NO_MEM as esp_err_t
                     }
@@ -1209,22 +1232,28 @@ fn xdp_dispatch(
             #[cfg(feature = "xdp-observe")]
             {
                 prog.rx_discarded();
+                prog.rx_event(tag, RxEvent::Discarded { normal: _normal_drop });
             }
             Some(include::ESP_OK as esp_err_t)
         }
         Action::Tx => {
             match xdp::tx::transmit(ifx, window, eb) {
-                xdp::tx::TxOutcome::Ok => {}
+                xdp::tx::TxOutcome::Ok => {
+                    #[cfg(feature = "xdp-observe")]
+                    prog.rx_event(tag, RxEvent::TxQueued);
+                }
                 xdp::tx::TxOutcome::FailBadBuf => {
                     #[cfg(feature = "xdp-observe")]
                     {
                         prog.tx_fail_bad_buf();
+                        prog.rx_event(tag, RxEvent::TxQueueFailed);
                     }
                 }
                 xdp::tx::TxOutcome::FailToken | xdp::tx::TxOutcome::FailRing => {
                     #[cfg(feature = "xdp-observe")]
                     {
                         prog.tx_fail_token();
+                        prog.rx_event(tag, RxEvent::TxQueueFailed);
                     }
                 }
             }
@@ -1234,6 +1263,7 @@ fn xdp_dispatch(
     #[cfg(feature = "xdp-observe")]
     {
         prog.rx_end();
+        prog.rx_event(tag, RxEvent::End);
     }
     result
 }

@@ -1,0 +1,489 @@
+{
+  "stage": "jit-rbpf",
+  "campaign": "dc74be72-b3b7-4233-8050-6f038a7bdd4c",
+  "experiment": "exec_bench",
+  "modes": [
+    "jit",
+    "rbpf"
+  ],
+  "accepted_run_ids": {
+    "exec_bench/jit/metrics/noop/1": "02e5628b-2934-4016-8d74-b481417e66ce",
+    "exec_bench/jit/metrics/noop/2": "578d6581-db05-4911-82d0-4773a0a86f9d",
+    "exec_bench/jit/metrics/prime/1": "1aedd29f-b10d-43cc-bc6f-998559c20ffe",
+    "exec_bench/jit/metrics/prime/2": "558d7b61-f603-4966-8ccc-eb9c3141f57c",
+    "exec_bench/jit/metrics/log2/1": "c002fe1d-b101-48e1-8b9b-f794cdb60824",
+    "exec_bench/jit/metrics/log2/2": "28aafc61-4bc9-4c22-84ae-4c43b1caf5b4",
+    "exec_bench/jit/metrics/copy/1": "f6821875-2f63-41a7-bb1c-78fda721298d",
+    "exec_bench/jit/metrics/copy/2": "4a704256-9857-4489-9d49-10ba16f065f6",
+    "exec_bench/jit/metrics/fletcher32/1": "34378781-ad3d-4a1f-8a57-2373c10668f2",
+    "exec_bench/jit/metrics/fletcher32/2": "76009cea-5283-4da6-8ee7-ae321135c3b6",
+    "exec_bench/jit/metrics/bsort/1": "dfe9f58f-3160-4775-ae17-0820eaa8b5a2",
+    "exec_bench/jit/metrics/bsort/2": "6db3c3b1-f759-4cda-900e-8538e182ed56",
+    "exec_bench/jit/metrics/strcmp/1": "bdff93c8-5ac1-4637-87c8-70c2e2c6df26",
+    "exec_bench/jit/metrics/strcmp/2": "04f666df-cecd-4c7e-8948-56622d13d7a3",
+    "exec_bench/rbpf/metrics/noop/1": "8aa4ac1f-0692-4cc6-8db5-bf1691680fe5",
+    "exec_bench/rbpf/metrics/noop/2": "df2e3f64-6850-490a-ba69-3d18a04ef319",
+    "exec_bench/rbpf/metrics/prime/1": "64e83f9a-4961-41d4-8daf-07b4dfbc1edf",
+    "exec_bench/rbpf/metrics/prime/2": "380f28b7-15e7-4d29-9af4-5ba5df7c9a04",
+    "exec_bench/rbpf/metrics/log2/1": "8241000e-12e2-4f83-9e58-51584936cfea",
+    "exec_bench/rbpf/metrics/log2/2": "024e67e2-9ad4-47f0-9c6c-6d7379a2c614",
+    "exec_bench/rbpf/metrics/copy/1": "e08cc6dc-6b20-4e7f-8ff7-215dd57efa60",
+    "exec_bench/rbpf/metrics/copy/2": "d4a90ae3-bfa3-4b84-9b23-249cb64ae4e0",
+    "exec_bench/rbpf/metrics/fletcher32/1": "8149d08d-af85-4a4e-9bee-1e44d05a9f19",
+    "exec_bench/rbpf/metrics/fletcher32/2": "5d93796c-45d7-42cc-95f9-5dab4f6ea878",
+    "exec_bench/rbpf/metrics/bsort/1": "79cdf1f6-435a-4fa0-ac93-fe59cd48543d",
+    "exec_bench/rbpf/metrics/bsort/2": "7830df95-a20d-4cb3-b643-3ffb137efdb7",
+    "exec_bench/rbpf/metrics/strcmp/1": "c68c4490-d3e3-47fe-97a8-8a09cb9d4036",
+    "exec_bench/rbpf/metrics/strcmp/2": "d927f42f-e3ee-46bb-bbc8-1a28a72d7f75"
+  },
+  "attempts": [
+    {
+      "run_id": "02e5628b-2934-4016-8d74-b481417e66ce",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "noop",
+        "n": 0,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 11,
+      "us_per_round": 3.6666666666666665
+    },
+    {
+      "run_id": "578d6581-db05-4911-82d0-4773a0a86f9d",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "noop",
+        "n": 0,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 16,
+      "us_per_round": 5.333333333333333
+    },
+    {
+      "run_id": "1aedd29f-b10d-43cc-bc6f-998559c20ffe",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "prime",
+        "n": 19,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 65,
+      "us_per_round": 21.666666666666668
+    },
+    {
+      "run_id": "558d7b61-f603-4966-8ccc-eb9c3141f57c",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "prime",
+        "n": 19,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 71,
+      "us_per_round": 23.666666666666668
+    },
+    {
+      "run_id": "c002fe1d-b101-48e1-8b9b-f794cdb60824",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "log2",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 47,
+      "us_per_round": 15.666666666666666
+    },
+    {
+      "run_id": "28aafc61-4bc9-4c22-84ae-4c43b1caf5b4",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "log2",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 52,
+      "us_per_round": 17.333333333333332
+    },
+    {
+      "run_id": "f6821875-2f63-41a7-bb1c-78fda721298d",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "copy",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 24,
+      "us_per_round": 8.0
+    },
+    {
+      "run_id": "4a704256-9857-4489-9d49-10ba16f065f6",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "copy",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 29,
+      "us_per_round": 9.666666666666666
+    },
+    {
+      "run_id": "34378781-ad3d-4a1f-8a57-2373c10668f2",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "fletcher32",
+        "n": 3,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 23,
+      "us_per_round": 7.666666666666667
+    },
+    {
+      "run_id": "76009cea-5283-4da6-8ee7-ae321135c3b6",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "fletcher32",
+        "n": 3,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 28,
+      "us_per_round": 9.333333333333334
+    },
+    {
+      "run_id": "dfe9f58f-3160-4775-ae17-0820eaa8b5a2",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "bsort",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 106,
+      "us_per_round": 35.333333333333336
+    },
+    {
+      "run_id": "6db3c3b1-f759-4cda-900e-8538e182ed56",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "bsort",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 110,
+      "us_per_round": 36.666666666666664
+    },
+    {
+      "run_id": "bdff93c8-5ac1-4637-87c8-70c2e2c6df26",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "strcmp",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 36,
+      "us_per_round": 12.0
+    },
+    {
+      "run_id": "04f666df-cecd-4c7e-8948-56622d13d7a3",
+      "mode": "jit",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "strcmp",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 42,
+      "us_per_round": 14.0
+    },
+    {
+      "run_id": "8aa4ac1f-0692-4cc6-8db5-bf1691680fe5",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "noop",
+        "n": 0,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 684,
+      "us_per_round": 228.0
+    },
+    {
+      "run_id": "df2e3f64-6850-490a-ba69-3d18a04ef319",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "noop",
+        "n": 0,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 605,
+      "us_per_round": 201.66666666666666
+    },
+    {
+      "run_id": "64e83f9a-4961-41d4-8daf-07b4dfbc1edf",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "prime",
+        "n": 19,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 1695,
+      "us_per_round": 565.0
+    },
+    {
+      "run_id": "380f28b7-15e7-4d29-9af4-5ba5df7c9a04",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "prime",
+        "n": 19,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 1657,
+      "us_per_round": 552.3333333333334
+    },
+    {
+      "run_id": "8241000e-12e2-4f83-9e58-51584936cfea",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "log2",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 1670,
+      "us_per_round": 556.6666666666666
+    },
+    {
+      "run_id": "024e67e2-9ad4-47f0-9c6c-6d7379a2c614",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "log2",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 1587,
+      "us_per_round": 529.0
+    },
+    {
+      "run_id": "e08cc6dc-6b20-4e7f-8ff7-215dd57efa60",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "copy",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 1073,
+      "us_per_round": 357.6666666666667
+    },
+    {
+      "run_id": "d4a90ae3-bfa3-4b84-9b23-249cb64ae4e0",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "copy",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 998,
+      "us_per_round": 332.6666666666667
+    },
+    {
+      "run_id": "8149d08d-af85-4a4e-9bee-1e44d05a9f19",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "fletcher32",
+        "n": 3,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 1072,
+      "us_per_round": 357.3333333333333
+    },
+    {
+      "run_id": "5d93796c-45d7-42cc-95f9-5dab4f6ea878",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "fletcher32",
+        "n": 3,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 1002,
+      "us_per_round": 334.0
+    },
+    {
+      "run_id": "79cdf1f6-435a-4fa0-ac93-fe59cd48543d",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "bsort",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 2742,
+      "us_per_round": 914.0
+    },
+    {
+      "run_id": "7830df95-a20d-4cb3-b643-3ffb137efdb7",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "bsort",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 2672,
+      "us_per_round": 890.6666666666666
+    },
+    {
+      "run_id": "c68c4490-d3e3-47fe-97a8-8a09cb9d4036",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 1,
+      "input": {
+        "program": "strcmp",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 1212,
+      "us_per_round": 404.0
+    },
+    {
+      "run_id": "d927f42f-e3ee-46bb-bbc8-1a28a72d7f75",
+      "mode": "rbpf",
+      "experiment": "exec_bench",
+      "variant": "metrics",
+      "status": "complete",
+      "repeat": 2,
+      "input": {
+        "program": "strcmp",
+        "n": 4,
+        "batch_count": 3,
+        "seed": 1
+      },
+      "batch_us": 1143,
+      "us_per_round": 381.0
+    }
+  ]
+}

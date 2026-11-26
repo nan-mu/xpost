@@ -1,11 +1,11 @@
 //! Mac flash / DUT agent HTTP client — frozen `/v1/*` contract on xpost-agent.
 //!
-//! Source of truth: `xpost-agent/src/main.rs` rustdoc
-//! ("HTTP / MCP control-plane contract (frozen)").
+//! The daemon route table is in `xpost-agent/src/http.rs`.
 
 use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use tokio::time::Duration;
 
@@ -19,6 +19,89 @@ pub struct AgentClient {
 struct ApiResp {
     ok: bool,
     message: String,
+    flash: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct MediumPreflight {
+    ok: bool,
+    preflight: Option<DeploymentReport>,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct DeploymentReport {
+    pub release: String,
+    required: usize,
+    deployments: Vec<serde_json::Value>,
+    issues: Vec<String>,
+    #[serde(default)]
+    pub prepared: Vec<PreparedDeployment>,
+    #[serde(default)]
+    pub hal_firmware: Vec<FirmwareIdentity>,
+}
+
+#[derive(Deserialize)]
+pub struct PreparedDeployment {
+    pub program: String,
+    pub mode: String,
+    pub profile: String,
+    pub slot: u8,
+    #[serde(default)]
+    pub container_sha256: String,
+    #[serde(flatten)]
+    pub firmware: FirmwareIdentity,
+}
+
+#[derive(Deserialize)]
+pub struct FirmwareIdentity {
+    pub firmware_profile: String,
+    pub firmware_sha256: String,
+}
+
+#[derive(Deserialize)]
+pub struct InstalledDeployment {
+    pub firmware_matches: bool,
+    pub container_sha256: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AttestResponse {
+    ok: bool,
+    message: Option<String>,
+    result: Option<InstalledDeployment>,
+}
+
+#[derive(Deserialize)]
+struct ExecBatchResponse {
+    ok: bool,
+    result: Option<ExecBatchWire>,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExecBatchWire {
+    boot_id: u32,
+    begin_tick: u64,
+    end_tick: u64,
+    execution_return: u32,
+    output: String,
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+pub struct PerfFreeze {
+    pub tick: u64,
+    pub flags: u32,
+    total: usize,
+    digest: u32,
+}
+
+pub struct ExecBatch {
+    pub boot_id: u32,
+    pub begin_tick: u64,
+    pub end_tick: u64,
+    pub execution_return: u32,
+    pub output: Vec<u8>,
 }
 
 /// `GET /v1/get/map/{name}` frozen JSON body (fields we read).
@@ -48,7 +131,162 @@ impl AgentClient {
         Self { base, http }
     }
 
-    /// `POST /v1/flash/fw` — build+flash firmware profile (does not install xdp.elf).
+    pub async fn health(&self) -> Result<()> {
+        self.get_message("/health").await?;
+        Ok(())
+    }
+
+    pub async fn medium_preflight(&self, stage: Option<&str>) -> Result<DeploymentReport> {
+        let suffix = stage.map_or_else(String::new, |stage| format!("/{stage}"));
+        let response: MediumPreflight = self
+            .http
+            .get(format!("{}/v1/preflight/medium{suffix}", self.base))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let report = response.preflight.with_context(|| {
+            response
+                .message
+                .unwrap_or_else(|| "Agent returned no deployment preflight report".into())
+        })?;
+        anyhow::ensure!(
+            response.ok,
+            "libbpf-mcu {}: {}/{} deployments verified; {}",
+            report.release,
+            report.deployments.len(),
+            report.required,
+            report.issues.join("\n")
+        );
+        Ok(report)
+    }
+
+    pub async fn preflight_xdp(&self, name: &str) -> Result<String> {
+        let result: ApiResp = self
+            .http
+            .get(format!("{}/v1/preflight/xdp/{name}", self.base))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        anyhow::ensure!(result.ok, "{}", result.message);
+        Ok(result.message)
+    }
+
+    pub async fn exb2(&self, input_hex: &str) -> Result<ExecBatch> {
+        let response: ExecBatchResponse = self
+            .http
+            .post(format!("{}/v1/exec/batch", self.base))
+            .json(&serde_json::json!({ "input_hex": input_hex }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        anyhow::ensure!(
+            response.ok,
+            "{}",
+            response.message.as_deref().unwrap_or("EXB2 request failed")
+        );
+        let wire = response
+            .result
+            .context("Agent EXB2 response lacks a result")?;
+        Ok(ExecBatch {
+            boot_id: wire.boot_id,
+            begin_tick: wire.begin_tick,
+            end_tick: wire.end_tick,
+            execution_return: wire.execution_return,
+            output: STANDARD.decode(wire.output)?,
+        })
+    }
+
+    pub async fn perf_prepare(
+        &self,
+        run: uuid::Uuid,
+        profile: &str,
+        variant: &str,
+    ) -> Result<(u32, u64)> {
+        let reply = self
+            .post_json(
+                "/v1/perf/prepare",
+                &serde_json::json!({
+                    "uuid": run.simple().to_string(), "profile": profile, "variant": variant
+                }),
+            )
+            .await?;
+        Ok((
+            perf_field(&reply, "epoch")?.parse()?,
+            perf_field(&reply, "boot_id")?.parse()?,
+        ))
+    }
+
+    pub async fn perf_arm(&self, epoch: u32) -> Result<u64> {
+        let reply = self
+            .post_json("/v1/perf/arm", &serde_json::json!({ "epoch": epoch }))
+            .await?;
+        Ok(perf_field(&reply, "tick")?.parse()?)
+    }
+
+    pub async fn perf_freeze(&self, epoch: u32) -> Result<PerfFreeze> {
+        let frozen = self
+            .post_json("/v1/perf/freeze", &serde_json::json!({ "epoch": epoch }))
+            .await?;
+        Ok(PerfFreeze {
+            tick: perf_field(&frozen, "tick")?.parse()?,
+            flags: perf_field(&frozen, "flags")?.parse()?,
+            total: perf_field(&frozen, "len")?.parse()?,
+            digest: perf_field(&frozen, "digest")?.parse()?,
+        })
+    }
+
+    pub async fn perf_read(&self, epoch: u32, frozen: PerfFreeze) -> Result<Vec<u8>> {
+        let PerfFreeze { total, digest, .. } = frozen;
+        anyhow::ensure!(
+            (57..=64 * 1024).contains(&total),
+            "invalid perf export length {total}"
+        );
+        let mut bytes = Vec::with_capacity(total);
+        while bytes.len() < total {
+            let part = self
+                .post_json(
+                    "/v1/perf/read",
+                    &serde_json::json!({
+                        "epoch": epoch, "offset": bytes.len(), "max_bytes": 512
+                    }),
+                )
+                .await?;
+            anyhow::ensure!(
+                perf_field(&part, "total")?.parse::<usize>()? == total
+                    && perf_field(&part, "digest")?.parse::<u32>()? == digest,
+                "perf identity changed during export"
+            );
+            let chunk = STANDARD.decode(perf_field(&part, "b64")?)?;
+            anyhow::ensure!(
+                !chunk.is_empty()
+                    && chunk.len() == perf_field(&part, "n")?.parse::<usize>()?
+                    && bytes.len() + chunk.len() <= total,
+                "invalid perf export chunk"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        let observed_digest = bytes.iter().fold(0x811c9dc5_u32, |hash, byte| {
+            (hash ^ u32::from(*byte)).wrapping_mul(0x01000193)
+        });
+        anyhow::ensure!(observed_digest == digest, "perf export digest mismatch");
+        Ok(bytes)
+    }
+
+    pub async fn perf_release(&self, epoch: u32) -> Result<()> {
+        self.post_json("/v1/perf/release", &serde_json::json!({ "epoch": epoch }))
+            .await?;
+        Ok(())
+    }
+
+    /// Build firmware and preflight all linked XDP artifacts before any device write.
+    /// Then flash firmware and install the verified cached containers.
+    /// The Agent selects XDP ELFs from its pinned libbpf-mcu release.
     pub async fn flash_fw(&self, name: &str) -> Result<()> {
         let body = serde_json::json!({ "name": name });
         let msg = self.post_json("/v1/flash/fw", &body).await?;
@@ -56,12 +294,53 @@ impl AgentClient {
         Ok(())
     }
 
-    /// `POST /v1/flash/xdp` — build and write the named image into the cold table.
-    /// The device resets.
-    pub async fn flash_xdp(&self, name: &str) -> Result<()> {
-        let body = serde_json::json!({ "name": name });
-        let msg = self.post_json("/v1/flash/xdp", &body).await?;
-        log::info!("flash_xdp: {msg}");
+    pub async fn flash_fw_evidence(
+        &self,
+        name: &str,
+        expected_sha256: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        self.post_response(
+            "/v1/flash/fw",
+            &serde_json::json!({ "name": name, "expected_sha256": expected_sha256 }),
+        )
+        .await?
+        .flash
+        .context("Agent did not return the flashed firmware identity")
+    }
+
+    pub async fn attest_deployment(
+        &self,
+        firmware: &str,
+        sha256: &str,
+    ) -> Result<InstalledDeployment> {
+        let response: AttestResponse = self
+            .http
+            .post(format!("{}/v1/deployment/attest", self.base))
+            .json(&serde_json::json!({ "firmware": firmware, "expected_sha256": sha256 }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        anyhow::ensure!(
+            response.ok,
+            "{}",
+            response
+                .message
+                .as_deref()
+                .unwrap_or("DUT attestation failed")
+        );
+        response
+            .result
+            .context("Agent returned no installed deployment")
+    }
+
+    /// Replace a single installed image using its checked Firmware ELF and partition.
+    pub async fn bind_xdp(&self, name: &str, firmware: &str, sha256: &str) -> Result<()> {
+        let body =
+            serde_json::json!({ "name": name, "firmware": firmware, "expected_sha256": sha256 });
+        let message = self.post_json("/v1/flash/xdp", &body).await?;
+        log::info!("bind_xdp: {message}");
         Ok(())
     }
 
@@ -76,36 +355,15 @@ impl AgentClient {
     }
 
     /// `POST /v1/clear/xdp` — `name` `"*"` clears the whole cold table.
-    pub async fn clear_xdp(&self, name: &str) -> Result<()> {
-        let body = serde_json::json!({ "name": name });
-        let msg = self.post_json("/v1/clear/xdp", &body).await?;
-        log::info!("clear_xdp: {msg}");
-        Ok(())
-    }
-
-    /// `POST /v1/enable/exec`.
-    pub async fn enable_exec(&self) -> Result<String> {
-        self.post_json("/v1/enable/exec", &serde_json::json!({})).await
-    }
-
-    /// `POST /v1/disable/exec`.
-    pub async fn disable_exec(&self) -> Result<String> {
-        self.post_json("/v1/disable/exec", &serde_json::json!({})).await
-    }
-
-    /// `POST /v1/get/finish` — host-only wait for UART `OK finish`.
-    pub async fn get_finish(&self) -> Result<String> {
-        self.post_json("/v1/get/finish", &serde_json::json!({})).await
-    }
-
-    /// `POST /v1/enable/xdp`.
     pub async fn enable_xdp(&self) -> Result<String> {
-        self.post_json("/v1/enable/xdp", &serde_json::json!({})).await
+        self.post_json("/v1/enable/xdp", &serde_json::json!({}))
+            .await
     }
 
     /// `POST /v1/disable/xdp`.
     pub async fn disable_xdp(&self) -> Result<String> {
-        self.post_json("/v1/disable/xdp", &serde_json::json!({})).await
+        self.post_json("/v1/disable/xdp", &serde_json::json!({}))
+            .await
     }
 
     /// `POST /v1/xdp/switch`. `policy` is `drop` or `pass`.
@@ -177,7 +435,11 @@ impl AgentClient {
     }
 
     /// `POST /v1/update/map/{name}` — batch `entries`.
-    pub async fn update_map_batch(&self, name: &str, entries: &[(String, String)]) -> Result<String> {
+    pub async fn update_map_batch(
+        &self,
+        name: &str,
+        entries: &[(String, String)],
+    ) -> Result<String> {
         let path = format!("/v1/update/map/{name}");
         let entries: Vec<serde_json::Value> = entries
             .iter()
@@ -198,7 +460,8 @@ impl AgentClient {
 
     /// `POST /v1/clear/perf`.
     pub async fn clear_perf(&self) -> Result<String> {
-        self.post_json("/v1/clear/perf", &serde_json::json!({})).await
+        self.post_json("/v1/clear/perf", &serde_json::json!({}))
+            .await
     }
 
     /// `GET /v1/get/perf` — message carries `b64=…` (or equivalent).
@@ -252,6 +515,10 @@ impl AgentClient {
     }
 
     async fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<String> {
+        Ok(self.post_response(path, body).await?.message)
+    }
+
+    async fn post_response(&self, path: &str, body: &serde_json::Value) -> Result<ApiResp> {
         let url = format!("{}{path}", self.base);
         let resp = self
             .http
@@ -271,8 +538,16 @@ impl AgentClient {
         if !api.ok {
             bail!("{}", api.message);
         }
-        Ok(api.message)
+        Ok(api)
     }
+}
+
+fn perf_field<'a>(reply: &'a str, name: &str) -> Result<&'a str> {
+    reply
+        .split_whitespace()
+        .filter_map(|field| field.split_once('='))
+        .find_map(|(key, value)| (key == name).then_some(value))
+        .with_context(|| format!("missing {name} in perf reply"))
 }
 
 fn normalize_base(endpoint: &str) -> String {
@@ -281,5 +556,41 @@ fn normalize_base(endpoint: &str) -> String {
         e.to_string()
     } else {
         format!("http://{e}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    #[tokio::test]
+    async fn medium_http_200_failure_preserves_the_preflight_issue() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let agent = super::AgentClient::new(listener.local_addr().unwrap().to_string());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 1024];
+            let n = socket.read(&mut bytes).await.unwrap();
+            assert!(bytes[..n].starts_with(b"GET /v1/preflight/medium HTTP/1.1\r\n"));
+            let body = r#"{"ok":false,"preflight":{"release":"v0.1.1","required":32,"deployments":[],"issues":["case_mark_idle slot B layout mismatch"]}}"#;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        });
+        let err = agent
+            .medium_preflight(None)
+            .await
+            .err()
+            .expect("business failure must block");
+        assert!(
+            err.to_string()
+                .contains("case_mark_idle slot B layout mismatch")
+        );
+        server.await.unwrap();
     }
 }

@@ -1,17 +1,20 @@
-# exec_bench (eBPF arm)
+# XPOST EXB2 firmware
 
-Opaque App carrier for function-call XDP via `xpost::ext::exec_call`.
+The firmware invokes the loaded XDP image once per EXB2 buffer. AOT and JIT
+use the native build. Use `--features interp` for rBPF.
 
-- Cold images: `../build/<name>/<name>.elf` from `pixi run build -c <name>` in `libbpf-mcu`
-- Map `workload`: keys `0`/`1`, value = opaque 32-byte blob
-- App: `SerialHandler` — exec / map / perf (cagt); does **not** interpret opcodes
-- Completion: App `info!("OK finish")` after `xdp_end` (UART `INFO - OK finish`, host `GetFinish`)
-- Host draft: [`HOST_DESIGN.md`](HOST_DESIGN.md), [`exec_bench.rs`](exec_bench.rs), [`exec_bench.sql`](exec_bench.sql)
-- HAL twin (same pipeline, no XDP): [`../exec_bench_hal`](../exec_bench_hal)
-
-```bash
-cargo build --release
+```sh
+cargo build --release --locked
+cargo build --release --locked --features interp --target-dir target/rbpf
 ```
 
-Flash: agent `POST /v1/flash/fw {"name":"exec-bench-ebpf"}` (co-flashes default xdp `incr`).
-Per-workload: `POST /v1/flash/xdp {"name":"square"}` (and the other stems).
+See the [medium procedure](../../xpost-test/procedures/medium.md) for formal runs.
+
+## Diagnostics
+
+Build with `--features diag` for the legacy 32-byte workload commands and
+performance report. Add `interp` for interpreter diagnostics. These commands
+support the
+[workload benchmark](../../xpost-test/scripts/workload_bench.py),
+[workload sweep](../../xpost-test/scripts/sweep_all3.py), and
+[interpreter benchmarks](../../xpost-test/scripts/interp_engine_bench.py).

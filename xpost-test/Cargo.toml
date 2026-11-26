@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["common", "ebpf"]
+members = ["common", "ebpf", "manifest"]
 default-members = ["common"]
 
 [workspace.package]

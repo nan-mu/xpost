@@ -78,6 +78,7 @@
 //! still use its own per-section stack buffers.
 
 pub mod command;
+pub mod exec_batch;
 pub mod reply;
 pub mod serial;
 mod wire_fmt;

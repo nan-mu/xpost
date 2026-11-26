@@ -11,3 +11,4 @@ critical-section = "1.2.0"
 esp-hal = { version = "~1.1.0", features = ["esp32c3", "unstable"] }
 heapless = "0.8"
 portable-atomic = { version = "1", default-features = false }
+xpost-network-perf = { path = "../../xpost-perf/firmware" }

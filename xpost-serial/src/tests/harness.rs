@@ -3,20 +3,21 @@
 use std::convert::Infallible;
 use std::fmt;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::client::error::{Interrupted, ParseError, RequestTimeout};
 use crate::client::{MemoryPair, MemoryServer, SerialHandler};
-use crate::r#type::reply::{ErrReply, MapError, PerfError, ServerError, SyntaxError};
-use crate::server::serial::{DefaultHandler, RequestHandler, SerialHandlerBuilder};
 use crate::server::SerialHandler as ServerHandler;
+use crate::server::exec_batch::EXEC_BATCH_LINE_BYTES;
+use crate::server::serial::{DefaultHandler, RequestHandler, SerialHandlerBuilder};
+use crate::r#type::reply::{ErrReply, MapError, PerfError, ServerError, SyntaxError};
 
 pub type ReadFn = Box<dyn FnMut() -> Option<u8> + Send>;
 pub type WriteFn = Box<dyn FnMut(&[u8]) -> Result<(), Infallible> + Send>;
-pub type TestBuilder = SerialHandlerBuilder<ReadFn, WriteFn, DefaultHandler, 128>;
+pub type TestBuilder = SerialHandlerBuilder<ReadFn, WriteFn, DefaultHandler, EXEC_BATCH_LINE_BYTES>;
 
 /// Concrete `E` for [`SerialHandler::request`] in session tests.
 pub enum TestError {
@@ -115,7 +116,9 @@ impl Drop for ServerTask {
     }
 }
 
-fn spawn_server<H>(mut handler: ServerHandler<ReadFn, WriteFn, H, 128>) -> ServerTask
+fn spawn_server<H>(
+    mut handler: ServerHandler<ReadFn, WriteFn, H, EXEC_BATCH_LINE_BYTES>,
+) -> ServerTask
 where
     H: RequestHandler + Send + 'static,
 {
@@ -141,7 +144,7 @@ fn builder(server: MemoryServer) -> TestBuilder {
     let write_end = server;
     let read: ReadFn = Box::new(move || read_end.read_byte());
     let write: WriteFn = Box::new(move |bytes: &[u8]| write_end.write_all(bytes));
-    ServerHandler::builder(read, write, [0u8; 128])
+    ServerHandler::builder(read, write, [0u8; EXEC_BATCH_LINE_BYTES])
 }
 
 /// Start memory server (with user `on_*` registrations) + client, run `body`, then shut down.
@@ -149,7 +152,7 @@ fn builder(server: MemoryServer) -> TestBuilder {
 /// `register` must end with [`.build()`](SerialHandlerBuilder::build).
 /// Client log/file tee is not exercised ([`SerialHandler::open_memory`]).
 pub fn with_session<H, F>(
-    register: impl FnOnce(TestBuilder) -> ServerHandler<ReadFn, WriteFn, H, 128>,
+    register: impl FnOnce(TestBuilder) -> ServerHandler<ReadFn, WriteFn, H, EXEC_BATCH_LINE_BYTES>,
     body: F,
 ) where
     H: RequestHandler + Send + 'static,
@@ -167,7 +170,7 @@ pub fn with_session<H, F>(
 
 /// Like [`with_session`], but tees the client transcript to a temp file and returns its lines.
 pub fn with_session_logged<H, F>(
-    register: impl FnOnce(TestBuilder) -> ServerHandler<ReadFn, WriteFn, H, 128>,
+    register: impl FnOnce(TestBuilder) -> ServerHandler<ReadFn, WriteFn, H, EXEC_BATCH_LINE_BYTES>,
     body: F,
 ) -> Vec<String>
 where
@@ -187,8 +190,8 @@ where
     ));
 
     let pair = MemoryPair::new();
-    let client = SerialHandler::open_memory_with_log(pair.client, &log_path)
-        .expect("open_memory_with_log");
+    let client =
+        SerialHandler::open_memory_with_log(pair.client, &log_path).expect("open_memory_with_log");
     let handler = register(builder(pair.server));
     let _server = spawn_server(handler);
     thread::sleep(Duration::from_millis(20));

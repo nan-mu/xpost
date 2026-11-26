@@ -4,6 +4,7 @@
 //! that can keep them in agreement is this file: one side writes, the other
 //! reads, and the bytes must come back identical.
 
+use xpost_perf::plan::{encode_report, report_len, EventSpec, MetricSpec, MetricValue};
 use xpost_perf::*;
 
 type Record = ([u8; 32], Kind, SpanStats);
@@ -45,7 +46,7 @@ fn span_round_trips() {
 
     let mut buf = [0u8; 256];
     let mut o = write_header(&mut buf, 1).unwrap();
-    o = write_entry(&mut buf, o, "engine", Kind::Span, &stats, (0, 0), &[]).unwrap();
+    o = write_entry(&mut buf, o, "engine", Kind::Span, &stats, (0, 0), &[], &[]).unwrap();
 
     let mut sink = Collect::new();
     let header = visit_entries(&buf[..o], &mut sink).unwrap();
@@ -67,7 +68,7 @@ fn an_empty_span_reports_no_samples() {
     let stats = SpanStats::new();
     let mut buf = [0u8; 128];
     let mut o = write_header(&mut buf, 1).unwrap();
-    o = write_entry(&mut buf, o, "idle", Kind::Span, &stats, (0, 0), &[]).unwrap();
+    o = write_entry(&mut buf, o, "idle", Kind::Span, &stats, (0, 0), &[], &[]).unwrap();
 
     let mut sink = Collect::new();
     visit_entries(&buf[..o], &mut sink).unwrap();
@@ -85,10 +86,10 @@ fn every_kind_round_trips() {
 
     let mut buf = [0u8; 512];
     let mut o = write_header(&mut buf, 4).unwrap();
-    o = write_entry(&mut buf, o, "count", Kind::Counter, &stats, (42, 0), &[]).unwrap();
-    o = write_entry(&mut buf, o, "span", Kind::Span, &stats, (0, 0), &[]).unwrap();
-    o = write_entry(&mut buf, o, "gauge", Kind::Gauge, &stats, (5, 9), &[]).unwrap();
-    o = write_entry(&mut buf, o, "hist", Kind::Histogram, &stats, (0, 0), &[4, 8, 16]).unwrap();
+    o = write_entry(&mut buf, o, "count", Kind::Counter, &stats, (42, 0), &[], &[]).unwrap();
+    o = write_entry(&mut buf, o, "span", Kind::Span, &stats, (0, 0), &[], &[]).unwrap();
+    o = write_entry(&mut buf, o, "gauge", Kind::Gauge, &stats, (5, 9), &[], &[]).unwrap();
+    o = write_entry(&mut buf, o, "hist", Kind::Histogram, &stats, (0, 0), &[4, 8, 16], &[1, 1, 1]).unwrap();
 
     let mut sink = Collect::new();
     let header = visit_entries(&buf[..o], &mut sink).unwrap();
@@ -110,10 +111,10 @@ fn a_foreign_magic_is_rejected() {
 fn an_unknown_version_is_rejected_not_guessed() {
     let mut buf = [0u8; 64];
     write_header(&mut buf, 0).unwrap();
-    buf[4..6].copy_from_slice(&2u16.to_le_bytes());
+    buf[4..6].copy_from_slice(&99u16.to_le_bytes());
     assert_eq!(
         read_header(&buf),
-        Err(DecodeError::UnsupportedVersion(2)),
+        Err(DecodeError::UnsupportedVersion(99)),
         "a reader must refuse a format it does not implement"
     );
 }
@@ -123,7 +124,7 @@ fn a_truncated_report_is_short_not_empty() {
     let stats = SpanStats::new();
     let mut buf = [0u8; 256];
     let mut o = write_header(&mut buf, 1).unwrap();
-    o = write_entry(&mut buf, o, "engine", Kind::Span, &stats, (0, 0), &[]).unwrap();
+    o = write_entry(&mut buf, o, "engine", Kind::Span, &stats, (0, 0), &[], &[]).unwrap();
 
     // Cut inside the entry. A reader that stopped silently would report zero
     // entries and hide the truncation.
@@ -138,7 +139,7 @@ fn an_overlong_name_is_refused_at_write() {
     let mut buf = [0u8; 256];
     let o = write_header(&mut buf, 1).unwrap();
     let long = "a".repeat(MAX_NAME + 1);
-    assert!(write_entry(&mut buf, o, &long, Kind::Span, &stats, (0, 0), &[]).is_none());
+    assert!(write_entry(&mut buf, o, &long, Kind::Span, &stats, (0, 0), &[], &[]).is_none());
 }
 
 #[test]
@@ -146,5 +147,313 @@ fn a_short_buffer_is_refused_not_overrun() {
     let stats = SpanStats::new();
     let mut buf = [0u8; 12];
     let o = write_header(&mut buf, 1).unwrap();
-    assert!(write_entry(&mut buf, o, "engine", Kind::Span, &stats, (0, 0), &[]).is_none());
+    assert!(write_entry(&mut buf, o, "engine", Kind::Span, &stats, (0, 0), &[], &[]).is_none());
+}
+
+// ── v2: events, and the length the header announces ─────────────────────────
+
+/// The sink the header is written to must agree with the one the body is
+/// written to. A mismatch leaves the frame unframeable, so measuring and
+/// writing go through the same encoder.
+#[test]
+fn measuring_and_writing_agree_on_every_kind() {
+    let mut stats = SpanStats::new();
+    for us in [3, 9] {
+        stats.record(us);
+    }
+    let edges = [1u64, 2, 4, 8];
+    let events = [
+        Event { kind: 2, arg0: 7, arg1: 0, t_us: 100 },
+        Event { kind: 3, arg0: 2, arg1: 1, t_us: 140 },
+    ];
+
+    let mut count = Counting::new();
+    assert!(encode_header(&mut count, 5));
+    assert!(encode_metric(&mut count, "c", Kind::Counter, &stats, (11, 0), &[], &[]));
+    assert!(encode_metric(&mut count, "s", Kind::Span, &stats, (0, 0), &[], &[]));
+    assert!(encode_metric(&mut count, "g", Kind::Gauge, &stats, (4, 6), &[], &[]));
+    assert!(encode_metric(&mut count, "h", Kind::Histogram, &stats, (0, 0), &edges, &[1, 2, 3, 4]));
+    assert!(encode_events(&mut count, "e", 1, &events));
+
+    let mut buf = [0u8; 512];
+    let mut write = SliceSink::new(&mut buf);
+    assert!(encode_header(&mut write, 5));
+    assert!(encode_metric(&mut write, "c", Kind::Counter, &stats, (11, 0), &[], &[]));
+    assert!(encode_metric(&mut write, "s", Kind::Span, &stats, (0, 0), &[], &[]));
+    assert!(encode_metric(&mut write, "g", Kind::Gauge, &stats, (4, 6), &[], &[]));
+    assert!(encode_metric(&mut write, "h", Kind::Histogram, &stats, (0, 0), &edges, &[1, 2, 3, 4]));
+    assert!(encode_events(&mut write, "e", 1, &events));
+    let wrote = write.wrote().expect("no overflow");
+
+    assert_eq!(count.len(), wrote, "length must not depend on the sink");
+    assert_eq!(wrote, HEADER_LEN + entry_len("c", Kind::Counter, 0)
+        + entry_len("s", Kind::Span, 0)
+        + entry_len("g", Kind::Gauge, 0)
+        + entry_len("h", Kind::Histogram, edges.len() * 16)
+        + event_entry_len("e", events.len()));
+}
+
+#[test]
+fn an_event_entry_round_trips_in_order() {
+    let events = [
+        Event { kind: 2, arg0: 0x11, arg1: 0, t_us: 1000 },
+        Event { kind: 11, arg0: 1, arg1: 0, t_us: 1001 },
+        Event { kind: 12, arg0: 1, arg1: 0, t_us: 1002 },
+        Event { kind: 3, arg0: 2, arg1: 0, t_us: 1100 },
+    ];
+
+    let mut buf = [0u8; 256];
+    let mut sink = SliceSink::new(&mut buf);
+    assert!(encode_header(&mut sink, 1));
+    assert!(encode_events(&mut sink, "flight", 7, &events));
+    let n = sink.wrote().unwrap();
+
+    let mut got = 0usize;
+    struct One(usize);
+    impl Visitor for One {
+        fn entry(&mut self, entry: &Entry<'_>) -> Result<(), DecodeError> {
+            assert_eq!(entry.kind, Kind::Event);
+            assert_eq!(entry.name, "flight");
+            assert_eq!(entry.dropped, 7, "ring overflow must survive the wire");
+            assert_eq!(entry.event_count(), 4);
+            for (i, expect) in [
+                Event { kind: 2, arg0: 0x11, arg1: 0, t_us: 1000 },
+                Event { kind: 11, arg0: 1, arg1: 0, t_us: 1001 },
+                Event { kind: 12, arg0: 1, arg1: 0, t_us: 1002 },
+                Event { kind: 3, arg0: 2, arg1: 0, t_us: 1100 },
+            ]
+            .iter()
+            .enumerate()
+            {
+                assert_eq!(entry.event(i).as_ref(), Some(expect), "event {i} out of order");
+            }
+            assert_eq!(entry.event(4), None, "reading past the count must not fabricate");
+            self.0 += 1;
+            Ok(())
+        }
+    }
+    let mut one = One(0);
+    visit_entries(&buf[..n], &mut one).unwrap();
+    got += one.0;
+    assert_eq!(got, 1);
+}
+
+#[test]
+fn an_empty_event_entry_is_not_a_broken_one() {
+    let mut buf = [0u8; 64];
+    let mut sink = SliceSink::new(&mut buf);
+    assert!(encode_header(&mut sink, 1));
+    assert!(encode_events(&mut sink, "none", 0, &[]));
+    let n = sink.wrote().unwrap();
+
+    let mut sink = Collect::new();
+    visit_entries(&buf[..n], &mut sink).unwrap();
+    assert_eq!(sink.len, 1);
+}
+
+#[test]
+fn a_truncated_event_stream_is_short_not_silently_empty() {
+    let events = [Event { kind: 2, arg0: 1, arg1: 0, t_us: 5 }];
+    let mut buf = [0u8; 128];
+    let mut sink = SliceSink::new(&mut buf);
+    assert!(encode_header(&mut sink, 1));
+    assert!(encode_events(&mut sink, "e", 0, &events));
+    let n = sink.wrote().unwrap();
+
+    let mut collect = Collect::new();
+    let err = visit_entries(&buf[..n - 4], &mut collect).unwrap_err();
+    assert_eq!(err, DecodeError::Short);
+}
+
+#[test]
+fn a_version_one_reader_refuses_version_two() {
+    // The whole point of the version gate: a v1 host must not try to decode a
+    // payload whose entry kinds it cannot size.
+    let mut buf = [0u8; 32];
+    let mut sink = SliceSink::new(&mut buf);
+    assert!(encode_header(&mut sink, 0));
+    buf[4..6].copy_from_slice(&1u16.to_le_bytes());
+    assert_eq!(read_header(&buf), Err(DecodeError::UnsupportedVersion(1)));
+}
+
+#[test]
+fn a_histogram_carries_its_buckets_not_just_its_edges() {
+    // Edges say where bins are; counts say how many samples landed in them.
+    // An encoder that wrote only edges would produce a histogram of nothing.
+    let mut stats = SpanStats::new();
+    for us in [1, 3, 30] {
+        stats.record(us);
+    }
+    let edges = [2u64, 8, 64];
+    let buckets = [1u64, 1, 1];
+
+    let mut buf = [0u8; 256];
+    let mut sink = SliceSink::new(&mut buf);
+    assert!(encode_header(&mut sink, 1));
+    assert!(encode_metric(&mut sink, "lookup_us", Kind::Histogram, &stats, (0, 0), &edges, &buckets));
+    let n = sink.wrote().unwrap();
+
+    struct One {
+        edges: [u64; 3],
+        buckets: [u64; 3],
+    }
+    impl Visitor for One {
+        fn entry(&mut self, entry: &Entry<'_>) -> Result<(), DecodeError> {
+            assert_eq!(entry.kind, Kind::Histogram);
+            assert_eq!(entry.stats.count, 3);
+            assert_eq!(entry.bucket_len(), self.edges.len());
+            let got_edges: Vec<u64> = (0..entry.bucket_len())
+                .map(|i| entry.edge(i).unwrap())
+                .collect();
+            let got_buckets: Vec<u64> = (0..entry.bucket_len())
+                .map(|i| entry.bucket(i).unwrap())
+                .collect();
+            assert_eq!(got_edges, self.edges.to_vec());
+            assert_eq!(got_buckets, self.buckets.to_vec(), "bucket counts must survive");
+            assert_eq!(entry.edge(self.edges.len()), None);
+            Ok(())
+        }
+    }
+    visit_entries(&buf[..n], &mut One { edges, buckets }).unwrap();
+}
+
+#[test]
+fn a_histogram_with_mismatched_edges_and_buckets_is_refused() {
+    let stats = SpanStats::new();
+    let mut sink = Counting::new();
+    assert!(!encode_metric(
+        &mut sink,
+        "bad",
+        Kind::Histogram,
+        &stats,
+        (0, 0),
+        &[1, 2],
+        &[1]
+    ));
+}
+
+// ── plan-driven reports ─────────────────────────────────────────────────────
+
+fn fixed_counter() -> MetricValue {
+    MetricValue::Counter(9)
+}
+
+fn fixed_span() -> MetricValue {
+    let mut s = SpanStats::new();
+    s.record(5);
+    MetricValue::Span(s)
+}
+
+fn fixed_hist() -> MetricValue {
+    let mut s = SpanStats::new();
+    s.record(5);
+    MetricValue::Histogram {
+        stats: s,
+        edges: &[2, 8],
+        buckets: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    }
+}
+
+const PLAN: &[MetricSpec] = &[
+    MetricSpec { name: "calls", get: fixed_counter },
+    MetricSpec { name: "engine_us", get: fixed_span },
+];
+
+fn three_events(out: &mut [Event]) -> (u64, usize) {
+    let all = [
+        Event { kind: 2, arg0: 0, arg1: 0, t_us: 10 },
+        Event { kind: 11, arg0: 1, arg1: 0, t_us: 11 },
+        Event { kind: 3, arg0: 2, arg1: 0, t_us: 20 },
+    ];
+    let n = out.len().min(all.len());
+    out[..n].copy_from_slice(&all[..n]);
+    // The true total is reported even to a short buffer, so the length call
+    // sees the real size.
+    (4, all.len())
+}
+
+#[test]
+fn a_plan_declares_its_own_entries() {
+    let events = EventSpec { name: "flight", get: three_events };
+    let len = report_len(PLAN, Some(events)).unwrap();
+
+    let mut ebuf = [Event::default(); 8];
+    let mut buf = [0u8; 512];
+    let mut sink = SliceSink::new(&mut buf);
+    assert!(encode_report(PLAN, Some(events), &mut ebuf, &mut sink));
+    assert_eq!(sink.wrote(), Some(len), "measured length must match written bytes");
+
+    // Copy the names out as fixed-size keys so no lifetime crosses the visitor.
+    struct Keys {
+        seen: [Option<([u8; 32], u8)>; 4],
+        n: usize,
+    }
+    impl Visitor for Keys {
+        fn entry(&mut self, entry: &Entry<'_>) -> Result<(), DecodeError> {
+            if self.n < self.seen.len() {
+                let mut k = [0u8; 32];
+                let n = entry.name.len().min(31);
+                k[..n].copy_from_slice(&entry.name.as_bytes()[..n]);
+                self.seen[self.n] = Some((k, n as u8));
+            }
+            self.n += 1;
+            Ok(())
+        }
+    }
+    let mut keys = Keys {
+        seen: [None; 4],
+        n: 0,
+    };
+    visit_entries(&buf[..len], &mut keys).unwrap();
+    assert_eq!(keys.n, 3, "one entry per plan item, events last");
+    let names: Vec<String> = keys
+        .seen
+        .iter()
+        .flatten()
+        .map(|(k, n)| String::from_utf8_lossy(&k[..*n as usize]).into_owned())
+        .collect();
+    assert_eq!(names, vec!["calls", "engine_us", "flight"]);
+}
+
+#[test]
+fn a_plan_without_events_reports_only_metrics() {
+    let len = report_len(PLAN, None).unwrap();
+    let mut sink = Counting::new();
+    assert!(encode_report(PLAN, None, &mut [], &mut sink));
+    assert_eq!(sink.len(), len);
+}
+
+#[test]
+fn a_short_event_buffer_is_refused_not_shortened() {
+    let events = EventSpec { name: "flight", get: three_events };
+    let mut too_small = [Event::default(); 2];
+    let mut sink = Counting::new();
+    assert!(
+        !encode_report(PLAN, Some(events), &mut too_small, &mut sink),
+        "a shortened timeline must not be published as a complete one"
+    );
+}
+
+#[test]
+fn an_empty_histogram_edge_list_is_refused() {
+    fn bad_hist() -> MetricValue {
+        MetricValue::Histogram {
+            stats: SpanStats::new(),
+            edges: &[],
+            buckets: [0; 16],
+        }
+    }
+    let plan = [MetricSpec { name: "h", get: bad_hist }];
+    assert_eq!(report_len(&plan, None), None);
+}
+
+#[test]
+fn a_plan_reports_the_histogram_kind_it_encodes() {
+    let plan = [MetricSpec { name: "h", get: fixed_hist }];
+    let len = report_len(&plan, None).unwrap();
+    let mut buf = [0u8; 256];
+    let mut sink = SliceSink::new(&mut buf);
+    assert!(encode_report(&plan, None, &mut [], &mut sink));
+    assert_eq!(sink.wrote(), Some(len));
+    assert_eq!(len, HEADER_LEN + entry_len("h", Kind::Histogram, 2 * 16));
 }
