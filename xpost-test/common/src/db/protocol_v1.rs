@@ -22,19 +22,22 @@ pub(super) async fn check(client: &mut Client) -> Result<()> {
 
 async fn validate(tx: &Transaction<'_>, ddl: &Ddl) -> Result<()> {
     let names: Vec<String> = ddl.tables.keys().map(|name| (*name).into()).collect();
-    let tables = catalog::tables(tx, &names, "").await?;
+    let mut tables = catalog::tables(tx, &names, "").await?;
+    catalog::table_objects(tx, &names, "", &mut tables).await?;
     let mut problems = Vec::new();
-    for (&name, columns) in &ddl.tables {
+    for (&name, expected) in &ddl.tables {
         match tables.get(name) {
             None => problems.push(format!("release.{name}: table missing")),
             Some(table) if !table.regular => {
                 problems.push(format!("release.{name}: expected a regular table"))
             }
-            Some(table) if table.columns != *columns => problems.push(format!(
-                "release.{name}: incompatible columns (expected {columns:?}, found {:?})",
-                table.columns,
+            Some(table) if table.columns != expected.columns => problems.push(format!(
+                "release.{name}: incompatible columns (expected {:?}, found {:?})",
+                expected.columns, table.columns,
             )),
-            _ => {}
+            Some(table) => {
+                problems.extend(integrity_problems(name, table, ddl)?);
+            }
         }
     }
     let permissions = tx
@@ -94,6 +97,103 @@ async fn validate(tx: &Transaction<'_>, ddl: &Ddl) -> Result<()> {
         problems.join("\n")
     );
     Ok(())
+}
+
+fn integrity_problems(name: &str, table: &catalog::Table, ddl: &Ddl) -> Result<Vec<String>> {
+    let expected = &ddl.tables[name];
+    let mut problems = Vec::new();
+    let key = format!("PRIMARY KEY ({})", expected.primary_key.join(","));
+    if !expected.primary_key.is_empty() && !has_key(table, "p", &key) {
+        problems.push(format!(
+            "release.{name}: missing or incompatible primary key {key}"
+        ));
+    }
+    for key in &expected.foreign_keys {
+        let target = if key.target.contains('(') {
+            key.target.clone()
+        } else {
+            let target_table = key
+                .target
+                .strip_prefix("release.")
+                .context("read foreign key target")?;
+            let primary_key = &ddl
+                .tables
+                .get(target_table)
+                .context("find foreign key target")?
+                .primary_key;
+            format!("{}({})", key.target, primary_key.join(","))
+        };
+        let definition = format!("FOREIGN KEY {} REFERENCES {target}", key.columns);
+        if !has_key(table, "f", &definition) {
+            problems.push(format!(
+                "release.{name}: missing or incompatible foreign key {definition}"
+            ));
+        }
+    }
+
+    // Check for validated constraints on the required column sets. PostgreSQL
+    // rewrites CHECK expressions, so this check does not compare formula text.
+    let mut checks: Vec<_> = table
+        .objects
+        .iter()
+        .filter(|object| {
+            object.kind == "c"
+                && !object.definition.ends_with(" [unvalidated]")
+                && !object.definition.ends_with(" NOT ENFORCED")
+        })
+        .collect();
+    for columns in &expected.checks {
+        if let Some(index) = checks
+            .iter()
+            .position(|object| object.check_columns == *columns)
+        {
+            checks.swap_remove(index);
+        } else {
+            problems.push(format!(
+                "release.{name}: missing validated CHECK on ({})",
+                columns.join(", ")
+            ));
+        }
+    }
+
+    let expected_trigger = expected.write_trigger.as_deref().map(compact_sql);
+    let mut canonical_trigger_active = false;
+    for trigger in table
+        .objects
+        .iter()
+        .filter(|object| object.active_write_trigger)
+    {
+        let clause = trigger
+            .definition
+            .rsplit_once(':')
+            .map(|(clause, _)| compact_sql(clause));
+        if clause == expected_trigger {
+            canonical_trigger_active = true;
+        } else {
+            problems.push(format!(
+                "release.{name}: unexpected active write trigger {}",
+                trigger.name
+            ));
+        }
+    }
+    if expected_trigger.is_some() && !canonical_trigger_active {
+        problems.push(format!(
+            "release.{name}: missing or inactive Protocol V1 write trigger"
+        ));
+    }
+    Ok(problems)
+}
+
+fn has_key(table: &catalog::Table, kind: &str, definition: &str) -> bool {
+    let definition = compact_sql(definition);
+    table
+        .objects
+        .iter()
+        .any(|object| object.kind == kind && compact_sql(&object.definition) == definition)
+}
+
+fn compact_sql(sql: &str) -> String {
+    sql.split_ascii_whitespace().collect()
 }
 
 /// Caller holds the exclusive schema session lock until reconciliation commits
@@ -161,7 +261,8 @@ pub(super) async fn reconcile(client: &mut Client) -> Result<()> {
         );
     }
     let mut rebuild = BTreeSet::new();
-    for (&name, columns) in &ddl.tables {
+    for (&name, definition) in &ddl.tables {
+        let columns = &definition.columns;
         ensure!(
             expected[name].columns == *columns,
             "DDL column inventory disagrees with PostgreSQL for release.{name}"
@@ -272,7 +373,7 @@ pub(super) async fn reconcile(client: &mut Client) -> Result<()> {
 fn same_definition(a: &catalog::Object, b: &catalog::Object) -> bool {
     a.kind == b.kind
         && a.definition == b.definition
-        && (!matches!(a.kind.as_str(), "default" | "trigger" | "index") || a.name == b.name)
+        && (!matches!(a.kind.as_str(), "default" | "index") || a.name == b.name)
 }
 
 fn quote(identifier: &str) -> String {

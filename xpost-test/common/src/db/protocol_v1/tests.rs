@@ -219,6 +219,159 @@ async fn reconciles_tables_and_protects_active_collection() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires the disposable reconcile_fixture database"]
+async fn checks_required_constraints_and_write_triggers_before_collection() -> Result<()> {
+    let db = Database::load_fixture()?;
+    let mut raw = db.connect().await?;
+    let database: String = raw
+        .query_one("SELECT current_database()::text", &[])
+        .await?
+        .get(0);
+    anyhow::ensure!(
+        database == "reconcile_fixture",
+        "use the disposable fixture"
+    );
+    drop(db.prepare().await?);
+
+    let artifact = Uuid::new_v4();
+    let artifact_oid = table_oid(&raw, "release.bench_artifact").await?;
+    raw.batch_execute(
+        "CREATE INDEX fixture_media_type ON release.bench_artifact(media_type);
+         ALTER TRIGGER immutable_evidence ON release.bench_artifact RENAME TO fixture_evidence",
+    )
+    .await?;
+    check(&mut raw).await?;
+    let prepared = db.prepare().await?;
+    insert_artifact(&prepared.connect().await?, artifact).await?;
+    drop(prepared);
+    let resumed = db.resume().await?;
+    let original = resumed
+        .client()
+        .query_one(
+            "SELECT media_type FROM release.bench_artifact WHERE artifact_id=$1",
+            &[&artifact],
+        )
+        .await?
+        .get::<_, String>(0);
+    drop(resumed);
+    assert_eq!(original, "fixture");
+
+    let mut unexpected = Vec::new();
+    for (table, predicate, reason) in [
+        (
+            "bench_artifact",
+            "pg_get_constraintdef(oid) LIKE '%octet_length(original_bytes)%'",
+            "CHECK",
+        ),
+        ("bench_run_artifact", "contype = 'p'", "primary key"),
+        (
+            "bench_run_artifact",
+            "confrelid = 'release.bench_artifact'::regclass",
+            "foreign key",
+        ),
+    ] {
+        let constraint = raw
+            .query_one(
+                &format!(
+                    "SELECT conname::text, pg_get_constraintdef(oid)
+                     FROM pg_constraint WHERE conrelid = 'release.{table}'::regclass AND {predicate}"
+                ),
+                &[],
+            )
+            .await?;
+        let name: &str = constraint.get(0);
+        let definition: &str = constraint.get(1);
+        let alteration = format!("ALTER TABLE release.{table}");
+        raw.batch_execute(&format!("{alteration} DROP CONSTRAINT {name}"))
+            .await?;
+        for (entry, result) in [
+            ("check", check(&mut raw).await),
+            ("resume", db.resume().await.map(drop)),
+        ] {
+            if !result.is_err_and(|error| {
+                let error = format!("{error:#}");
+                error.contains(table) && error.contains(reason)
+            }) {
+                unexpected.push(format!(
+                    "{entry} did not report missing {reason} on {table}"
+                ));
+            }
+        }
+        assert_eq!(
+            raw.query_one(
+                "SELECT count(*) FROM pg_constraint WHERE conrelid = $1::text::regclass AND conname = $2",
+                &[&format!("release.{table}"), &name],
+            )
+            .await?
+            .get::<_, i64>(0),
+            0,
+            "read-only checks leave the missing constraint alone"
+        );
+        if reason == "CHECK" {
+            let error = db
+                .prepare()
+                .await
+                .err()
+                .expect("missing CHECK must block preparation");
+            assert!(format!("{error:#}").contains("release.bench_artifact"));
+        }
+        raw.batch_execute(&format!("{alteration} ADD CONSTRAINT {name} {definition}"))
+            .await?;
+    }
+
+    raw.batch_execute(
+        "CREATE FUNCTION release.fixture_rewrite() RETURNS trigger LANGUAGE plpgsql
+         AS $$ BEGIN NEW.media_type := 'rewritten'; RETURN NEW; END $$;
+         CREATE TRIGGER fixture_rewrite BEFORE INSERT ON release.bench_artifact
+         FOR EACH ROW EXECUTE FUNCTION release.fixture_rewrite()",
+    )
+    .await?;
+    for (entry, result) in [
+        ("check", check(&mut raw).await),
+        ("resume", db.resume().await.map(drop)),
+        ("prepare", db.prepare().await.map(drop)),
+    ] {
+        if !result.is_err_and(|error| {
+            let error = format!("{error:#}");
+            error.contains("release.bench_artifact") && error.contains("fixture_rewrite")
+        }) {
+            unexpected.push(format!(
+                "{entry} did not report the unexpected write trigger"
+            ));
+        }
+    }
+    let row = raw
+        .query_one(
+            "SELECT media_type, EXISTS (
+               SELECT 1 FROM pg_trigger WHERE tgrelid='release.bench_artifact'::regclass
+               AND tgname='fixture_rewrite'
+             ) FROM release.bench_artifact WHERE artifact_id=$1",
+            &[&artifact],
+        )
+        .await?;
+    assert_eq!(row.get::<_, String>(0), original);
+    assert!(row.get::<_, bool>(1));
+    assert_eq!(
+        table_oid(&raw, "release.bench_artifact").await?,
+        artifact_oid
+    );
+    raw.batch_execute("ALTER TABLE release.bench_artifact DISABLE TRIGGER fixture_rewrite")
+        .await?;
+    check(&mut raw).await?;
+    drop(db.resume().await?);
+    drop(db.prepare().await?);
+    raw.batch_execute(
+        "DROP TRIGGER fixture_rewrite ON release.bench_artifact;
+         ALTER TRIGGER fixture_evidence ON release.bench_artifact RENAME TO immutable_evidence;
+         DROP FUNCTION release.fixture_rewrite();
+         DROP INDEX release.fixture_media_type",
+    )
+    .await?;
+    assert!(unexpected.is_empty(), "{}", unexpected.join("\n"));
+    Ok(())
+}
+
 async fn insert_artifact(client: &Client, id: Uuid) -> Result<()> {
     client.execute("INSERT INTO release.bench_artifact VALUES ($1,'fixture',repeat('a',64),0,''::bytea,'fixture','{}')", &[&id]).await?;
     Ok(())

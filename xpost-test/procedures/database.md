@@ -80,9 +80,13 @@ Grant `UPDATE` on `release.bench_run` and `EXECUTE` on `release.bench_valid_boun
 ### Read-only checks and resume
 
 The `db-preflight` selection reports the database name, role, and permissions on `release`.
-Preflight checks the expected columns and required privileges on all 132 tables.
-It reports missing or incompatible tables without changing them.
-Resume checks the existing schema and recovers the original records.
+Preflight checks the columns and required privileges on all 132 tables.
+It also checks primary keys, foreign keys, and the column groups that CHECK constraints cover.
+These constraints must also cover rows already in the table.
+New collection, preflight, and resume reject unexpected active write triggers on managed tables.
+Resolve the reported constraint or trigger before collecting data.
+Preflight and resume leave the schema intact. Resume recovers the original records.
+Compatible tables can retain auxiliary non-unique indexes.
 A reconnect acquires a shared lock for the connection and does no DDL.
 Plan selections and `dev` do not access PostgreSQL.
 
