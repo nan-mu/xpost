@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
+use tokio::sync::watch;
 use tokio_postgres::{Client, Config, NoTls, config::SslMode, error::SqlState};
 
 const SETTINGS_PATH: &str = "/root/.db";
@@ -102,6 +103,10 @@ impl Database {
     }
 
     pub async fn connect(&self) -> Result<Client> {
+        Ok(self.open().await?.0)
+    }
+
+    pub(super) async fn open(&self) -> Result<(Client, watch::Receiver<bool>)> {
         let (client, connection) = self.0.connect(NoTls).await.map_err(|error| {
             // A server can put arbitrary text in its authentication error.
             match error.code() {
@@ -114,12 +119,14 @@ impl Database {
                 _ => anyhow::anyhow!("connect protocol database failed"),
             }
         })?;
+        let (closed, notification) = watch::channel(false);
         tokio::spawn(async move {
             if connection.await.is_err() {
                 log::warn!("protocol database connection closed with an error");
             }
+            let _ = closed.send(true);
         });
-        Ok(client)
+        Ok((client, notification))
     }
 }
 

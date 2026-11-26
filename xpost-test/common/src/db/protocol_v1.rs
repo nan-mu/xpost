@@ -1,173 +1,300 @@
-//! Protocol V1 table inventory and first-use initialization.
+//! Reconcile the release schema using the canonical Protocol V1 DDL.
 
-use anyhow::{Context, Result, ensure};
-use tokio_postgres::{Client, IsolationLevel};
+use super::{catalog, ddl::Ddl};
+use anyhow::{Context, Result, bail, ensure};
+use std::collections::BTreeSet;
+use tokio_postgres::{Client, IsolationLevel, Transaction};
+use uuid::Uuid;
 
-const SQL: &str = include_str!("../../../sql/protocol_v1.sql");
-// The two-integer key space is separate from the campaign session locks.
-const INITIALIZATION_LOCK: i32 = 0x5850_4f53;
-
-pub(super) fn declared_tables() -> Vec<String> {
-    SQL.lines()
-        .filter_map(|line| line.strip_prefix("CREATE TABLE "))
-        .map(|line| {
-            line.split_whitespace()
-                .next()
-                .expect("Protocol V1 table name")
-                .to_owned()
-        })
-        .collect()
-}
-
-/// Initialize a dedicated empty database, or retain an existing Protocol V1 database.
-pub(crate) async fn initialize_if_empty(client: &mut Client) -> Result<bool> {
+pub(super) async fn check(client: &mut Client) -> Result<()> {
     let tx = client
         .build_transaction()
-        .isolation_level(IsolationLevel::ReadCommitted)
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
         .start()
         .await?;
-    tx.query_one(
-        "SELECT pg_advisory_xact_lock($1, 1)",
-        &[&INITIALIZATION_LOCK],
-    )
-    .await
-    .context("lock Protocol V1 initialization")?;
+    tx.batch_execute("SET LOCAL search_path = pg_catalog")
+        .await?;
+    validate(&tx, &Ddl::load()?).await?;
+    tx.commit().await?;
+    Ok(())
+}
 
-    let tables = declared_tables();
-    let present: i64 = tx
-        .query_one(
-            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE c.relkind IN ('r', 'p') AND (n.nspname || '.' || c.relname) = ANY($1)",
-            &[&tables],
+async fn validate(tx: &Transaction<'_>, ddl: &Ddl) -> Result<()> {
+    let names: Vec<String> = ddl.tables.keys().map(|name| (*name).into()).collect();
+    let tables = catalog::tables(tx, &names, "").await?;
+    let mut problems = Vec::new();
+    for (&name, columns) in &ddl.tables {
+        match tables.get(name) {
+            None => problems.push(format!("release.{name}: table missing")),
+            Some(table) if !table.regular => {
+                problems.push(format!("release.{name}: expected a regular table"))
+            }
+            Some(table) if table.columns != *columns => problems.push(format!(
+                "release.{name}: incompatible columns (expected {columns:?}, found {:?})",
+                table.columns,
+            )),
+            _ => {}
+        }
+    }
+    let permissions = tx
+        .query(
+            "SELECT c.relname::text,
+                has_schema_privilege(n.oid, 'USAGE'),
+                has_table_privilege(c.oid, 'SELECT'),
+                has_table_privilege(c.oid, 'INSERT'),
+                c.relname <> 'bench_run' OR has_table_privilege(c.oid, 'UPDATE')
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'release' AND c.relkind = 'r' AND c.relname::text = ANY($1)",
+            &[&names],
         )
-        .await?
-        .get(0);
-    if present == tables.len() as i64 {
-        tx.commit().await?;
-        return Ok(false);
+        .await?;
+    for row in permissions {
+        let name: &str = row.get(0);
+        let missing: Vec<_> = ["USAGE", "SELECT", "INSERT", "UPDATE"]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, privilege)| (!row.get::<_, bool>(index + 1)).then_some(privilege))
+            .collect();
+        if !missing.is_empty() {
+            problems.push(format!("release.{name}: missing {}", missing.join(", ")));
+        }
+    }
+    let globals: Vec<String> = ddl
+        .statements
+        .iter()
+        .filter(|s| s.global)
+        .map(|s| s.name.to_owned())
+        .collect();
+    let installed = catalog::globals(tx, &globals, "").await?;
+    for statement in ddl.statements.iter().filter(|s| s.global) {
+        let name = statement.name;
+        let Some(definitions) = installed.get(name) else {
+            problems.push(format!(
+                "release.{name}: Protocol V1 type or function missing"
+            ));
+            continue;
+        };
+        if let Some(domain) = statement.sql.strip_prefix("CREATE DOMAIN ") {
+            let base_type = domain
+                .split_once(" AS ")
+                .and_then(|(_, definition)| definition.split_whitespace().next())
+                .context("read Protocol V1 domain base type")?;
+            let prefix = format!("domain:{base_type}:");
+            if definitions.len() != 1 || !definitions[0].starts_with(&prefix) {
+                problems.push(format!(
+                    "release.{name}: expected domain with base type {base_type}"
+                ));
+            }
+        }
     }
     ensure!(
-        present == 0,
-        "Protocol V1 database is partially initialized ({present}/{} tables). Inspect it before collecting data",
-        tables.len()
+        problems.is_empty(),
+        "Protocol V1 check failed: {}",
+        problems.join("\n")
     );
+    Ok(())
+}
 
-    let target: String = tx
-        .query_one("SELECT current_database()::text", &[])
-        .await?
-        .get(0);
-    ensure!(
-        target == "experiments",
-        "automatic Protocol V1 initialization requires the dedicated experiments database"
-    );
-
+/// Caller holds the exclusive schema session lock until reconciliation commits
+/// and the session has acquired its shared collection lock.
+pub(super) async fn reconcile(client: &mut Client) -> Result<()> {
+    let ddl = Ddl::load()?;
+    let mut tx = client.transaction().await?;
+    tx.batch_execute("SET LOCAL search_path = pg_catalog")
+        .await?;
     let schema = tx
         .query_opt(
-            "SELECT has_schema_privilege(n.oid, 'USAGE'), has_schema_privilege(n.oid, 'CREATE'),
-                    EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace = n.oid)
-                    OR EXISTS (SELECT 1 FROM pg_proc p WHERE p.pronamespace = n.oid)
-                    OR EXISTS (SELECT 1 FROM pg_type t WHERE t.typnamespace = n.oid)
-             FROM pg_namespace n WHERE n.nspname = 'release'",
+            "SELECT has_schema_privilege(oid, 'USAGE'), has_schema_privilege(oid, 'CREATE')
+         FROM pg_namespace WHERE nspname = 'release'",
             &[],
         )
         .await?
-        .context("prepare schema release in experiments before collection")?;
-    ensure!(
-        !schema.get::<_, bool>(2),
-        "automatic Protocol V1 initialization requires an empty release schema"
-    );
+        .context("prepare schema release before collection")?;
     ensure!(
         schema.get::<_, bool>(0) && schema.get::<_, bool>(1),
-        "automatic Protocol V1 initialization requires USAGE and CREATE on schema release"
+        "Protocol V1 preparation requires USAGE and CREATE on schema release"
     );
 
-    let (_, ddl) = SQL
-        .split_once("\nBEGIN;\n")
-        .context("find Protocol V1 transaction start")?;
-    let ddl = ddl
-        .trim_end()
-        .strip_suffix("\nCOMMIT;")
-        .context("find Protocol V1 transaction end")?;
-    tx.batch_execute(ddl)
-        .await
-        .context("create Protocol V1 tables in release")?;
-    tx.commit()
-        .await
-        .context("commit Protocol V1 initialization")?;
-    eprintln!(
-        "Initialized {} Protocol V1 tables in experiments.release",
-        tables.len()
-    );
-    Ok(true)
-}
+    let names: Vec<String> = ddl.tables.keys().map(|name| (*name).into()).collect();
+    let global_names: Vec<_> = ddl
+        .statements
+        .iter()
+        .filter(|s| s.global)
+        .map(|s| s.name.to_owned())
+        .collect();
+    let mut installed = catalog::tables(&tx, &names, "").await?;
+    catalog::table_objects(&tx, &names, "", &mut installed).await?;
+    let installed_globals = catalog::globals(&tx, &global_names, "").await?;
 
-#[cfg(test)]
-mod tests {
-    use super::{SQL, declared_tables};
+    // Ask PostgreSQL to describe the DDL, including its normalized constraints.
+    // The reference objects exist only inside this savepoint. A name prefix
+    // avoids needing CREATE privileges on the database to make another schema.
+    let prefix = format!("x{}_", &Uuid::new_v4().simple().to_string()[..8]);
+    let reference_sql = ddl
+        .statements
+        .iter()
+        .map(|s| s.shadow(&prefix))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let reference = tx.transaction().await?;
+    apply(
+        &reference,
+        &reference_sql,
+        "describe the canonical Protocol V1 DDL",
+    )
+    .await?;
+    let shadow_names: Vec<_> = names.iter().map(|name| format!("{prefix}{name}")).collect();
+    let shadow_globals: Vec<_> = global_names
+        .iter()
+        .map(|name| format!("{prefix}{name}"))
+        .collect();
+    let mut expected = catalog::tables(&reference, &shadow_names, &prefix).await?;
+    catalog::table_objects(&reference, &shadow_names, &prefix, &mut expected).await?;
+    let expected_globals = catalog::globals(&reference, &shadow_globals, &prefix).await?;
+    reference.rollback().await?;
 
-    #[test]
-    fn the_new_protocol_declares_132_release_tables() {
-        let tables = declared_tables();
-        assert!(tables.iter().all(|name| name.starts_with("release.")));
-        assert_eq!(tables.len(), 132);
-        assert_eq!(
-            tables
-                .iter()
-                .filter(|name| name.starts_with("release.bench_"))
-                .count(),
-            12
+    for (name, definitions) in &installed_globals {
+        ensure!(
+            expected_globals.get(name) == Some(definitions),
+            "incompatible Protocol V1 type or function release.{name}"
         );
-        for mode in ["hal", "aot", "jit", "rbpf"] {
-            let prefix = format!("release.{mode}_");
-            assert_eq!(
-                tables
-                    .iter()
-                    .filter(|name| name.starts_with(&prefix))
-                    .count(),
-                30
+    }
+    let mut rebuild = BTreeSet::new();
+    for (&name, columns) in &ddl.tables {
+        ensure!(
+            expected[name].columns == *columns,
+            "DDL column inventory disagrees with PostgreSQL for release.{name}"
+        );
+        if let Some(table) = installed.get(name) {
+            ensure!(
+                table.regular,
+                "release.{name} is not a regular Protocol V1 table"
             );
+            if table.columns != *columns {
+                rebuild.insert(name);
+            }
         }
-        assert!(!SQL.lines().any(|line| line.starts_with("CREATE SCHEMA ")));
-        assert!(SQL.contains("variant text NOT NULL CHECK (variant IN ('metrics','trace'))"));
-        assert!(SQL.contains(
-            "ALTER TABLE release.hal_case_switch ADD CHECK(switch_kind='native_policy_select' AND source_slot IS NULL AND target_slot IS NULL AND rebind_ticks IS NULL)"
-        ));
-        assert!(
-            !SQL.lines()
-                .any(|line| line.starts_with("CREATE TABLE IF NOT EXISTS")),
-            "a table that already exists must abort the new protocol, not get skipped"
-        );
-        assert!(
-            !SQL.lines().any(|line| {
-                let trimmed = line.trim_start();
-                trimmed.starts_with("DROP ") || trimmed.starts_with("TRUNCATE ")
-            }),
-            "the new protocol does not delete existing data"
-        );
     }
+
+    let mut restore = Vec::new();
+    for (name, table) in &installed {
+        let canonical = &expected[name].objects;
+        if rebuild.contains(name.as_str()) {
+            for object in &table.objects {
+                let known = matches!(object.kind.as_str(), "default" | "n")
+                    || canonical.iter().any(|known| {
+                        known.kind == object.kind
+                            && (known.definition == object.definition
+                                || (object.kind != "f" && known.name == object.name))
+                    });
+                ensure!(
+                    known,
+                    "cannot rebuild release.{name}: non-managed or incompatible {} {}",
+                    object.kind,
+                    object.name
+                );
+            }
+            continue;
+        }
+        for wanted in canonical {
+            let current = table.objects.iter().find(|o| same_definition(o, wanted));
+            if let Some(current) = current {
+                if current.kind == "f" && rebuild.contains(current.referenced.as_str()) {
+                    apply(
+                        &tx,
+                        &format!(
+                            "ALTER TABLE release.{name} DROP CONSTRAINT {}",
+                            quote(&current.name)
+                        ),
+                        &format!(
+                            "detach release.{name}.{} from release.{}",
+                            current.name, current.referenced
+                        ),
+                    )
+                    .await?;
+                    restore.push((name, &current.name, &current.definition));
+                }
+            } else if wanted.kind == "f" && !table.objects.iter().any(|o| o.name == wanted.name) {
+                restore.push((name, &wanted.name, &wanted.definition));
+            } else {
+                bail!(
+                    "release.{name}: missing or incompatible {} {}",
+                    wanted.kind,
+                    wanted.name
+                );
+            }
+        }
+    }
+
+    if !rebuild.is_empty() {
+        let names = rebuild
+            .iter()
+            .map(|name| format!("release.{name}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        apply(
+            &tx,
+            &format!("DROP TABLE {names} RESTRICT"),
+            &format!("rebuild {names}"),
+        )
+        .await?;
+    }
+    let selected = ddl.statements.iter().filter(|s| {
+        if s.global {
+            !installed_globals.contains_key(s.name)
+        } else {
+            !installed.contains_key(s.name) || rebuild.contains(s.name)
+        }
+    });
+    for statement in selected {
+        apply(
+            &tx,
+            statement.sql,
+            &format!("create Protocol V1 object for release.{}", statement.name),
+        )
+        .await?;
+    }
+    for (table, constraint, definition) in restore {
+        apply(
+            &tx, &format!("ALTER TABLE release.{table} ADD CONSTRAINT {} {definition}", quote(constraint)),
+            &format!("restore foreign key release.{table}.{constraint}; check the retained rows and referenced table"),
+        ).await?;
+    }
+    validate(&tx, &ddl).await?;
+    tx.commit().await?;
+    for table in rebuild {
+        eprintln!("Rebuilt incompatible Protocol V1 table release.{table}");
+    }
+    Ok(())
+}
+
+fn same_definition(a: &catalog::Object, b: &catalog::Object) -> bool {
+    a.kind == b.kind
+        && a.definition == b.definition
+        && (!matches!(a.kind.as_str(), "default" | "trigger" | "index") || a.name == b.name)
+}
+
+fn quote(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+async fn apply(tx: &Transaction<'_>, sql: &str, operation: &str) -> Result<()> {
+    tx.batch_execute(sql).await.map_err(|error| {
+        if let Some(cause) = error.as_db_error() {
+            anyhow::anyhow!(
+                "{operation}: {}{}",
+                cause.message(),
+                cause
+                    .detail()
+                    .map(|detail| format!(" ({detail})"))
+                    .unwrap_or_default()
+            )
+        } else {
+            anyhow::Error::new(error).context(operation.to_owned())
+        }
+    })
 }
 
 #[cfg(test)]
-mod bootstrap_tests {
-    use super::{declared_tables, initialize_if_empty};
-    use crate::db::{Database, protocol};
-
-    #[tokio::test]
-    #[ignore = "requires a disposable experiments database with empty release schema in XPOST_CASE_TEST_DB_FILE"]
-    async fn concurrent_first_writers_initialize_the_protocol_once() -> anyhow::Result<()> {
-        let database = Database::load_fixture()?;
-        let mut first = database.connect().await?;
-        let mut second = database.connect().await?;
-        let tables = declared_tables();
-        assert!(protocol::check(&mut first, &tables).await.is_err());
-
-        let (a, b) = tokio::try_join!(
-            initialize_if_empty(&mut first),
-            initialize_if_empty(&mut second)
-        )?;
-        assert_ne!(a, b);
-        protocol::check(&mut first, &tables).await?;
-        assert!(!initialize_if_empty(&mut second).await?);
-        Ok(())
-    }
-}
+mod tests;

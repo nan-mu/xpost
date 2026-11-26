@@ -27,7 +27,7 @@ use uuid::Uuid;
 use crate::{
     agent::{AgentClient, PerfFreeze},
     config::FileConfig,
-    db::{Database, metrics, protocol},
+    db::{Collection, metrics, protocol},
     pipeline::{self, RawTx},
 };
 
@@ -220,7 +220,7 @@ pub(super) fn planned_input(
 pub(super) async fn run_cell(
     cfg: &FileConfig,
     agent: &AgentClient,
-    database: &Database,
+    database: &Collection<'_>,
     client: &mut Client,
     experiment: &str,
     mode: &str,

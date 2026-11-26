@@ -15,7 +15,7 @@ use super::{exb2::Sampling, medium_network::NetworkPlan};
 use crate::{
     agent::{AgentClient, DeploymentReport},
     config::{FileConfig, MediumStage},
-    db::{Database, protocol, protocol_v1},
+    db::{Collection, Database},
 };
 
 const MODES: [&str; 4] = ["hal", "aot", "jit", "rbpf"];
@@ -194,30 +194,44 @@ pub async fn run(cfg: &FileConfig, volume: Volume) -> Result<()> {
         cfg.medium_stage == MediumStage::HalAot || cfg.medium_resume_id.is_some(),
         "JIT/rBPF requires the HAL/AOT campaign ID"
     );
-    let (ready, settings) = preflight(cfg, volume, cfg.medium_resume_id.is_none()).await?;
+    let (ready, deployments) = preflight(cfg, volume).await?;
     println!("{}", serde_json::to_string(&ready)?);
     ensure!(
         ready.unavailable.is_empty(),
         "medium collectors unavailable: {}",
         ready.unavailable.join(", ")
     );
+    let settings = Database::load()?;
+    let collection = if cfg.medium_resume_id.is_some() {
+        settings.resume().await?
+    } else {
+        settings.prepare().await?
+    };
+    collection
+        .protect(async {
+            check_resume(cfg, volume, &ready, &deployments, collection.client()).await?;
+            collect(cfg, volume, ready, &collection, revision, preflight_started).await
+        })
+        .await
+}
+
+async fn collect(
+    cfg: &FileConfig,
+    volume: Volume,
+    ready: Readiness,
+    collection: &Collection<'_>,
+    revision: &str,
+    preflight_started: Instant,
+) -> Result<()> {
     let endpoint = cfg
         .agent
         .resolved_endpoint()
         .context("medium needs [agent].endpoint")?;
     let agent = AgentClient::new(endpoint);
-    let mut database = settings.connect().await?;
+    let mut database = collection.connect().await?;
     let expected: BTreeSet<String> = ready.identities.keys().cloned().collect();
     let medium_id = cfg.medium_resume_id.unwrap_or_else(Uuid::new_v4);
-    // A dedicated connection keeps the lock while collectors recover their writes.
-    let lock = settings.connect().await?;
-    let lock_key = i64::from_be_bytes(medium_id.as_bytes()[..8].try_into().expect("UUID prefix"));
-    ensure!(
-        lock.query_one("SELECT pg_try_advisory_lock($1)", &[&lock_key])
-            .await?
-            .get::<_, bool>(0),
-        "campaign {medium_id} already has an active runner"
-    );
+    collection.lock_campaign(medium_id).await?;
     let (mut resume, mut order) = match cfg.medium_resume_id {
         Some(id) => Resume::load(&database, id, &ready.identities).await?,
         None => (
@@ -258,7 +272,7 @@ pub async fn run(cfg: &FileConfig, volume: Volume) -> Result<()> {
             cfg,
             volume,
             &agent,
-            &settings,
+            collection,
             &mut database,
             group,
             &mut device,
@@ -278,7 +292,7 @@ pub async fn run(cfg: &FileConfig, volume: Volume) -> Result<()> {
                 })
             );
             problems.push(format!("{error:#}"));
-            match settings.connect().await {
+            match collection.connect().await {
                 Ok(recovered) => database = recovered,
                 Err(error) => {
                     problems.push(format!("reconnect protocol database: {error:#}"));
@@ -482,7 +496,7 @@ async fn run_group(
     cfg: &FileConfig,
     volume: Volume,
     agent: &AgentClient,
-    settings: &Database,
+    settings: &Collection<'_>,
     db: &mut Client,
     group: &FirmwareGroup,
     device: &mut DeviceDeployment,
@@ -858,7 +872,18 @@ fn terminal_attempt(status: &str, issues: &Value) -> bool {
 }
 
 pub async fn check(cfg: &FileConfig, volume: Volume) -> Result<()> {
-    let (ready, _) = preflight(cfg, volume, false).await?;
+    let (ready, deployments) = preflight(cfg, volume).await?;
+    let settings = Database::load()?;
+    let collection = settings.resume().await?;
+    collection
+        .protect(check_resume(
+            cfg,
+            volume,
+            &ready,
+            &deployments,
+            collection.client(),
+        ))
+        .await?;
     println!("{}", serde_json::to_string_pretty(&ready)?);
     ensure!(
         ready.unavailable.is_empty(),
@@ -868,11 +893,7 @@ pub async fn check(cfg: &FileConfig, volume: Volume) -> Result<()> {
     Ok(())
 }
 
-async fn preflight(
-    cfg: &FileConfig,
-    volume: Volume,
-    initialize_database: bool,
-) -> Result<(Readiness, Database)> {
+async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<(Readiness, DeploymentReport)> {
     let planned = plan(volume, cfg.medium_stage);
     if let Some(experiment) = &cfg.medium_resume_experiment {
         ensure!(
@@ -910,13 +931,6 @@ async fn preflight(
         deployments.release == "v0.1.1",
         "medium requires the v0.1.1 release"
     );
-    let tables = if volume == Volume::All {
-        let mut both = plan(volume, MediumStage::HalAot);
-        both.extend(plan(volume, MediumStage::JitRbpf));
-        protocol_tables(&both)
-    } else {
-        protocol_tables(&planned)
-    };
     let mut unavailable = BTreeSet::new();
     for cell in planned.iter().flat_map(|group| &group.cells) {
         let supported = match (cell.experiment, cell.mode, cell.variant) {
@@ -953,28 +967,49 @@ async fn preflight(
         "medium Agent health and deployment identities verified for {} Firmware ELF digests",
         groups.len()
     );
-    let settings = Database::load()?;
-    let mut database = settings.connect().await?;
     check_host(cfg)?;
     super::medium_network::check_capture_path(cfg)?;
-    if initialize_database {
-        protocol_v1::initialize_if_empty(&mut database).await?;
-    }
-    protocol::check(&mut database, &tables).await?;
+    Ok((
+        Readiness {
+            release: deployments.release.clone(),
+            volume: volume.label(),
+            stage: cfg.medium_stage.as_str(),
+            groups,
+            unavailable: unavailable.into_iter().collect(),
+            identities,
+            deployments: containers,
+        },
+        deployments,
+    ))
+}
+
+async fn check_resume(
+    cfg: &FileConfig,
+    volume: Volume,
+    ready: &Readiness,
+    deployments: &DeploymentReport,
+    database: &Client,
+) -> Result<()> {
     if let Some(id) = cfg.medium_resume_id {
-        Resume::load(&database, id, &identities).await?;
+        Resume::load(database, id, &ready.identities).await?;
         if cfg.medium_stage == MediumStage::JitRbpf {
             let first_deployments;
             let report = if volume == Volume::All {
-                &deployments
+                deployments
             } else {
-                first_deployments = agent.medium_preflight(Some("hal-aot")).await?;
+                let endpoint = cfg
+                    .agent
+                    .resolved_endpoint()
+                    .context("medium needs [agent].endpoint")?;
+                first_deployments = AgentClient::new(endpoint)
+                    .medium_preflight(Some("hal-aot"))
+                    .await?;
                 &first_deployments
             };
             let first = bind_firmware(plan(volume, MediumStage::HalAot), report)?;
             let first = planned_identities(cfg, volume, MediumStage::HalAot, &first, report)?;
             let expected = first.keys().cloned().collect();
-            let audit = reconcile(&database, id, &expected, &first).await?;
+            let audit = reconcile(database, id, &expected, &first).await?;
             check_first_stage(&audit)?;
         }
     } else {
@@ -983,18 +1018,7 @@ async fn preflight(
             "JIT/rBPF needs the original HAL/AOT campaign ID"
         );
     }
-    Ok((
-        Readiness {
-            release: deployments.release,
-            volume: volume.label(),
-            stage: cfg.medium_stage.as_str(),
-            groups,
-            unavailable: unavailable.into_iter().collect(),
-            identities,
-            deployments: containers,
-        },
-        settings,
-    ))
+    Ok(())
 }
 
 fn check_first_stage(audit: &Reconciliation) -> Result<()> {
@@ -1060,57 +1084,6 @@ fn check_host(cfg: &FileConfig) -> Result<()> {
     );
     eprintln!("medium raw socket and tcpdump host timestamps verified on {iface}");
     Ok(())
-}
-
-fn protocol_tables(plan: &[Group]) -> Vec<String> {
-    let mut tables = [
-        "condition",
-        "run",
-        "artifact",
-        "run_artifact",
-        "clock",
-        "calibration",
-        "calibration_sample",
-        "event_definition",
-        "send_attempt",
-        "capture",
-        "packet_fact",
-        "analysis",
-    ]
-    .map(|name| format!("release.bench_{name}"))
-    .into_iter()
-    .collect::<BTreeSet<_>>();
-    for cell in plan.iter().flat_map(|group| &group.cells) {
-        let (mode, experiment, variant) = (cell.mode, cell.experiment, cell.variant);
-        tables.insert(format!("release.{mode}_{experiment}_config"));
-        tables.insert(format!("release.{mode}_{experiment}_{variant}_data"));
-        if variant == "trace" {
-            tables.insert(format!("release.{mode}_{experiment}_event"));
-        } else {
-            for table in [
-                "metric_definition",
-                "metric_series",
-                "metric_snapshot",
-                "scalar_sample",
-                "histogram_sample",
-                "histogram_bucket",
-            ] {
-                tables.insert(format!("release.{mode}_{table}"));
-            }
-        }
-        let records = match experiment {
-            "firewall" => &["firewall_token"][..],
-            "exec_bench" => &["exec_batch"],
-            "case" => &["case_switch"],
-            _ => &["probe_result"],
-        };
-        tables.extend(
-            records
-                .iter()
-                .map(|table| format!("release.{mode}_{table}")),
-        );
-    }
-    tables.into_iter().collect()
 }
 
 fn bind_firmware(plan: Vec<Group>, report: &DeploymentReport) -> Result<Vec<FirmwareGroup>> {
@@ -1418,28 +1391,5 @@ mod tests {
         assert!(!resume.should_run("firewall", "hal", "metrics", "400", 1));
         assert!(resume.should_run("firewall", "hal", "metrics", "400", 2));
         assert!(resume.should_run("firewall", "jit", "metrics", "400", 1));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires the dedicated schema in a disposable XPOST_CASE_TEST_DB_FILE database"]
-    async fn medium_protocol_preflight_is_read_only_and_reports_missing_tables()
-    -> anyhow::Result<()> {
-        let database = crate::db::Database::load_fixture()?;
-        let mut client = database.connect().await?;
-        let tables = super::protocol_tables(&super::plan(
-            super::Volume::Medium,
-            super::MediumStage::HalAot,
-        ));
-        super::protocol::check(&mut client, &tables).await?;
-        let error =
-            super::protocol::check(&mut client, &["release.aot_missing_fixture_table".into()])
-                .await
-                .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("release.aot_missing_fixture_table")
-        );
-        Ok(())
     }
 }

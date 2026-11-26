@@ -6,7 +6,8 @@ The `xpost-serial` crate defines the wire types.
 
 The runner uses `profile.toml` for selection and `config/` for experiment settings.
 It reads `/root/.db` when it needs PostgreSQL.
-A new collection initializes Protocol V1 in an empty `release` schema in `experiments`.
+A new collection reconciles managed Protocol V1 tables in `release`.
+Recreating a table with incompatible columns removes that table's data.
 See the [experiment database procedure](../../procedures/database.md).
 
 # Runner entry

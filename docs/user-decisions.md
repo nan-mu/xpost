@@ -234,3 +234,16 @@ Initialize the empty `release` schema. Keep preflight read-only.
 
 Reason. The maintainer granted schema-level creation in `release` and selected that schema for new collection.
 This supersedes the five-schema layout for new Protocol V1 records.
+
+## 2026-11-27 Reconcile Protocol V1 tables before collection
+
+Use the database selected by `PGDATABASE` and its `release` schema.
+Derive the expected structure from `xpost-test/sql/protocol_v1.sql`.
+Create missing tables. Keep compatible tables and their data.
+Recreate each table with incompatible columns and discard its old data.
+Roll back the preparation if a dependency prevents safe recreation.
+Keep preflight, resume, and reconnect free of DDL.
+Hold schema protection during all collection and recovery writes.
+
+Reason. The maintainer chose per-table reconciliation without version migrations.
+This replaces empty-schema-only initialization for new runs.

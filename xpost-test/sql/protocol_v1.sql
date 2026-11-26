@@ -1,6 +1,7 @@
 -- XPOST experiment design v1. PostgreSQL 14+.
--- Apply to the prepared release schema. Existing table-name collisions abort the transaction.
--- No destructive migration, DROP, or TRUNCATE is included.
+-- Use this DDL as the Protocol V1 structure definition in release.
+-- The runner reconciles managed tables before new collection.
+-- Direct execution creates all objects and requires an empty release schema.
 BEGIN;
 CREATE DOMAIN release.bench_u64 AS numeric(20,0)
   CHECK (VALUE >= 0 AND VALUE <= 18446744073709551615);

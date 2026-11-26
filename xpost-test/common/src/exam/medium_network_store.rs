@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tokio_postgres::{Client, Transaction, types::ToSql};
 use uuid::Uuid;
 
-use crate::db::{Database, metrics, protocol};
+use crate::db::{Collection, metrics, protocol};
 
 use super::{Analysis, Cell, Link, Observation, Stimulus, Workload, seed, sent_token};
 
@@ -29,7 +29,7 @@ impl Attempt {
     pub(super) async fn finish_recovering(
         &self,
         client: &mut Client,
-        database: &Database,
+        database: &Collection<'_>,
         cell: &Cell<'_>,
         link: &Link,
         out: &Observation,
@@ -113,12 +113,15 @@ impl Attempt {
         ).await?;
         let fixture = match cell.experiment {
             Workload::Firewall => {
-                let fixture = Uuid::new_v4();
                 let bytes = serde_json::to_vec(rules)?;
-                let digest = protocol::digest(&bytes);
-                tx.execute("INSERT INTO release.bench_artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type)
-                    VALUES($1,'firewall_fixture',$2,$3,$4,'application/json')",
-                    &[&fixture, &digest, &(bytes.len() as i64), &bytes]).await?;
+                let fixture = protocol::create_artifact(
+                    &tx,
+                    "firewall_fixture",
+                    &bytes,
+                    "application/json",
+                    None,
+                )
+                .await?;
                 let lookup = stimulus.case();
                 let legal = match stimulus {
                     Stimulus::Miss => 10_i32,
@@ -157,8 +160,7 @@ impl Attempt {
              VALUES($1,$2,$3,$4,$5,$6,'formal',$7,$8::text::release.bench_u64,$9,'running',$1,$10,$11)",
             &[&run,&condition,&config,&mode,&name,&variant,&repeat,&seed(run).to_string(),&order,&release,&super::super::medium::revision()]).await?;
         if let Some(fixture) = fixture {
-            tx.execute("INSERT INTO release.bench_run_artifact(run_id,role,artifact_id) VALUES($1,'firewall_fixture',$2)",
-                &[&run,&fixture]).await?;
+            protocol::link_artifact(&tx, run, "firewall_fixture", fixture).await?;
         }
         tx.commit().await?;
         Ok(Self { run, config })
@@ -518,4 +520,135 @@ pub(super) fn recover(run: Uuid, out: &Observation, summary: &Value) -> Result<P
         fs::write(dir.join("tcpdump.stderr"), &capture.stderr)?;
     }
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{db::Database, exam::medium_network::NetworkPlan};
+
+    #[tokio::test]
+    #[ignore = "requires initialized release in the disposable database"]
+    async fn recovers_an_interrupted_network_write_and_keeps_its_artifacts() -> Result<()> {
+        let settings = Database::load_fixture()?;
+        let admin = settings.connect().await?;
+        let name: String = admin
+            .query_one("SELECT current_database()::text", &[])
+            .await?
+            .get(0);
+        ensure!(
+            name == "reconcile_fixture",
+            "use the disposable reconcile_fixture database"
+        );
+        let database = settings.resume().await?;
+        let mut writer = database.connect().await?;
+        let cell = Cell {
+            experiment: Workload::Firewall,
+            mode: "hal",
+            variant: "metrics",
+            firmware: "fixture",
+            firmware_sha256: "fixture",
+            timing: NetworkPlan::MEDIUM,
+        };
+        let link = Link {
+            iface: "fixture".into(),
+            capture_rx_iface: None,
+            src: Ipv4Addr::new(192, 0, 2, 1),
+            dut: Ipv4Addr::new(192, 0, 2, 2),
+            hit: Ipv4Addr::new(192, 0, 2, 3),
+            src_mac: [1; 6],
+            dut_mac: [2; 6],
+            port: 8080,
+            sport: 8081,
+        };
+        let run = Uuid::new_v4();
+        let attempt = Attempt::start(
+            &mut writer,
+            &cell,
+            &link,
+            run,
+            0,
+            1,
+            Stimulus::Rate(400),
+            &[7; 32],
+            &json!({}),
+            &[link.hit],
+        )
+        .await?;
+        let pid: i32 = writer
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await?
+            .get(0);
+        admin
+            .query_one("SELECT pg_terminate_backend($1, 1000)", &[&pid])
+            .await?;
+        let out = Observation::default();
+        let analysis = Analysis::default();
+        assert_eq!(
+            attempt
+                .finish_recovering(
+                    &mut writer,
+                    &database,
+                    &cell,
+                    &link,
+                    &out,
+                    &analysis,
+                    "inconclusive"
+                )
+                .await?,
+            ("inconclusive".into(), true)
+        );
+        let row = writer.query_one("SELECT a.original_bytes,a.media_type,a.sha256 FROM release.bench_run_artifact l
+            JOIN release.bench_artifact a USING (artifact_id) WHERE l.run_id=$1 AND l.role='firewall_fixture'", &[&run]).await?;
+        let bytes = serde_json::to_vec(&[link.hit])?;
+        assert_eq!(row.get::<_, Vec<u8>>(0), bytes);
+        assert_eq!(row.get::<_, String>(1), "application/json");
+        assert_eq!(row.get::<_, String>(2), protocol::digest(&bytes));
+        let row = writer
+            .query_one(
+                "SELECT status,qualified FROM release.bench_run
+            JOIN release.hal_firewall_metrics_data USING (run_id) WHERE run_id=$1",
+                &[&run],
+            )
+            .await?;
+        assert_eq!(row.get::<_, String>(0), "inconclusive");
+        assert!(!row.get::<_, bool>(1));
+        // This retained row has NULL baseline/final references. It remains
+        // valid when the referenced table is rebuilt and both FKs restored.
+        let writer_pid: i32 = writer
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await?
+            .get(0);
+        let guard_pid: i32 = database
+            .client()
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await?
+            .get(0);
+        for pid in [writer_pid, guard_pid] {
+            admin
+                .query_one("SELECT pg_terminate_backend($1, 1000)", &[&pid])
+                .await?;
+        }
+        drop(writer);
+        drop(database);
+        admin
+            .batch_execute(
+                "ALTER TABLE release.hal_metric_snapshot ALTER COLUMN profile_hash DROP NOT NULL",
+            )
+            .await?;
+        let prepared = settings.prepare().await?;
+        let retained = prepared.client().query_one(
+            "SELECT baseline_snapshot_id, final_snapshot_id FROM release.hal_firewall_metrics_data WHERE run_id=$1", &[&run],
+        ).await?;
+        assert_eq!(retained.get::<_, Option<Uuid>>(0), None);
+        assert_eq!(retained.get::<_, Option<Uuid>>(1), None);
+        let validated: i64 = prepared.client().query_one(
+            "SELECT count(*) FROM pg_constraint WHERE conrelid='release.hal_firewall_metrics_data'::regclass
+             AND confrelid='release.hal_metric_snapshot'::regclass AND convalidated",
+            &[],
+        ).await?.get(0);
+        assert_eq!(validated, 2);
+
+        Ok(())
+    }
 }

@@ -2,42 +2,15 @@
 
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tokio_postgres::{Client, Transaction};
 use uuid::Uuid;
 
-use crate::db::{Database, protocol};
+use crate::db::protocol;
 
 use super::case_capture::{Evidence, POST, PPS, PRE, Packet};
 use super::case_trace::Trace;
 
 const RELEASE_COMMIT: &str = "07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113";
-
-pub(super) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-pub(super) async fn connect(database: &Database) -> Result<Client> {
-    let mut client = database.connect().await?;
-    let tables = [
-        "release.bench_run",
-        "release.bench_condition",
-        "release.bench_artifact",
-        "release.bench_run_artifact",
-        "release.bench_clock",
-        "release.bench_capture",
-        "release.bench_packet_fact",
-        "release.bench_analysis",
-        "release.bench_event_definition",
-        "release.aot_case_config",
-        "release.aot_case_switch",
-        "release.aot_case_trace_data",
-        "release.aot_case_event",
-    ]
-    .map(str::to_owned);
-    protocol::check(&mut client, &tables).await?;
-    Ok(client)
-}
 
 pub(super) struct Attempt {
     pub run: Uuid,
@@ -137,8 +110,8 @@ impl Attempt {
             self.switch(&tx, switch, result, capture, &issues).await?;
         }
         let evidence = serde_json::to_vec(&json!({
-            "pcap_sha256": result.capture.as_ref().map(|capture| hex(&Sha256::digest(&capture.pcap))),
-            "trace_sha256": result.trace_bytes.as_ref().map(|bytes| hex(&Sha256::digest(bytes))),
+            "pcap_sha256": result.capture.as_ref().map(|capture| protocol::digest(&capture.pcap)),
+            "trace_sha256": result.trace_bytes.as_ref().map(|bytes| protocol::digest(bytes)),
             "freeze_receipt": result.freeze_receipt, "boot_id": result.boot,
             "switch_reply": result.switch.as_ref().and_then(|switch| switch.reply.as_ref()),
             "published_state": result.switch.as_ref().and_then(|switch| switch.state_after.as_ref()),
@@ -153,7 +126,7 @@ impl Attempt {
         .await?;
         tx.execute("INSERT INTO release.bench_analysis(analysis_id,run_id,algorithm_version,source_digest,qualified,issues)
             VALUES($1,$2,'case-trace-v1',$3,$4,$5)",
-            &[&Uuid::new_v4(), &self.run, &hex(&Sha256::digest(&evidence)), &result.qualified(), &issues]).await?;
+            &[&Uuid::new_v4(), &self.run, &protocol::digest(&evidence), &result.qualified(), &issues]).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -166,14 +139,8 @@ impl Attempt {
         bytes: &[u8],
         meta: &Value,
     ) -> Result<Uuid> {
-        let id = Uuid::new_v4();
-        let digest = hex(&Sha256::digest(bytes));
-        tx.execute("INSERT INTO release.bench_artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type,metadata) VALUES($1,$2,$3,$4,$5,$6,$7)", &[&id,&role,&digest,&(bytes.len() as i64),&bytes,&media,&meta]).await?;
-        tx.execute(
-            "INSERT INTO release.bench_run_artifact(run_id,role,artifact_id) VALUES($1,$2,$3)",
-            &[&self.run, &role, &id],
-        )
-        .await?;
+        let id = protocol::create_artifact(tx, role, bytes, media, Some(meta)).await?;
+        protocol::link_artifact(tx, self.run, role, id).await?;
         Ok(id)
     }
 
@@ -480,8 +447,18 @@ mod tests {
             .unwrap_err();
         assert!(duplicate.to_string().contains("no running record"));
         for (role, bytes) in [("tcpdump", vec![1, 2, 3]), ("dut_trace", vec![9, 8, 7])] {
-            let row = client.query_one("SELECT a.original_bytes FROM release.bench_run_artifact r JOIN release.bench_artifact a USING(artifact_id) WHERE r.run_id=$1 AND r.role=$2", &[&run,&role]).await?;
+            let row = client.query_one("SELECT a.original_bytes,a.media_type,a.metadata,a.sha256 FROM release.bench_run_artifact r JOIN release.bench_artifact a USING(artifact_id) WHERE r.run_id=$1 AND r.role=$2", &[&run,&role]).await?;
             assert_eq!(row.get::<_, Vec<u8>>(0), bytes);
+            assert_eq!(row.get::<_, String>(3), protocol::digest(&bytes));
+            if role == "tcpdump" {
+                assert_eq!(row.get::<_, String>(1), "application/vnd.tcpdump.pcap");
+                assert_eq!(
+                    row.get::<_, Value>(2),
+                    json!({"interface":"fixture","includes_tx":true})
+                );
+            } else {
+                assert_eq!(row.get::<_, Value>(2), json!({"wire_version":1}));
+            }
         }
         let row = client.query_one("SELECT status, switch_index, qualified, reply_transition_gap_ns::text FROM release.bench_run JOIN release.aot_case_switch USING(run_id) WHERE run_id=$1", &[&run]).await?;
         assert_eq!(row.get::<_, String>(0), "complete");

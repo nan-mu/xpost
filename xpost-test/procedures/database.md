@@ -31,16 +31,27 @@ The parser accepts whitespace and a comment after a quoted value.
 The connection uses PostgreSQL without TLS. Use the trusted experiment network.
 Plan selections and `dev` do not read the file.
 
-## First use
+## Prepare a new collection
 
-A new `all`, `medium`, or `exec_bench` run initializes an empty `release` schema in `experiments`.
-The runner applies Protocol V1 in one transaction before it records observations.
-It retains a complete installation and refuses to initialize a partially populated `release` schema.
-A campaign resume requires its original Protocol V1 records in `release`.
-
-The schema contains 12 shared `bench_` tables.
-Each mode uses its own 30 tables with the mode name as a prefix.
+The runner connects to the database in `PGDATABASE`.
+It manages Protocol V1 objects in the `release` schema.
+The schema contains 12 shared `bench_` tables and 30 tables per mode.
 For example, `release.bench_run` tracks attempts and `release.hal_exec_batch` holds HAL batches.
+
+A new `all`, `medium`, or `exec_bench` run compares each managed table with [protocol_v1.sql](../sql/protocol_v1.sql).
+The comparison checks column names, types, order, and nullability.
+The runner creates missing tables and keeps compatible tables and their records.
+**It drops each table with incompatible columns and removes that table's data before it recreates the table.**
+The runner leaves unmanaged tables in place.
+
+One transaction applies the changes.
+The runner restores affected Protocol V1 foreign keys on retained tables.
+The transaction rolls back if retained rows reference removed records or if a dependency prevents the change.
+Resolve the reported conflict before you start another collection.
+
+New collection takes the exclusive schema lock during preparation.
+Collection and resume hold shared locks. An active run prevents schema changes by another runner.
+If the schema guard disconnects, the runner stops. A write in flight still holds its connection's shared lock.
 
 ### Prepare the schema in pgAdmin
 
@@ -62,15 +73,18 @@ COMMIT;
 
 The writer owns the objects it creates. Database-level CREATE is unnecessary.
 For administrator-owned objects, apply [protocol_v1.sql](../sql/protocol_v1.sql) to the empty schema.
-Grant the writer `USAGE` on `release`.
+Grant the writer `USAGE` and `CREATE` on `release` for new collection.
 Grant `SELECT` and `INSERT` on its Protocol V1 tables.
 Grant `UPDATE` on `release.bench_run` and `EXECUTE` on `release.bench_valid_bounds(bigint[])`.
 
-### Read-only privileges and readiness
+### Read-only checks and resume
 
-The `db-preflight` selection reports the database name and login role.
-It checks the writer's access to `release` and verifies all 132 tables.
-A preflight reports missing tables without creating them.
+The `db-preflight` selection reports the database name, role, and permissions on `release`.
+Preflight checks the expected columns and required privileges on all 132 tables.
+It reports missing or incompatible tables without changing them.
+Resume checks the existing schema and recovers the original records.
+A reconnect acquires a shared lock for the connection and does no DDL.
+Plan selections and `dev` do not access PostgreSQL.
 
 ## Check the runner
 

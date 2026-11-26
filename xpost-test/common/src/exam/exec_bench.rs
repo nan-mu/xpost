@@ -8,12 +8,12 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
-use tokio_postgres::{Client, Transaction};
+use tokio_postgres::Client;
 use uuid::Uuid;
 
 use crate::agent::{AgentClient, ExecBatch};
 use crate::config::FileConfig;
-use crate::db::{Database, metrics, protocol, protocol_v1};
+use crate::db::{Collection, Database, metrics, protocol};
 
 use super::exb2::{self, BUF, ROUNDS, SEED, Sampling};
 use super::medium::{Actions, Resume};
@@ -80,38 +80,26 @@ pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
     ensure!(!selected.is_empty(), "select at least one EXB2 mode");
     // Native AOT and JIT share the carrier. Keep them adjacent when both are selected.
     selected.sort_by_key(|mode| mode.firmware());
-    let mut tables = [
-        "release.bench_condition",
-        "release.bench_run",
-        "release.bench_artifact",
-        "release.bench_run_artifact",
-        "release.bench_clock",
-        "release.bench_analysis",
-    ]
-    .map(str::to_owned)
-    .to_vec();
     for mode in &selected {
-        for table in [
-            "exec_bench_config",
-            "exec_batch",
-            "exec_bench_metrics_data",
-            "metric_definition",
-            "metric_series",
-            "metric_snapshot",
-            "scalar_sample",
-        ] {
-            tables.push(format!("{}.{table}", mode.as_str()));
-        }
         for program in exb2::PROGRAMS {
             if let Some(profile) = mode.deployment(program) {
                 agent.preflight_xdp(&profile).await?;
             }
         }
     }
-    let database = Database::load()?;
+    let settings = Database::load()?;
+    let database = settings.prepare().await?;
+    database
+        .protect(run_selected(&agent, &database, selected))
+        .await
+}
+
+async fn run_selected(
+    agent: &AgentClient,
+    database: &Collection<'_>,
+    selected: Vec<Mode>,
+) -> Result<()> {
     let mut db = database.connect().await?;
-    protocol_v1::initialize_if_empty(&mut db).await?;
-    protocol::check(&mut db, &tables).await?;
     let mut loaded = String::new();
     let mut image = None;
     let mut order = 0;
@@ -126,9 +114,9 @@ pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
             image = Some(mode.firmware());
         }
         run_mode(
-            &agent,
+            agent,
             &mut db,
-            &database,
+            database,
             mode,
             &loaded,
             None,
@@ -144,7 +132,7 @@ pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
 pub(super) async fn run_mode(
     agent: &AgentClient,
     db: &mut Client,
-    database: &Database,
+    database: &Collection<'_>,
     mode: Mode,
     firmware_hash: &str,
     medium_id: Option<Uuid>,
@@ -245,7 +233,7 @@ struct Attempt<'a> {
 async fn run_attempt(
     agent: &AgentClient,
     db: &mut Client,
-    database: &Database,
+    database: &Collection<'_>,
     sample: &Sample,
     attempt: &Attempt<'_>,
 ) -> Result<()> {
@@ -565,13 +553,27 @@ async fn start(db: &mut Client, attempt: &Attempt<'_>, sample: &Sample) -> Resul
     let tx = db.transaction().await?;
     let parameters = json!({ "workload": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED, "medium_id": sample.medium_id, "stage": sample.medium_id.map(|_| crate::config::MediumStage::for_mode(mode)), "medium_identity": attempt.medium_identity, "retry_of": attempt.retry_of });
     tx.execute("INSERT INTO release.bench_condition(condition_id,experiment,protocol_version,parameters,planned_modes) VALUES($1,'exec_bench','1',$2,ARRAY[$3]::text[])", &[&condition,&parameters,&mode]).await?;
-    let request = artifact(&tx, "exb2_input", &sample.input).await?;
-    let expected = artifact(&tx, "exb2_expected", &sample.expected).await?;
+    let request = protocol::create_artifact(
+        &tx,
+        "exb2_input",
+        &sample.input,
+        "application/octet-stream",
+        None,
+    )
+    .await?;
+    let expected = protocol::create_artifact(
+        &tx,
+        "exb2_expected",
+        &sample.expected,
+        "application/octet-stream",
+        None,
+    )
+    .await?;
     let digest = protocol::hex(&sample.profile);
     tx.execute(&format!("INSERT INTO release.{mode}_exec_bench_config(config_id,condition_id,instrumentation,profile_hash,workload,work_param,batch_count,samples_per_run,input_bytes,input_protocol,wifi_enabled,fixture_artifact_id) VALUES($1,$2,'counter_only',$3,$4,$5,$6,$7,8258,'EXB2',false,$8)"), &[&config,&condition,&digest,&sample.program,&(sample.n as i32),&i64::from(ROUNDS),&sample.sampling.samples,&request]).await?;
     tx.execute("INSERT INTO release.bench_run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit) VALUES($1,$2,$3,$4,'exec_bench','metrics',$5,$6,$7::text::release.bench_u64,$8,'running',$1,'07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113',$9)", &[&attempt.id,&condition,&config,&mode,&phase(sample.medium_id),&attempt.repeat,&SEED.to_string(),&attempt.order,&super::medium::revision()]).await?;
-    link(&tx, attempt.id, "exb2_input", request).await?;
-    link(&tx, attempt.id, "exb2_expected", expected).await?;
+    protocol::link_artifact(&tx, attempt.id, "exb2_input", request).await?;
+    protocol::link_artifact(&tx, attempt.id, "exb2_expected", expected).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -712,22 +714,6 @@ async fn finish(
     Ok(())
 }
 
-async fn artifact(tx: &Transaction<'_>, role: &str, bytes: &[u8]) -> Result<Uuid> {
-    let id = Uuid::new_v4();
-    let hash = protocol::digest(bytes);
-    tx.execute("INSERT INTO release.bench_artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type) VALUES($1,$2,$3,$4,$5,'application/octet-stream')", &[&id,&role,&hash,&(bytes.len() as i64),&bytes]).await?;
-    Ok(id)
-}
-
-async fn link(tx: &Transaction<'_>, run: Uuid, role: &str, id: Uuid) -> Result<()> {
-    tx.execute(
-        "INSERT INTO release.bench_run_artifact(run_id,role,artifact_id) VALUES($1,$2,$3)",
-        &[&run, &role, &id],
-    )
-    .await?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,7 +739,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a disposable protocol database XPOST_CASE_TEST_DB_FILE"]
     async fn exb2_attempt_roundtrips_in_all_four_protocol_schemas() -> Result<()> {
-        let database = crate::db::Database::load_fixture()?;
+        let settings = Database::load_fixture()?;
+        let database = settings.resume().await?;
         let mut client = database.connect().await?;
         for mode in [Mode::Hal, Mode::Aot, Mode::Jit, Mode::Rbpf] {
             for sampling in [Sampling::MEDIUM, Sampling::FULL] {
@@ -766,7 +753,7 @@ mod tests {
     }
 
     async fn roundtrip(
-        database: &Database,
+        database: &Collection<'_>,
         client: &mut Client,
         mode: Mode,
         sampling: Sampling,
@@ -841,7 +828,7 @@ mod tests {
     }
 
     async fn finish_rolls_back_on_constraint_failure(
-        database: &Database,
+        database: &Collection<'_>,
         client: &mut Client,
     ) -> Result<()> {
         let sample = fixture_sample(Mode::Hal, Sampling::MEDIUM);

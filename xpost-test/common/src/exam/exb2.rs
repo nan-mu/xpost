@@ -4,7 +4,6 @@
 //! Both the input and output digests include the scratch and padding.
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 pub(super) const PROGRAMS: [&str; 7] = [
     "noop",
@@ -138,8 +137,8 @@ pub(super) fn conditions(sampling: Sampling) -> Value {
         let (request, expected) = buffers(task, vector);
         let mut input = json!({ "program": program, "task": task, "n": vector.n, "seed": SEED, "variant": 0,
             "batch_count": ROUNDS, "input_bytes": vector.input.len(), "scratch_bytes": vector.scratch.len(),
-            "request_sha256": super::case_store::hex(&Sha256::digest(request)),
-            "response_sha256": super::case_store::hex(&Sha256::digest(expected)),
+            "request_sha256": crate::db::protocol::digest(&request),
+            "response_sha256": crate::db::protocol::digest(&expected),
             "expected_status": 0, "expected_completed": ROUNDS, "expected_result": vector.result,
             "expected_digest": vector.digest,
         });

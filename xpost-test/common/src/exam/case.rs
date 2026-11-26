@@ -12,18 +12,17 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::agent::AgentClient;
 use crate::config::FileConfig;
-use crate::db::{Database, protocol};
+use crate::db::{Collection, protocol};
 use crate::pipeline::{READY_BUDGET, RoundUi, status};
 
 use super::{
     case_capture::{Capture, POST, PRE},
-    case_store::{self, Attempt, Observation, Switch},
+    case_store::{Attempt, Observation, Switch},
     case_trace,
     medium::Actions,
 };
@@ -44,7 +43,7 @@ pub(super) fn planned_input(cfg: &FileConfig, slot_b_sha256: &str) -> Result<ser
 
 pub(super) async fn run_case(
     cfg: &FileConfig,
-    database: &Database,
+    database: &Collection<'_>,
     expected_fw: &str,
     medium_id: Uuid,
     identity: &serde_json::Value,
@@ -71,9 +70,9 @@ pub(super) async fn run_case(
             && identity["input"]["slot_b_sha256"].as_str() == Some(&digest_b),
         "case preflight changed since campaign planning"
     );
-    let mut client = case_store::connect(database).await?;
+    let mut client = database.connect().await?;
     let run = Uuid::new_v4();
-    let profile = case_store::hex(&Sha256::digest(b"case-aot-trace-v0.1.1"));
+    let profile = protocol::digest(b"case-aot-trace-v0.1.1");
     let attempt = match Attempt::start(
         &mut client,
         run,
