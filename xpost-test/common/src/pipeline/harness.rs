@@ -1,6 +1,11 @@
 //! TC attach + ringbuf event pump + seq-keyed waits.
 
-use std::{collections::HashMap, net::Ipv4Addr, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    collections::HashMap,
+    net::Ipv4Addr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use aya::{
@@ -8,13 +13,10 @@ use aya::{
     maps::{Array, MapData, RingBuf},
     programs::{SchedClassifier, TcAttachType, Xdp, XdpFlags, tc},
 };
-use common::{
-    FilterConfig, KIND_BOUNCE_INGRESS, KIND_ECHO_INGRESS, KIND_STIM_EGRESS, StampEvent,
-};
+use common::{FilterConfig, KIND_BOUNCE_INGRESS, KIND_ECHO_INGRESS, KIND_STIM_EGRESS, StampEvent};
 use log::{debug, info, warn};
 use tokio::task::JoinHandle;
 
-use crate::pipeline::pkt_rx::PktBook;
 use crate::pipeline::RawTx;
 
 #[derive(Debug, Clone, Copy)]
@@ -26,7 +28,6 @@ struct Pending {
     t0: Option<Sighting>,
     t_echo: Option<Sighting>,
     t_bounce: Option<Sighting>,
-    rx_stamp_n: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -34,10 +35,6 @@ pub struct SeqSight {
     pub t0_ns: Option<u64>,
     pub t_echo_ns: Option<u64>,
     pub t_bounce_ns: Option<u64>,
-    /// Incoming `FWSTIM` frames seen on the packet socket. Not a timestamp.
-    pub pkt_n: u32,
-    /// First-kept receive stamps. Later stamps do not replace the first.
-    pub rx_stamp_n: u32,
 }
 
 pub struct Harness {
@@ -46,7 +43,6 @@ pub struct Harness {
     _tc_links: Vec<aya::programs::tc::SchedClassifierLinkId>,
     _xdp_link: Option<aya::programs::xdp::XdpLinkId>,
     raw: Arc<RawTx>,
-    pkt: PktBook,
     pending: Arc<Mutex<HashMap<u64, Pending>>>,
     esp_ip: Ipv4Addr,
     next_seq: u64,
@@ -145,7 +141,6 @@ impl Harness {
         }
 
         let events = RingBuf::try_from(ebpf.take_map("EVENTS").context("EVENTS map")?)?;
-        let pkt = PktBook::open(&iface).context("packet observer")?;
         let pending: Arc<Mutex<HashMap<u64, Pending>>> = Arc::new(Mutex::new(HashMap::new()));
         let pending_ev = pending.clone();
         let event_task = tokio::spawn(async move {
@@ -161,7 +156,6 @@ impl Harness {
             _tc_links: tc_links,
             _xdp_link: xdp_link,
             raw,
-            pkt,
             pending,
             esp_ip,
             next_seq: 1,
@@ -177,53 +171,19 @@ impl Harness {
 
     pub async fn reset_state(&self) {
         self.lock_pending().clear();
-        self.pkt.reset().await;
         // Let the ringbuf pump drop late events for cleared seqs before the next window.
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    /// Clear both drop counters before the measured window.
-    pub fn begin_observe(&mut self) -> Result<()> {
-        let _ = self.take_stamp_drops()?;
-        let _ = self.pkt.take_drops()?;
-        Ok(())
-    }
-
-    /// Drops during the measured window. Each read clears that counter.
-    pub fn finish_observe(&mut self) -> Result<(u64, u64)> {
-        let stamp_drops = self.take_stamp_drops()?;
-        let pkt_drops = self.pkt.take_drops()?;
-        Ok((stamp_drops, pkt_drops))
-    }
-
-    fn take_stamp_drops(&mut self) -> Result<u64> {
-        let map = self
-            ._ebpf
-            .map_mut("STAMP_DROPS")
-            .context("STAMP_DROPS map")?;
-        let mut drops: Array<&mut MapData, u64> = Array::try_from(map)?;
-        let n = drops.get(&0, 0).context("STAMP_DROPS get")?;
-        drops.set(0, 0, 0).context("STAMP_DROPS clear")?;
-        Ok(n)
-    }
-
-    /// Remove `seq` from the pending map and return TC sightings plus packet-socket hits.
-    pub async fn take_seq(&self, seq: u64) -> SeqSight {
-        let pkt_n = self.pkt.take(seq).await;
-        let mut map = self.lock_pending();
-        match map.remove(&seq) {
-            Some(p) => SeqSight {
-                t0_ns: p.t0.map(|s| s.ktime_ns),
-                t_echo_ns: p.t_echo.map(|s| s.ktime_ns),
-                t_bounce_ns: p.t_bounce.map(|s| s.ktime_ns),
-                pkt_n,
-                rx_stamp_n: p.rx_stamp_n,
-            },
-            None => SeqSight {
-                pkt_n,
-                ..SeqSight::default()
-            },
-        }
+    /// Remove the sequence and return its kernel timestamps.
+    pub fn take_seq(&self, seq: u64) -> SeqSight {
+        self.lock_pending()
+            .remove(&seq)
+            .map_or_else(SeqSight::default, |pending| SeqSight {
+                t0_ns: pending.t0.map(|sighting| sighting.ktime_ns),
+                t_echo_ns: pending.t_echo.map(|sighting| sighting.ktime_ns),
+                t_bounce_ns: pending.t_bounce.map(|sighting| sighting.ktime_ns),
+            })
     }
 
     async fn register_seq(&self, seq: u64) {
@@ -234,7 +194,6 @@ impl Harness {
                 t0: None,
                 t_echo: None,
                 t_bounce: None,
-                rx_stamp_n: 0,
             },
         );
     }
@@ -255,11 +214,6 @@ impl Harness {
     /// One neighbor announce. The probe loop refreshes this about once per second.
     pub fn announce_neighbor(&self, src_ip: Ipv4Addr) -> Result<()> {
         self.raw.announce_neighbor(src_ip)
-    }
-
-    /// Avoid HashMap growth on the send path.
-    pub fn reserve_pending(&self, n: usize) {
-        self.lock_pending().reserve(n);
     }
 
     fn lock_pending(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Pending>> {
@@ -314,7 +268,6 @@ fn handle_event(pending: &Mutex<HashMap<u64, Pending>>, ev: StampEvent) {
                 "event bounce_ingress seq={} t_bounce_ns={}",
                 ev.seq, ev.ktime_ns
             );
-            entry.rx_stamp_n = entry.rx_stamp_n.saturating_add(1);
             if entry.t_bounce.is_none() {
                 entry.t_bounce = Some(Sighting {
                     ktime_ns: ev.ktime_ns,
@@ -326,7 +279,6 @@ fn handle_event(pending: &Mutex<HashMap<u64, Pending>>, ev: StampEvent) {
                 "event echo_ingress seq={} sport={} t1_ns={}",
                 ev.seq, ev.udp_sport, ev.ktime_ns
             );
-            entry.rx_stamp_n = entry.rx_stamp_n.saturating_add(1);
             if entry.t_echo.is_none() {
                 entry.t_echo = Some(Sighting {
                     ktime_ns: ev.ktime_ns,

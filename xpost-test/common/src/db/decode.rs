@@ -20,7 +20,7 @@
 //!   event     u64 dropped, u32 n, n x (u8 kind, u8 pad[3], u32 arg0, u32 arg1, u32 t_us)
 //! ```
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// First four bytes of every report.
 pub const MAGIC: u32 = 0x3152_4650;
@@ -53,17 +53,6 @@ impl Kind {
             5 => Self::Event,
             other => bail!("unknown report entry kind {other}"),
         })
-    }
-
-    /// Name for the `_data.kind` column.
-    pub fn text(self) -> &'static str {
-        match self {
-            Self::Counter => "counter",
-            Self::Span => "span",
-            Self::Gauge => "gauge",
-            Self::Histogram => "histogram",
-            Self::Event => "event",
-        }
     }
 }
 
@@ -127,37 +116,6 @@ impl DecodedReport {
         self.metric(name)
             .filter(|m| m.kind == Kind::Counter)
             .map(|m| m.count)
-    }
-
-    pub fn has_events(&self) -> bool {
-        !self.events.is_empty()
-    }
-
-    /// Which section kinds this report carried, in the legacy mask spelling.
-    ///
-    /// The mask is a description of the report, not of the firmware: a build
-    /// that sends no events gets no trace bit, which is what the old
-    /// "did this cell have a timeline" check actually meant.
-    pub fn mask(&self) -> u8 {
-        let mut m = 0u8;
-        for metric in &self.metrics {
-            m |= match metric.kind {
-                Kind::Counter => super::legacy::MASK_C,
-                Kind::Span | Kind::Histogram => super::legacy::MASK_A,
-                Kind::Gauge => super::legacy::MASK_G,
-                Kind::Event => 0,
-            };
-        }
-        if self.has_events() || self.events_dropped != 0 {
-            m |= super::legacy::MASK_T;
-        }
-        m
-    }
-
-    /// Trace section as the legacy check expects it, or `None` when the report
-    /// carried no events.
-    pub fn trace(&self) -> Option<super::legacy::TraceSnap> {
-        super::legacy::project(self).trace
     }
 }
 
@@ -227,8 +185,7 @@ pub fn decode_payload(payload: &[u8]) -> Result<DecodedReport> {
             .get(at)
             .with_context(|| format!("entry {i} ({name}): truncated at its kind"))?;
         at += 1;
-        let kind = Kind::from_u8(kind_byte)
-            .with_context(|| format!("entry {i} ({name})"))?;
+        let kind = Kind::from_u8(kind_byte).with_context(|| format!("entry {i} ({name})"))?;
 
         match kind {
             Kind::Counter => {
@@ -316,7 +273,12 @@ pub fn decode_payload(payload: &[u8]) -> Result<DecodedReport> {
                 let n = u32_at(payload, at + 8)? as usize;
                 at += 12;
                 out.events_dropped = out.events_dropped.saturating_add(dropped);
-                need(payload, at, n.checked_mul(EVENT_WIRE_LEN).context("event count overflow")?)?;
+                need(
+                    payload,
+                    at,
+                    n.checked_mul(EVENT_WIRE_LEN)
+                        .context("event count overflow")?,
+                )?;
                 for _ in 0..n {
                     let b = &payload[at..at + EVENT_WIRE_LEN];
                     out.events.push(Event {
@@ -347,64 +309,6 @@ pub fn decode_payload(payload: &[u8]) -> Result<DecodedReport> {
     Ok(out)
 }
 
-fn decode_b64(s: &str) -> Result<Vec<u8>> {
-    fn val(c: u8) -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let s = s.trim_end_matches('=');
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    let mut i = 0;
-    while i + 4 <= bytes.len() {
-        let a = val(bytes[i]).context("b64")?;
-        let b = val(bytes[i + 1]).context("b64")?;
-        let c = val(bytes[i + 2]).context("b64")?;
-        let d = val(bytes[i + 3]).context("b64")?;
-        out.push((a << 2) | (b >> 4));
-        out.push((b << 4) | (c >> 2));
-        out.push((c << 6) | d);
-        i += 4;
-    }
-    let rem = bytes.len() - i;
-    if rem == 2 {
-        let a = val(bytes[i]).context("b64")?;
-        let b = val(bytes[i + 1]).context("b64")?;
-        out.push((a << 2) | (b >> 4));
-    } else if rem == 3 {
-        let a = val(bytes[i]).context("b64")?;
-        let b = val(bytes[i + 1]).context("b64")?;
-        let c = val(bytes[i + 2]).context("b64")?;
-        out.push((a << 2) | (b >> 4));
-        out.push((b << 4) | (c >> 2));
-    } else if rem != 0 {
-        bail!("bad b64 remainder");
-    }
-    Ok(out)
-}
-
-/// Agent `get perf` reply: `OK get perf <n> b64=…`.
-pub fn parse_report_b64(msg: &str) -> Result<Vec<u8>> {
-    let msg = msg.trim();
-    let b64 = msg
-        .split_whitespace()
-        .find_map(|p| p.strip_prefix("b64="))
-        .context("get/perf reply missing b64=")?;
-    decode_b64(b64)
-}
-
-/// Decode an agent `get perf` reply.
-pub fn decode_report_msg(msg: &str) -> Result<DecodedReport> {
-    let payload = parse_report_b64(msg)?;
-    decode_payload(&payload)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,7 +316,10 @@ mod tests {
     /// Hand-built bytes matching the firmware encoder. Built here, not imported,
     /// because this crate cannot reach `xpost-perf`; the layout above is the
     /// contract both sides follow.
-    fn report(metrics: &[(&str, Kind, [u64; 4], &[(u64, u64)])], events: Option<(u64, &[Event])>) -> Vec<u8> {
+    fn report(
+        metrics: &[(&str, Kind, [u64; 4], &[(u64, u64)])],
+        events: Option<(u64, &[Event])>,
+    ) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(&MAGIC.to_le_bytes());
         b.extend_from_slice(&VERSION.to_le_bytes());
@@ -477,7 +384,12 @@ mod tests {
                 ("calls", Kind::Counter, [7, 0, 0, 0], &[]),
                 ("engine_us", Kind::Span, [3, 60, 10, 30], &[]),
                 ("depth", Kind::Gauge, [5, 9, 0, 0], &[]),
-                ("lookup_us", Kind::Histogram, [3, 60, 1, 40], &[(4, 1), (16, 2)]),
+                (
+                    "lookup_us",
+                    Kind::Histogram,
+                    [3, 60, 1, 40],
+                    &[(4, 1), (16, 2)],
+                ),
             ],
             None,
         );
@@ -485,7 +397,10 @@ mod tests {
         assert_eq!(got.entries, 4);
         assert_eq!(got.counter("calls"), Some(7));
         let span = got.metric("engine_us").unwrap();
-        assert_eq!((span.count, span.total_us, span.min_us, span.max_us), (3, 60, 10, 30));
+        assert_eq!(
+            (span.count, span.total_us, span.min_us, span.max_us),
+            (3, 60, 10, 30)
+        );
         let gauge = got.metric("depth").unwrap();
         assert_eq!((gauge.current, gauge.peak), (5, 9));
         let hist = got.metric("lookup_us").unwrap();
@@ -503,14 +418,35 @@ mod tests {
     #[test]
     fn events_keep_their_order_and_drop_count() {
         let evs = [
-            Event { kind: 2, t_us: 100, arg0: 0, arg1: 0 },
-            Event { kind: 11, t_us: 101, arg0: 1, arg1: 0 },
-            Event { kind: 3, t_us: 120, arg0: 2, arg1: 0 },
+            Event {
+                kind: 2,
+                t_us: 100,
+                arg0: 0,
+                arg1: 0,
+            },
+            Event {
+                kind: 11,
+                t_us: 101,
+                arg0: 1,
+                arg1: 0,
+            },
+            Event {
+                kind: 3,
+                t_us: 120,
+                arg0: 2,
+                arg1: 0,
+            },
         ];
-        let bytes = report(&[("calls", Kind::Counter, [1, 0, 0, 0], &[])], Some((4, &evs)));
+        let bytes = report(
+            &[("calls", Kind::Counter, [1, 0, 0, 0], &[])],
+            Some((4, &evs)),
+        );
         let got = decode_payload(&bytes).unwrap();
         assert_eq!(got.events, evs.to_vec());
-        assert_eq!(got.events_dropped, 4, "a dropped event is visible, not silent");
+        assert_eq!(
+            got.events_dropped, 4,
+            "a dropped event is visible, not silent"
+        );
     }
 
     #[test]
@@ -560,6 +496,9 @@ mod tests {
         let err = decode_payload(&bytes).unwrap_err();
         // The context names the entry, so the sentence carries both the entry
         // and the offending kind byte.
-        assert!(format!("{err:#}").contains("unknown report entry kind 99"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("unknown report entry kind 99"),
+            "{err:#}"
+        );
     }
 }

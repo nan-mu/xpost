@@ -27,7 +27,7 @@ use uuid::Uuid;
 use crate::{
     agent::{AgentClient, PerfFreeze},
     config::FileConfig,
-    db::{metrics, protocol},
+    db::{Collection, metrics, protocol},
     pipeline::{self, RawTx},
 };
 
@@ -220,6 +220,7 @@ pub(super) fn planned_input(
 pub(super) async fn run_cell(
     cfg: &FileConfig,
     agent: &AgentClient,
+    database: &Collection<'_>,
     client: &mut Client,
     experiment: &str,
     mode: &str,
@@ -346,7 +347,7 @@ pub(super) async fn run_cell(
         let (status, recovered) = match attempt
             .finish_recovering(
                 client,
-                &cfg.postgres,
+                database,
                 &cell,
                 &link,
                 &observation,
@@ -357,7 +358,7 @@ pub(super) async fn run_cell(
         {
             Ok(value) => value,
             Err(error) => {
-                let observed = protocol::run_status(&cfg.postgres, run).await;
+                let observed = protocol::run_status(database, run).await;
                 let recovery =
                     store::recover(run, &observation, &summary).map(|p| p.display().to_string());
                 println!(

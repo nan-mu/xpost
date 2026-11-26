@@ -1,49 +1,30 @@
 # xpost-test, the TR3000 formal and flame harness
 
-This crate owns the **end-to-end experiment workflow**. Mac-side USB is owned by
-`xpost-agent` (HTTP `/v1/*`); low-level serial types live in **`xpost-serial`**.
+This crate runs the experiment workflow.
+The macOS Agent owns USB and serves HTTP under `/v1/*`.
+The `xpost-serial` crate defines the wire types.
 
-Binary name: **`xpost-test`**. Compile-time config only:
-[`config/default.toml`](../../config/default.toml) +
-[`just_tx.toml`](../../config/just_tx.toml) +
-[`just_drop.toml`](../../config/just_drop.toml) +
-[`firewall.toml`](../../config/firewall.toml). Knobs: [`config`](crate::config).
+The runner uses `profile.toml` for selection and `config/` for experiment settings.
+It reads `/root/.db` when it needs PostgreSQL.
+A new collection reconciles managed Protocol V1 tables in `release`.
+Recreating a table with incompatible columns removes that table's data.
+See the [experiment database procedure](../../procedures/database.md).
 
-# Sole entry
+# Runner entry
 
-Always on TR3000, **no env / no CLI flags / no subcommands**:
+Run `./xpost-test` on TR3000 without arguments or additional environment variables.
+Change `run` in `profile.toml` before building.
 
-```text
-Mac (USB ESP)                         TR3000                         Postgres
-cd xpost-agent                        ./xpost-test                   formal.*
-cargo run --release --locked -- serve  │                              ▲
-  --bind 0.0.0.0:9240                    │ flash/fw · get/map · get/perf│
-  /health /v1/*                         │ enable/disable/xdp           │
-        ▲                               │                              │
-        └──────── HTTP [agent] ─────────┘                              │
-                    RAW UDP stim (test-owned) ──► DUT ──► get/perf ────┘
-```
+| Selection | Operation |
+|-----------|-----------|
+| `all`, `medium` | Campaign after readiness checks |
+| `all-plan`, `medium-plan` | Print the plan without connecting to PostgreSQL |
+| `all-preflight`, `medium-preflight` | Check deployment and collector readiness |
+| `db-preflight` | Check Protocol V1 tables and privileges without the Agent |
+| `exec_bench` | Run standalone EXB2 collection with Protocol V1 |
+| `dev` | Run HAL smoke on TX, DROP, and firewall without PostgreSQL |
 
-The default `run = ["medium"]` stops at the readiness check.
-See [the medium procedure](../../../procedures/medium.md) for its status and plan.
-
-For the explicit legacy experiments and HAL smoke:
-
-1. Mac: `cd xpost-agent && cargo run --release --locked -- serve --bind 0.0.0.0:9240`
-2. Edit `profile.toml` `run = ["just_drop"]` and/or `["just_tx"]` /
-   `["firewall"]` / `["dev"]` / `["formal-clear"]` (steps fixed in Rust).
-3. Rebuild → scp → on TR3000: `./xpost-test`
-
-| `run` | Role | Tables |
-|-------|------|--------|
-| `just_drop` | `xdp_cag` PPS grid + Array Map + `xdp_t` Trace | `exam` + `just_drop_*` + perf |
-| `just_tx` | `xdp_cag` pps grid RTT + `xdp_t` Trace | `exam` + `just_tx_*` (sent/ok; success RTT) + perf |
-| `firewall` | hash blacklist size×hit/miss PPS + Trace | `exam` + `firewall_*` + perf |
-| `dev` | HAL smoke: just_tx / just_drop / firewall `@100pps×2s`; **no XDP, no DB** | none |
-| `formal-clear` | `TRUNCATE exam CASCADE` | wipe |
-
-Formal DDL: `sql/formal.sql` (shared) + `just_tx.sql` / `just_drop.sql` / `firewall.sql`.
-Open-run never DROP/TRUNCATE; wipe with `run = ["formal-clear"]`.
+See the [medium procedure](../../procedures/medium.md) for the campaign plan.
 
 # Topology
 
@@ -62,7 +43,7 @@ Mac Mini, TR3000, and ESP32-C3 on one subnet
 |------|------------|
 | Stim | UDP `dst = ESP_IP`, `dport` echo port (default 8080) |
 | Payload | `FWSTIM` + `u64` LE `seq` |
-| Timestamps | TC egress → T0; matching echo/bounce → T1 |
+| Timestamps | TC egress gives T0. A matching echo or bounce gives T1. |
 
 # Build / deploy
 
@@ -75,5 +56,5 @@ scp -O target/aarch64-unknown-linux-musl/release/xpost-test tr3000:~/xpost-test
 
 ```bash
 opkg update && opkg install kmod-sched-bpf kmod-sched-core ip-full
-ip link   # confirm probe.iface (often br-lan)
+ip link   # Check probe.iface (often br-lan)
 ```

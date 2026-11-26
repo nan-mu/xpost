@@ -1,5 +1,5 @@
 //! Compile-time TOML for the `xpost-test` binary:
-//! `profile.toml` + `config/default.toml` + `just_tx.toml` + `just_drop.toml` + `firewall.toml`
+//! `profile.toml` + `config/default.toml` + `firewall.toml`
 //! + `exec_bench.toml`.
 //!
 //! Files are embedded at compile time; after editing, rebuild and scp to TR3000.
@@ -12,58 +12,19 @@
 //! No env vars, no CLI args. `profile.toml` `run = [...]` selects **experiment
 //! names** only; steps are hard-coded in Rust.
 //!
-//! # `run` values
-//!
-//! | Name | What | Postgres tables |
-//! |------|------|-----------------|
-//! | `all` | Full campaign, selected phase | Dedicated protocol database |
-//! | `medium` | Selected phase after preflight | Dedicated protocol database |
-//! | `just_drop` | Formal XDP PPS grid + Trace | `exam` + `just_drop_*` + `xdp_*` / `trace_event` |
-//! | `just_tx` | Formal XDP pps grid RTT + Trace | `exam` + `just_tx_config`(sent/ok) / `just_tx_data` + perf |
-//! | `firewall` | Hash blacklist size×hit/miss PPS grid + Trace | `exam` + `firewall_*` + perf |
-//! | `exec_bench` | Exec ingress function-call A/B (eBPF + HAL) | `exam` + `exec_bench_*` + perf |
-//! | `dev` | HAL smoke: just_tx/just_drop/firewall `@100pps×2s`; no XDP, no DB | — |
-//! | `formal-clear` | `TRUNCATE exam CASCADE` | wipe only |
-//!
-//! `dev` is fully hard-coded (no separate TOML); never touches Postgres.
-//!
-//! Formal DDL: `sql/formal.sql` + `just_tx.sql` / `just_drop.sql` / `firewall.sql`
-//! / `exec_bench.sql` (open-run never DROP/TRUNCATE). Wipe: `run = ["formal-clear"]`.
-//!
-//! ```toml
-//! run = ["dev"]
-//! # run = ["just_tx"]
-//! # run = ["just_drop", "just_tx"]
-//! # run = ["firewall"]
-//! # run = ["exec_bench"]
-//! # run = ["formal-clear"]
-//! ```
+//! Campaigns and the standalone EXB2 collector write Protocol V1.
+//! Plan selections and the HAL smoke test need no database.
+//! Database selections load `/root/.db` when needed.
 
-use std::{net::Ipv4Addr, sync::OnceLock};
+use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 const EMBEDDED_DEFAULT: &str = include_str!("../../config/default.toml");
 const EMBEDDED_PROFILE: &str = include_str!("../../profile.toml");
-const EMBEDDED_JUST_TX: &str = include_str!("../../config/just_tx.toml");
-const EMBEDDED_JUST_DROP: &str = include_str!("../../config/just_drop.toml");
 const EMBEDDED_FIREWALL: &str = include_str!("../../config/firewall.toml");
 const EMBEDDED_EXEC_BENCH: &str = include_str!("../../config/exec_bench.toml");
-
-static POSTGRES: OnceLock<PostgresConfig> = OnceLock::new();
-
-/// Install Postgres settings from embedded config (call once at process start).
-pub fn install_postgres(cfg: PostgresConfig) {
-    let _ = POSTGRES.set(cfg);
-}
-
-/// Compile-time Postgres DSN pieces (after [`install_postgres`]).
-pub fn postgres() -> &'static PostgresConfig {
-    POSTGRES
-        .get()
-        .expect("postgres config: call install_postgres after FileConfig::embedded")
-}
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -109,16 +70,11 @@ pub struct FileConfig {
     pub medium_resume_experiment: Option<String>,
     #[serde(default)]
     pub medium_stage: MediumStage,
-    pub postgres: PostgresConfig,
     pub probe: ProbeConfig,
     #[serde(rename = "dut")]
     pub target: TargetConfig,
     #[serde(default)]
     pub agent: AgentConfig,
-    #[serde(default)]
-    pub just_drop: BenchPpsConfig,
-    #[serde(default)]
-    pub just_tx: BenchPpsConfig,
     #[serde(default)]
     pub firewall: FirewallConfig,
     #[serde(default)]
@@ -127,40 +83,6 @@ pub struct FileConfig {
 
 fn default_version() -> String {
     "0".into()
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PostgresConfig {
-    pub host: String,
-    #[serde(default = "default_pg_port")]
-    pub port: u16,
-    pub user: String,
-    pub password: String,
-    #[serde(default = "default_pg_dbname")]
-    pub dbname: String,
-    #[serde(default)]
-    pub protocol_dbname: Option<String>,
-    #[serde(default = "default_formal_schema")]
-    pub formal_schema: String,
-}
-
-fn default_pg_port() -> u16 {
-    5432
-}
-fn default_pg_dbname() -> String {
-    "postgres".into()
-}
-fn default_formal_schema() -> String {
-    "formal".into()
-}
-
-impl PostgresConfig {
-    pub fn dsn(&self) -> String {
-        format!(
-            "host={} port={} dbname={} user={} password={} connect_timeout=10 sslmode=disable",
-            self.host, self.port, self.dbname, self.user, self.password
-        )
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -177,57 +99,21 @@ impl AgentConfig {
     }
 }
 
-/// Knobs for formal PPS / RTT arms (`just_tx.toml` / `just_drop.toml`).
-#[derive(Debug, Clone, Deserialize)]
-pub struct BenchPpsConfig {
-    #[serde(default = "default_true")]
-    pub formal: bool,
-    #[serde(default = "default_pps_arms")]
-    pub arms: Vec<String>,
-}
-
-/// Knobs for hash-map firewall formal (`firewall.toml`).
+/// Firewall blacklist size for the Protocol V1 collector.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FirewallConfig {
-    #[serde(default = "default_true")]
-    pub formal: bool,
-    #[serde(default = "default_pps_arms")]
-    pub arms: Vec<String>,
     #[serde(default = "default_fw_blacklist_size")]
     pub blacklist_size: u32,
-    #[serde(default = "default_fw_legal_packets")]
-    pub legal_packets: u32,
 }
 
-fn default_true() -> bool {
-    true
-}
-fn default_pps_arms() -> Vec<String> {
-    vec!["hal".into(), "xdp".into()]
-}
 fn default_fw_blacklist_size() -> u32 {
     200
-}
-fn default_fw_legal_packets() -> u32 {
-    1024
-}
-
-impl Default for BenchPpsConfig {
-    fn default() -> Self {
-        Self {
-            formal: true,
-            arms: default_pps_arms(),
-        }
-    }
 }
 
 impl Default for FirewallConfig {
     fn default() -> Self {
         Self {
-            formal: true,
-            arms: default_pps_arms(),
             blacklist_size: default_fw_blacklist_size(),
-            legal_packets: default_fw_legal_packets(),
         }
     }
 }
@@ -286,7 +172,6 @@ fn default_stim_sport() -> u16 {
 struct DefaultFile {
     #[serde(default = "default_version")]
     version: String,
-    postgres: PostgresConfig,
     probe: ProbeConfig,
     #[serde(rename = "dut")]
     target: TargetConfig,
@@ -302,18 +187,6 @@ struct ProfileFile {
     medium_resume_experiment: Option<String>,
     #[serde(default)]
     medium_stage: MediumStage,
-}
-
-#[derive(Debug, Deserialize)]
-struct JustTxFile {
-    #[serde(flatten)]
-    bench: BenchPpsConfig,
-}
-
-#[derive(Debug, Deserialize)]
-struct JustDropFile {
-    #[serde(flatten)]
-    bench: BenchPpsConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,10 +207,6 @@ impl FileConfig {
             toml::from_str(EMBEDDED_PROFILE).context("parse profile.toml")?;
         let def: DefaultFile =
             toml::from_str(EMBEDDED_DEFAULT).context("parse config/default.toml")?;
-        let just_tx: JustTxFile =
-            toml::from_str(EMBEDDED_JUST_TX).context("parse config/just_tx.toml")?;
-        let just_drop: JustDropFile =
-            toml::from_str(EMBEDDED_JUST_DROP).context("parse config/just_drop.toml")?;
         let firewall: FirewallFile =
             toml::from_str(EMBEDDED_FIREWALL).context("parse config/firewall.toml")?;
         let exec_bench: ExecBenchFile =
@@ -348,12 +217,9 @@ impl FileConfig {
             medium_resume_id: profile.medium_resume_id,
             medium_resume_experiment: profile.medium_resume_experiment,
             medium_stage: profile.medium_stage,
-            postgres: def.postgres,
             probe: def.probe,
             target: def.target,
             agent: def.agent,
-            just_drop: just_drop.bench,
-            just_tx: just_tx.bench,
             firewall: firewall.bench,
             exec_bench: exec_bench.bench,
         };
@@ -375,6 +241,7 @@ impl FileConfig {
                         | "all"
                         | "all-plan"
                         | "all-preflight"
+                        | "db-preflight"
                 )
             })
         {
@@ -383,20 +250,19 @@ impl FileConfig {
         for name in &self.run {
             match name.as_str() {
                 "all" | "all-plan" | "all-preflight" | "medium" | "medium-plan"
-                | "medium-preflight" | "just_tx" | "just_drop" | "firewall" | "exec_bench"
-                | "lookup" | "dev" | "formal-clear" => {}
+                | "medium-preflight" | "db-preflight" | "exec_bench" | "dev" => {}
+                "just_tx" | "just_drop" | "firewall" => bail!(
+                    "standalone {name} is retired; select all or medium for Protocol V1 network collection"
+                ),
+                "lookup" | "formal-clear" => bail!("run entry {name} is retired"),
                 other => bail!(
-                    "unknown experiment {other:?} in profile.toml `run`; use all / all-plan / all-preflight / medium / medium-plan / medium-preflight / just_tx / just_drop / firewall / exec_bench / lookup / dev / formal-clear"
+                    "unknown experiment {other:?} in profile.toml `run`; use all / all-plan / all-preflight / medium / medium-plan / medium-preflight / db-preflight / exec_bench / dev"
                 ),
             }
         }
         let n = self.firewall.blacklist_size;
         if n == 0 || n > 256 {
             bail!("firewall.toml blacklist_size {n} out of 1..=256");
-        }
-        let legal = self.firewall.legal_packets;
-        if legal == 0 || legal > 1024 {
-            bail!("firewall.toml legal_packets {legal} out of 1..=1024");
         }
         Ok(())
     }
@@ -434,6 +300,15 @@ fn parse_mac(s: &str) -> Result<[u8; 6]> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn historical_database_selections_are_rejected_before_dispatch() {
+        for selection in ["just_tx", "just_drop", "firewall", "lookup", "formal-clear"] {
+            let mut cfg = super::FileConfig::embedded().unwrap();
+            cfg.run = vec!["dev".into(), selection.into()];
+            assert!(cfg.validate().unwrap_err().to_string().contains("retired"));
+        }
+    }
+
     #[test]
     fn retired_case_selections_are_rejected_before_dispatch() {
         for selection in ["hot_swap", "case-smoke"] {

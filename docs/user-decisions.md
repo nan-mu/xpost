@@ -202,3 +202,48 @@ Publish the first phase and verify all its terminal keys before the second phase
 Use the 30-second network windows and 100-batch EXB2 runs specified in the full brief.
 
 Reason. The maintainer requested the full grid after reviewing the phased PR evidence.
+
+## 2026-11-27 Runner database configuration
+
+New collection writes Protocol V1 to the NAS database `experiments`.
+The runner reads PostgreSQL settings from `/root/.db` at runtime.
+The NAS database `postgres` retains the historical data.
+
+Reason. The maintainer stopped the historical data migration and chose a dedicated database for new collection.
+
+## 2026-11-27 Lookup selection
+
+Retire the standalone `lookup` selection.
+
+Reason. The diagnostic uses the historical writer and has no equivalent Protocol V1 entry.
+The maintainer chose retirement during the database refactor.
+
+## 2026-11-27 Automatic Protocol V1 initialization
+
+Initialize Protocol V1 when a new collection opens the empty `experiments` database.
+Allow an administrator to prepare empty schemas for a writer without database-level CREATE.
+Keep preflight read-only. Require existing storage when resuming a campaign.
+
+Reason. The maintainer asked the runner to create absent Protocol V1 tables automatically.
+
+## 2026-11-27 Store Protocol V1 in release
+
+Use the `release` schema in `experiments` for new Protocol V1 objects.
+Prefix shared objects with `bench_` and mode tables with their mode names.
+Initialize the empty `release` schema. Keep preflight read-only.
+
+Reason. The maintainer granted schema-level creation in `release` and selected that schema for new collection.
+This supersedes the five-schema layout for new Protocol V1 records.
+
+## 2026-11-27 Reconcile Protocol V1 tables before collection
+
+Use the database selected by `PGDATABASE` and its `release` schema.
+Derive the expected structure from `xpost-test/sql/protocol_v1.sql`.
+Create missing tables. Keep compatible tables and their data.
+Recreate each table with incompatible columns and discard its old data.
+Roll back the preparation if a dependency prevents safe recreation.
+Keep preflight, resume, and reconnect free of DDL.
+Hold schema protection during all collection and recovery writes.
+
+Reason. The maintainer chose per-table reconciliation without version migrations.
+This replaces empty-schema-only initialization for new runs.

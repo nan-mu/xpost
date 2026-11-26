@@ -10,16 +10,6 @@
 
 version = "1"
 
-[postgres]
-host = "192.168.110.96"
-port = 5432
-user = "nan"
-password = "22332233"
-dbname = "postgres"
-formal_schema = "formal"
-# Medium uses a separate database initialized with sql/protocol_v1.sql.
-protocol_dbname = "xpost_medium"
-
 [agent]
 endpoint = "192.168.110.96:9240"
 

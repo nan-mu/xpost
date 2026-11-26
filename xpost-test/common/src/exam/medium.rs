@@ -15,7 +15,7 @@ use super::{exb2::Sampling, medium_network::NetworkPlan};
 use crate::{
     agent::{AgentClient, DeploymentReport},
     config::{FileConfig, MediumStage},
-    db::protocol,
+    db::{Collection, Database},
 };
 
 const MODES: [&str; 4] = ["hal", "aot", "jit", "rbpf"];
@@ -194,30 +194,44 @@ pub async fn run(cfg: &FileConfig, volume: Volume) -> Result<()> {
         cfg.medium_stage == MediumStage::HalAot || cfg.medium_resume_id.is_some(),
         "JIT/rBPF requires the HAL/AOT campaign ID"
     );
-    let ready = preflight(cfg, volume).await?;
+    let (ready, deployments) = preflight(cfg, volume).await?;
     println!("{}", serde_json::to_string(&ready)?);
     ensure!(
         ready.unavailable.is_empty(),
         "medium collectors unavailable: {}",
         ready.unavailable.join(", ")
     );
+    let settings = Database::load()?;
+    let collection = if cfg.medium_resume_id.is_some() {
+        settings.resume().await?
+    } else {
+        settings.prepare().await?
+    };
+    collection
+        .protect(async {
+            check_resume(cfg, volume, &ready, &deployments, collection.client()).await?;
+            collect(cfg, volume, ready, &collection, revision, preflight_started).await
+        })
+        .await
+}
+
+async fn collect(
+    cfg: &FileConfig,
+    volume: Volume,
+    ready: Readiness,
+    collection: &Collection<'_>,
+    revision: &str,
+    preflight_started: Instant,
+) -> Result<()> {
     let endpoint = cfg
         .agent
         .resolved_endpoint()
         .context("medium needs [agent].endpoint")?;
     let agent = AgentClient::new(endpoint);
-    let mut database = protocol::connect(&cfg.postgres).await?;
+    let mut database = collection.connect().await?;
     let expected: BTreeSet<String> = ready.identities.keys().cloned().collect();
     let medium_id = cfg.medium_resume_id.unwrap_or_else(Uuid::new_v4);
-    // A dedicated connection keeps the lock while collectors recover their writes.
-    let lock = protocol::connect(&cfg.postgres).await?;
-    let lock_key = i64::from_be_bytes(medium_id.as_bytes()[..8].try_into().expect("UUID prefix"));
-    ensure!(
-        lock.query_one("SELECT pg_try_advisory_lock($1)", &[&lock_key])
-            .await?
-            .get::<_, bool>(0),
-        "campaign {medium_id} already has an active runner"
-    );
+    collection.lock_campaign(medium_id).await?;
     let (mut resume, mut order) = match cfg.medium_resume_id {
         Some(id) => Resume::load(&database, id, &ready.identities).await?,
         None => (
@@ -258,6 +272,7 @@ pub async fn run(cfg: &FileConfig, volume: Volume) -> Result<()> {
             cfg,
             volume,
             &agent,
+            collection,
             &mut database,
             group,
             &mut device,
@@ -277,7 +292,7 @@ pub async fn run(cfg: &FileConfig, volume: Volume) -> Result<()> {
                 })
             );
             problems.push(format!("{error:#}"));
-            match protocol::connect(&cfg.postgres).await {
+            match collection.connect().await {
                 Ok(recovered) => database = recovered,
                 Err(error) => {
                     problems.push(format!("reconnect protocol database: {error:#}"));
@@ -481,6 +496,7 @@ async fn run_group(
     cfg: &FileConfig,
     volume: Volume,
     agent: &AgentClient,
+    settings: &Collection<'_>,
     db: &mut Client,
     group: &FirmwareGroup,
     device: &mut DeviceDeployment,
@@ -505,6 +521,7 @@ async fn run_group(
                 }
                 super::case::run_case(
                     cfg,
+                    settings,
                     hash,
                     medium_id,
                     resume
@@ -546,7 +563,7 @@ async fn run_group(
                 super::exec_bench::run_mode(
                     agent,
                     db,
-                    &cfg.postgres,
+                    settings,
                     super::exec_bench::Mode::parse(cell.mode)?,
                     hash,
                     Some(medium_id),
@@ -577,6 +594,7 @@ async fn run_group(
             super::medium_network::run_cell(
                 cfg,
                 agent,
+                settings,
                 db,
                 cell.experiment,
                 cell.mode,
@@ -806,21 +824,21 @@ async fn attempt_rows(
         "SELECT r.experiment,r.mode,r.variant,r.repeat_no,r.status,c.parameters,r.run_id,r.plan_order,
         COALESCE((SELECT CASE WHEN count(*)=1 THEN bool_and(a.qualified AND
             (r.status <> 'inconclusive' OR EXISTS (
-                SELECT 1 FROM bench.analysis previous
+                SELECT 1 FROM release.bench_analysis previous
                 WHERE previous.run_id=a.run_id AND previous.source_digest=a.source_digest
                   AND previous.created_at <= a.created_at
                   AND previous.analysis_id <> a.analysis_id
                   AND a.issues @> jsonb_build_array(jsonb_build_object('supersedes_analysis_id',previous.analysis_id))
             ))) ELSE false END
-          FROM bench.analysis a WHERE a.run_id=r.run_id AND NOT EXISTS (
-            SELECT 1 FROM bench.analysis newer
+          FROM release.bench_analysis a WHERE a.run_id=r.run_id AND NOT EXISTS (
+            SELECT 1 FROM release.bench_analysis newer
             WHERE newer.run_id=a.run_id AND newer.source_digest=a.source_digest
               AND newer.created_at >= a.created_at
               AND newer.analysis_id <> a.analysis_id
               AND newer.issues @> jsonb_build_array(jsonb_build_object('supersedes_analysis_id',a.analysis_id))
           )),false),
-        EXISTS(SELECT 1 FROM bench.run_artifact ra WHERE ra.run_id=r.run_id AND ra.role='case_publish_intent'),r.issues
-        FROM bench.run r JOIN bench.condition c USING(condition_id)
+        EXISTS(SELECT 1 FROM release.bench_run_artifact ra WHERE ra.run_id=r.run_id AND ra.role='case_publish_intent'),r.issues
+        FROM release.bench_run r JOIN release.bench_condition c USING(condition_id)
         WHERE r.phase='formal' AND c.parameters->>'medium_id'=$1
         ORDER BY r.plan_order",
         &[&campaign.to_string()],
@@ -854,7 +872,18 @@ fn terminal_attempt(status: &str, issues: &Value) -> bool {
 }
 
 pub async fn check(cfg: &FileConfig, volume: Volume) -> Result<()> {
-    let ready = preflight(cfg, volume).await?;
+    let (ready, deployments) = preflight(cfg, volume).await?;
+    let settings = Database::load()?;
+    let collection = settings.resume().await?;
+    collection
+        .protect(check_resume(
+            cfg,
+            volume,
+            &ready,
+            &deployments,
+            collection.client(),
+        ))
+        .await?;
     println!("{}", serde_json::to_string_pretty(&ready)?);
     ensure!(
         ready.unavailable.is_empty(),
@@ -864,7 +893,7 @@ pub async fn check(cfg: &FileConfig, volume: Volume) -> Result<()> {
     Ok(())
 }
 
-async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<Readiness> {
+async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<(Readiness, DeploymentReport)> {
     let planned = plan(volume, cfg.medium_stage);
     if let Some(experiment) = &cfg.medium_resume_experiment {
         ensure!(
@@ -902,13 +931,6 @@ async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<Readiness> {
         deployments.release == "v0.1.1",
         "medium requires the v0.1.1 release"
     );
-    let tables = if volume == Volume::All {
-        let mut both = plan(volume, MediumStage::HalAot);
-        both.extend(plan(volume, MediumStage::JitRbpf));
-        protocol_tables(&both)
-    } else {
-        protocol_tables(&planned)
-    };
     let mut unavailable = BTreeSet::new();
     for cell in planned.iter().flat_map(|group| &group.cells) {
         let supported = match (cell.experiment, cell.mode, cell.variant) {
@@ -945,24 +967,49 @@ async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<Readiness> {
         "medium Agent health and deployment identities verified for {} Firmware ELF digests",
         groups.len()
     );
-    let mut database = protocol::connect(&cfg.postgres).await?;
-    protocol::check(&mut database, &tables).await?;
     check_host(cfg)?;
     super::medium_network::check_capture_path(cfg)?;
+    Ok((
+        Readiness {
+            release: deployments.release.clone(),
+            volume: volume.label(),
+            stage: cfg.medium_stage.as_str(),
+            groups,
+            unavailable: unavailable.into_iter().collect(),
+            identities,
+            deployments: containers,
+        },
+        deployments,
+    ))
+}
+
+async fn check_resume(
+    cfg: &FileConfig,
+    volume: Volume,
+    ready: &Readiness,
+    deployments: &DeploymentReport,
+    database: &Client,
+) -> Result<()> {
     if let Some(id) = cfg.medium_resume_id {
-        Resume::load(&database, id, &identities).await?;
+        Resume::load(database, id, &ready.identities).await?;
         if cfg.medium_stage == MediumStage::JitRbpf {
             let first_deployments;
             let report = if volume == Volume::All {
-                &deployments
+                deployments
             } else {
-                first_deployments = agent.medium_preflight(Some("hal-aot")).await?;
+                let endpoint = cfg
+                    .agent
+                    .resolved_endpoint()
+                    .context("medium needs [agent].endpoint")?;
+                first_deployments = AgentClient::new(endpoint)
+                    .medium_preflight(Some("hal-aot"))
+                    .await?;
                 &first_deployments
             };
             let first = bind_firmware(plan(volume, MediumStage::HalAot), report)?;
             let first = planned_identities(cfg, volume, MediumStage::HalAot, &first, report)?;
             let expected = first.keys().cloned().collect();
-            let audit = reconcile(&database, id, &expected, &first).await?;
+            let audit = reconcile(database, id, &expected, &first).await?;
             check_first_stage(&audit)?;
         }
     } else {
@@ -971,15 +1018,7 @@ async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<Readiness> {
             "JIT/rBPF needs the original HAL/AOT campaign ID"
         );
     }
-    Ok(Readiness {
-        release: deployments.release,
-        volume: volume.label(),
-        stage: cfg.medium_stage.as_str(),
-        groups,
-        unavailable: unavailable.into_iter().collect(),
-        identities,
-        deployments: containers,
-    })
+    Ok(())
 }
 
 fn check_first_stage(audit: &Reconciliation) -> Result<()> {
@@ -1045,53 +1084,6 @@ fn check_host(cfg: &FileConfig) -> Result<()> {
     );
     eprintln!("medium raw socket and tcpdump host timestamps verified on {iface}");
     Ok(())
-}
-
-fn protocol_tables(plan: &[Group]) -> Vec<String> {
-    let mut tables = [
-        "condition",
-        "run",
-        "artifact",
-        "run_artifact",
-        "clock",
-        "calibration",
-        "calibration_sample",
-        "event_definition",
-        "send_attempt",
-        "capture",
-        "packet_fact",
-        "analysis",
-    ]
-    .map(|name| format!("bench.{name}"))
-    .into_iter()
-    .collect::<BTreeSet<_>>();
-    for cell in plan.iter().flat_map(|group| &group.cells) {
-        let (mode, experiment, variant) = (cell.mode, cell.experiment, cell.variant);
-        tables.insert(format!("{mode}.{experiment}_config"));
-        tables.insert(format!("{mode}.{experiment}_{variant}_data"));
-        if variant == "trace" {
-            tables.insert(format!("{mode}.{experiment}_event"));
-        } else {
-            for table in [
-                "metric_definition",
-                "metric_series",
-                "metric_snapshot",
-                "scalar_sample",
-                "histogram_sample",
-                "histogram_bucket",
-            ] {
-                tables.insert(format!("{mode}.{table}"));
-            }
-        }
-        let records = match experiment {
-            "firewall" => &["firewall_token"][..],
-            "exec_bench" => &["exec_batch"],
-            "case" => &["case_switch"],
-            _ => &["probe_result"],
-        };
-        tables.extend(records.iter().map(|table| format!("{mode}.{table}")));
-    }
-    tables.into_iter().collect()
 }
 
 fn bind_firmware(plan: Vec<Group>, report: &DeploymentReport) -> Result<Vec<FirmwareGroup>> {
@@ -1322,12 +1314,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a disposable protocol database XPOST_CASE_TEST_PG"]
+    #[ignore = "requires a disposable protocol database XPOST_CASE_TEST_DB_FILE"]
     async fn explicit_analysis_replacements_control_campaign_qualification() -> anyhow::Result<()> {
         use super::{Uuid, json};
-        let dsn = std::env::var("XPOST_CASE_TEST_PG")?;
-        let (mut client, connection) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls).await?;
-        tokio::spawn(connection);
+        let database = crate::db::Database::load_fixture()?;
+        let mut client = database.connect().await?;
         let tx = client.transaction().await?;
         let campaign = Uuid::new_v4();
         let identity = json!({"stage":"hal-aot","firmware_sha256":"fixture","input":{"pps":400}});
@@ -1344,19 +1335,19 @@ mod tests {
             } else {
                 "inconclusive"
             };
-            tx.execute("INSERT INTO bench.condition(condition_id,experiment,protocol_version,parameters,planned_modes)
+            tx.execute("INSERT INTO release.bench_condition(condition_id,experiment,protocol_version,parameters,planned_modes)
                 VALUES ($1,'firewall','1',$2,ARRAY['hal'])", &[&condition,&parameters]).await?;
             let fixture = Uuid::new_v4();
             let fixture_digest = "b".repeat(64);
-            tx.execute("INSERT INTO bench.artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type)
+            tx.execute("INSERT INTO release.bench_artifact(artifact_id,role,sha256,size_bytes,original_bytes,media_type)
                 VALUES($1,'fixture',$2,0,''::bytea,'application/octet-stream')", &[&fixture,&fixture_digest]).await?;
             let profile_hash = "c".repeat(64);
-            tx.execute("INSERT INTO hal.firewall_config(config_id,condition_id,instrumentation,profile_hash,target_pps,
+            tx.execute("INSERT INTO release.hal_firewall_config(config_id,condition_id,instrumentation,profile_hash,target_pps,
                 send_window_ns,drain_ns,payload_bytes,blacklist_capacity,blacklist_entries,legal_numerator,
                 legal_denominator,lookup_case,map_fixture_artifact_id)
                 VALUES($1,$2,'counter_only',$3,400,5000000000,250000000,42,256,1,1,10,'mixed',$4)",
                 &[&config,&condition,&profile_hash,&fixture]).await?;
-            tx.execute("INSERT INTO bench.run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid)
+            tx.execute("INSERT INTO release.bench_run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid)
                 VALUES($1,$2,$3,'hal','firewall','metrics','formal',1,0,$4,$5,$1)",
                 &[&run,&condition,&config,&scenario,&status]).await?;
             let original = Uuid::new_v4();
@@ -1370,7 +1361,7 @@ mod tests {
                     json!([{"supersedes_analysis_id":original}]),
                 ),
             ] {
-                tx.execute("INSERT INTO bench.analysis(analysis_id,run_id,algorithm_version,source_digest,qualified,issues)
+                tx.execute("INSERT INTO release.bench_analysis(analysis_id,run_id,algorithm_version,source_digest,qualified,issues)
                     VALUES($1,$2,'fixture',$3,$4,$5)", &[&id,&run,&digest,&qualified,&notes]).await?;
             }
         }
@@ -1400,24 +1391,5 @@ mod tests {
         assert!(!resume.should_run("firewall", "hal", "metrics", "400", 1));
         assert!(resume.should_run("firewall", "hal", "metrics", "400", 2));
         assert!(resume.should_run("firewall", "jit", "metrics", "400", 1));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires the dedicated schema in a disposable XPOST_CASE_TEST_PG database"]
-    async fn medium_protocol_preflight_is_read_only_and_reports_missing_tables()
-    -> anyhow::Result<()> {
-        let dsn = std::env::var("XPOST_CASE_TEST_PG")?;
-        let (mut client, session) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls).await?;
-        tokio::spawn(session);
-        let tables = super::protocol_tables(&super::plan(
-            super::Volume::Medium,
-            super::MediumStage::HalAot,
-        ));
-        super::protocol::check(&mut client, &tables).await?;
-        let error = super::protocol::check(&mut client, &["aot.missing_fixture_table".into()])
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("aot.missing_fixture_table"));
-        Ok(())
     }
 }

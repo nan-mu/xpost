@@ -113,7 +113,7 @@ An explicit replacement analysis identifies its predecessor in `supersedes_analy
 Both analyses must use the same raw evidence digest.
 The terminal audit identifies the accepted run IDs for plotting.
 
-Use `lookup` and `dev` as separate diagnostics. Medium omits Case.
+Use `dev` for standalone HAL smoke. Medium omits Case.
 Count firmware flashes and cold installations across both phases and resumes.
 Record diagnostics, pauses, and retries separately.
 The combined medium execution target is 60 minutes.
@@ -123,7 +123,7 @@ The combined medium execution target is 60 minutes.
 ```text
 before any device write:
   check all released deployments, firmware bindings, and slot capacities
-  check the dedicated PostgreSQL database and its four-mode schema
+  check the dedicated PostgreSQL database and the Protocol V1 tables in `release`
   check target identity and support for required callbacks
 for each firmware group:
   check the installed identity when resuming
@@ -210,27 +210,18 @@ An XDP execution should return `XDP_PASS` (2) on success or `XDP_ABORTED` (0) on
 
 The 88-byte `workload_v2` design had no runtime caller at the review head.
 The published ABI replaces that design.
-The older 32-byte `workload` path remains reachable from explicit legacy selections.
-It still needs replacement in the runner and firmware.
+The standalone `exec_bench` selection uses EXB2.
 
 ## Database and review
 
-Set `[postgres].protocol_dbname` in `xpost-test/config/default.toml`.
-Build and upload the selected runner with `./xpost-test/scripts/xpost-test.fish`.
-If the case database write fails, the runner exports available evidence under `case-evidence/<run_id>`.
-Use a dedicated database with the [four-mode schema](../sql/protocol_v1.sql).
-Apply the schema once to an empty database.
-The existing database holds earlier measurements.
-The case entry checks the protocol database before the firmware flash.
-
-```bash
-psql -X -v ON_ERROR_STOP=1 -f xpost-test/sql/protocol_v1.sql <new-database>
-psql -X -v ON_ERROR_STOP=1 -v run_id=<uuid> -f xpost-test/sql/medium_run.sql <new-database>
-```
+Configure and check the [experiment database](database.md) before collection.
+The runner checks Protocol V1 readiness before the first firmware write.
+When a Case write fails, the runner exports available evidence under `case-evidence/<run_id>`.
+Read the run with [medium_run.sql](../sql/medium_run.sql) and its `run_id` parameter.
 
 The read query selects the mode table for the run and returns the condition, config, result, and artifact identities.
 It also returns the Metrics snapshots or Trace events and available experiment-specific observations.
-Read the original bytes from `bench.artifact.original_bytes` with the returned artifact ID.
+Read the original bytes from `release.bench_artifact.original_bytes` with the returned artifact ID.
 The SQL fixture check wrote EXB2 rows for all four modes and read each run with this query.
 The check also exercised the network and case query paths with blocked fixture rows.
 A second DDL apply rejected the existing objects.

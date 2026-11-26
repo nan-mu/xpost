@@ -11,9 +11,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::agent::AgentClient;
 use crate::config::FileConfig;
-use crate::exam::just_drop::stim_src_ip;
 use crate::pipeline::{
-    status, BudgetEta, Harness, READY_BUDGET, RawTx, RoundUi, iface_ipv4, iface_mac,
+    BudgetEta, Harness, READY_BUDGET, RawTx, RoundUi, iface_ipv4, iface_mac, status,
 };
 
 const STIM_PORT: u16 = 8080;
@@ -94,7 +93,9 @@ async fn smoke_just_tx(
     let before = agent.map_slot("rxcnt", IPPROTO_UDP).await?;
 
     harness.reset_state().await;
-    harness.announce_neighbor(spoof).context("announce neighbor")?;
+    harness
+        .announce_neighbor(spoof)
+        .context("announce neighbor")?;
     let pps = SMOKE_PPS.max(1.0);
     let interval = Duration::from_secs_f64(1.0 / pps);
     let start = Instant::now();
@@ -117,7 +118,7 @@ async fn smoke_just_tx(
 
     let mut ok = 0u64;
     for seq in &seqs {
-        let sight = harness.take_seq(*seq).await;
+        let sight = harness.take_seq(*seq);
         if sight.t0_ns.is_some() && sight.t_bounce_ns.or(sight.t_echo_ns).is_some() {
             ok += 1;
         }
@@ -145,11 +146,7 @@ async fn smoke_just_tx(
     Ok(())
 }
 
-async fn smoke_just_drop(
-    cfg: &FileConfig,
-    agent: &AgentClient,
-    eta: &mut BudgetEta,
-) -> Result<()> {
+async fn smoke_just_drop(cfg: &FileConfig, agent: &AgentClient, eta: &mut BudgetEta) -> Result<()> {
     let ui = RoundUi::new();
     flash_settle(agent, &ui, eta, "just-drop-hal").await?;
 
@@ -169,7 +166,10 @@ async fn smoke_just_drop(
         .await
         .context("just_drop_hal disable/xdp")?;
 
-    let map = agent.get_map("counter").await.context("just_drop_hal get/map")?;
+    let map = agent
+        .get_map("counter")
+        .await
+        .context("just_drop_hal get/map")?;
     let mut sum = 0i64;
     let mut slots = 0u32;
     for e in &map.entries {
@@ -231,8 +231,15 @@ async fn smoke_firewall(
         .update_map_batch("blacklist", &[(hit.to_string(), "1".into())])
         .await
         .context("firewall_hal update/map seed")?;
-    let rows = agent.get_map("blacklist").await.context("firewall_hal get/map")?;
-    if !rows.entries.iter().any(|e| e.key == hit.to_string() && e.value == "1") {
+    let rows = agent
+        .get_map("blacklist")
+        .await
+        .context("firewall_hal get/map")?;
+    if !rows
+        .entries
+        .iter()
+        .any(|e| e.key == hit.to_string() && e.value == "1")
+    {
         ui.clear_temp_for_error();
         bail!("firewall_hal: seeded hit={hit} missing from get/map");
     }
@@ -275,7 +282,10 @@ async fn smoke_firewall(
         .await
         .context("firewall_hal disable/xdp")?;
 
-    let map_rows = agent.get_map("blacklist").await.context("firewall_hal get/map after")?;
+    let map_rows = agent
+        .get_map("blacklist")
+        .await
+        .context("firewall_hal get/map after")?;
     let hit_count: i64 = map_rows
         .entries
         .iter()
@@ -363,10 +373,7 @@ async fn paced_multi_src(
         }
         if last_paint.elapsed() >= Duration::from_millis(100) {
             let frac = (sent as f64 / expect).clamp(0.0, 1.0);
-            ui.live_set(
-                "hal drop",
-                &[("tx", frac, &format!("{sent}/{expect:.0}"))],
-            );
+            ui.live_set("hal drop", &[("tx", frac, &format!("{sent}/{expect:.0}"))]);
             ui.set_eta(&eta.fmt());
             last_paint = Instant::now();
         }
@@ -384,4 +391,14 @@ fn lan_ip(esp: Ipv4Addr, avoid: &[Ipv4Addr]) -> Ipv4Addr {
         }
     }
     Ipv4Addr::new(o[0], o[1], o[2], 254)
+}
+
+/// Deterministic stim src IP: last octet cycles with seed; avoids DUT own octet.
+fn stim_src_ip(seed: i64, pkt_i: u64, esp: Ipv4Addr) -> Ipv4Addr {
+    let o = esp.octets();
+    let mut octet = ((seed as u64).wrapping_add(pkt_i) % 256) as u8;
+    if octet == o[3] {
+        octet = octet.wrapping_add(1);
+    }
+    Ipv4Addr::new(o[0], o[1], o[2], octet)
 }
