@@ -12,10 +12,7 @@ use serde_json::{Value, json};
 use tokio_postgres::{Client, Transaction, types::ToSql};
 use uuid::Uuid;
 
-use crate::{
-    config::PostgresConfig,
-    db::{metrics, protocol},
-};
+use crate::db::{Database, metrics, protocol};
 
 use super::{Analysis, Cell, Link, Observation, Stimulus, Workload, seed, sent_token};
 
@@ -32,7 +29,7 @@ impl Attempt {
     pub(super) async fn finish_recovering(
         &self,
         client: &mut Client,
-        cfg: &PostgresConfig,
+        database: &Database,
         cell: &Cell<'_>,
         link: &Link,
         out: &Observation,
@@ -43,7 +40,8 @@ impl Attempt {
             Ok(()) => return Ok((intended.into(), false)),
             Err(error) => error,
         };
-        *client = protocol::connect(cfg)
+        *client = database
+            .connect()
             .await
             .with_context(|| format!("reconnect after finish failed: {initial:#}"))?;
         let status = self.status(client).await?;
@@ -58,7 +56,7 @@ impl Attempt {
             Ok(()) => Ok((intended.into(), true)),
             Err(error) => {
                 if client.is_closed() {
-                    *client = protocol::connect(cfg).await?;
+                    *client = database.connect().await?;
                 }
                 let status = self.status(client).await?;
                 ensure!(

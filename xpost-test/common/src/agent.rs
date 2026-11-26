@@ -458,13 +458,8 @@ impl AgentClient {
         self.update_map_batch(name, &entries).await
     }
 
-    /// `POST /v1/clear/perf`.
-    pub async fn clear_perf(&self) -> Result<String> {
-        self.post_json("/v1/clear/perf", &serde_json::json!({}))
-            .await
-    }
-
     /// `GET /v1/get/perf` — message carries `b64=…` (or equivalent).
+    #[allow(dead_code)] // The HTTP contract test still exercises this endpoint.
     pub async fn get_perf(&self) -> Result<String> {
         self.get_message("/v1/get/perf").await
     }

@@ -3,12 +3,10 @@
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-#[cfg(test)]
-use tokio_postgres::NoTls;
 use tokio_postgres::{Client, Transaction};
 use uuid::Uuid;
 
-use crate::{config::PostgresConfig, db::protocol};
+use crate::db::{Database, protocol};
 
 use super::case_capture::{Evidence, POST, PPS, PRE, Packet};
 use super::case_trace::Trace;
@@ -19,8 +17,8 @@ pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-pub(super) async fn connect(cfg: &PostgresConfig) -> Result<Client> {
-    let mut client = protocol::connect(cfg).await?;
+pub(super) async fn connect(database: &Database) -> Result<Client> {
+    let mut client = database.connect().await?;
     let tables = [
         "bench.run",
         "bench.condition",
@@ -401,11 +399,10 @@ mod tests {
     use crate::exam::case_trace::Event;
 
     #[tokio::test]
-    #[ignore = "requires a disposable protocol database supplied as XPOST_CASE_TEST_PG"]
+    #[ignore = "requires a disposable protocol database supplied as XPOST_CASE_TEST_DB_FILE"]
     async fn stores_a_case_switch_and_both_raw_artifacts_under_its_run_id() -> Result<()> {
-        let dsn = std::env::var("XPOST_CASE_TEST_PG")?;
-        let (mut client, connection) = tokio_postgres::connect(&dsn, NoTls).await?;
-        tokio::spawn(connection);
+        let database = crate::db::Database::load_fixture()?;
+        let mut client = database.connect().await?;
         let run = Uuid::new_v4();
         let attempt = Attempt::start(
             &mut client,

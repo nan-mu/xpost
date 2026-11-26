@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::agent::AgentClient;
 use crate::config::FileConfig;
+use crate::db::{Database, protocol};
 use crate::pipeline::{READY_BUDGET, RoundUi, status};
 
 use super::{
@@ -43,6 +44,7 @@ pub(super) fn planned_input(cfg: &FileConfig, slot_b_sha256: &str) -> Result<ser
 
 pub(super) async fn run_case(
     cfg: &FileConfig,
+    database: &Database,
     expected_fw: &str,
     medium_id: Uuid,
     identity: &serde_json::Value,
@@ -69,7 +71,7 @@ pub(super) async fn run_case(
             && identity["input"]["slot_b_sha256"].as_str() == Some(&digest_b),
         "case preflight changed since campaign planning"
     );
-    let mut client = case_store::connect(&cfg.postgres).await?;
+    let mut client = case_store::connect(database).await?;
     let run = Uuid::new_v4();
     let profile = case_store::hex(&Sha256::digest(b"case-aot-trace-v0.1.1"));
     let attempt = match Attempt::start(
@@ -86,7 +88,7 @@ pub(super) async fn run_case(
     {
         Ok(attempt) => attempt,
         Err(error) => {
-            let state = crate::db::protocol::run_status(&cfg.postgres, run).await;
+            let state = protocol::run_status(database, run).await;
             emit_result(
                 run,
                 "blocked",
@@ -121,11 +123,11 @@ pub(super) async fn run_case(
         .finish(&mut client, &observation, &cfg.probe.iface)
         .await
     {
-        let mut state = crate::db::protocol::run_status(&cfg.postgres, run).await;
+        let mut state = protocol::run_status(database, run).await;
         let mut detail = format!("{error:#}");
         if state == "running" {
             let retry = async {
-                let mut database = crate::db::protocol::connect(&cfg.postgres).await?;
+                let mut database = database.connect().await?;
                 attempt
                     .finish(&mut database, &observation, &cfg.probe.iface)
                     .await
@@ -133,7 +135,7 @@ pub(super) async fn run_case(
             .await;
             state = if let Err(retry_error) = retry {
                 detail.push_str(&format!(". Same-run write retry: {retry_error:#}"));
-                crate::db::protocol::run_status(&cfg.postgres, run).await
+                protocol::run_status(database, run).await
             } else {
                 status.to_owned()
             };
@@ -283,7 +285,7 @@ async fn perform(
             "source_slot": 0, "target_slot": 1, "target_generation": gen_b,
         }))?;
         let tx = client.transaction().await?;
-        crate::db::protocol::artifact(&tx, run, "case_publish_intent", &intent).await?;
+        protocol::artifact(&tx, run, "case_publish_intent", &intent).await?;
         tx.commit().await.context("persist case publish intent")
     }
     .await;

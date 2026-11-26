@@ -36,11 +36,4 @@ mod tests {
             "the new protocol does not delete existing data"
         );
     }
-
-    #[test]
-    fn the_old_generator_is_still_the_three_mode_stream_protocol() {
-        assert_eq!(super::super::schema::MODES, ["aot", "rbpf", "hal"]);
-        assert!(super::super::schema::all_sql().contains("CREATE TABLE IF NOT EXISTS"));
-        assert!(super::super::schema::all_sql().contains("'stream','trace'"));
-    }
 }

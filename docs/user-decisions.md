@@ -202,3 +202,18 @@ Publish the first phase and verify all its terminal keys before the second phase
 Use the 30-second network windows and 100-batch EXB2 runs specified in the full brief.
 
 Reason. The maintainer requested the full grid after reviewing the phased PR evidence.
+
+## 2026-11-27 Runner database configuration
+
+New collection writes Protocol V1 to the NAS database `experiments`.
+The runner reads PostgreSQL settings from `/root/.db` at runtime.
+The NAS database `postgres` retains the historical data.
+
+Reason. The maintainer stopped the historical data migration and chose a dedicated database for new collection.
+
+## 2026-11-27 Lookup selection
+
+Retire the standalone `lookup` selection.
+
+Reason. The diagnostic uses the historical writer and has no equivalent Protocol V1 entry.
+The maintainer chose retirement during the database refactor.

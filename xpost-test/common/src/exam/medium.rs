@@ -15,7 +15,7 @@ use super::{exb2::Sampling, medium_network::NetworkPlan};
 use crate::{
     agent::{AgentClient, DeploymentReport},
     config::{FileConfig, MediumStage},
-    db::protocol,
+    db::{Database, protocol},
 };
 
 const MODES: [&str; 4] = ["hal", "aot", "jit", "rbpf"];
@@ -194,7 +194,7 @@ pub async fn run(cfg: &FileConfig, volume: Volume) -> Result<()> {
         cfg.medium_stage == MediumStage::HalAot || cfg.medium_resume_id.is_some(),
         "JIT/rBPF requires the HAL/AOT campaign ID"
     );
-    let ready = preflight(cfg, volume).await?;
+    let (ready, settings) = preflight(cfg, volume).await?;
     println!("{}", serde_json::to_string(&ready)?);
     ensure!(
         ready.unavailable.is_empty(),
@@ -206,11 +206,11 @@ pub async fn run(cfg: &FileConfig, volume: Volume) -> Result<()> {
         .resolved_endpoint()
         .context("medium needs [agent].endpoint")?;
     let agent = AgentClient::new(endpoint);
-    let mut database = protocol::connect(&cfg.postgres).await?;
+    let mut database = settings.connect().await?;
     let expected: BTreeSet<String> = ready.identities.keys().cloned().collect();
     let medium_id = cfg.medium_resume_id.unwrap_or_else(Uuid::new_v4);
     // A dedicated connection keeps the lock while collectors recover their writes.
-    let lock = protocol::connect(&cfg.postgres).await?;
+    let lock = settings.connect().await?;
     let lock_key = i64::from_be_bytes(medium_id.as_bytes()[..8].try_into().expect("UUID prefix"));
     ensure!(
         lock.query_one("SELECT pg_try_advisory_lock($1)", &[&lock_key])
@@ -258,6 +258,7 @@ pub async fn run(cfg: &FileConfig, volume: Volume) -> Result<()> {
             cfg,
             volume,
             &agent,
+            &settings,
             &mut database,
             group,
             &mut device,
@@ -277,7 +278,7 @@ pub async fn run(cfg: &FileConfig, volume: Volume) -> Result<()> {
                 })
             );
             problems.push(format!("{error:#}"));
-            match protocol::connect(&cfg.postgres).await {
+            match settings.connect().await {
                 Ok(recovered) => database = recovered,
                 Err(error) => {
                     problems.push(format!("reconnect protocol database: {error:#}"));
@@ -481,6 +482,7 @@ async fn run_group(
     cfg: &FileConfig,
     volume: Volume,
     agent: &AgentClient,
+    settings: &Database,
     db: &mut Client,
     group: &FirmwareGroup,
     device: &mut DeviceDeployment,
@@ -505,6 +507,7 @@ async fn run_group(
                 }
                 super::case::run_case(
                     cfg,
+                    settings,
                     hash,
                     medium_id,
                     resume
@@ -546,7 +549,7 @@ async fn run_group(
                 super::exec_bench::run_mode(
                     agent,
                     db,
-                    &cfg.postgres,
+                    settings,
                     super::exec_bench::Mode::parse(cell.mode)?,
                     hash,
                     Some(medium_id),
@@ -577,6 +580,7 @@ async fn run_group(
             super::medium_network::run_cell(
                 cfg,
                 agent,
+                settings,
                 db,
                 cell.experiment,
                 cell.mode,
@@ -854,7 +858,7 @@ fn terminal_attempt(status: &str, issues: &Value) -> bool {
 }
 
 pub async fn check(cfg: &FileConfig, volume: Volume) -> Result<()> {
-    let ready = preflight(cfg, volume).await?;
+    let (ready, _) = preflight(cfg, volume).await?;
     println!("{}", serde_json::to_string_pretty(&ready)?);
     ensure!(
         ready.unavailable.is_empty(),
@@ -864,7 +868,7 @@ pub async fn check(cfg: &FileConfig, volume: Volume) -> Result<()> {
     Ok(())
 }
 
-async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<Readiness> {
+async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<(Readiness, Database)> {
     let planned = plan(volume, cfg.medium_stage);
     if let Some(experiment) = &cfg.medium_resume_experiment {
         ensure!(
@@ -945,7 +949,8 @@ async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<Readiness> {
         "medium Agent health and deployment identities verified for {} Firmware ELF digests",
         groups.len()
     );
-    let mut database = protocol::connect(&cfg.postgres).await?;
+    let settings = Database::load()?;
+    let mut database = settings.connect().await?;
     protocol::check(&mut database, &tables).await?;
     check_host(cfg)?;
     super::medium_network::check_capture_path(cfg)?;
@@ -971,15 +976,18 @@ async fn preflight(cfg: &FileConfig, volume: Volume) -> Result<Readiness> {
             "JIT/rBPF needs the original HAL/AOT campaign ID"
         );
     }
-    Ok(Readiness {
-        release: deployments.release,
-        volume: volume.label(),
-        stage: cfg.medium_stage.as_str(),
-        groups,
-        unavailable: unavailable.into_iter().collect(),
-        identities,
-        deployments: containers,
-    })
+    Ok((
+        Readiness {
+            release: deployments.release,
+            volume: volume.label(),
+            stage: cfg.medium_stage.as_str(),
+            groups,
+            unavailable: unavailable.into_iter().collect(),
+            identities,
+            deployments: containers,
+        },
+        settings,
+    ))
 }
 
 fn check_first_stage(audit: &Reconciliation) -> Result<()> {
@@ -1322,12 +1330,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a disposable protocol database XPOST_CASE_TEST_PG"]
+    #[ignore = "requires a disposable protocol database XPOST_CASE_TEST_DB_FILE"]
     async fn explicit_analysis_replacements_control_campaign_qualification() -> anyhow::Result<()> {
         use super::{Uuid, json};
-        let dsn = std::env::var("XPOST_CASE_TEST_PG")?;
-        let (mut client, connection) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls).await?;
-        tokio::spawn(connection);
+        let database = crate::db::Database::load_fixture()?;
+        let mut client = database.connect().await?;
         let tx = client.transaction().await?;
         let campaign = Uuid::new_v4();
         let identity = json!({"stage":"hal-aot","firmware_sha256":"fixture","input":{"pps":400}});
@@ -1403,12 +1410,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires the dedicated schema in a disposable XPOST_CASE_TEST_PG database"]
+    #[ignore = "requires the dedicated schema in a disposable XPOST_CASE_TEST_DB_FILE database"]
     async fn medium_protocol_preflight_is_read_only_and_reports_missing_tables()
     -> anyhow::Result<()> {
-        let dsn = std::env::var("XPOST_CASE_TEST_PG")?;
-        let (mut client, session) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls).await?;
-        tokio::spawn(session);
+        let database = crate::db::Database::load_fixture()?;
+        let mut client = database.connect().await?;
         let tables = super::protocol_tables(&super::plan(
             super::Volume::Medium,
             super::MediumStage::HalAot,

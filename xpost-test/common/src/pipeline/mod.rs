@@ -1,7 +1,6 @@
 //! Stimulus / TC harness plumbing shared by exams.
 
 mod harness;
-mod pkt_rx;
 mod raw_tx;
 pub mod status;
 

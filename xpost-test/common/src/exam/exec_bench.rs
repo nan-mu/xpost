@@ -12,8 +12,8 @@ use tokio_postgres::{Client, Transaction};
 use uuid::Uuid;
 
 use crate::agent::{AgentClient, ExecBatch};
-use crate::config::{FileConfig, PostgresConfig};
-use crate::db::{metrics, protocol};
+use crate::config::FileConfig;
+use crate::db::{Database, metrics, protocol};
 
 use super::exb2::{self, BUF, ROUNDS, SEED, Sampling};
 use super::medium::{Actions, Resume};
@@ -108,7 +108,8 @@ pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
             }
         }
     }
-    let mut db = protocol::connect(&cfg.postgres).await?;
+    let database = Database::load()?;
+    let mut db = database.connect().await?;
     protocol::check(&mut db, &tables).await?;
     let mut loaded = String::new();
     let mut image = None;
@@ -126,7 +127,7 @@ pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
         run_mode(
             &agent,
             &mut db,
-            &cfg.postgres,
+            &database,
             mode,
             &loaded,
             None,
@@ -142,7 +143,7 @@ pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
 pub(super) async fn run_mode(
     agent: &AgentClient,
     db: &mut Client,
-    database: &PostgresConfig,
+    database: &Database,
     mode: Mode,
     firmware_hash: &str,
     medium_id: Option<Uuid>,
@@ -243,7 +244,7 @@ struct Attempt<'a> {
 async fn run_attempt(
     agent: &AgentClient,
     db: &mut Client,
-    database: &PostgresConfig,
+    database: &Database,
     sample: &Sample,
     attempt: &Attempt<'_>,
 ) -> Result<()> {
@@ -278,7 +279,7 @@ async fn run_attempt(
         let initial_error = format!("{error:#}");
         let mut state = protocol::run_status(database, attempt.id).await;
         if state == "running"
-            && let Ok(mut recovered) = protocol::connect(database).await
+            && let Ok(mut recovered) = database.connect().await
         {
             terminal = finish(&mut recovered, attempt, sample, &evidence).await;
             state = protocol::run_status(database, attempt.id).await;
@@ -749,21 +750,22 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a disposable protocol database XPOST_CASE_TEST_PG"]
+    #[ignore = "requires a disposable protocol database XPOST_CASE_TEST_DB_FILE"]
     async fn exb2_attempt_roundtrips_in_all_four_protocol_schemas() -> Result<()> {
-        let dsn = std::env::var("XPOST_CASE_TEST_PG")?;
-        let (mut client, session) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls).await?;
-        tokio::spawn(session);
+        let database = crate::db::Database::load_fixture()?;
+        let mut client = database.connect().await?;
         for mode in [Mode::Hal, Mode::Aot, Mode::Jit, Mode::Rbpf] {
             for sampling in [Sampling::MEDIUM, Sampling::FULL] {
-                roundtrip(&mut client, mode, sampling, false).await?;
+                roundtrip(&database, &mut client, mode, sampling, false).await?;
             }
         }
-        roundtrip(&mut client, Mode::Hal, Sampling::FULL, true).await?;
+        roundtrip(&database, &mut client, Mode::Hal, Sampling::FULL, true).await?;
+        finish_rolls_back_on_constraint_failure(&database, &mut client).await?;
         Ok(())
     }
 
     async fn roundtrip(
+        database: &Database,
         client: &mut Client,
         mode: Mode,
         sampling: Sampling,
@@ -790,6 +792,7 @@ mod tests {
         let row = client.query_one(&format!("SELECT r.status, c.samples_per_run, d.batches_expected, d.batches_completed, d.valid_batches, d.qualified FROM bench.run r JOIN {mode}.exec_bench_metrics_data d USING (run_id,config_id) JOIN {mode}.exec_bench_config c USING (config_id) WHERE r.run_id=$1"), &[&attempt.id]).await?;
         let status = if corrupt { "failed" } else { "complete" };
         assert_eq!(row.get::<_, String>(0), status);
+        assert_eq!(protocol::run_status(database, attempt.id).await, status);
         assert_eq!(row.get::<_, i32>(1), sampling.samples);
         assert_eq!(row.get::<_, i32>(2), sampling.samples);
         assert_eq!(row.get::<_, i32>(3), sampling.samples - i32::from(corrupt));
@@ -833,6 +836,46 @@ mod tests {
             sampling.samples - 2 * i32::from(corrupt)
         );
         assert_eq!(event["us_per_round"].as_f64(), (!corrupt).then_some(5.0));
+        Ok(())
+    }
+
+    async fn finish_rolls_back_on_constraint_failure(
+        database: &Database,
+        client: &mut Client,
+    ) -> Result<()> {
+        let sample = fixture_sample(Mode::Hal, Sampling::MEDIUM);
+        let attempt = Attempt {
+            id: Uuid::new_v4(),
+            order: 0,
+            repeat: 1,
+            config: Uuid::new_v4(),
+            retry_of: None,
+            medium_identity: None,
+        };
+        start(client, &attempt, &sample).await?;
+        client.execute(
+            "INSERT INTO bench.clock(run_id,clock_id,domain,tick_hz,tick_bits,precision_description)
+             VALUES ($1,'dut','dut',1000000,64,'fixture conflict')",
+            &[&attempt.id],
+        ).await?;
+        let acquired = fixture_acquisition(attempt.id, &sample, sample.sampling.samples as u64);
+        let evidence = validate(attempt.id, &sample, &acquired);
+        let error = finish(client, &attempt, &sample, &evidence)
+            .await
+            .unwrap_err();
+        let error = error.downcast_ref::<tokio_postgres::Error>().unwrap();
+        assert_eq!(
+            error.code(),
+            Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION)
+        );
+        assert_eq!(protocol::run_status(database, attempt.id).await, "running");
+        let rows = client
+            .query_one(
+                "SELECT count(*) FROM hal.exec_batch WHERE run_id=$1",
+                &[&attempt.id],
+            )
+            .await?;
+        assert_eq!(rows.get::<_, i64>(0), 0);
         Ok(())
     }
 

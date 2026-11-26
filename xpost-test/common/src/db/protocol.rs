@@ -1,44 +1,48 @@
 //! Connections and read-only checks for the dedicated experiment database.
 
-use std::time::Duration;
-
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
-use tokio_postgres::{Client, NoTls, Transaction};
+use tokio_postgres::{Client, Transaction};
 use uuid::Uuid;
 
-use crate::config::PostgresConfig;
+use super::Database;
 
-pub async fn connect(cfg: &PostgresConfig) -> Result<Client> {
-    let database = cfg
-        .protocol_dbname
-        .as_deref()
-        .context("set [postgres].protocol_dbname")?;
-    ensure!(
-        !database.trim().is_empty() && database != cfg.dbname,
-        "use a protocol database separate from the historical database"
-    );
-    let (client, connection) = tokio_postgres::Config::new()
-        .host(&cfg.host)
-        .port(cfg.port)
-        .dbname(database)
-        .user(&cfg.user)
-        .password(&cfg.password)
-        .connect_timeout(Duration::from_secs(10))
-        .connect(NoTls)
+pub async fn check_database() -> Result<()> {
+    let mut client = Database::load()?.connect().await?;
+    let tables = declared_tables();
+    let identity = client
+        .query_one("SELECT current_database()::text, current_user::text", &[])
         .await
-        .context("connect protocol database")?;
-    tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            log::warn!("protocol database connection: {error}");
-        }
-    });
-    Ok(client)
+        .context("read protocol database identity")?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "database": identity.get::<_, &str>(0),
+            "role": identity.get::<_, &str>(1),
+            "expected_tables": tables.len(),
+        })
+    );
+    check(&mut client, &tables).await?;
+    println!("Protocol V1 tables and privileges verified");
+    Ok(())
 }
 
-pub async fn run_status(cfg: &PostgresConfig, run: Uuid) -> String {
+pub(super) fn declared_tables() -> Vec<String> {
+    include_str!("../../../sql/protocol_v1.sql")
+        .lines()
+        .filter_map(|line| line.strip_prefix("CREATE TABLE "))
+        .map(|line| {
+            line.split_whitespace()
+                .next()
+                .expect("Protocol V1 table name")
+                .to_owned()
+        })
+        .collect()
+}
+
+pub async fn run_status(database: &Database, run: Uuid) -> String {
     let result: Result<Option<String>> = async {
-        let client = connect(cfg).await?;
+        let client = database.connect().await?;
         Ok(client
             .query_opt("SELECT status FROM bench.run WHERE run_id=$1", &[&run])
             .await?
@@ -57,22 +61,37 @@ pub async fn check(client: &mut Client, tables: &[String]) -> Result<()> {
     let tx = client.build_transaction().read_only(true).start().await?;
     let rows = tx
         .query(
-            "SELECT names.name FROM unnest($1::text[]) AS names(name) \
-         LEFT JOIN pg_class c ON c.oid = to_regclass(names.name) \
-         WHERE c.oid IS NULL OR c.relkind NOT IN ('r', 'p') \
-            OR NOT has_schema_privilege(c.relnamespace, 'USAGE') \
-            OR NOT has_table_privilege(c.oid, 'SELECT') \
-            OR NOT has_table_privilege(c.oid, 'INSERT') \
-            OR (names.name = 'bench.run' AND NOT has_table_privilege(c.oid, 'UPDATE')) \
-         ORDER BY names.name",
+            "SELECT names.name, c.oid IS NOT NULL AS present, \
+                    has_schema_privilege(n.oid, 'USAGE') AS can_use, \
+                    has_table_privilege(c.oid, 'SELECT') AS can_select, \
+                    has_table_privilege(c.oid, 'INSERT') AS can_insert, \
+                    names.name <> 'bench.run' OR has_table_privilege(c.oid, 'UPDATE') AS can_update \
+             FROM unnest($1::text[]) AS names(name) \
+             LEFT JOIN pg_namespace n ON n.nspname = split_part(names.name, '.', 1) \
+             LEFT JOIN pg_class c ON c.relnamespace = n.oid \
+                 AND c.relname = split_part(names.name, '.', 2) AND c.relkind IN ('r', 'p') \
+             ORDER BY names.name",
             &[&tables],
         )
         .await
         .context("check protocol database tables and privileges")?;
-    let missing = rows
-        .iter()
-        .map(|row| row.get::<_, &str>(0))
-        .collect::<Vec<_>>();
+    let mut missing = Vec::new();
+    for row in rows {
+        let name = row.get::<_, &str>(0);
+        if !row.get::<_, bool>(1) {
+            missing.push(format!("{name} (table missing)"));
+            continue;
+        }
+        let privileges = ["USAGE", "SELECT", "INSERT", "UPDATE"];
+        let absent = privileges
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, name)| (!row.get::<_, bool>(i + 2)).then_some(name))
+            .collect::<Vec<_>>();
+        if !absent.is_empty() {
+            missing.push(format!("{name} ({})", absent.join(", ")));
+        }
+    }
     ensure!(
         missing.is_empty(),
         "protocol tables or privileges missing: {}",

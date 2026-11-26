@@ -1,8 +1,7 @@
 //! TR3000 host harness binary **`xpost-test`**.
 //!
 //! Sole entry: bare `./xpost-test` (no env, no flags). Experiments and knobs
-//! come from compile-time `profile.toml`, `config/default.toml` and `just_tx.toml` /
-//! `just_drop.toml` — see [`config`].
+//! come from compile-time TOML. Database settings come from `/root/.db`.
 //!
 #![doc = include_str!("overview.md")]
 #![deny(dead_code)]
@@ -15,7 +14,7 @@ mod exam;
 mod pipeline;
 
 use anyhow::Result;
-use config::{FileConfig, install_postgres};
+use config::FileConfig;
 use log::info;
 
 #[tokio::main]
@@ -26,12 +25,12 @@ async fn main() -> Result<()> {
         "all" => return medium::run(&cfg, Volume::All).await,
         "all-plan" => return medium::preview(cfg.medium_stage, Volume::All),
         "all-preflight" => return medium::check(&cfg, Volume::All).await,
+        "db-preflight" => return db::protocol::check_database().await,
         "medium" => return medium::run(&cfg, Volume::Medium).await,
         "medium-plan" => return medium::preview(cfg.medium_stage, Volume::Medium),
         "medium-preflight" => return medium::check(&cfg, Volume::Medium).await,
         _ => {}
     }
-    install_postgres(cfg.postgres.clone());
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     info!(
@@ -55,67 +54,10 @@ async fn main() -> Result<()> {
 
 async fn dispatch(cfg: &FileConfig, name: &str) -> Result<()> {
     match name {
-        "just_drop" => exam::run_just_drop_pps(cfg).await,
-        "firewall" => {
-            exam::run_firewall(
-                cfg,
-                exam::FirewallOpts {
-                    formal: cfg.firewall.formal,
-                    rates: None,
-                    lookup: false,
-                    skip_trace: false,
-                },
-            )
-            .await
-        }
-        "just_tx" => {
-            let mut harness = pipeline::open_harness(cfg).await?;
-            exam::run_just_tx(
-                cfg,
-                &mut harness,
-                exam::JustTxOpts {
-                    is_dev: false,
-                    formal: cfg.just_tx.formal,
-                    rates: None,
-                    lookup_pair: false,
-                    skip_trace: false,
-                },
-            )
-            .await
-        }
-        "lookup" => {
-            let mut harness = pipeline::open_harness(cfg).await?;
-            exam::run_just_tx(
-                cfg,
-                &mut harness,
-                exam::JustTxOpts {
-                    is_dev: false,
-                    formal: true,
-                    rates: Some(&[1400.0]),
-                    lookup_pair: true,
-                    skip_trace: true,
-                },
-            )
-            .await?;
-            exam::run_firewall(
-                cfg,
-                exam::FirewallOpts {
-                    formal: true,
-                    rates: Some(exam::LOOKUP_RATES),
-                    lookup: true,
-                    skip_trace: true,
-                },
-            )
-            .await
-        }
         "exec_bench" => exam::run_exec_bench(cfg).await,
         "dev" => {
             let mut harness = pipeline::open_harness(cfg).await?;
             exam::run_dev(cfg, &mut harness).await
-        }
-        "formal-clear" => {
-            let pg_opts = db::PgOpts { formal: true };
-            db::formal_clear(pg_opts).await
         }
         other => anyhow::bail!("internal: unknown run entry {other:?}"),
     }
