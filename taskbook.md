@@ -52,3 +52,7 @@ PGDATABASE=experiments
 ## 交付
 
 按 `task-brief-to-pr` 的独立 worktree 流程实施；主代理亲自运行未覆盖的测试。采用 Matt `code-review` 核对规格和安全边界，采用 `pr` 在英文 PR 正文中记录实际检查结果、复用证据、未完成事项、旧入口处理清单、初始化与 preflight 状态。通过指定 GitHub MCP 创建开放 PR（不合并），不要用 gh 直连。没有真实运行证据时不宣称 NAS 已初始化、应用已连通或写入成功。待用户审核合入后，再由用户授权启动新数据采集。
+
+## 澄清记录
+
+- 2026-11-27：`lookup` 的开关对照仍使用旧 writer，Protocol V1 没有等价的写入入口。询问是否改为本地诊断文件，或退役入口。维护者答复：「退役 lookup 入口」。
