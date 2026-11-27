@@ -254,5 +254,7 @@ Select one Rust workload when building each HAL Firmware ELF.
 Use task equivalence for the native baseline.
 Add `matmul` to HAL. Keep the seven released workloads in AOT, JIT, and rBPF.
 Preserve existing Protocol V1 rows when checking the expanded HAL workload constraint.
+Use 630 attempts across 29 cells for the updated `all` plan.
+This supersedes the 625-attempt count for future planning. The original campaign keeps its recorded count.
 
 Reason. The PR #42 brief requests independent workload deployment and a native MCU baseline.

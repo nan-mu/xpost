@@ -5,7 +5,7 @@
 
 use serde_json::{Value, json};
 
-const HAL_PROGRAMS: [&str; 8] = [
+pub(super) const HAL_PROGRAMS: [&str; 8] = [
     "noop",
     "prime",
     "log2",
@@ -15,12 +15,8 @@ const HAL_PROGRAMS: [&str; 8] = [
     "strcmp",
     "matmul",
 ];
-pub(super) fn programs(hal: bool) -> &'static [&'static str] {
-    if hal {
-        &HAL_PROGRAMS
-    } else {
-        &HAL_PROGRAMS[..7]
-    }
+pub(super) fn xdp_programs() -> &'static [&'static str] {
+    &HAL_PROGRAMS[..HAL_PROGRAMS.len() - 1]
 }
 
 pub(super) fn task(program: &str) -> usize {
@@ -191,13 +187,13 @@ mod tests {
 
     #[test]
     fn full_sampling_changes_identity_without_changing_workload_vectors() {
-        let medium = conditions(Sampling::MEDIUM, programs(false));
-        let full = conditions(Sampling::FULL, programs(false));
+        let medium = conditions(Sampling::MEDIUM, xdp_programs());
+        let full = conditions(Sampling::FULL, xdp_programs());
         assert_eq!(medium["batches_per_program"], 2);
         assert_eq!(full["batches_per_program"], 500);
         assert_eq!(medium["runs_per_program"], 2);
         assert_eq!(full["runs_per_program"], 5);
-        for task in 0..programs(false).len() {
+        for task in 0..xdp_programs().len() {
             let mut full_input = full["workloads"][task].as_object().unwrap().clone();
             assert_eq!(
                 full_input.remove("sampling"),

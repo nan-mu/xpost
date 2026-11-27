@@ -1,7 +1,9 @@
 //! Read the statement and column inventory from the canonical Protocol V1 DDL.
 
 use anyhow::{Context, Result, bail, ensure};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub(super) const HAL_EXEC_CONFIG: &str = "hal_exec_bench_config";
 
 pub(super) const SQL: &str = include_str!("../../../sql/protocol_v1.sql");
 
@@ -23,6 +25,7 @@ pub(super) struct TableDefinition {
     pub primary_key: Vec<String>,
     pub foreign_keys: Vec<ForeignKey>,
     pub checks: Vec<Vec<String>>,
+    pub workload_allowlist: BTreeSet<String>,
     pub write_trigger: Option<String>,
 }
 
@@ -83,7 +86,7 @@ impl Ddl {
                 })
                 .context("read Protocol V1 object name")?;
             if table {
-                let definition = table_definition(sql)
+                let definition = table_definition(name, sql)
                     .with_context(|| format!("read Protocol V1 definition for release.{name}"))?;
                 ensure!(
                     tables.insert(name, definition).is_none(),
@@ -154,7 +157,7 @@ fn statement_end(sql: &str) -> Option<usize> {
     None
 }
 
-fn table_definition(sql: &str) -> Result<TableDefinition> {
+fn table_definition(name: &str, sql: &str) -> Result<TableDefinition> {
     let (_, body) = sql.split_once('(').context("find table body")?;
     let body = body
         .trim_end()
@@ -235,11 +238,24 @@ fn table_definition(sql: &str) -> Result<TableDefinition> {
     for column in &mut table.columns {
         column.not_null |= table.primary_key.contains(&column.name);
     }
-    table.checks = items
-        .iter()
-        .filter_map(|item| item.split_once("CHECK").map(|(_, check)| check))
-        .map(|check| check_columns(check, &table.columns))
-        .collect();
+    for item in items {
+        let Some((prefix, expression)) = item.split_once("CHECK") else {
+            continue;
+        };
+        let columns = check_columns(expression, &table.columns);
+        if name == HAL_EXEC_CONFIG && columns == ["workload"] {
+            table.workload_allowlist = workload_values(&item[prefix.len()..])
+                .context("parse HAL workload CHECK in Protocol V1 DDL")?
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+        }
+        table.checks.push(columns);
+    }
+    ensure!(
+        name != HAL_EXEC_CONFIG || !table.workload_allowlist.is_empty(),
+        "missing HAL workload allowlist in Protocol V1 DDL"
+    );
     Ok(table)
 }
 
@@ -270,4 +286,45 @@ fn without_comment(line: &str) -> &str {
         }
     }
     line
+}
+
+// PostgreSQL deparses a literal IN list as equality with ANY over an array.
+// Limit equivalence to this form and compare values without evaluating SQL.
+pub(super) fn workload_values(check: &str) -> Option<BTreeSet<&str>> {
+    let check = check.trim().strip_prefix("CHECK")?;
+    let start = check.find('\'')?;
+    let (operator, list) = check.split_at(start);
+    let operator: String = operator
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace() && *c != '(')
+        .collect();
+    let list = match operator.as_str() {
+        "workloadIN" => list.trim_end_matches(|c: char| c == ')' || c.is_ascii_whitespace()),
+        "workload=ANYARRAY[" => {
+            let (values, tail) = list.split_once(']')?;
+            let tail = tail.trim_start();
+            let tail = tail.strip_prefix("::text[]").unwrap_or(tail);
+            if !tail.chars().all(|c| c == ')' || c.is_ascii_whitespace()) {
+                return None;
+            }
+            values
+        }
+        _ => return None,
+    };
+    list.split(',')
+        .map(|item| {
+            let item = item.trim();
+            let item = match item.split_once("::") {
+                Some((literal, cast)) if cast.trim() == "text" => literal.trim_end(),
+                Some(_) => return None,
+                None => item,
+            };
+            let value = item.strip_prefix('\'')?.strip_suffix('\'')?;
+            (!value.is_empty()
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
+            .then_some(value)
+        })
+        .collect()
 }

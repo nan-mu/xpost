@@ -1285,6 +1285,16 @@ mod tests {
         assert!(compatible(&identities, key, &stored));
         stored["medium_identity"]["firmware_sha256"] = firmware[0]["firmware_sha256"].clone();
         assert!(!compatible(&identities, key, &stored));
+
+        // PR41 used the same Firmware ELF across every HAL EXB2 workload.
+        let legacy_digest = "aa".repeat(32);
+        for program in crate::exam::exb2::xdp_programs() {
+            let key = format!("exec_bench/hal/metrics/{program}/1");
+            let mut identity = identities[&key].clone();
+            identity["firmware_sha256"] = json!(legacy_digest);
+            let legacy = json!({ "stage":"hal-aot", "medium_identity":identity });
+            assert!(!compatible(&identities, &key, &legacy), "{program}");
+        }
         Ok(())
     }
 

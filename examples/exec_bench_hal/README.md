@@ -25,6 +25,7 @@ That build pins C sources from libbpf-mcu commit `07a4ea9a81a7fedf7bef2d6ced8d7f
 | 6 | [strcmp](exb2/strcmp.md) | `exec_bench_hal_strcmp` | `exec-bench-hal-strcmp` |
 | 7 | [matmul](exb2/matmul.md) | `exec_bench_hal_matmul` | `exec-bench-hal-matmul` |
 
+Use the nightly toolchain selected by `rust-toolchain.toml`. The aggregate command requires Cargo 1.91 or newer for `host-tuple`.
 Run the commands from `examples/exec_bench_hal`.
 
 ```sh

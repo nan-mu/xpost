@@ -55,7 +55,10 @@ impl Mode {
     }
 
     pub(super) fn programs(self) -> &'static [&'static str] {
-        exb2::programs(self == Self::Hal)
+        match self {
+            Self::Hal => &exb2::HAL_PROGRAMS,
+            Self::Aot | Self::Jit | Self::Rbpf => exb2::xdp_programs(),
+        }
     }
 
     fn deployment(self, program: &str) -> Option<String> {

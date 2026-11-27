@@ -12,22 +12,21 @@ use crate::release::{COMMIT, DeploymentInfo, Mode, PROGRAMS, ProgramArchive, TAG
 
 const NETWORK_HAL_FIRMWARE: [&str; 3] = ["firewall-hal", "just-drop-hal", "just-tx-hal"];
 
-const EXB2_HAL_FIRMWARE: [&str; 8] = [
-    "exec-bench-hal-noop",
-    "exec-bench-hal-prime",
-    "exec-bench-hal-log2",
-    "exec-bench-hal-copy",
-    "exec-bench-hal-fletcher32",
-    "exec-bench-hal-bsort",
-    "exec-bench-hal-strcmp",
-    "exec-bench-hal-matmul",
+const EXB2_HAL_FIRMWARE: [(&str, u8); 8] = [
+    ("exec-bench-hal-noop", 0),
+    ("exec-bench-hal-prime", 1),
+    ("exec-bench-hal-log2", 2),
+    ("exec-bench-hal-copy", 3),
+    ("exec-bench-hal-fletcher32", 4),
+    ("exec-bench-hal-bsort", 5),
+    ("exec-bench-hal-strcmp", 6),
+    ("exec-bench-hal-matmul", 7),
 ];
 
 pub(crate) fn hal_exec_task(name: &str) -> Option<u8> {
     EXB2_HAL_FIRMWARE
         .iter()
-        .position(|&profile| profile == name)
-        .map(|task| task as u8)
+        .find_map(|&(profile, task)| (profile == name).then_some(task))
 }
 
 pub fn hal_exec(root: &Path, profiles: &Profiles, name: &str) -> Result<HalFirmware> {
@@ -106,7 +105,10 @@ impl Scope {
 pub fn medium_scope(root: &Path, profiles: &Profiles, scope: Scope) -> Medium {
     let mut report = inspect(root, Some(profiles), scope);
     if !matches!(scope, Scope::JitRbpf) {
-        for name in NETWORK_HAL_FIRMWARE.into_iter().chain(EXB2_HAL_FIRMWARE) {
+        for name in NETWORK_HAL_FIRMWARE
+            .into_iter()
+            .chain(EXB2_HAL_FIRMWARE.map(|(profile, _)| profile))
+        {
             let require_wifi = !matches!(scope, Scope::All) && hal_exec_task(name).is_none();
             match check_hal(root, profiles, name, require_wifi) {
                 Ok(firmware) => report.hal_firmware.push(firmware),
