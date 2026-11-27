@@ -18,6 +18,10 @@ The 41 targets include separate Metrics and Trace Firmware ELFs for the network 
 The phased endpoint checks only the deployments and HAL Firmware ELFs needed by the selected phase.
 The [v0.1.0 ledger](libbpf-mcu-v0.1.0.sha256) records the earlier release with zero deployments.
 
+Run `cargo build-hal-all` from `examples/exec_bench_hal` before preflight.
+The HAL EXB2 cell uses eight firmware groups. Each workload has its own Firmware ELF.
+See the [HAL EXB2 build instructions](../../examples/exec_bench_hal/README.md).
+
 Provide the Wi-Fi build inputs for each network example before building its Firmware ELF.
 Use the local `.env` paths described in the [README](../../README.md).
 The phased preflight checks the linked Wi-Fi input marker before any device write.
@@ -65,9 +69,9 @@ Use `all-preflight` to check full deployment and collector readiness from TR3000
 
 | Full phase | Modes | Cells | Planned attempts |
 | --- | --- | ---: | ---: |
-| One | HAL, AOT | 14 | 312 |
+| One | HAL, AOT | 14 | 317 |
 | Two | JIT, rBPF, one separate AOT Case | 15 | 313 |
-| Total | Four modes | 29 | 625 |
+| Total | Four modes | 29 | 630 |
 
 Each mode runs 13 target rates from 400 to 4000 pps for each network Metrics experiment.
 Each rate uses three repeats. Send for 30 seconds and observe for one second.
@@ -89,9 +93,9 @@ Set `run = ["medium"]` for formal execution.
 
 | Phase | Modes | Metrics | Trace | Attempts |
 | --- | --- | ---: | ---: | ---: |
-| One | HAL, AOT | 8 | 6 | 72 |
+| One | HAL, AOT | 8 | 6 | 74 |
 | Two | JIT, rBPF | 8 | 6 | 72 |
-| Total | Four modes | 16 | 12 | 144 |
+| Total | Four modes | 16 | 12 | 146 |
 
 Run `exec_bench`, `firewall`, `just_tx`, and `just_drop` in that order.
 Group Firmware ELFs by digest within each experiment.
@@ -99,7 +103,10 @@ Keep rates and repeats within each firmware group.
 Each phase uses 36 five-second network Metrics windows.
 Each phase uses one tagged Just TX and Just DROP Trace probe per mode.
 Firewall Trace uses one hit and one miss per mode.
-EXB2 measures two batches for each of seven workloads per mode.
+EXB2 measures two batches per workload.
+HAL has eight workloads. AOT, JIT, and rBPF each have seven.
+Resume checks the Firmware ELF digest for each HAL workload.
+The earlier C HAL attempts retain their original campaign identity.
 
 Publish phase one reconciliation, figures, and unqualified conditions before phase two.
 Set `medium_stage = "jit-rbpf"` for phase two.

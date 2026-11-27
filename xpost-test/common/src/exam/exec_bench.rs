@@ -12,7 +12,7 @@ use tokio_postgres::Client;
 use uuid::Uuid;
 
 use crate::agent::{AgentClient, ExecBatch};
-use crate::config::FileConfig;
+use crate::config::{ExecBenchConfig, FileConfig};
 use crate::db::{Collection, Database, metrics, protocol};
 
 use super::exb2::{self, BUF, ROUNDS, SEED, Sampling};
@@ -46,12 +46,16 @@ impl Mode {
         }
     }
 
-    fn firmware(self) -> &'static str {
+    pub(super) fn firmware(self, program: &str) -> String {
         match self {
-            Self::Hal => "exec-bench-hal",
-            Self::Aot | Self::Jit => "exec-bench-aot",
-            Self::Rbpf => "exec-bench-rbpf",
+            Self::Hal => format!("exec-bench-hal-{program}"),
+            Self::Aot | Self::Jit => "exec-bench-aot".into(),
+            Self::Rbpf => "exec-bench-rbpf".into(),
         }
+    }
+
+    pub(super) fn programs(self) -> &'static [&'static str] {
+        exb2::programs(self == Self::Hal)
     }
 
     fn deployment(self, program: &str) -> Option<String> {
@@ -63,61 +67,130 @@ impl Mode {
     }
 }
 
-pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
-    let endpoint = cfg
-        .agent
-        .resolved_endpoint()
-        .context("exec_bench needs [agent].endpoint")?;
-    let agent = AgentClient::new(endpoint);
-    agent.health().await?;
+struct Target {
+    mode: Mode,
+    firmware: String,
+    programs: Vec<&'static str>,
+    expected_hash: Option<String>,
+}
+
+fn standalone_targets(config: &ExecBenchConfig) -> Result<Vec<Target>> {
     let mut selected = Vec::new();
-    for mode in &cfg.exec_bench.modes {
+    for mode in &config.modes {
         let mode = Mode::parse(mode)?;
         if !selected.contains(&mode) {
             selected.push(mode);
         }
     }
     ensure!(!selected.is_empty(), "select at least one EXB2 mode");
-    // Native AOT and JIT share the carrier. Keep them adjacent when both are selected.
-    selected.sort_by_key(|mode| mode.firmware());
-    for mode in &selected {
-        for program in exb2::PROGRAMS {
-            if let Some(profile) = mode.deployment(program) {
-                agent.preflight_xdp(&profile).await?;
+    for program in &config.workloads {
+        ensure!(
+            selected
+                .iter()
+                .any(|mode| mode.programs().contains(&program.as_str())),
+            "no selected EXB2 mode supports workload `{program}`"
+        );
+    }
+    let mut targets = Vec::new();
+    for mode in selected {
+        let programs: Vec<_> = mode
+            .programs()
+            .iter()
+            .copied()
+            .filter(|name| {
+                config.workloads.is_empty()
+                    || config.workloads.iter().any(|selected| selected == name)
+            })
+            .collect();
+        if mode == Mode::Hal {
+            for program in programs {
+                targets.push(Target {
+                    mode,
+                    firmware: mode.firmware(program),
+                    programs: vec![program],
+                    expected_hash: None,
+                });
+            }
+        } else if let Some(first) = programs.first() {
+            targets.push(Target {
+                mode,
+                firmware: mode.firmware(first),
+                programs,
+                expected_hash: None,
+            });
+        }
+    }
+    // AOT and JIT share one carrier. Keep them adjacent.
+    targets.sort_by(|a, b| a.firmware.cmp(&b.firmware));
+    Ok(targets)
+}
+
+pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
+    let mut targets = standalone_targets(&cfg.exec_bench)?;
+    let endpoint = cfg
+        .agent
+        .resolved_endpoint()
+        .context("exec_bench needs [agent].endpoint")?;
+    let agent = AgentClient::new(endpoint);
+    agent.health().await?;
+    for target in &mut targets {
+        if target.mode == Mode::Hal {
+            let hash = agent.preflight_hal_exec(&target.firmware).await?;
+            parse_sha256(&hash)?;
+            target.expected_hash = Some(hash);
+        } else {
+            for program in &target.programs {
+                if let Some(profile) = target.mode.deployment(program) {
+                    agent.preflight_xdp(&profile).await?;
+                }
             }
         }
     }
     let settings = Database::load()?;
     let database = settings.prepare().await?;
     database
-        .protect(run_selected(&agent, &database, selected))
+        .protect(run_selected(&agent, &database, targets))
         .await
 }
 
 async fn run_selected(
     agent: &AgentClient,
     database: &Collection<'_>,
-    selected: Vec<Mode>,
+    targets: Vec<Target>,
 ) -> Result<()> {
     let mut db = database.connect().await?;
     let mut loaded = String::new();
-    let mut image = None;
+    let mut image = String::new();
     let mut order = 0;
-    for mode in selected {
-        if image != Some(mode.firmware()) {
-            let flash = agent.flash_fw_evidence(mode.firmware(), None).await?;
+    for target in targets {
+        if image != target.firmware {
+            let flash = agent
+                .flash_fw_evidence(&target.firmware, target.expected_hash.as_deref())
+                .await?;
+            ensure!(
+                flash["firmware_profile"] == target.firmware,
+                "Agent flashed an unexpected firmware profile"
+            );
             loaded = flash["firmware_sha256"]
                 .as_str()
                 .context("missing Firmware ELF digest")?
                 .to_owned();
+            ensure!(
+                target
+                    .expected_hash
+                    .as_ref()
+                    .is_none_or(|hash| hash == &loaded),
+                "Agent flashed an unexpected Firmware ELF digest"
+            );
             agent.get_init().await?;
-            image = Some(mode.firmware());
+            image = target.firmware;
         }
         run_mode(
             agent,
             &mut db,
             database,
-            mode,
+            target.mode,
+            &target.programs,
             &loaded,
             None,
             &mut order,
@@ -134,6 +207,7 @@ pub(super) async fn run_mode(
     db: &mut Client,
     database: &Collection<'_>,
     mode: Mode,
+    programs: &[&'static str],
     firmware_hash: &str,
     medium_id: Option<Uuid>,
     order: &mut i32,
@@ -141,7 +215,7 @@ pub(super) async fn run_mode(
     mut formal: Option<(&Resume, &mut Option<String>, &mut Actions)>,
 ) -> Result<()> {
     let profile = parse_sha256(firmware_hash)?;
-    for (task, program) in exb2::PROGRAMS.into_iter().enumerate() {
+    for &program in programs {
         let repeats = (1..=sampling.runs)
             .filter(|&repeat| {
                 formal.as_ref().is_none_or(|(resume, _, _)| {
@@ -157,7 +231,7 @@ pub(super) async fn run_mode(
             if loaded != Some(&name) {
                 let install_started = std::time::Instant::now();
                 agent
-                    .bind_xdp(&name, mode.firmware(), firmware_hash)
+                    .bind_xdp(&name, &mode.firmware(program), firmware_hash)
                     .await?;
                 if let Some((_, loaded, actions)) = &mut formal {
                     actions.cold_install_confirmed += 1;
@@ -167,7 +241,7 @@ pub(super) async fn run_mode(
                 agent.get_init().await?;
             }
         }
-        let (n, input, expected) = exb2::request(task);
+        let (n, input, expected) = exb2::request(exb2::task(program));
         let sample = Sample {
             mode,
             program,
@@ -219,6 +293,23 @@ struct Sample {
     profile: [u8; 32],
     medium_id: Option<Uuid>,
     sampling: Sampling,
+}
+
+impl Sample {
+    fn hal_build(&self) -> Option<Value> {
+        (self.mode == Mode::Hal).then(|| {
+            json!({
+                "implementation": "native_rust",
+                "firmware_profile": self.mode.firmware(self.program),
+                "cargo_feature": self.program,
+                "cargo_profile": "release",
+                "opt_level": "s",
+                "lto": "fat",
+                "codegen_units": 1,
+                "timing_boundary": "EXB2 execute entry through response publication",
+            })
+        })
+    }
 }
 
 struct Attempt<'a> {
@@ -478,6 +569,7 @@ fn result_event(
     json!({ "run_id": attempt.id.to_string(), "experiment": "exec_bench", "mode": sample.mode.as_str(),
         "variant": "metrics", "phase": phase(sample.medium_id), "medium_id": sample.medium_id, "stage": sample.medium_id.map(|_| crate::config::MediumStage::for_mode(sample.mode.as_str())), "retry_of": attempt.retry_of, "input": { "program": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED },
         "repeat": attempt.repeat, "status": status, "database_status": database_status, "issues": issues,
+        "firmware_sha256": protocol::hex(&sample.profile), "hal_build": sample.hal_build(),
         "batch_us": batch_us, "us_per_round": us_per_round, "execution_return": single.map(|reply| reply.execution_return),
         "batches_expected": sample.sampling.samples, "batches_completed": completed,
         "valid_batches": valid, "qualified": status == "complete",
@@ -551,7 +643,10 @@ async fn start(db: &mut Client, attempt: &Attempt<'_>, sample: &Sample) -> Resul
     let condition = Uuid::new_v4();
     let config = attempt.config;
     let tx = db.transaction().await?;
-    let parameters = json!({ "workload": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED, "medium_id": sample.medium_id, "stage": sample.medium_id.map(|_| crate::config::MediumStage::for_mode(mode)), "medium_identity": attempt.medium_identity, "retry_of": attempt.retry_of });
+    let mut parameters = json!({ "workload": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED, "medium_id": sample.medium_id, "stage": sample.medium_id.map(|_| crate::config::MediumStage::for_mode(mode)), "medium_identity": attempt.medium_identity, "retry_of": attempt.retry_of });
+    if let Some(build) = sample.hal_build() {
+        parameters["hal_build"] = build;
+    }
     tx.execute("INSERT INTO release.bench_condition(condition_id,experiment,protocol_version,parameters,planned_modes) VALUES($1,'exec_bench','1',$2,ARRAY[$3]::text[])", &[&condition,&parameters,&mode]).await?;
     let request = protocol::create_artifact(
         &tx,
@@ -571,7 +666,9 @@ async fn start(db: &mut Client, attempt: &Attempt<'_>, sample: &Sample) -> Resul
     .await?;
     let digest = protocol::hex(&sample.profile);
     tx.execute(&format!("INSERT INTO release.{mode}_exec_bench_config(config_id,condition_id,instrumentation,profile_hash,workload,work_param,batch_count,samples_per_run,input_bytes,input_protocol,wifi_enabled,fixture_artifact_id) VALUES($1,$2,'counter_only',$3,$4,$5,$6,$7,8258,'EXB2',false,$8)"), &[&config,&condition,&digest,&sample.program,&(sample.n as i32),&i64::from(ROUNDS),&sample.sampling.samples,&request]).await?;
-    tx.execute("INSERT INTO release.bench_run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit) VALUES($1,$2,$3,$4,'exec_bench','metrics',$5,$6,$7::text::release.bench_u64,$8,'running',$1,'07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113',$9)", &[&attempt.id,&condition,&config,&mode,&phase(sample.medium_id),&attempt.repeat,&SEED.to_string(),&attempt.order,&super::medium::revision()]).await?;
+    let libbpf_commit =
+        (sample.mode != Mode::Hal).then_some("07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113");
+    tx.execute("INSERT INTO release.bench_run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit) VALUES($1,$2,$3,$4,'exec_bench','metrics',$5,$6,$7::text::release.bench_u64,$8,'running',$1,$9,$10)", &[&attempt.id,&condition,&config,&mode,&phase(sample.medium_id),&attempt.repeat,&SEED.to_string(),&attempt.order,&libbpf_commit,&super::medium::revision()]).await?;
     protocol::link_artifact(&tx, attempt.id, "exb2_input", request).await?;
     protocol::link_artifact(&tx, attempt.id, "exb2_expected", expected).await?;
     tx.commit().await?;
@@ -719,6 +816,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn standalone_selects_the_hal_matmul_profile_and_rejects_non_hal_matmul() -> Result<()> {
+        let mut config = ExecBenchConfig {
+            modes: vec!["hal".into(), "aot".into(), "jit".into(), "rbpf".into()],
+            workloads: vec!["matmul".into()],
+        };
+        let targets = standalone_targets(&config)?;
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].firmware, "exec-bench-hal-matmul");
+        assert_eq!(targets[0].programs, ["matmul"]);
+        config.modes.remove(0);
+        assert!(standalone_targets(&config).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn full_run_qualifies_batches_individually_under_exact_perf_totals() {
         let sample = fixture_sample(Mode::Hal, Sampling::FULL);
         let run = Uuid::new_v4();
@@ -744,10 +856,21 @@ mod tests {
         let mut client = database.connect().await?;
         for mode in [Mode::Hal, Mode::Aot, Mode::Jit, Mode::Rbpf] {
             for sampling in [Sampling::MEDIUM, Sampling::FULL] {
-                roundtrip(&database, &mut client, mode, sampling, false).await?;
+                roundtrip(
+                    &database,
+                    &mut client,
+                    fixture_sample(mode, sampling),
+                    false,
+                )
+                .await?;
             }
         }
-        roundtrip(&database, &mut client, Mode::Hal, Sampling::FULL, true).await?;
+        let sample = fixture_sample(Mode::Hal, Sampling::FULL);
+        roundtrip(&database, &mut client, sample, true).await?;
+        let mut matmul = fixture_sample(Mode::Hal, Sampling::MEDIUM);
+        matmul.program = "matmul";
+        (matmul.n, matmul.input, matmul.expected) = exb2::request(exb2::task(matmul.program));
+        roundtrip(&database, &mut client, matmul, false).await?;
         finish_rolls_back_on_constraint_failure(&database, &mut client).await?;
         Ok(())
     }
@@ -755,11 +878,11 @@ mod tests {
     async fn roundtrip(
         database: &Collection<'_>,
         client: &mut Client,
-        mode: Mode,
-        sampling: Sampling,
+        sample: Sample,
         corrupt: bool,
     ) -> Result<()> {
-        let sample = fixture_sample(mode, sampling);
+        let sampling = sample.sampling;
+        let mode = sample.mode;
         let attempt = Attempt {
             id: Uuid::new_v4(),
             order: 0,
@@ -802,6 +925,33 @@ mod tests {
             assert_eq!(row.get::<_, Vec<u8>>(1) == sample.expected, good);
             assert_eq!(row.get::<_, bool>(2), good);
             assert_eq!(row.get::<_, bool>(3), good);
+        }
+        if sample.program == "matmul" {
+            let stored = client
+                .query_one(
+                    "SELECT c.workload,c.work_param,c.profile_hash,i.original_bytes,b.actual_bytes,
+                 clk.tick_hz::text,b.begin_tick::text,b.end_tick::text,
+                 bc.parameters->'hal_build'->>'cargo_feature',r.libbpf_commit
+                 FROM release.hal_exec_bench_config c
+                 JOIN release.bench_condition bc USING (condition_id)
+                 JOIN release.bench_run r USING (config_id)
+                 JOIN release.bench_artifact i ON i.artifact_id=c.fixture_artifact_id
+                 JOIN release.hal_exec_batch b USING (run_id)
+                 JOIN release.bench_clock clk USING (run_id)
+                 WHERE r.run_id=$1 AND clk.clock_id='dut'",
+                    &[&attempt.id],
+                )
+                .await?;
+            assert_eq!(stored.get::<_, String>(0), "matmul");
+            assert_eq!(stored.get::<_, i32>(1), 2);
+            assert_eq!(stored.get::<_, String>(2), protocol::hex(&sample.profile));
+            assert_eq!(stored.get::<_, Vec<u8>>(3), sample.input);
+            assert_eq!(stored.get::<_, Vec<u8>>(4), sample.expected);
+            assert_eq!(stored.get::<_, String>(5), "1000000");
+            assert_eq!(stored.get::<_, String>(6), "110");
+            assert_eq!(stored.get::<_, String>(7), "125");
+            assert_eq!(stored.get::<_, String>(8), "matmul");
+            assert_eq!(stored.get::<_, Option<String>>(9), None);
         }
         let metrics = client
             .query_one(

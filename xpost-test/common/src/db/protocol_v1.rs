@@ -156,6 +156,27 @@ fn integrity_problems(name: &str, table: &catalog::Table, ddl: &Ddl) -> Result<V
         }
     }
 
+    // The initial HAL allowlist has the same columns but rejects task 7.
+    // Require the expanded allowlist during read-only readiness and resume.
+    if name == "hal_exec_bench_config"
+        && table
+            .objects
+            .iter()
+            .filter(|object| object.kind == "c" && object.check_columns == ["workload"])
+            .any(|object| {
+                let values = object
+                    .definition
+                    .strip_prefix("CHECK ((workload = ANY (ARRAY[")
+                    .and_then(|definition| definition.strip_suffix("])))"));
+                !values.is_some_and(|values| {
+                    values
+                        .split(',')
+                        .any(|value| value.trim() == "'matmul'::text")
+                })
+            })
+    {
+        problems.push("release.hal_exec_bench_config: workload CHECK must allow matmul. Preserve the table and update its constraint before collection".into());
+    }
     let expected_trigger = expected.write_trigger.as_deref().map(compact_sql);
     let mut canonical_trigger_active = false;
     for trigger in table

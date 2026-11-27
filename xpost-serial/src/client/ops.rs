@@ -34,9 +34,10 @@ pub enum FlashOp {
         /// Empty = clear all (`*`).
         names: Vec<String>,
     },
-    /// Read the installed firmware identity and one cold image without writing flash.
+    /// Read the installed firmware identity and optionally one cold image.
     Attest {
         expectation: FirmwareExpectation,
+        firmware_only: bool,
     },
     /// Read the XDP table through an exclusive download-mode session.
     List,

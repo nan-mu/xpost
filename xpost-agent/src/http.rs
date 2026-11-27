@@ -263,6 +263,7 @@ async fn serve_async(
         .route("/preflight/medium/{stage}", get(v1_stage_preflight))
         .route("/deployment/attest", post(v1_attest_deployment))
         .route("/preflight/xdp/{name}", get(v1_xdp_preflight))
+        .route("/preflight/fw/{name}", get(v1_hal_exec_preflight))
         .route("/get/init", get(v1_get_init))
         .route("/flash/fw", post(v1_flash_fw))
         .route("/flash/xdp", post(v1_flash_xdp))
@@ -433,6 +434,22 @@ async fn v1_attest_deployment(
 async fn v1_dut_status(State(st): State<AppState>) -> Json<ApiResp> {
     let shared = st.shared.clone();
     st.reply(move || ops::dut_status(shared.as_ref())).await
+}
+
+async fn v1_hal_exec_preflight(
+    State(st): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Json<ApiResp> {
+    let host = st.host;
+    match tokio::task::spawn_blocking(move || {
+        crate::preflight::hal_exec(&host.root, &host.profiles, &name)
+    })
+    .await
+    {
+        Ok(Ok(report)) => Json(ApiResp::ok(report.firmware_sha256)),
+        Ok(Err(error)) => Json(ApiResp::err(format!("{error:#}"))),
+        Err(error) => Json(ApiResp::err(format!("join: {error}"))),
+    }
 }
 
 async fn v1_xdp_preflight(

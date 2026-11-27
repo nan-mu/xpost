@@ -783,7 +783,6 @@ dependencies = [
 name = "exec_bench_hal"
 version = "0.1.0"
 dependencies = [
- "cc",
  "critical-section",
  "embassy-executor",
  "embassy-time",
@@ -878,6 +877,10 @@ dependencies = [
  "typenum",
  "version_check",
 ]
+
+[[package]]
+name = "hal-build"
+version = "0.1.0"
 
 [[package]]
 name = "hash32"

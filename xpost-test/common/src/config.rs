@@ -123,6 +123,8 @@ impl Default for FirewallConfig {
 pub struct ExecBenchConfig {
     #[serde(default = "default_exec_modes", alias = "arms")]
     pub modes: Vec<String>,
+    #[serde(default)]
+    pub workloads: Vec<String>,
 }
 
 fn default_exec_modes() -> Vec<String> {
@@ -133,6 +135,7 @@ impl Default for ExecBenchConfig {
     fn default() -> Self {
         Self {
             modes: default_exec_modes(),
+            workloads: Vec::new(),
         }
     }
 }

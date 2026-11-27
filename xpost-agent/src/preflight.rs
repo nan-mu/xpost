@@ -7,15 +7,36 @@ use object::{Object, ObjectSection, ObjectSymbol};
 use serde::{Deserialize, Serialize};
 
 use crate::deployment::{self, PreparedInfo, Target};
-use crate::profiles::{Profiles, XdpProfile, abs_under_root};
+use crate::profiles::{FwProfile, Profiles, XdpProfile, abs_under_root};
 use crate::release::{COMMIT, DeploymentInfo, Mode, PROGRAMS, ProgramArchive, TAG, format_sha256};
 
-const HAL_FIRMWARE: [&str; 4] = [
-    "firewall-hal",
-    "just-drop-hal",
-    "just-tx-hal",
-    "exec-bench-hal",
+const NETWORK_HAL_FIRMWARE: [&str; 3] = ["firewall-hal", "just-drop-hal", "just-tx-hal"];
+
+const EXB2_HAL_FIRMWARE: [&str; 8] = [
+    "exec-bench-hal-noop",
+    "exec-bench-hal-prime",
+    "exec-bench-hal-log2",
+    "exec-bench-hal-copy",
+    "exec-bench-hal-fletcher32",
+    "exec-bench-hal-bsort",
+    "exec-bench-hal-strcmp",
+    "exec-bench-hal-matmul",
 ];
+
+pub(crate) fn hal_exec_task(name: &str) -> Option<u8> {
+    EXB2_HAL_FIRMWARE
+        .iter()
+        .position(|&profile| profile == name)
+        .map(|task| task as u8)
+}
+
+pub fn hal_exec(root: &Path, profiles: &Profiles, name: &str) -> Result<HalFirmware> {
+    anyhow::ensure!(
+        hal_exec_task(name).is_some(),
+        "unknown EXB2 HAL firmware profile {name}"
+    );
+    check_hal(root, profiles, name, false)
+}
 
 pub fn profile(root: &Path, profiles: &Profiles, name: &str) -> Result<PreparedInfo> {
     let xdp = profiles
@@ -49,8 +70,8 @@ pub struct Medium {
 
 #[derive(Serialize)]
 pub struct HalFirmware {
-    firmware_profile: &'static str,
-    firmware_sha256: String,
+    pub firmware_profile: String,
+    pub firmware_sha256: String,
 }
 
 impl Medium {
@@ -84,15 +105,13 @@ impl Scope {
 
 pub fn medium_scope(root: &Path, profiles: &Profiles, scope: Scope) -> Medium {
     let mut report = inspect(root, Some(profiles), scope);
-    let hal_firmware = if matches!(scope, Scope::JitRbpf) {
-        &[][..]
-    } else {
-        &HAL_FIRMWARE[..]
-    };
-    for &name in hal_firmware {
-        match check_hal(root, profiles, name, !matches!(scope, Scope::All)) {
-            Ok(firmware) => report.hal_firmware.push(firmware),
-            Err(error) => report.issues.push(format!("HAL {name}: {error:#}")),
+    if !matches!(scope, Scope::JitRbpf) {
+        for name in NETWORK_HAL_FIRMWARE.into_iter().chain(EXB2_HAL_FIRMWARE) {
+            let require_wifi = !matches!(scope, Scope::All) && hal_exec_task(name).is_none();
+            match check_hal(root, profiles, name, require_wifi) {
+                Ok(firmware) => report.hal_firmware.push(firmware),
+                Err(error) => report.issues.push(format!("HAL {name}: {error:#}")),
+            }
         }
     }
     report
@@ -208,15 +227,23 @@ fn inspect(root: &Path, profiles: Option<&Profiles>, scope: Scope) -> Medium {
 fn check_hal(
     root: &Path,
     profiles: &Profiles,
-    name: &'static str,
-    require_network: bool,
+    name: &str,
+    require_wifi: bool,
 ) -> Result<HalFirmware> {
     let profile = profiles.fw(name).context("missing HAL firmware profile")?;
-    anyhow::ensure!(profile.xdp.is_empty(), "HAL profile lists XDP images");
     let firmware = abs_under_root(root, &profile.artifact);
     let partitions = abs_under_root(root, &profile.partition_table);
     let snapshot = deployment::firmware_snapshot(&firmware, &partitions)?;
-    let elf = object::File::parse(snapshot.elf.as_slice()).context("parse HAL Firmware ELF")?;
+    validate_hal(profile, &snapshot.elf, require_wifi)?;
+    Ok(HalFirmware {
+        firmware_profile: name.to_owned(),
+        firmware_sha256: format_sha256(&snapshot.sha256),
+    })
+}
+
+pub(crate) fn validate_hal(profile: &FwProfile, bytes: &[u8], require_wifi: bool) -> Result<()> {
+    anyhow::ensure!(profile.xdp.is_empty(), "HAL profile lists XDP images");
+    let elf = object::File::parse(bytes).context("parse HAL Firmware ELF")?;
     anyhow::ensure!(
         elf.architecture() == object::Architecture::Riscv32
             && elf.is_little_endian()
@@ -224,13 +251,26 @@ fn check_hal(
             && elf.section_by_name(xpost_elf::SECTION_NAME).is_none(),
         "invalid HAL Firmware ELF"
     );
-    if require_network && name != "exec-bench-hal" {
+    if let Some(task) = hal_exec_task(&profile.name) {
+        let marker = elf
+            .symbol_by_name("XPOST_EXB2_HAL_TASK")
+            .context("missing EXB2 HAL task identity")?;
+        let section = marker
+            .section_index()
+            .context("missing EXB2 HAL task identity section")?;
+        let value = elf
+            .section_by_index(section)?
+            .data_range(marker.address(), marker.size())?;
+        anyhow::ensure!(
+            value == Some(&[task][..]),
+            "EXB2 HAL task identity does not match {} (expected task {task})",
+            profile.name
+        );
+    }
+    if require_wifi {
         check_wifi(&elf)?;
     }
-    Ok(HalFirmware {
-        firmware_profile: name,
-        firmware_sha256: format_sha256(&snapshot.sha256),
-    })
+    Ok(())
 }
 
 fn profile_name(program: &str, mode: Mode) -> String {

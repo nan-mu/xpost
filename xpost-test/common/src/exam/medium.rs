@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
-use super::{exb2::Sampling, medium_network::NetworkPlan};
+use super::{exb2::Sampling, exec_bench::Mode as ExecMode, medium_network::NetworkPlan};
 use crate::{
     agent::{AgentClient, DeploymentReport},
     config::{FileConfig, MediumStage},
@@ -84,6 +84,8 @@ struct Cell {
     mode: &'static str,
     variant: &'static str,
     conditions: Value,
+    #[serde(skip)]
+    exec_programs: &'static [&'static str],
 }
 
 fn plan(volume: Volume, stage: MediumStage) -> Vec<Group> {
@@ -102,20 +104,27 @@ fn plan(volume: Volume, stage: MediumStage) -> Vec<Group> {
         }
     };
     for mode in stage.modes() {
-        let firmware = if mode == "jit" {
-            "exec-bench-aot".into()
-        } else {
-            format!("exec-bench-{mode}")
+        let exec_mode = ExecMode::parse(mode).expect("medium EXB2 mode");
+        let programs = exec_mode.programs();
+        let mut add_exec = |programs: &'static [&'static str]| {
+            add(
+                exec_mode.firmware(programs[0]),
+                Cell {
+                    experiment: "exec_bench",
+                    mode,
+                    variant: "metrics",
+                    conditions: super::exb2::conditions(volume.sampling(), programs),
+                    exec_programs: programs,
+                },
+            );
         };
-        add(
-            firmware,
-            Cell {
-                experiment: "exec_bench",
-                mode,
-                variant: "metrics",
-                conditions: super::exb2::conditions(volume.sampling()),
-            },
-        );
+        if exec_mode == ExecMode::Hal {
+            for program in programs {
+                add_exec(std::slice::from_ref(program));
+            }
+        } else {
+            add_exec(programs);
+        }
     }
     for experiment in NETWORK {
         let family = experiment.replace('_', "-");
@@ -142,6 +151,7 @@ fn plan(volume: Volume, stage: MediumStage) -> Vec<Group> {
                         mode,
                         variant,
                         conditions,
+                        exec_programs: &[],
                     },
                 );
             }
@@ -155,6 +165,7 @@ fn plan(volume: Volume, stage: MediumStage) -> Vec<Group> {
                 mode: "aot",
                 variant: "trace",
                 conditions: json!({"probes": ["A-to-B"]}),
+                exec_programs: &[],
             },
         );
     }
@@ -166,7 +177,11 @@ pub fn preview(stage: MediumStage, volume: Volume) -> Result<()> {
     let phase = |stage: MediumStage| {
         let groups = plan(volume, stage);
         let cells = groups.iter().flat_map(|group| &group.cells);
-        let count = cells.clone().count();
+        let count = cells
+            .clone()
+            .map(|cell| (cell.experiment, cell.mode, cell.variant))
+            .collect::<BTreeSet<_>>()
+            .len();
         let attempts = cells
             .flat_map(cell_conditions)
             .map(|(_, repeats)| repeats)
@@ -564,7 +579,8 @@ async fn run_group(
                     agent,
                     db,
                     settings,
-                    super::exec_bench::Mode::parse(cell.mode)?,
+                    ExecMode::parse(cell.mode)?,
+                    cell.exec_programs,
                     hash,
                     Some(medium_id),
                     order,
@@ -701,9 +717,10 @@ fn cell_conditions(cell: &Cell) -> Vec<(String, i32)> {
         let repeats = cell.conditions["runs_per_program"]
             .as_i64()
             .expect("EXB2 repeats") as i32;
-        return super::exb2::PROGRAMS
-            .into_iter()
-            .map(|name| (name.to_owned(), repeats))
+        return cell
+            .exec_programs
+            .iter()
+            .map(|&name| (name.to_owned(), repeats))
             .collect();
     }
     if cell.variant == "metrics" {
@@ -1104,7 +1121,7 @@ fn bind_firmware(plan: Vec<Group>, report: &DeploymentReport) -> Result<Vec<Firm
             }
             let programs: &[&str] = match cell.experiment {
                 "case" => &["case_swap", "case_mark"],
-                "exec_bench" => &super::exb2::PROGRAMS,
+                "exec_bench" => cell.exec_programs,
                 _ => std::slice::from_ref(&cell.experiment),
             };
             for &program in programs {
@@ -1169,14 +1186,14 @@ mod tests {
             .map(|cell| (cell.experiment, cell.mode, cell.variant))
             .collect::<BTreeSet<_>>();
         assert_eq!(keys.len(), 14);
-        assert_eq!(cells.len(), 14);
+        assert_eq!(cells.len(), 21);
         assert_eq!(
             cells
                 .iter()
                 .flat_map(|cell| super::cell_conditions(cell))
                 .map(|(_, repeats)| repeats)
                 .sum::<i32>(),
-            72
+            74
         );
         assert_eq!(
             keys.iter().map(|key| key.1).collect::<BTreeSet<_>>(),
@@ -1185,6 +1202,90 @@ mod tests {
         let mut order = cells.iter().map(|cell| cell.experiment).collect::<Vec<_>>();
         order.dedup();
         assert_eq!(order, ["exec_bench", "firewall", "just_tx", "just_drop"]);
+    }
+
+    #[test]
+    fn every_hal_workload_uses_a_distinct_profile_and_matmul_stays_hal_only() {
+        for volume in [super::Volume::Medium, super::Volume::All] {
+            let groups = super::plan(volume, super::MediumStage::HalAot);
+            let hal = groups
+                .iter()
+                .filter(|group| {
+                    group.cells[0].experiment == "exec_bench" && group.cells[0].mode == "hal"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(hal.len(), 8);
+            for (group, workload) in hal.into_iter().zip([
+                "noop",
+                "prime",
+                "log2",
+                "copy",
+                "fletcher32",
+                "bsort",
+                "strcmp",
+                "matmul",
+            ]) {
+                assert_eq!(group.firmware, format!("exec-bench-hal-{workload}"));
+                assert_eq!(group.cells.len(), 1);
+                let conditions = super::cell_conditions(&group.cells[0]);
+                assert_eq!(conditions, [(workload.to_owned(), volume.sampling().runs)]);
+            }
+            for stage in [super::MediumStage::HalAot, super::MediumStage::JitRbpf] {
+                for cell in super::plan(volume, stage)
+                    .iter()
+                    .flat_map(|group| &group.cells)
+                {
+                    if cell.mode != "hal" && cell.experiment == "exec_bench" {
+                        let workloads = super::cell_conditions(cell);
+                        assert_eq!(workloads.len(), 7);
+                        assert!(workloads.iter().all(|(name, _)| name != "matmul"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resume_keys_bind_hal_matmul_to_its_own_digest_and_full_response() -> anyhow::Result<()> {
+        use super::{MediumStage, Volume, bind_firmware, compatible, json, planned_identities};
+        let volume = Volume::All;
+        let stage = MediumStage::HalAot;
+        let planned = super::plan(volume, stage)
+            .into_iter()
+            .filter(|group| group.firmware.starts_with("exec-bench-hal-"))
+            .collect::<Vec<_>>();
+        let firmware = planned
+            .iter()
+            .enumerate()
+            .map(|(index, group)| {
+                json!({
+                    "firmware_profile": group.firmware,
+                    "firmware_sha256": format!("{index:064x}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let report = serde_json::from_value(json!({
+            "release":"v0.1.1",
+            "required":0,
+            "deployments":[],
+            "issues":[],
+            "hal_firmware":firmware
+        }))?;
+        let groups = bind_firmware(planned, &report)?;
+        let cfg = crate::config::FileConfig::embedded()?;
+        let identities = planned_identities(&cfg, volume, stage, &groups, &report)?;
+        let key = "exec_bench/hal/metrics/matmul/1";
+        let matched = &identities[key];
+        assert_eq!(matched["firmware_sha256"], firmware[7]["firmware_sha256"]);
+        assert_eq!(matched["container_sha256"], serde_json::Value::Null);
+        assert_eq!(matched["input"]["expected_result"], json!([19, 50]));
+        assert_eq!(matched["input"]["scratch_bytes"], 16);
+        assert_eq!(identities.len(), 40);
+        let mut stored = json!({ "stage":"hal-aot", "medium_identity":matched });
+        assert!(compatible(&identities, key, &stored));
+        stored["medium_identity"]["firmware_sha256"] = firmware[0]["firmware_sha256"].clone();
+        assert!(!compatible(&identities, key, &stored));
+        Ok(())
     }
 
     #[test]
@@ -1211,17 +1312,17 @@ mod tests {
     }
 
     #[test]
-    fn all_has_625_attempts_across_29_cells() {
+    fn all_has_630_attempts_with_hal_matmul() {
         use super::{MediumStage, Volume, cell_conditions, plan};
         let hal_aot = plan(Volume::All, MediumStage::HalAot);
         let jit_rbpf = plan(Volume::All, MediumStage::JitRbpf);
         let first = hal_aot.iter().flat_map(|group| &group.cells);
         let second = jit_rbpf.iter().flat_map(|group| &group.cells);
-        assert_eq!(first.clone().count(), 14);
+        assert_eq!(first.clone().count(), 21);
         assert_eq!(second.clone().count(), 15);
         assert_eq!(
             first.flat_map(cell_conditions).map(|(_, n)| n).sum::<i32>(),
-            312
+            317
         );
         assert_eq!(
             second

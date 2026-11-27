@@ -247,3 +247,12 @@ Hold schema protection during all collection and recovery writes.
 
 Reason. The maintainer chose per-table reconciliation without version migrations.
 This replaces empty-schema-only initialization for new runs.
+
+## 2026-11-28 Native EXB2 HAL workloads
+
+Select one Rust workload when building each HAL Firmware ELF.
+Use task equivalence for the native baseline.
+Add `matmul` to HAL. Keep the seven released workloads in AOT, JIT, and rBPF.
+Preserve existing Protocol V1 rows when checking the expanded HAL workload constraint.
+
+Reason. The PR #42 brief requests independent workload deployment and a native MCU baseline.

@@ -528,7 +528,7 @@ CREATE TABLE release.hal_exec_bench_config (
   profile_hash text NOT NULL CHECK(profile_hash ~ '^[0-9a-f]{64}$'),
   calibration_ids uuid[] NOT NULL DEFAULT ARRAY[]::uuid[],
   parameters jsonb NOT NULL DEFAULT '{}',
-  workload text NOT NULL CHECK(workload IN ('noop','prime','log2','copy','fletcher32','bsort','strcmp')),
+  workload text NOT NULL CHECK(workload IN ('noop','prime','log2','copy','fletcher32','bsort','strcmp','matmul')),
   work_param integer NOT NULL CHECK(work_param>=0),
   batch_count bigint NOT NULL CHECK(batch_count BETWEEN 1 AND 65536),
   samples_per_run integer NOT NULL CHECK(samples_per_run>0),

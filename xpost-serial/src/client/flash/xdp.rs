@@ -253,6 +253,7 @@ pub(super) fn attest(
     xdp: XdpTable,
     partition: &str,
     expectation: &FirmwareExpectation,
+    firmware_only: bool,
 ) -> io::Result<(bool, Option<[u8; 32]>)> {
     let mut dl = port.open_download_for_install()?;
     let observation = (|| {
@@ -265,6 +266,9 @@ pub(super) fn attest(
             } else {
                 Err(error)
             };
+        }
+        if firmware_only {
+            return Ok((true, None));
         }
         let table = dl.read_flash(xdp.base, xdp.len)?;
         let entries = list_entries(&table)?;

@@ -1,3 +1,7 @@
 # Modes for the explicit EXB2 transport selection.
 # The 29-cell medium plan defines its own required modes.
 modes = ["hal", "aot", "jit", "rbpf"]
+
+# Leave workloads empty to run every workload supported by each selected mode.
+# For HAL matmul only, set modes = ["hal"] and workloads = ["matmul"].
+workloads = []

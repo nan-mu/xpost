@@ -1,16 +1,3 @@
-#![no_std]
-#![no_main]
-#![deny(
-    clippy::mem_forget,
-    reason = "mem::forget is generally not safe to do with esp_hal types"
-)]
-#![deny(clippy::large_stack_frames)]
-
-//! Native HAL twin of `exec_bench`. Run the selected EXB2 kernel directly.
-
-#[cfg(feature = "diag")]
-mod diagnostics;
-mod exb2;
 #[path = "../../../exec_bench/src/exec_metrics.rs"]
 mod exec_metrics;
 
@@ -34,6 +21,10 @@ fn panic(panic_info: &core::panic::PanicInfo) -> ! {
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+// Agent verifies this identity against the selected profile before a write.
+#[unsafe(no_mangle)]
+pub static XPOST_EXB2_HAL_TASK: u8 = exec_bench_hal::TASK_ID;
+
 static mut EXEC_BATCH: ExecBatch = ExecBatch::new();
 
 #[allow(
@@ -42,6 +33,7 @@ static mut EXEC_BATCH: ExecBatch = ExecBatch::new();
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
+    core::hint::black_box(&XPOST_EXB2_HAL_TASK);
     esp_println::logger::init_logger(log::LevelFilter::Info);
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -61,11 +53,6 @@ async fn main(spawner: Spawner) -> ! {
     // The single serial task owns the staging buffer for the rest of this boot.
     let batch = unsafe { &mut *addr_of_mut!(EXEC_BATCH) };
     spawner.spawn(control_serial(usb_rx, batch, boot_id).unwrap());
-
-    // Scale sweep, for the three-engine comparison. Runs after the serial task
-    // starts so a reset still produces the boot banner first.
-    #[cfg(feature = "diag")]
-    diagnostics::scale_sweep();
 
     loop {
         Timer::after(Duration::from_secs(60)).await;
@@ -90,7 +77,21 @@ serial_task! {
             },
             [0u8; EXEC_BATCH_LINE_BYTES],
         )
-        .on_exec_batch(move |command, reply| batch.handle(command, reply, boot_id, |buf| Ok(exb2::run(buf))));
+        .on_exec_batch(move |command, reply| batch.handle(command, reply, boot_id, |buf| Ok(run_exb2(buf))));
         exec_metrics::register(builder).build()
     }
+}
+
+fn run_exb2(buffer: &mut [u8]) -> (u64, u64, u32) {
+    exec_metrics::begin_invocation();
+    let begin = exec_metrics::now();
+    let status = exec_bench_hal::execute(buffer);
+    let end = exec_metrics::now();
+    let action = if status == 0 {
+        xpost_type::XdpAction::Pass
+    } else {
+        xpost_type::XdpAction::Aborted
+    };
+    exec_metrics::end_invocation(action);
+    (begin, end, status)
 }

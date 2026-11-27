@@ -163,9 +163,17 @@ impl AgentClient {
     }
 
     pub async fn preflight_xdp(&self, name: &str) -> Result<String> {
+        self.preflight_digest("xdp", name).await
+    }
+
+    pub async fn preflight_hal_exec(&self, name: &str) -> Result<String> {
+        self.preflight_digest("fw", name).await
+    }
+
+    async fn preflight_digest(&self, kind: &str, name: &str) -> Result<String> {
         let result: ApiResp = self
             .http
-            .get(format!("{}/v1/preflight/xdp/{name}", self.base))
+            .get(format!("{}/v1/preflight/{kind}/{name}", self.base))
             .send()
             .await?
             .error_for_status()?

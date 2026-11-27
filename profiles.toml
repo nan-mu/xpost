@@ -158,11 +158,60 @@ build = { cwd = "examples/exec_bench", command = ["cargo", "build", "--release",
 xdp = ["noop_rbpf"]
 
 [[fw]]
-name = "exec-bench-hal"
+name = "exec-bench-hal-noop"
 target = "esp32c3"
 partition_table = "examples/exec_bench_hal/partitions.csv"
-artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal"
-build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build", "--release"] }
+artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal_noop"
+build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build-hal", "--locked", "--features", "noop", "--bin", "exec_bench_hal_noop", "--target-dir", "target"] }
+
+[[fw]]
+name = "exec-bench-hal-prime"
+target = "esp32c3"
+partition_table = "examples/exec_bench_hal/partitions.csv"
+artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal_prime"
+build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build-hal", "--locked", "--features", "prime", "--bin", "exec_bench_hal_prime", "--target-dir", "target"] }
+
+[[fw]]
+name = "exec-bench-hal-log2"
+target = "esp32c3"
+partition_table = "examples/exec_bench_hal/partitions.csv"
+artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal_log2"
+build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build-hal", "--locked", "--features", "log2", "--bin", "exec_bench_hal_log2", "--target-dir", "target"] }
+
+[[fw]]
+name = "exec-bench-hal-copy"
+target = "esp32c3"
+partition_table = "examples/exec_bench_hal/partitions.csv"
+artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal_copy"
+build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build-hal", "--locked", "--features", "copy", "--bin", "exec_bench_hal_copy", "--target-dir", "target"] }
+
+[[fw]]
+name = "exec-bench-hal-fletcher32"
+target = "esp32c3"
+partition_table = "examples/exec_bench_hal/partitions.csv"
+artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal_fletcher32"
+build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build-hal", "--locked", "--features", "fletcher32", "--bin", "exec_bench_hal_fletcher32", "--target-dir", "target"] }
+
+[[fw]]
+name = "exec-bench-hal-bsort"
+target = "esp32c3"
+partition_table = "examples/exec_bench_hal/partitions.csv"
+artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal_bsort"
+build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build-hal", "--locked", "--features", "bsort", "--bin", "exec_bench_hal_bsort", "--target-dir", "target"] }
+
+[[fw]]
+name = "exec-bench-hal-strcmp"
+target = "esp32c3"
+partition_table = "examples/exec_bench_hal/partitions.csv"
+artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal_strcmp"
+build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build-hal", "--locked", "--features", "strcmp", "--bin", "exec_bench_hal_strcmp", "--target-dir", "target"] }
+
+[[fw]]
+name = "exec-bench-hal-matmul"
+target = "esp32c3"
+partition_table = "examples/exec_bench_hal/partitions.csv"
+artifact = "examples/exec_bench_hal/target/riscv32imc-unknown-none-elf/release/exec_bench_hal_matmul"
+build = { cwd = "examples/exec_bench_hal", command = ["cargo", "build-hal", "--locked", "--features", "matmul", "--bin", "exec_bench_hal_matmul", "--target-dir", "target"] }
 
 # ---------------------------------------------------------------------------
 # case_xdp — AOT Trace for one A-to-B publish.

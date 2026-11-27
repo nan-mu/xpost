@@ -210,8 +210,11 @@ fn run_op(
         FlashOp::Clear { names } => table()
             .and_then(|table| xdp::clear(port, table, names))
             .map(|_| FlashResult::Done),
-        FlashOp::Attest { expectation } => table()
-            .and_then(|table| xdp::attest(port, table, partition, expectation))
+        FlashOp::Attest {
+            expectation,
+            firmware_only,
+        } => table()
+            .and_then(|table| xdp::attest(port, table, partition, expectation, *firmware_only))
             .map(|(firmware_matches, image_sha256)| FlashResult::Attested {
                 firmware_matches,
                 image_sha256,

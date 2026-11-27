@@ -1,5 +1,7 @@
 # exec_bench — host-side design
 
+This document records the legacy map-based sweep. See the [current HAL EXB2 design](../exec_bench_hal/README.md) for standalone EXB2.
+
 Historical design for the 32-byte workload carrier. See [EXB2 firmware](README.md)
 for current builds and supported diagnostics.
 
