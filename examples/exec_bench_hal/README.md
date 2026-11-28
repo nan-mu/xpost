@@ -48,7 +48,8 @@ The Agent checks the ELF's embedded task ID against the selected profile.
 
 Each bin declares its own `esp_rtos::main` and binds its matching workload type.
 The feature selects the workload module. Rust static calls bind the protocol to that type.
-The Firmware ELF shares startup, serial transport, and Metrics through the firmware module.
+The bins share startup, serial transport, and Metrics through the firmware module.
+The firmware keeps a reference to the task marker so the linker retains it for Agent preflight.
 
 Run host byte-level checks for each compiled workload. Select the host target for the current machine.
 
@@ -130,6 +131,16 @@ Set `modes = ["hal"]` and `workloads = []` to select all eight workloads.
 Full runs five attempts of 100 batches per workload, with three rounds per batch.
 Full initializes Protocol V1 in an empty `release` schema.
 If the schema has objects, Full checks compatibility before it flashes a Firmware ELF.
+Build from `xpost-test` with the compiled revision. The `xpost-test.fish` script sets it.
+
+```sh
+XPOST_MEDIUM_REVISION="$(git rev-parse HEAD)" cargo build --release --locked
+```
+
+For one recovery attempt, set `retry_run_ids` to the failed Full run IDs.
+Keep `workloads = []`. Each retry uses its original repeat number and Firmware ELF.
+The runner stores the failed run ID in the new condition's `retry_of` field.
+
 The runner checks the entire response against the independent expected bytes.
 The HAL config records the workload and Firmware ELF SHA-256.
 The run condition records the Rust baseline, feature, release optimization settings, and timing boundary.

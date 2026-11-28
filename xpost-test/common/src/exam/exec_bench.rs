@@ -6,6 +6,8 @@
 //! Arm Metrics before the first batch. Freeze after the last batch.
 //! Save the raw buffers, counter boundaries, and invocation ticks under one run ID.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use tokio_postgres::Client;
@@ -77,6 +79,45 @@ struct Target {
     expected_hash: Option<String>,
 }
 
+type RetrySlots = BTreeMap<(&'static str, i32), Uuid>;
+
+pub(super) enum TrialPlan<'a> {
+    Standalone,
+    Retry(&'a RetrySlots),
+    Campaign(&'a Resume, &'a mut Option<String>, &'a mut Actions),
+}
+
+impl TrialPlan<'_> {
+    fn should_run(&self, mode: Mode, program: &'static str, repeat: i32) -> bool {
+        match self {
+            Self::Standalone => true,
+            Self::Retry(slots) => slots.contains_key(&(program, repeat)),
+            Self::Campaign(resume, _, _) => {
+                resume.should_run("exec_bench", mode.as_str(), "metrics", program, repeat)
+            }
+        }
+    }
+
+    fn retry_of(&self, mode: Mode, program: &'static str, repeat: i32) -> Option<Uuid> {
+        match self {
+            Self::Standalone => None,
+            Self::Retry(slots) => slots.get(&(program, repeat)).copied(),
+            Self::Campaign(resume, _, _) => {
+                resume.retry_of("exec_bench", mode.as_str(), "metrics", program, repeat)
+            }
+        }
+    }
+
+    fn medium_identity(&self, mode: Mode, program: &'static str, repeat: i32) -> Option<&Value> {
+        match self {
+            Self::Campaign(resume, _, _) => {
+                resume.identity("exec_bench", mode.as_str(), "metrics", program, repeat)
+            }
+            Self::Standalone | Self::Retry(_) => None,
+        }
+    }
+}
+
 fn standalone_targets(config: &ExecBenchConfig) -> Result<Vec<Target>> {
     let mut selected = Vec::new();
     for mode in &config.modes {
@@ -130,11 +171,21 @@ fn standalone_targets(config: &ExecBenchConfig) -> Result<Vec<Target>> {
 
 fn standalone_sampling(config: &ExecBenchConfig) -> Result<Sampling> {
     match config.sampling {
-        ExecBenchSampling::Medium => Ok(Sampling::MEDIUM),
+        ExecBenchSampling::Medium => {
+            ensure!(
+                config.retry_run_ids.is_empty(),
+                "EXB2 retries require Full sampling"
+            );
+            Ok(Sampling::MEDIUM)
+        }
         ExecBenchSampling::Full => {
             ensure!(
                 !config.modes.is_empty() && config.modes.iter().all(|mode| mode == "hal"),
                 "standalone EXB2 Full requires HAL mode"
+            );
+            ensure!(
+                config.workloads.is_empty(),
+                "standalone EXB2 Full requires an empty workload list"
             );
             Ok(Sampling::FULL)
         }
@@ -167,14 +218,77 @@ pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
         }
     }
     let settings = Database::load()?;
-    let database = if sampling == Sampling::FULL {
-        settings.prepare_append_only().await?
-    } else {
-        settings.prepare().await?
-    };
+    let database = prepare_standalone_database(&settings, sampling).await?;
+    let retries = &cfg.exec_bench.retry_run_ids;
     database
-        .protect(run_selected(&agent, &database, targets, sampling))
+        .protect(run_selected(&agent, &database, targets, sampling, retries))
         .await
+}
+
+async fn prepare_standalone_database(
+    settings: &Database,
+    sampling: Sampling,
+) -> Result<Collection<'_>> {
+    if sampling == Sampling::FULL {
+        settings.prepare_append_only().await
+    } else {
+        settings.prepare().await
+    }
+}
+
+async fn retry_slots(
+    database: &Collection<'_>,
+    targets: &[Target],
+    ids: &[Uuid],
+) -> Result<RetrySlots> {
+    let mut slots = RetrySlots::new();
+    for id in ids {
+        database.lock_campaign(*id).await?;
+        let row = database
+            .client()
+            .query_opt(
+                "SELECT c.workload, r.repeat_no, c.profile_hash
+             FROM release.bench_run r
+             JOIN release.bench_condition cond USING (condition_id)
+             JOIN release.hal_exec_bench_config c USING (config_id)
+             JOIN release.hal_exec_bench_metrics_data d USING (run_id, config_id)
+             WHERE r.run_id=$1 AND r.mode='hal' AND r.experiment='exec_bench'
+               AND r.variant='metrics' AND r.phase='formal' AND r.status='failed'
+               AND cond.parameters->>'medium_id' IS NULL AND cond.parameters->>'retry_of' IS NULL
+               AND c.samples_per_run=$2 AND r.repeat_no BETWEEN 1 AND $3
+               AND c.batch_count=$4 AND d.batches_expected=$2 AND NOT d.qualified
+               AND NOT EXISTS (
+                   SELECT 1 FROM release.bench_condition prior_retry
+                   WHERE prior_retry.parameters->>'retry_of'=r.run_id::text
+               )",
+                &[
+                    id,
+                    &Sampling::FULL.samples,
+                    &Sampling::FULL.runs,
+                    &i64::from(ROUNDS),
+                ],
+            )
+            .await?
+            .with_context(|| {
+                format!("expected an eligible failed standalone HAL Full run: {id}")
+            })?;
+        let name: &str = row.get(0);
+        let repeat: i32 = row.get(1);
+        let hash: &str = row.get(2);
+        let program = targets
+            .iter()
+            .find_map(|target| {
+                target.programs.iter().copied().find(|program| {
+                    *program == name && target.expected_hash.as_deref() == Some(hash)
+                })
+            })
+            .with_context(|| format!("HAL Full retry {id} requires its original Firmware ELF"))?;
+        ensure!(
+            slots.insert((program, repeat), *id).is_none(),
+            "duplicate HAL Full retry slot for {program} repeat {repeat}"
+        );
+    }
+    Ok(slots)
 }
 
 async fn run_selected(
@@ -182,12 +296,21 @@ async fn run_selected(
     database: &Collection<'_>,
     targets: Vec<Target>,
     sampling: Sampling,
+    retry_ids: &[Uuid],
 ) -> Result<()> {
+    let retries = retry_slots(database, &targets, retry_ids).await?;
     let mut db = database.connect().await?;
     let mut loaded = String::new();
     let mut image = String::new();
     let mut order = 0;
     for target in targets {
+        if !retry_ids.is_empty()
+            && !retries
+                .keys()
+                .any(|(program, _)| target.programs.contains(program))
+        {
+            continue;
+        }
         if image != target.firmware {
             let flash = agent
                 .flash_fw_evidence(&target.firmware, target.expected_hash.as_deref())
@@ -220,7 +343,11 @@ async fn run_selected(
             None,
             &mut order,
             sampling,
-            None,
+            if retry_ids.is_empty() {
+                TrialPlan::Standalone
+            } else {
+                TrialPlan::Retry(&retries)
+            },
         )
         .await?;
     }
@@ -237,28 +364,27 @@ pub(super) async fn run_mode(
     medium_id: Option<Uuid>,
     order: &mut i32,
     sampling: exb2::Sampling,
-    mut formal: Option<(&Resume, &mut Option<String>, &mut Actions)>,
+    mut plan: TrialPlan<'_>,
 ) -> Result<()> {
     let profile = parse_sha256(firmware_hash)?;
     for &program in programs {
         let repeats = (1..=sampling.runs)
-            .filter(|&repeat| {
-                formal.as_ref().is_none_or(|(resume, _, _)| {
-                    resume.should_run("exec_bench", mode.as_str(), "metrics", program, repeat)
-                })
-            })
+            .filter(|&repeat| plan.should_run(mode, program, repeat))
             .collect::<Vec<_>>();
         if repeats.is_empty() {
             continue;
         }
         if let Some(name) = mode.deployment(program) {
-            let loaded = formal.as_ref().and_then(|(_, loaded, _)| loaded.as_deref());
+            let loaded = match &plan {
+                TrialPlan::Campaign(_, loaded, _) => loaded.as_deref(),
+                TrialPlan::Standalone | TrialPlan::Retry(_) => None,
+            };
             if loaded != Some(&name) {
                 let install_started = std::time::Instant::now();
                 agent
                     .bind_xdp(&name, &mode.firmware(program), firmware_hash)
                     .await?;
-                if let Some((_, loaded, actions)) = &mut formal {
+                if let TrialPlan::Campaign(_, loaded, actions) = &mut plan {
                     actions.cold_install_confirmed += 1;
                     actions.cold_install_s += install_started.elapsed().as_secs_f64();
                     **loaded = Some(name);
@@ -283,12 +409,8 @@ pub(super) async fn run_mode(
                 order: *order,
                 repeat,
                 config: Uuid::new_v4(),
-                retry_of: formal.as_ref().and_then(|(resume, _, _)| {
-                    resume.retry_of("exec_bench", mode.as_str(), "metrics", program, repeat)
-                }),
-                medium_identity: formal.as_ref().and_then(|(resume, _, _)| {
-                    resume.identity("exec_bench", mode.as_str(), "metrics", program, repeat)
-                }),
+                retry_of: plan.retry_of(mode, program, repeat),
+                medium_identity: plan.medium_identity(mode, program, repeat),
             };
             *order += 1;
             run_attempt(agent, db, database, &sample, &attempt).await?;
@@ -857,7 +979,25 @@ mod tests {
         );
         let mixed: ExecBenchConfig = toml::from_str("modes = ['hal', 'aot']\nsampling = 'full'")?;
         assert!(standalone_sampling(&mixed).is_err());
+        let subset: ExecBenchConfig =
+            toml::from_str("modes = ['hal']\nsampling = 'full'\nworkloads = ['copy']")?;
+        assert!(standalone_sampling(&subset).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn standalone_retry_selects_only_the_failed_slot_and_keeps_its_parent() {
+        let failed = Uuid::new_v4();
+        let slots = RetrySlots::from([(("copy", 3), failed)]);
+        let plan = TrialPlan::Retry(&slots);
+        assert_eq!(
+            (1..=Sampling::FULL.runs)
+                .filter(|&repeat| plan.should_run(Mode::Hal, "copy", repeat))
+                .collect::<Vec<_>>(),
+            [3]
+        );
+        assert!(!plan.should_run(Mode::Hal, "noop", 3));
+        assert_eq!(plan.retry_of(Mode::Hal, "copy", 3), Some(failed));
     }
 
     #[test]
@@ -920,6 +1060,52 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    #[ignore = "requires a fresh disposable release schema in XPOST_CASE_TEST_DB_FILE"]
+    async fn full_collection_creates_empty_schema_and_preserves_incompatible_tables() -> Result<()>
+    {
+        let settings = Database::load_fixture()?;
+        let client = settings.connect().await?;
+        let name: String = client
+            .query_one("SELECT current_database()::text", &[])
+            .await?
+            .get(0);
+        anyhow::ensure!(
+            name.starts_with("exb2_full_fixture"),
+            "use a disposable database named exb2_full_fixture"
+        );
+        let fresh = prepare_standalone_database(&settings, Sampling::FULL).await?;
+        let marker = Uuid::new_v4();
+        fresh
+            .client()
+            .execute(
+                "INSERT INTO release.bench_condition
+                 (condition_id, experiment, protocol_version, parameters)
+                 VALUES ($1, 'exec_bench', 'fixture', '{}')",
+                &[&marker],
+            )
+            .await?;
+        drop(fresh);
+        let compatible = prepare_standalone_database(&settings, Sampling::FULL).await?;
+        drop(compatible);
+
+        client
+            .batch_execute("ALTER TABLE release.bench_condition ADD COLUMN full_fixture_marker int")
+            .await?;
+        let attempt = prepare_standalone_database(&settings, Sampling::FULL).await;
+        client
+            .query_one(
+                "SELECT full_fixture_marker FROM release.bench_condition WHERE condition_id = $1",
+                &[&marker],
+            )
+            .await?;
+        match attempt {
+            Ok(_) => anyhow::bail!("Full accepted incompatible columns"),
+            Err(error) => assert!(format!("{error:#}").contains("incompatible columns")),
+        }
+        Ok(())
+    }
+
     async fn roundtrip(
         database: &Collection<'_>,
         client: &mut Client,
@@ -970,6 +1156,34 @@ mod tests {
             assert_eq!(row.get::<_, Vec<u8>>(1) == sample.expected, good);
             assert_eq!(row.get::<_, bool>(2), good);
             assert_eq!(row.get::<_, bool>(3), good);
+        }
+        if mode == "hal" && sampling == Sampling::FULL {
+            let config = ExecBenchConfig {
+                modes: vec!["hal".into()],
+                ..ExecBenchConfig::default()
+            };
+            let mut targets = standalone_targets(&config)?;
+            for target in &mut targets {
+                target.expected_hash = Some(protocol::hex(&sample.profile));
+            }
+            let retry = retry_slots(database, &targets, &[attempt.id]).await;
+            // A failed slot can be selected with the exact artifact. A qualified slot cannot.
+            if corrupt {
+                assert_eq!(
+                    retry?,
+                    RetrySlots::from([((sample.program, attempt.repeat), attempt.id)])
+                );
+                for target in &mut targets {
+                    target.expected_hash = None;
+                }
+                assert!(
+                    retry_slots(database, &targets, &[attempt.id])
+                        .await
+                        .is_err()
+                );
+            } else {
+                assert!(retry.is_err());
+            }
         }
         if sample.program == "matmul" {
             let stored = client

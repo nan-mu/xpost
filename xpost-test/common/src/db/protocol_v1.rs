@@ -250,7 +250,8 @@ pub(super) async fn prepare_append_only(client: &mut Client) -> Result<()> {
         .await?;
     let schema = tx
         .query_opt(
-            "SELECT NOT (
+            "SELECT has_schema_privilege(n.oid, 'USAGE'), has_schema_privilege(n.oid, 'CREATE'),
+                NOT (
                 EXISTS (SELECT FROM pg_class WHERE relnamespace = n.oid) OR
                 EXISTS (SELECT FROM pg_proc WHERE pronamespace = n.oid) OR
                 EXISTS (SELECT FROM pg_type WHERE typnamespace = n.oid)
@@ -258,8 +259,16 @@ pub(super) async fn prepare_append_only(client: &mut Client) -> Result<()> {
             &[],
         )
         .await?
-        .context("prepare schema release before collection")?;
-    if schema.get::<_, bool>(0) {
+        .context("Protocol V1 requires the release schema")?;
+    ensure!(
+        schema.get::<_, bool>(0),
+        "Protocol V1 collection requires USAGE on schema release"
+    );
+    if schema.get::<_, bool>(2) {
+        ensure!(
+            schema.get::<_, bool>(1),
+            "Protocol V1 initialization requires CREATE on schema release"
+        );
         // Every ALTER in the canonical DDL follows CREATE of the same table.
         // A conflicting object created by another session aborts this transaction.
         for statement in &ddl.statements {

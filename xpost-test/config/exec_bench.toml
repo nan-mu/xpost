@@ -8,3 +8,6 @@ workloads = []
 
 # Standalone sampling. For full, select only exec_bench and set modes = ["hal"].
 sampling = "medium"
+
+# Retry only the failed Full runs with these IDs. Empty selects a new sweep.
+retry_run_ids = []

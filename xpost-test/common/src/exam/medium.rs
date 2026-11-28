@@ -585,7 +585,7 @@ async fn run_group(
                     Some(medium_id),
                     order,
                     volume.sampling(),
-                    Some((resume, &mut device.active, actions)),
+                    super::exec_bench::TrialPlan::Campaign(resume, &mut device.active, actions),
                 )
                 .await
                 .with_context(|| format!("exec_bench/{}/{}", cell.mode, cell.variant))?;

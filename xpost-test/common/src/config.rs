@@ -135,6 +135,8 @@ pub struct ExecBenchConfig {
     pub workloads: Vec<String>,
     #[serde(default)]
     pub sampling: ExecBenchSampling,
+    #[serde(default)]
+    pub retry_run_ids: Vec<uuid::Uuid>,
 }
 
 fn default_exec_modes() -> Vec<String> {
@@ -147,6 +149,7 @@ impl Default for ExecBenchConfig {
             modes: default_exec_modes(),
             workloads: Vec::new(),
             sampling: ExecBenchSampling::default(),
+            retry_run_ids: Vec::new(),
         }
     }
 }
@@ -320,6 +323,19 @@ fn parse_mac(s: &str) -> Result<[u8; 6]> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn standalone_full_rejects_a_combined_experiment_list() {
+        let mut cfg = super::FileConfig::embedded().unwrap();
+        cfg.exec_bench.sampling = super::ExecBenchSampling::Full;
+        cfg.run = vec!["exec_bench".into(), "dev".into()];
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("EXB2 Full")
+        );
+    }
+
     #[test]
     fn historical_database_selections_are_rejected_before_dispatch() {
         for selection in ["just_tx", "just_drop", "firewall", "lookup", "formal-clear"] {
