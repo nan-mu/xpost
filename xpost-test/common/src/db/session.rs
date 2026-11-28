@@ -18,9 +18,23 @@ pub struct Collection<'a> {
     closed: watch::Receiver<bool>,
 }
 
+enum Preparation {
+    Reconcile,
+    AppendOnly,
+}
+
 impl Database {
     /// Reconcile before new collection and keep the schema protected.
     pub async fn prepare(&self) -> Result<Collection<'_>> {
+        self.prepare_with(Preparation::Reconcile).await
+    }
+
+    /// Initialize an empty schema or validate an existing one without DDL.
+    pub async fn prepare_append_only(&self) -> Result<Collection<'_>> {
+        self.prepare_with(Preparation::AppendOnly).await
+    }
+
+    async fn prepare_with(&self, preparation: Preparation) -> Result<Collection<'_>> {
         let (mut guard, closed) = self.open().await?;
         ensure!(
             guard
@@ -29,7 +43,10 @@ impl Database {
                 .get::<_, bool>(0),
             "Protocol V1 schema is in use by another runner"
         );
-        protocol_v1::reconcile(&mut guard).await?;
+        match preparation {
+            Preparation::Reconcile => protocol_v1::reconcile(&mut guard).await?,
+            Preparation::AppendOnly => protocol_v1::prepare_append_only(&mut guard).await?,
+        }
         // This session still owns the exclusive lock while it takes the shared
         // lock. A competing preparer cannot slip in between these statements.
         lock_shared(&guard).await?;

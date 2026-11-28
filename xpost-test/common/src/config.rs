@@ -118,11 +118,25 @@ impl Default for FirewallConfig {
     }
 }
 
-/// EXB2 modes. Legacy `arms` remains a read alias.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecBenchSampling {
+    #[default]
+    Medium,
+    Full,
+}
+
+/// Standalone EXB2 selection. Legacy `arms` remains a read alias.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExecBenchConfig {
     #[serde(default = "default_exec_modes", alias = "arms")]
     pub modes: Vec<String>,
+    #[serde(default)]
+    pub workloads: Vec<String>,
+    #[serde(default)]
+    pub sampling: ExecBenchSampling,
+    #[serde(default)]
+    pub retry_run_ids: Vec<uuid::Uuid>,
 }
 
 fn default_exec_modes() -> Vec<String> {
@@ -133,6 +147,9 @@ impl Default for ExecBenchConfig {
     fn default() -> Self {
         Self {
             modes: default_exec_modes(),
+            workloads: Vec::new(),
+            sampling: ExecBenchSampling::default(),
+            retry_run_ids: Vec::new(),
         }
     }
 }
@@ -231,6 +248,12 @@ impl FileConfig {
         if self.run.is_empty() {
             bail!("profile.toml `run` must list at least one experiment");
         }
+        if self.exec_bench.sampling == ExecBenchSampling::Full
+            && self.run.len() != 1
+            && self.run.iter().any(|name| name == "exec_bench")
+        {
+            bail!("standalone EXB2 Full requires `run = [\"exec_bench\"]`");
+        }
         if self.run.len() != 1
             && self.run.iter().any(|name| {
                 matches!(
@@ -300,6 +323,19 @@ fn parse_mac(s: &str) -> Result<[u8; 6]> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn standalone_full_rejects_a_combined_experiment_list() {
+        let mut cfg = super::FileConfig::embedded().unwrap();
+        cfg.exec_bench.sampling = super::ExecBenchSampling::Full;
+        cfg.run = vec!["exec_bench".into(), "dev".into()];
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("EXB2 Full")
+        );
+    }
+
     #[test]
     fn historical_database_selections_are_rejected_before_dispatch() {
         for selection in ["just_tx", "just_drop", "firewall", "lookup", "formal-clear"] {

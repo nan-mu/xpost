@@ -1,0 +1,16 @@
+#[cfg(feature = "bsort")]
+pub mod bsort;
+#[cfg(feature = "copy")]
+pub mod copy;
+#[cfg(feature = "fletcher32")]
+pub mod fletcher32;
+#[cfg(feature = "log2")]
+pub mod log2;
+#[cfg(feature = "matmul")]
+pub mod matmul;
+#[cfg(feature = "noop")]
+pub mod noop;
+#[cfg(feature = "prime")]
+pub mod prime;
+#[cfg(feature = "strcmp")]
+pub mod strcmp;

@@ -134,6 +134,11 @@ pub fn build_registry(
         if p.name.trim().is_empty() {
             bail!("fw entry with empty name");
         }
+        if p.name.starts_with("exec-bench-hal-")
+            && crate::preflight::hal_exec_task(&p.name).is_none()
+        {
+            bail!("unknown EXB2 HAL firmware profile `{}`", p.name);
+        }
         if p.artifact.trim().is_empty() {
             bail!("fw `{}`: empty artifact", p.name);
         }
@@ -547,6 +552,37 @@ mode = "hal"
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../profiles.toml");
         let text = std::fs::read_to_string(&path).unwrap();
         let profiles = Profiles::parse(&text).unwrap();
+        for (task, program) in [
+            "noop",
+            "prime",
+            "log2",
+            "copy",
+            "fletcher32",
+            "bsort",
+            "strcmp",
+            "matmul",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let name = format!("exec-bench-hal-{program}");
+            let profile = profiles.fw(&name).unwrap();
+            assert_eq!(crate::preflight::hal_exec_task(&name), Some(task as u8));
+            assert!(profile.xdp.is_empty());
+            assert!(
+                profile
+                    .artifact
+                    .ends_with(&format!("/exec_bench_hal_{program}"))
+            );
+        }
+        let invalid = text.replace(
+            "name = \"exec-bench-hal-matmul\"",
+            "name = \"exec-bench-hal-unknown\"",
+        );
+        assert!(
+            format!("{:#}", Profiles::parse(&invalid).unwrap_err())
+                .contains("unknown EXB2 HAL firmware profile")
+        );
         let idle = profiles.xdp("case_mark_idle").unwrap();
         assert_eq!(idle.program, "case_mark");
         assert_eq!(idle.mode, Mode::Aot);

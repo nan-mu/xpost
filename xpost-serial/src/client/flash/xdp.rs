@@ -253,41 +253,61 @@ pub(super) fn attest(
     xdp: XdpTable,
     partition: &str,
     expectation: &FirmwareExpectation,
+    firmware_only: bool,
 ) -> io::Result<(bool, Option<[u8; 32]>)> {
     let mut dl = port.open_download_for_install()?;
-    let observation = (|| {
-        let segment = dl.application_segment(&expectation.elf)?;
-        if let Err(error) = verify_firmware(expectation, xdp, partition, &segment, |addr, len| {
-            dl.read_flash(addr, len)
-        }) {
-            return if error.kind() == io::ErrorKind::InvalidData {
-                Ok((false, None))
-            } else {
-                Err(error)
-            };
-        }
-        let table = dl.read_flash(xdp.base, xdp.len)?;
-        let entries = list_entries(&table)?;
-        let image = match entries.as_slice() {
-            [only]
-                if only.offset == 0
-                    && table[only.len as usize..].iter().all(|byte| *byte == 0xff) =>
-            {
-                Some(Sha256::digest(&table[..only.len as usize]).into())
-            }
-            [] if table.iter().all(|byte| *byte == 0xff) => None,
-            _ => {
-                return Err(io::Error::other(
-                    "cannot attest a dirty or multi-image cold table",
-                ));
-            }
-        };
-        Ok((true, image))
-    })();
+    let observation = dl
+        .application_segment(&expectation.elf)
+        .and_then(|segment| {
+            attest_verified(
+                expectation,
+                xdp,
+                partition,
+                &segment,
+                firmware_only,
+                |addr, len| dl.read_flash(addr, len),
+            )
+        });
     let reset = dl.reset_to_app();
     let attested = observation?;
     reset?;
     Ok(attested)
+}
+
+fn attest_verified(
+    expectation: &FirmwareExpectation,
+    xdp: XdpTable,
+    partition: &str,
+    segment: &(u32, Vec<u8>),
+    firmware_only: bool,
+    mut read: impl FnMut(u32, u32) -> io::Result<Vec<u8>>,
+) -> io::Result<(bool, Option<[u8; 32]>)> {
+    if let Err(error) = verify_firmware(expectation, xdp, partition, segment, &mut read) {
+        return if error.kind() == io::ErrorKind::InvalidData {
+            Ok((false, None))
+        } else {
+            Err(error)
+        };
+    }
+    if firmware_only {
+        return Ok((true, None));
+    }
+    let table = read(xdp.base, xdp.len)?;
+    let entries = list_entries(&table)?;
+    let image = match entries.as_slice() {
+        [only]
+            if only.offset == 0 && table[only.len as usize..].iter().all(|byte| *byte == 0xff) =>
+        {
+            Some(Sha256::digest(&table[..only.len as usize]).into())
+        }
+        [] if table.iter().all(|byte| *byte == 0xff) => None,
+        _ => {
+            return Err(io::Error::other(
+                "cannot attest a dirty or multi-image cold table",
+            ));
+        }
+    };
+    Ok((true, image))
 }
 
 fn verify_firmware(
@@ -552,6 +572,40 @@ mod attestation_tests {
                 (table.base + FLASH_SECTOR, FLASH_SECTOR)
             ]
         );
+    }
+
+    #[test]
+    fn hal_attestation_checks_partition_and_app_without_reading_cold_flash() {
+        let (expectation, xdp, mut io) = fixture();
+        let segment = (0x10000, io.app.clone());
+        io.fail_read = Some("cold");
+        assert_eq!(
+            attest_verified(&expectation, xdp, "xdp", &segment, true, |addr, len| io
+                .read_flash(addr, len))
+            .unwrap(),
+            (true, None)
+        );
+        assert_eq!(io.events, ["partition", "app"]);
+
+        io.events.clear();
+        io.app[0] ^= 1;
+        assert_eq!(
+            attest_verified(&expectation, xdp, "xdp", &segment, true, |addr, len| io
+                .read_flash(addr, len))
+            .unwrap(),
+            (false, None)
+        );
+        assert_eq!(io.events, ["partition", "app"]);
+
+        io.events.clear();
+        io.table[0] ^= 1;
+        assert_eq!(
+            attest_verified(&expectation, xdp, "xdp", &segment, true, |addr, len| io
+                .read_flash(addr, len))
+            .unwrap(),
+            (false, None)
+        );
+        assert_eq!(io.events, ["partition"]);
     }
 
     #[test]

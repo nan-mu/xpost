@@ -141,17 +141,19 @@ impl Uart {
         })
     }
 
-    /// Write `cmd` + `\n`, flush, return the wall time after a successful flush.
+    /// Write `cmd` and its newline, then flush the port.
     ///
-    /// That timestamp is the exclusive lower bound for [`SharedRecord::wait_reply`].
+    /// Return the time before the newline as the lower bound for matching replies.
     pub fn write_command<C: Command + ?Sized>(&mut self, cmd: &C) -> io::Result<SystemTime> {
         let Some(w) = self.writer.as_mut() else {
             return Err(std::io::Error::other("uart closed"));
         };
         w.write_all(cmd.to_serial_buf())?;
+        // The DUT can reply as soon as it receives the newline, while flush is pending.
+        let sent = SystemTime::now();
         w.write_all(b"\n")?;
         w.flush()?;
-        Ok(SystemTime::now())
+        Ok(sent)
     }
 }
 
@@ -215,4 +217,72 @@ fn read_exact_wake(
         }
     }
     Ok(payload)
+}
+
+#[cfg(all(test, feature = "dev", feature = "server"))]
+mod tests {
+    use super::*;
+    use crate::client::record::{Found, SharedRecordInner};
+    use crate::tests::harness::TestError;
+    use std::time::Duration;
+
+    struct ReplyDuringFlush(SharedRecord);
+
+    impl Read for ReplyDuringFlush {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Write for ReplyDuringFlush {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes != b"\n" {
+                // This reply arrived before the new command was terminated.
+                self.0.uart(b"OK exec batch invoke 1 10 11 0");
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            // Replay the valid DUT reply while the host is still flushing the write.
+            self.0
+                .uart(b"OK exec batch invoke 903449073 88323818 88323822 0");
+            Ok(())
+        }
+    }
+
+    impl AppBytePort for ReplyDuringFlush {
+        fn try_clone_box(&self) -> io::Result<Box<dyn AppBytePort>> {
+            Ok(Box::new(Self(self.0.clone())))
+        }
+
+        fn set_timeout(&mut self, _: Duration) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_accepts_a_reply_received_before_flush_returns() {
+        let record = SharedRecordInner::create_memory();
+        let mut uart =
+            Uart::open_port(Box::new(ReplyDuringFlush(record.clone())), record.clone()).unwrap();
+        let command = crate::command::Command::ExecBatchInvoke;
+        let sent = uart.write_command(command.to_string().as_str()).unwrap();
+        let (found, _) = tokio::time::timeout(
+            Duration::from_millis(30),
+            record.wait_reply::<TestError>(&command, sent),
+        )
+        .await
+        .expect("the recorded reply must not expire")
+        .unwrap();
+        assert!(matches!(
+            found,
+            Found::ExecBatchInvoke {
+                boot_id: 903449073,
+                begin_tick: 88323818,
+                end_tick: 88323822,
+                action: 0,
+            }
+        ));
+    }
 }

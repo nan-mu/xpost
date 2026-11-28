@@ -31,6 +31,42 @@ fn canonical_ddl_describes_132_tables() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn hal_workload_check_requires_all_eight_values_and_accepts_reordering() -> Result<()> {
+    use super::{catalog, check_hal_workloads};
+
+    let ddl = Ddl::load()?;
+    let values = "'matmul', 'strcmp', 'bsort', 'fletcher32', 'copy', 'log2', 'prime', 'noop'";
+    let reordered = format!(
+        "CHECK ((workload = ANY (ARRAY[{}])))",
+        values.replace("',", "'::text,") + "::text"
+    );
+    let mut table = catalog::Table {
+        objects: vec![catalog::Object {
+            kind: "c".into(),
+            name: "renamed_workload_check".into(),
+            definition: reordered,
+            referenced: String::new(),
+            check_columns: vec!["workload".into()],
+            active_write_trigger: false,
+        }],
+        ..Default::default()
+    };
+    check_hal_workloads(&table, &ddl)?;
+    table.objects[0].definition = format!("CHECK (workload IN ({values}))");
+    check_hal_workloads(&table, &ddl)?;
+    for incompatible in [
+        values.replace("'matmul', ", ""),
+        values.replace("'noop'", "'other'"),
+        values.replace("'matmul'", "'mat mul'"),
+        "'matmul'".to_owned(),
+    ] {
+        table.objects[0].definition = format!("CHECK (workload IN ({incompatible}))");
+        assert!(check_hal_workloads(&table, &ddl).is_err(), "{incompatible}");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires an empty release schema in a disposable database with fixture grants"]
 async fn reconciles_tables_and_protects_active_collection() -> Result<()> {

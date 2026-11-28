@@ -18,6 +18,10 @@ The 41 targets include separate Metrics and Trace Firmware ELFs for the network 
 The phased endpoint checks only the deployments and HAL Firmware ELFs needed by the selected phase.
 The [v0.1.0 ledger](libbpf-mcu-v0.1.0.sha256) records the earlier release with zero deployments.
 
+Run `cargo build-hal-all` from `examples/exec_bench_hal` before preflight.
+The HAL EXB2 cell uses eight firmware groups. Each workload has its own Firmware ELF.
+See the [HAL EXB2 build instructions](../../examples/exec_bench_hal/README.md).
+
 Provide the Wi-Fi build inputs for each network example before building its Firmware ELF.
 Use the local `.env` paths described in the [README](../../README.md).
 The phased preflight checks the linked Wi-Fi input marker before any device write.
@@ -65,9 +69,9 @@ Use `all-preflight` to check full deployment and collector readiness from TR3000
 
 | Full phase | Modes | Cells | Planned attempts |
 | --- | --- | ---: | ---: |
-| One | HAL, AOT | 14 | 312 |
+| One | HAL, AOT | 14 | 317 |
 | Two | JIT, rBPF, one separate AOT Case | 15 | 313 |
-| Total | Four modes | 29 | 625 |
+| Total | Four modes | 29 | 630 |
 
 Each mode runs 13 target rates from 400 to 4000 pps for each network Metrics experiment.
 Each rate uses three repeats. Send for 30 seconds and observe for one second.
@@ -89,9 +93,9 @@ Set `run = ["medium"]` for formal execution.
 
 | Phase | Modes | Metrics | Trace | Attempts |
 | --- | --- | ---: | ---: | ---: |
-| One | HAL, AOT | 8 | 6 | 72 |
+| One | HAL, AOT | 8 | 6 | 74 |
 | Two | JIT, rBPF | 8 | 6 | 72 |
-| Total | Four modes | 16 | 12 | 144 |
+| Total | Four modes | 16 | 12 | 146 |
 
 Run `exec_bench`, `firewall`, `just_tx`, and `just_drop` in that order.
 Group Firmware ELFs by digest within each experiment.
@@ -99,7 +103,11 @@ Keep rates and repeats within each firmware group.
 Each phase uses 36 five-second network Metrics windows.
 Each phase uses one tagged Just TX and Just DROP Trace probe per mode.
 Firewall Trace uses one hit and one miss per mode.
-EXB2 measures two batches for each of seven workloads per mode.
+EXB2 measures two batches per workload.
+HAL has eight workloads. AOT, JIT, and rBPF each have seven.
+Resume checks the Firmware ELF digest for each HAL workload.
+Keep earlier C HAL attempts under their original campaign ID.
+Start a new campaign ID for the native Rust HAL baseline when the previous campaign used C HAL.
 
 Publish phase one reconciliation, figures, and unqualified conditions before phase two.
 Set `medium_stage = "jit-rbpf"` for phase two.
@@ -174,7 +182,7 @@ The runner checks the scope of DUT counts before it attributes them to a stimulu
   The program executes every round internally. Observe the batch outside the call.
   Record XDP action or direct-entry status separately from the buffer status.
   Check completed rounds, result, digest, input, and padding.
-  Check every scratch byte for copy and bsort.
+  Check every scratch byte for copy, bsort, and HAL matmul.
   Report ticks per round only for a correct batch measured on the DUT clock.
 - **Case.** Prepare A with `case_swap` and B with `case_mark_idle`.
   Send 40-byte UDP probes with JTX1 tags and an eight-byte zero tail.
@@ -194,7 +202,8 @@ The runner checks the scope of DUT counts before it attributes them to a stimulu
 All rows use three rounds, seed 1, variant 0, a 64-byte little-endian header, and a total capacity of 8258 bytes.
 Initialize scratch with `a5` and remaining padding with `cc`.
 Set request status to `0xffffffff`.
-In the host check, the published C direct entry returned 0 for all rows.
+In the historical host check, the published C direct entry returned 0 for the original seven tasks.
+The HAL matmul vector comes from its [workload design](../../examples/exec_bench_hal/exb2/matmul.md).
 Every response preserved the input and padding and reported status 0 and completed 3.
 An XDP execution should return `XDP_PASS` (2) on success or `XDP_ABORTED` (0) on error.
 
@@ -207,6 +216,7 @@ An XDP execution should return `XDP_PASS` (2) on success or `XDP_ABORTED` (0) on
 | fletcher32 | 3 | hex `01 02 03` | `04050204` hex | 0 | `199d264a` | — |
 | bsort | 4 | u32 values 8, 2, 1, 8 | 1 | 8 | `91efbaee` | u32 values 1, 2, 8, 8 |
 | strcmp | 4 | `abcz\0abdz\0` | `ffffffff` hex | 3 | `664ce84e` | — |
+| matmul (HAL) | 2 | u32 matrices A = [[1, 2], [3, 4]] and B = [[5, 6], [7, 8]] | 19 | 50 | `91eee432` | u32 matrix [[19, 22], [43, 50]] |
 
 The 88-byte `workload_v2` design had no runtime caller at the review head.
 The published ABI replaces that design.

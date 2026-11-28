@@ -1,6 +1,9 @@
 //! Reconcile the release schema using the canonical Protocol V1 DDL.
 
-use super::{catalog, ddl::Ddl};
+use super::{
+    catalog,
+    ddl::{Ddl, HAL_EXEC_CONFIG, workload_values},
+};
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::BTreeSet;
 use tokio_postgres::{Client, IsolationLevel, Transaction};
@@ -156,6 +159,11 @@ fn integrity_problems(name: &str, table: &catalog::Table, ddl: &Ddl) -> Result<V
         }
     }
 
+    if name == HAL_EXEC_CONFIG
+        && let Err(error) = check_hal_workloads(table, ddl)
+    {
+        problems.push(error.to_string());
+    }
     let expected_trigger = expected.write_trigger.as_deref().map(compact_sql);
     let mut canonical_trigger_active = false;
     for trigger in table
@@ -184,6 +192,44 @@ fn integrity_problems(name: &str, table: &catalog::Table, ddl: &Ddl) -> Result<V
     Ok(problems)
 }
 
+fn is_workload_check(object: &catalog::Object) -> bool {
+    object.kind == "c" && object.check_columns == ["workload"]
+}
+
+fn check_hal_workloads(table: &catalog::Table, ddl: &Ddl) -> Result<()> {
+    let expected: BTreeSet<&str> = ddl.tables[HAL_EXEC_CONFIG]
+        .workload_allowlist
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut validated = false;
+    for object in table
+        .objects
+        .iter()
+        .filter(|object| is_workload_check(object))
+    {
+        let definition = &object.definition;
+        if definition.ends_with(" NOT ENFORCED") {
+            continue;
+        }
+        let unvalidated = definition.strip_suffix(" [unvalidated]");
+        let actual = workload_values(unvalidated.unwrap_or(definition));
+        if actual.as_ref() != Some(&expected) {
+            bail!(
+                "release.{HAL_EXEC_CONFIG}: incompatible workload CHECK `{}`. Preserve the table and update the workload allowlist to {:?} before collection",
+                object.name,
+                expected,
+            );
+        }
+        validated |= unvalidated.is_none();
+    }
+    ensure!(
+        validated,
+        "release.{HAL_EXEC_CONFIG}: missing validated workload CHECK"
+    );
+    Ok(())
+}
+
 fn has_key(table: &catalog::Table, kind: &str, definition: &str) -> bool {
     let definition = compact_sql(definition);
     table
@@ -194,6 +240,49 @@ fn has_key(table: &catalog::Table, kind: &str, definition: &str) -> bool {
 
 fn compact_sql(sql: &str) -> String {
     sql.split_ascii_whitespace().collect()
+}
+
+/// Caller holds the exclusive schema session lock.
+pub(super) async fn prepare_append_only(client: &mut Client) -> Result<()> {
+    let ddl = Ddl::load()?;
+    let tx = client.transaction().await?;
+    tx.batch_execute("SET LOCAL search_path = pg_catalog")
+        .await?;
+    let schema = tx
+        .query_opt(
+            "SELECT has_schema_privilege(n.oid, 'USAGE'), has_schema_privilege(n.oid, 'CREATE'),
+                NOT (
+                EXISTS (SELECT FROM pg_class WHERE relnamespace = n.oid) OR
+                EXISTS (SELECT FROM pg_proc WHERE pronamespace = n.oid) OR
+                EXISTS (SELECT FROM pg_type WHERE typnamespace = n.oid)
+             ) FROM pg_namespace n WHERE nspname = 'release'",
+            &[],
+        )
+        .await?
+        .context("Protocol V1 requires the release schema")?;
+    ensure!(
+        schema.get::<_, bool>(0),
+        "Protocol V1 collection requires USAGE on schema release"
+    );
+    if schema.get::<_, bool>(2) {
+        ensure!(
+            schema.get::<_, bool>(1),
+            "Protocol V1 initialization requires CREATE on schema release"
+        );
+        // Every ALTER in the canonical DDL follows CREATE of the same table.
+        // A conflicting object created by another session aborts this transaction.
+        for statement in &ddl.statements {
+            apply(
+                &tx,
+                statement.sql,
+                &format!("initialize release.{}", statement.name),
+            )
+            .await?;
+        }
+    }
+    validate(&tx, &ddl).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Caller holds the exclusive schema session lock until reconciliation commits
@@ -226,6 +315,9 @@ pub(super) async fn reconcile(client: &mut Client) -> Result<()> {
     let mut installed = catalog::tables(&tx, &names, "").await?;
     catalog::table_objects(&tx, &names, "", &mut installed).await?;
     let installed_globals = catalog::globals(&tx, &global_names, "").await?;
+    if let Some(table) = installed.get(HAL_EXEC_CONFIG) {
+        check_hal_workloads(table, &ddl)?;
+    }
 
     // Ask PostgreSQL to describe the DDL, including its normalized constraints.
     // The reference objects exist only inside this savepoint. A name prefix
@@ -299,6 +391,10 @@ pub(super) async fn reconcile(client: &mut Client) -> Result<()> {
             continue;
         }
         for wanted in canonical {
+            // The read-only check and preparation use the same allowlist comparison.
+            if name == HAL_EXEC_CONFIG && is_workload_check(wanted) {
+                continue;
+            }
             let current = table.objects.iter().find(|o| same_definition(o, wanted));
             if let Some(current) = current {
                 if current.kind == "f" && rebuild.contains(current.referenced.as_str()) {

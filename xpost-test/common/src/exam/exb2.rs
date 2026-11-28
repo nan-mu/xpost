@@ -5,7 +5,7 @@
 
 use serde_json::{Value, json};
 
-pub(super) const PROGRAMS: [&str; 7] = [
+pub(super) const HAL_PROGRAMS: [&str; 8] = [
     "noop",
     "prime",
     "log2",
@@ -13,7 +13,19 @@ pub(super) const PROGRAMS: [&str; 7] = [
     "fletcher32",
     "bsort",
     "strcmp",
+    "matmul",
 ];
+pub(super) fn xdp_programs() -> &'static [&'static str] {
+    &HAL_PROGRAMS[..HAL_PROGRAMS.len() - 1]
+}
+
+pub(super) fn task(program: &str) -> usize {
+    HAL_PROGRAMS
+        .iter()
+        .position(|&name| name == program)
+        .expect("planned EXB2 workload")
+}
+
 pub(super) const BUF: usize = 8258;
 const HEADER: usize = 64;
 pub(super) const ROUNDS: u32 = 3;
@@ -46,7 +58,7 @@ struct Vector {
 }
 
 // Byte-exact references from tests/exb2-host-vectors.md at Gitea b7af1ff.
-const VECTORS: [Vector; 7] = [
+const VECTORS: [Vector; 8] = [
     Vector {
         n: 0,
         input: &[],
@@ -96,6 +108,13 @@ const VECTORS: [Vector; 7] = [
         result: [u32::MAX, 3],
         digest: 0x664ce84e,
     },
+    Vector {
+        n: 2,
+        input: b"\x01\0\0\0\x02\0\0\0\x03\0\0\0\x04\0\0\0\x05\0\0\0\x06\0\0\0\x07\0\0\0\x08\0\0\0",
+        scratch: b"\x13\0\0\0\x16\0\0\0\x2b\0\0\0\x32\0\0\0",
+        result: [19, 50],
+        digest: 0x91eee432,
+    },
 ];
 
 fn buffers(task: usize, vector: &Vector) -> (Vec<u8>, Vec<u8>) {
@@ -132,8 +151,10 @@ fn buffers(task: usize, vector: &Vector) -> (Vec<u8>, Vec<u8>) {
     (request, expected)
 }
 
-pub(super) fn conditions(sampling: Sampling) -> Value {
-    let workloads = PROGRAMS.iter().zip(&VECTORS).enumerate().map(|(task, (program, vector))| {
+pub(super) fn conditions(sampling: Sampling, programs: &[&str]) -> Value {
+    let workloads = programs.iter().map(|&program| {
+        let task = task(program);
+        let vector = &VECTORS[task];
         let (request, expected) = buffers(task, vector);
         let mut input = json!({ "program": program, "task": task, "n": vector.n, "seed": SEED, "variant": 0,
             "batch_count": ROUNDS, "input_bytes": vector.input.len(), "scratch_bytes": vector.scratch.len(),
@@ -166,13 +187,13 @@ mod tests {
 
     #[test]
     fn full_sampling_changes_identity_without_changing_workload_vectors() {
-        let medium = conditions(Sampling::MEDIUM);
-        let full = conditions(Sampling::FULL);
+        let medium = conditions(Sampling::MEDIUM, xdp_programs());
+        let full = conditions(Sampling::FULL, xdp_programs());
         assert_eq!(medium["batches_per_program"], 2);
         assert_eq!(full["batches_per_program"], 500);
         assert_eq!(medium["runs_per_program"], 2);
         assert_eq!(full["runs_per_program"], 5);
-        for task in 0..PROGRAMS.len() {
+        for task in 0..xdp_programs().len() {
             let mut full_input = full["workloads"][task].as_object().unwrap().clone();
             assert_eq!(
                 full_input.remove("sampling"),

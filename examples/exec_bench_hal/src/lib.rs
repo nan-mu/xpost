@@ -1,164 +1,104 @@
 #![no_std]
-#![cfg(feature = "diag")]
 
-//! Workload kernels for the HAL diagnostic sweep.
+#[cfg(target_os = "none")]
+pub mod firmware;
+pub mod workloads;
 
-const HEADER: usize = 8;
-const OP_INCR: u32 = 0;
-const OP_SQUARE: u32 = 1;
-const OP_BITSWAP: u32 = 2;
-const OP_FIB: u32 = 3;
-const OP_BUF: u32 = 4;
-const OP_MEMCPY: u32 = 5;
-const OP_FLETCHER32: u32 = 6;
-const OP_BSORT: u32 = 7;
+pub trait Workload {
+    const TASK_ID: u8;
+    const MIN_N: usize;
+    const MAX_N: usize;
+    const MAX_VARIANT: u32;
 
-fn store_u32(buf: &mut [u8], off: usize, v: u32) {
-    buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    fn layout(n: usize, variant: u32) -> (usize, usize);
+    fn validate(_input: &[u8]) -> Result<(), Error> {
+        Ok(())
+    }
+    fn round(n: usize, variant: u32, input: &[u8], scratch: &mut [u8]) -> (u32, u32);
 }
 
-fn load_u32(buf: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
+const CONTEXT_BYTES: usize = 8258;
+const HEADER_BYTES: usize = 64;
+
+#[derive(Clone, Copy)]
+#[repr(u32)]
+pub enum Error {
+    BadMagic = 1,
+    BadVersion = 2,
+    BadTask = 3,
+    BadRange = 4,
+    BadLayout = 5,
+    BadVariant = 6,
+    ShortBuffer = 7,
 }
 
-fn fib_u32(n: u32) -> u32 {
-    if n == 0 {
-        return 0;
-    }
-    let mut a = 0u32;
-    let mut b = 1u32;
-    for _ in 1..n {
-        let c = a.wrapping_add(b);
-        a = b;
-        b = c;
-    }
-    b
+pub(crate) fn word(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
-/// Fletcher-32 as in Wikipedia / RFC 3720 §12.1 (360-word inner chunks).
-fn fletcher32(data: &[u8]) -> u32 {
-    let mut sum1 = 0xffffu32;
-    let mut sum2 = 0xffffu32;
-    let mut i = 0usize;
-    let mut len = data.len();
-    while len > 1 {
-        let mut words = len / 2;
-        if words > 360 {
-            words = 360;
-        }
-        len -= words * 2;
-        while words > 0 {
-            let w = u16::from(data[i]) | (u16::from(data[i + 1]) << 8);
-            i += 2;
-            sum1 += u32::from(w);
-            sum2 += sum1;
-            words -= 1;
-        }
-        sum1 = (sum1 & 0xffff) + (sum1 >> 16);
-        sum2 = (sum2 & 0xffff) + (sum2 >> 16);
+fn run<W: Workload>(header: &[u8], payload: &mut [u8]) -> Result<[u32; 4], Error> {
+    if &header[..4] != b"EXB2" {
+        return Err(Error::BadMagic);
     }
-    if len != 0 {
-        sum1 += u32::from(data[i]);
-        sum2 += sum1;
-        sum1 = (sum1 & 0xffff) + (sum1 >> 16);
-        sum2 = (sum2 & 0xffff) + (sum2 >> 16);
+    if header[4..8] != [2, 0, 64, 0] {
+        return Err(Error::BadVersion);
     }
-    sum1 = (sum1 & 0xffff) + (sum1 >> 16);
-    sum2 = (sum2 & 0xffff) + (sum2 >> 16);
-    (sum2 << 16) | sum1
+    if word(header, 8) != u32::from(W::TASK_ID) {
+        return Err(Error::BadTask);
+    }
+    if word(header, 56) != 0 || word(header, 60) != 0 {
+        return Err(Error::BadLayout);
+    }
+    let n = word(header, 12) as usize;
+    let rounds = word(header, 16);
+    let variant = word(header, 20);
+    if !(W::MIN_N..=W::MAX_N).contains(&n) || !(1..=65536).contains(&rounds) {
+        return Err(Error::BadRange);
+    }
+    if variant > W::MAX_VARIANT {
+        return Err(Error::BadVariant);
+    }
+    let (input_len, scratch_len) = W::layout(n, variant);
+    if word(header, 28) as usize != input_len || word(header, 32) as usize != scratch_len {
+        return Err(Error::BadLayout);
+    }
+    let (input, scratch) = payload
+        .get_mut(..input_len + scratch_len)
+        .ok_or(Error::ShortBuffer)?
+        .split_at_mut(input_len);
+    let input: &[u8] = input;
+    W::validate(input)?;
+
+    let mut digest = word(header, 24) ^ 0x811c9dc5;
+    let mut result = (0, 0);
+    for round in 0..rounds {
+        // Keep reads, computation and Scratch writes inside each measured round.
+        use core::hint::black_box;
+        result = W::round(black_box(n), black_box(variant), black_box(input), scratch);
+        black_box(&*scratch);
+        digest = (digest.rotate_left(5) ^ result.0).wrapping_add(result.1 ^ round ^ 0x9e3779b9);
+    }
+    Ok([rounds, result.0, result.1, digest])
 }
 
-/// One native execution on the 32-byte map value (same layout as the XDP images).
-pub fn run_hal(buf: &mut [u8]) -> Result<(), ()> {
-    if buf.len() < HEADER {
-        return Err(());
+/// Execute the compiled workload and publish the EXB2 response in place.
+pub fn execute<W: Workload>(buffer: &mut [u8]) -> u32 {
+    if buffer.len() != CONTEXT_BYTES {
+        return Error::ShortBuffer as u32;
     }
-    let op = load_u32(buf, 0);
-    let param = load_u32(buf, 4);
-    let avail = buf.len() - HEADER;
-    let payload = &mut buf[HEADER..];
-
-    match op {
-        OP_INCR => {
-            if avail < 4 {
-                return Err(());
-            }
-            let x = load_u32(payload, 0);
-            store_u32(payload, 0, x.wrapping_add(1));
-            Ok(())
-        }
-        OP_SQUARE => {
-            if avail < 4 {
-                return Err(());
-            }
-            let x = load_u32(payload, 0);
-            store_u32(payload, 0, x.wrapping_mul(x));
-            Ok(())
-        }
-        OP_BITSWAP => {
-            if avail < 4 {
-                return Err(());
-            }
-            let x = load_u32(payload, 0);
-            store_u32(payload, 0, x.reverse_bits());
-            Ok(())
-        }
-        OP_FIB => {
-            if avail < 4 {
-                return Err(());
-            }
-            store_u32(payload, 0, fib_u32(param.min(47)));
-            Ok(())
-        }
-        OP_BUF => {
-            let n = param as usize;
-            if n > avail {
-                return Err(());
-            }
-            let mut acc = 0u32;
-            for i in 0..n {
-                payload[i] = payload[i].wrapping_add(i as u8);
-                acc = acc.wrapping_add(u32::from(payload[i]));
-            }
-            if avail >= n + 4 {
-                store_u32(payload, n, acc);
-            }
-            Ok(())
-        }
-        OP_MEMCPY => {
-            let n = param as usize;
-            if n == 0 || n > avail / 2 {
-                return Err(());
-            }
-            payload.copy_within(0..n, n);
-            Ok(())
-        }
-        OP_FLETCHER32 => {
-            let n = param as usize;
-            if n == 0 || n > avail || avail < n + 4 {
-                return Err(());
-            }
-            let sum = fletcher32(&payload[..n]);
-            store_u32(payload, n, sum);
-            Ok(())
-        }
-        OP_BSORT => {
-            let n = param as usize;
-            if !(2..=64).contains(&n) || avail < n * 4 {
-                return Err(());
-            }
-            for i in 0..n - 1 {
-                for j in 0..n - 1 - i {
-                    let a = load_u32(payload, j * 4);
-                    let b = load_u32(payload, (j + 1) * 4);
-                    if a > b {
-                        store_u32(payload, j * 4, b);
-                        store_u32(payload, (j + 1) * 4, a);
-                    }
-                }
-            }
-            Ok(())
-        }
-        _ => Err(()),
+    let (header, payload) = buffer.split_at_mut(HEADER_BYTES);
+    let (status, fields) = match run::<W>(header, payload) {
+        Ok(fields) => (0, fields),
+        Err(error) => (error as u32, [0; 4]),
+    };
+    for (out, field) in header[36..56]
+        .chunks_exact_mut(4)
+        .zip([status].into_iter().chain(fields))
+    {
+        out.copy_from_slice(&field.to_le_bytes());
     }
+    status
 }
+
+#[cfg(test)]
+mod tests;

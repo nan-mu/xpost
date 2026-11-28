@@ -193,6 +193,13 @@ fn flash_fw_inner(
         (g.root.clone(), fw, linked)
     };
 
+    let exec_hal = crate::preflight::hal_exec_task(name).is_some();
+    if exec_hal {
+        anyhow::ensure!(
+            linked_xdps.is_empty(),
+            "EXB2 HAL firmware cannot co-flash XDP"
+        );
+    }
     let build_dur = run_build(&root, &fw.build, &format!("fw `{name}`"), peer)?;
 
     let firmware = abs_under_root(&root, &fw.artifact);
@@ -227,6 +234,9 @@ fn flash_fw_inner(
         Some(target) => target.snapshot.clone(),
         None => firmware_snapshot(&firmware, &partitions)?,
     };
+    if exec_hal {
+        crate::preflight::validate_hal(&fw, &snapshot.elf, false)?;
+    }
     let firmware_sha = snapshot.sha256;
     if let Some(expected) = expected_sha256 {
         let actual = format_sha256(&firmware_sha);
@@ -330,9 +340,14 @@ pub fn attest_deployment(
         format_sha256(&target.snapshot.sha256) == expected_sha256,
         "Firmware ELF changed since preflight"
     );
+    let firmware_only = crate::preflight::hal_exec_task(firmware).is_some();
+    if firmware_only {
+        crate::preflight::validate_hal(profile, &target.snapshot.elf, false)?;
+    }
     match g.handler.flash_with_table(
         FlashOp::Attest {
             expectation: target.snapshot,
+            firmware_only,
         },
         Some(target.table),
     )? {

@@ -247,3 +247,24 @@ Hold schema protection during all collection and recovery writes.
 
 Reason. The maintainer chose per-table reconciliation without version migrations.
 This replaces empty-schema-only initialization for new runs.
+
+## 2026-11-28 Native EXB2 HAL workloads
+
+Select one Rust workload when building each HAL Firmware ELF.
+Use task equivalence for the native baseline.
+Add `matmul` to HAL. Keep the seven released workloads in AOT, JIT, and rBPF.
+Preserve existing Protocol V1 rows when checking the expanded HAL workload constraint.
+Use 630 attempts across 29 cells for the updated `all` plan.
+This supersedes the 625-attempt count for future planning. The original campaign keeps its recorded count.
+
+Reason. The PR #42 brief requests independent workload deployment and a native MCU baseline.
+
+## 2026-11-28 Standalone HAL EXB2 Full collection
+
+Run standalone HAL EXB2 Full after the revised Firmware ELFs pass isolated qualification and preflight.
+Use five runs per workload, 100 batches per run, and three rounds per batch.
+Store the runs in NAS `experiments.release` and verify the stored data.
+Initialize an empty schema. Check an existing schema without changing its tables or constraints.
+This limit overrides general Protocol V1 reconciliation for this collection.
+
+Reason. The PR #42 revision authorizes automatic Full collection for the eight HAL workloads.

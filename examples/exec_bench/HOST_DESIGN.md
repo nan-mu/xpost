@@ -1,5 +1,7 @@
 # exec_bench — host-side design
 
+This document records the legacy map-based sweep. See the [current HAL EXB2 design](../exec_bench_hal/README.md) for standalone EXB2.
+
 Historical design for the 32-byte workload carrier. See [EXB2 firmware](README.md)
 for current builds and supported diagnostics.
 
@@ -37,7 +39,7 @@ exec_bench (ebpf):
     upload to db
 ```
 
-### HAL arm (`exec-bench-hal`)
+### Historical HAL profile (`exec-bench-hal`)
 
 Same control-plane verbs. This arm does not flash XDP. `OK finish` is an App
 `info!` line after `xdp_end` (logger text `INFO - OK finish`). It is not
@@ -45,6 +47,7 @@ Same control-plane verbs. This arm does not flash XDP. `OK finish` is an App
 
 ```text
 exec_bench (hal):
+  # Historical command for the retired single-profile HAL workflow
   agent flash fw exec-bench-hal
   for workload in {incr, square, bitswap, fib, buf, memcpy, fletcher32, bsort}:
     agent clear perf
@@ -59,7 +62,7 @@ exec_bench (hal):
 
 ## Contracts
 
-- Profiles: `[[fw]] exec-bench-ebpf` + per-workload `[[xdp]]`; `[[fw]] exec-bench-hal`
+- Historical profiles: `[[fw]] exec-bench-ebpf` + per-workload `[[xdp]]`; `[[fw]] exec-bench-hal`
   in [`profiles.toml`](../../profiles.toml)
 - `enable/disable exec` / `GetFinish` are `xpost-serial` verbs; agent mirrors
   them (`/v1/enable/exec`, `/v1/disable/exec`, `/v1/get/finish`)
@@ -85,7 +88,7 @@ offset  size  field
 
 Opcode names ↔ LE u32 values and expected output checks belong in the
 xpost-test exam module (draft: [`exec_bench.rs`](exec_bench.rs); HAL
-compute is [`run_hal`](../exec_bench_hal/src/lib.rs)). The App never sees
+compute is [`run_hal` at the original revision](https://github.com/nan-mu/xpost/blob/bb6b906f0b39abe440107c3831da88d825bd325c/examples/exec_bench_hal/src/lib.rs)). The App never sees
 these names.
 
 `update map` input for each cell: host builds the 32-byte blob (or a wire

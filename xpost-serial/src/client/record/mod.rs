@@ -107,8 +107,8 @@ impl SharedRecordInner {
         self.notify.notify_waiters();
     }
 
-    pub async fn notified(&self) {
-        self.notify.notified().await;
+    pub fn notified(&self) -> impl Future<Output = ()> + '_ {
+        self.notify.notified()
     }
 
     /// Wait for a matching reply after `after` (caller races timeout / interrupt).
@@ -586,6 +586,22 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y as i32, m as u32, d as u32)
+}
+
+#[cfg(all(test, feature = "dev"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn waiter_observes_a_reply_appended_before_its_first_poll() {
+        let record = SharedRecordInner::create_memory();
+        let changed = record.notified();
+        // A reader may finish after the scan, before the await polls the waiter.
+        record.uart(b"OK exec batch invoke 903449073 88323818 88323822 0");
+        tokio::time::timeout(Duration::from_millis(30), changed)
+            .await
+            .expect("the waiter must observe the reply");
+    }
 }
 
 fn days_from_civil(y: i64, m: u32, d: u32) -> Option<u64> {

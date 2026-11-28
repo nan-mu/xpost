@@ -1,19 +1,75 @@
 [workspace]
+resolver = "3"
+members = ["xtask"]
+default-members = ["."]
 
 [package]
 edition      = "2024"
 name         = "exec_bench_hal"
+autobins     = false
 rust-version = "1.88"
 version      = "0.1.0"
 
 [[bin]]
-name = "exec_bench_hal"
-path = "./src/bin/main.rs"
+name = "exec_bench_hal_noop"
+path = "src/bin/noop.rs"
+required-features = ["noop"]
+test = false
+bench = false
+
+[[bin]]
+name = "exec_bench_hal_prime"
+path = "src/bin/prime.rs"
+required-features = ["prime"]
+test = false
+bench = false
+
+[[bin]]
+name = "exec_bench_hal_log2"
+path = "src/bin/log2.rs"
+required-features = ["log2"]
+test = false
+bench = false
+
+[[bin]]
+name = "exec_bench_hal_copy"
+path = "src/bin/copy.rs"
+required-features = ["copy"]
+test = false
+bench = false
+
+[[bin]]
+name = "exec_bench_hal_fletcher32"
+path = "src/bin/fletcher32.rs"
+required-features = ["fletcher32"]
+test = false
+bench = false
+
+[[bin]]
+name = "exec_bench_hal_bsort"
+path = "src/bin/bsort.rs"
+required-features = ["bsort"]
+test = false
+bench = false
+
+[[bin]]
+name = "exec_bench_hal_strcmp"
+path = "src/bin/strcmp.rs"
+required-features = ["strcmp"]
+test = false
+bench = false
+
+[[bin]]
+name = "exec_bench_hal_matmul"
+path = "src/bin/matmul.rs"
+required-features = ["matmul"]
+test = false
+bench = false
 
 [package.metadata.espflash]
 partition_table = "partitions.csv"
 
-[dependencies]
+[target.'cfg(target_os = "none")'.dependencies]
 xpost-perf = { path = "../../xpost-perf" }
 esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
 esp-rtos = { version = "0.3.0", features = [
@@ -31,9 +87,6 @@ embeprom = { version = "=0.3.0", default-features = false }
 xpost-serial = { path = "../../xpost-serial", default-features = false, features = ["server"] }
 xpost-type = { path = "../../xpost-type" }
 
-[build-dependencies]
-cc = "1"
-
 [profile.dev]
 opt-level = "s"
 
@@ -44,5 +97,11 @@ lto           = "fat"
 opt-level     = "s"
 
 [features]
-# Boot-time scale sweep for the diagnostic comparison script.
-diag = []
+noop = []
+prime = []
+log2 = []
+copy = []
+fletcher32 = []
+bsort = []
+strcmp = []
+matmul = []

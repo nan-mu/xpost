@@ -32,7 +32,7 @@ The root Cargo workspace contains the root package, `esp-radio`, `xpost-macros`,
 
 ## Engines
 
-`examples/exec_bench_hal` runs the eight workloads as native Rust. It does not link the xpost runtime.
+[HAL EXB2](examples/exec_bench_hal/README.md) builds eight native Rust Firmware ELFs, one per workload. The HAL firmware uses the ESP32-C3 hardware abstraction layer.
 
 `examples/exec_bench` runs an XDP image through `exec_call` and does not start Wi-Fi. A build without `interp` executes the RV32IMC machine code in the XDP ELF. A build with `--features interp` executes the eBPF object through `rbpf`. `diag` is a Cargo feature. It turns on the scale sweep in the exec_bench figure under Experiments.
 
@@ -119,13 +119,13 @@ These two figures are the map lookups taken during the three network runs, not a
 
 ![map-lookup time distribution](docs/figures/evaluation-lookup-cdf.png)
 
-### exec_bench
+### Historical exec_bench scale sweep
+
+The figure below records the legacy scale sweep. See [HAL EXB2](examples/exec_bench_hal/README.md) for the current workload set and measurement boundary.
 
 Eight programs run as a function call, with no Wi-Fi. `incr` adds one to a word. `square` squares a word. `bitswap` reverses the bits of a word. `fib` loops. `buf` and `memcpy` copy bytes. `fletcher32` checksums bytes. `bsort` sorts up to six 32-bit words. The input's work-size field is the horizontal axis. `incr`, `square`, and `bitswap` ignore it and do a fixed amount of work, so their lines are flat. `fib` loops that many times, up to 47. `buf` copies that many bytes, up to 1024. `memcpy` copies at most 12 bytes, `fletcher32` checksums at most 20 bytes, and `bsort` sorts at most six words. For `fib` and `buf`, the horizontal axis is logarithmic with base 2. The vertical axis is microseconds for one call, from the board's microsecond clock. The line is a straight fit of time against the work size itself. On the logarithmic axis that line is not straight. The band is the 99% confidence interval of the fit.
 
 HAL is `examples/exec_bench_hal`. AOT is `examples/exec_bench` running the RV32IMC image. Interpreter is that same example built with `--features interp`, which runs the eBPF object in `rbpf`.
-
-`xpost-test/common/src/exam/exec_bench.rs` is the host check for these workloads.
 
 ![exec_bench on HAL, AOT, and the interpreter](docs/figures/exec-bench-sweeps.png)
 

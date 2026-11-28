@@ -101,10 +101,12 @@ where
     E: RequestError,
 {
     loop {
+        // Capture the notification before scanning so an append cannot miss the waiter.
+        let changed = record.notified();
         if let Some(found) = scan_once::<E>(record, cmd, after)? {
             return Ok(found);
         }
-        record.notified().await;
+        changed.await;
     }
 }
 
