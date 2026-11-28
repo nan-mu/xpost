@@ -5,3 +5,6 @@ modes = ["hal", "aot", "jit", "rbpf"]
 # Leave workloads empty to run every workload supported by each selected mode.
 # For HAL matmul only, set modes = ["hal"] and workloads = ["matmul"].
 workloads = []
+
+# Standalone sampling. For full, select only exec_bench and set modes = ["hal"].
+sampling = "medium"

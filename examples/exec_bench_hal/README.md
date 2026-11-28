@@ -46,6 +46,10 @@ The release profile uses `opt-level = "s"`, fat LTO, one codegen unit, and debug
 The target configuration enables frame pointers and stack protection.
 The Agent checks the ELF's embedded task ID against the selected profile.
 
+Each bin declares its own `esp_rtos::main` and binds its matching workload type.
+The feature selects the workload module. Rust static calls bind the protocol to that type.
+The Firmware ELF shares startup, serial transport, and Metrics through the firmware module.
+
 Run host byte-level checks for each compiled workload. Select the host target for the current machine.
 
 ```sh
@@ -120,6 +124,12 @@ workloads = ["matmul"]
 
 Rebuild the runner after changing its configuration.
 HAL uses all eight workloads. AOT, JIT, and rBPF use the seven in the pinned release.
+Standalone sampling defaults to `medium`, which runs two single-batch attempts per workload.
+For HAL Full, select only `exec_bench` in `profile.toml` and set `sampling = "full"`.
+Set `modes = ["hal"]` and `workloads = []` to select all eight workloads.
+Full runs five attempts of 100 batches per workload, with three rounds per batch.
+Full initializes Protocol V1 in an empty `release` schema.
+If the schema has objects, Full checks compatibility before it flashes a Firmware ELF.
 The runner checks the entire response against the independent expected bytes.
 The HAL config records the workload and Firmware ELF SHA-256.
 The run condition records the Rust baseline, feature, release optimization settings, and timing boundary.

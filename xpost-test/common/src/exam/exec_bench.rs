@@ -12,7 +12,7 @@ use tokio_postgres::Client;
 use uuid::Uuid;
 
 use crate::agent::{AgentClient, ExecBatch};
-use crate::config::{ExecBenchConfig, FileConfig};
+use crate::config::{ExecBenchConfig, ExecBenchSampling, FileConfig};
 use crate::db::{Collection, Database, metrics, protocol};
 
 use super::exb2::{self, BUF, ROUNDS, SEED, Sampling};
@@ -128,7 +128,24 @@ fn standalone_targets(config: &ExecBenchConfig) -> Result<Vec<Target>> {
     Ok(targets)
 }
 
+fn standalone_sampling(config: &ExecBenchConfig) -> Result<Sampling> {
+    match config.sampling {
+        ExecBenchSampling::Medium => Ok(Sampling::MEDIUM),
+        ExecBenchSampling::Full => {
+            ensure!(
+                !config.modes.is_empty() && config.modes.iter().all(|mode| mode == "hal"),
+                "standalone EXB2 Full requires HAL mode"
+            );
+            Ok(Sampling::FULL)
+        }
+    }
+}
+
 pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
+    let sampling = standalone_sampling(&cfg.exec_bench)?;
+    if sampling == Sampling::FULL {
+        super::medium::revision().context("build the Full runner with XPOST_MEDIUM_REVISION")?;
+    }
     let mut targets = standalone_targets(&cfg.exec_bench)?;
     let endpoint = cfg
         .agent
@@ -150,9 +167,13 @@ pub async fn run_exec_bench(cfg: &FileConfig) -> Result<()> {
         }
     }
     let settings = Database::load()?;
-    let database = settings.prepare().await?;
+    let database = if sampling == Sampling::FULL {
+        settings.prepare_append_only().await?
+    } else {
+        settings.prepare().await?
+    };
     database
-        .protect(run_selected(&agent, &database, targets))
+        .protect(run_selected(&agent, &database, targets, sampling))
         .await
 }
 
@@ -160,6 +181,7 @@ async fn run_selected(
     agent: &AgentClient,
     database: &Collection<'_>,
     targets: Vec<Target>,
+    sampling: Sampling,
 ) -> Result<()> {
     let mut db = database.connect().await?;
     let mut loaded = String::new();
@@ -197,7 +219,7 @@ async fn run_selected(
             &loaded,
             None,
             &mut order,
-            Sampling::MEDIUM,
+            sampling,
             None,
         )
         .await?;
@@ -299,6 +321,14 @@ struct Sample {
 }
 
 impl Sample {
+    fn phase(&self) -> &'static str {
+        if self.medium_id.is_some() || self.sampling == Sampling::FULL {
+            "formal"
+        } else {
+            "pilot"
+        }
+    }
+
     fn hal_build(&self) -> Option<Value> {
         (self.mode == Mode::Hal).then(|| {
             json!({
@@ -570,7 +600,7 @@ fn result_event(
         None
     };
     json!({ "run_id": attempt.id.to_string(), "experiment": "exec_bench", "mode": sample.mode.as_str(),
-        "variant": "metrics", "phase": phase(sample.medium_id), "medium_id": sample.medium_id, "stage": sample.medium_id.map(|_| crate::config::MediumStage::for_mode(sample.mode.as_str())), "retry_of": attempt.retry_of, "input": { "program": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED },
+        "variant": "metrics", "phase": sample.phase(), "medium_id": sample.medium_id, "stage": sample.medium_id.map(|_| crate::config::MediumStage::for_mode(sample.mode.as_str())), "retry_of": attempt.retry_of, "input": { "program": sample.program, "n": sample.n, "batch_count": ROUNDS, "seed": SEED },
         "repeat": attempt.repeat, "status": status, "database_status": database_status, "issues": issues,
         "firmware_sha256": protocol::hex(&sample.profile), "hal_build": sample.hal_build(),
         "batch_us": batch_us, "us_per_round": us_per_round, "execution_return": single.map(|reply| reply.execution_return),
@@ -611,14 +641,6 @@ fn preserve(run: Uuid, sample: &Sample, evidence: &Completed<'_>, event: &Value)
     }
     fs::write(path.join("attempt.json"), serde_json::to_vec_pretty(event)?)?;
     Ok(path.display().to_string())
-}
-
-fn phase(medium_id: Option<Uuid>) -> &'static str {
-    if medium_id.is_some() {
-        "formal"
-    } else {
-        "pilot"
-    }
 }
 
 fn all_pass(pair: &metrics::Pair<'_>, count: u64) -> bool {
@@ -671,7 +693,7 @@ async fn start(db: &mut Client, attempt: &Attempt<'_>, sample: &Sample) -> Resul
     tx.execute(&format!("INSERT INTO release.{mode}_exec_bench_config(config_id,condition_id,instrumentation,profile_hash,workload,work_param,batch_count,samples_per_run,input_bytes,input_protocol,wifi_enabled,fixture_artifact_id) VALUES($1,$2,'counter_only',$3,$4,$5,$6,$7,8258,'EXB2',false,$8)"), &[&config,&condition,&digest,&sample.program,&(sample.n as i32),&i64::from(ROUNDS),&sample.sampling.samples,&request]).await?;
     let libbpf_commit =
         (sample.mode != Mode::Hal).then_some("07a4ea9a81a7fedf7bef2d6ced8d7fcfcccfd113");
-    tx.execute("INSERT INTO release.bench_run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit) VALUES($1,$2,$3,$4,'exec_bench','metrics',$5,$6,$7::text::release.bench_u64,$8,'running',$1,$9,$10)", &[&attempt.id,&condition,&config,&mode,&phase(sample.medium_id),&attempt.repeat,&SEED.to_string(),&attempt.order,&libbpf_commit,&super::medium::revision()]).await?;
+    tx.execute("INSERT INTO release.bench_run(run_id,condition_id,config_id,mode,experiment,variant,phase,repeat_no,seed,plan_order,status,run_uuid,libbpf_commit,xpost_commit) VALUES($1,$2,$3,$4,'exec_bench','metrics',$5,$6,$7::text::release.bench_u64,$8,'running',$1,$9,$10)", &[&attempt.id,&condition,&config,&mode,&sample.phase(),&attempt.repeat,&SEED.to_string(),&attempt.order,&libbpf_commit,&super::medium::revision()]).await?;
     protocol::link_artifact(&tx, attempt.id, "exb2_input", request).await?;
     protocol::link_artifact(&tx, attempt.id, "exb2_expected", expected).await?;
     tx.commit().await?;
@@ -819,10 +841,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn standalone_sampling_defaults_to_medium_and_requires_hal_for_full() -> Result<()> {
+        let medium: ExecBenchConfig = toml::from_str("modes = ['hal', 'aot']")?;
+        let full: ExecBenchConfig = toml::from_str("modes = ['hal']\nsampling = 'full'")?;
+        assert!(standalone_sampling(&medium)? == Sampling::MEDIUM);
+        assert!(standalone_sampling(&full)? == Sampling::FULL);
+        assert_eq!(standalone_targets(&full)?.len(), 8);
+        assert_eq!(
+            fixture_sample(Mode::Hal, standalone_sampling(&medium)?).phase(),
+            "pilot"
+        );
+        assert_eq!(
+            fixture_sample(Mode::Hal, standalone_sampling(&full)?).phase(),
+            "formal"
+        );
+        let mixed: ExecBenchConfig = toml::from_str("modes = ['hal', 'aot']\nsampling = 'full'")?;
+        assert!(standalone_sampling(&mixed).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn standalone_selects_the_hal_matmul_profile_and_rejects_non_hal_matmul() -> Result<()> {
         let mut config = ExecBenchConfig {
-            modes: vec!["hal".into(), "aot".into(), "jit".into(), "rbpf".into()],
             workloads: vec!["matmul".into()],
+            ..ExecBenchConfig::default()
         };
         let targets = standalone_targets(&config)?;
         assert_eq!(targets.len(), 1);

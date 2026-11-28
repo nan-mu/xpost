@@ -242,6 +242,40 @@ fn compact_sql(sql: &str) -> String {
     sql.split_ascii_whitespace().collect()
 }
 
+/// Caller holds the exclusive schema session lock.
+pub(super) async fn prepare_append_only(client: &mut Client) -> Result<()> {
+    let ddl = Ddl::load()?;
+    let tx = client.transaction().await?;
+    tx.batch_execute("SET LOCAL search_path = pg_catalog")
+        .await?;
+    let schema = tx
+        .query_opt(
+            "SELECT NOT (
+                EXISTS (SELECT FROM pg_class WHERE relnamespace = n.oid) OR
+                EXISTS (SELECT FROM pg_proc WHERE pronamespace = n.oid) OR
+                EXISTS (SELECT FROM pg_type WHERE typnamespace = n.oid)
+             ) FROM pg_namespace n WHERE nspname = 'release'",
+            &[],
+        )
+        .await?
+        .context("prepare schema release before collection")?;
+    if schema.get::<_, bool>(0) {
+        // Every ALTER in the canonical DDL follows CREATE of the same table.
+        // A conflicting object created by another session aborts this transaction.
+        for statement in &ddl.statements {
+            apply(
+                &tx,
+                statement.sql,
+                &format!("initialize release.{}", statement.name),
+            )
+            .await?;
+        }
+    }
+    validate(&tx, &ddl).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Caller holds the exclusive schema session lock until reconciliation commits
 /// and the session has acquired its shared collection lock.
 pub(super) async fn reconcile(client: &mut Client) -> Result<()> {

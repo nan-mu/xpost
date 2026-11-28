@@ -258,3 +258,13 @@ Use 630 attempts across 29 cells for the updated `all` plan.
 This supersedes the 625-attempt count for future planning. The original campaign keeps its recorded count.
 
 Reason. The PR #42 brief requests independent workload deployment and a native MCU baseline.
+
+## 2026-11-28 Standalone HAL EXB2 Full collection
+
+Run standalone HAL EXB2 Full after the revised Firmware ELFs pass isolated qualification and preflight.
+Use five runs per workload, 100 batches per run, and three rounds per batch.
+Store the runs in NAS `experiments.release` and verify the stored data.
+Initialize an empty schema. Check an existing schema without changing its tables or constraints.
+This limit overrides general Protocol V1 reconciliation for this collection.
+
+Reason. The PR #42 revision authorizes automatic Full collection for the eight HAL workloads.

@@ -2,6 +2,24 @@ extern crate std;
 
 use std::{vec, vec::Vec};
 
+use crate::Workload;
+#[cfg(feature = "bsort")]
+use crate::workloads::bsort::Bsort as Selected;
+#[cfg(feature = "copy")]
+use crate::workloads::copy::Copy as Selected;
+#[cfg(feature = "fletcher32")]
+use crate::workloads::fletcher32::Fletcher32 as Selected;
+#[cfg(feature = "log2")]
+use crate::workloads::log2::Log2 as Selected;
+#[cfg(feature = "matmul")]
+use crate::workloads::matmul::Matmul as Selected;
+#[cfg(feature = "noop")]
+use crate::workloads::noop::Noop as Selected;
+#[cfg(feature = "prime")]
+use crate::workloads::prime::Prime as Selected;
+#[cfg(feature = "strcmp")]
+use crate::workloads::strcmp::Strcmp as Selected;
+
 fn request(task: u32, n: u32, variant: u32, input: &[u8], scratch: usize) -> Vec<u8> {
     let mut buffer = vec![0xcc; 8258];
     buffer[..64].fill(0);
@@ -42,7 +60,7 @@ fn matmul_publishes_all_four_results_and_preserves_input_and_padding() {
         .collect();
     let mut buffer = request(7, 2, 0, &input, 16);
     let expected = response(buffer.clone(), [0, 3, 19, 50, 0x91eee432], &output);
-    assert_eq!(crate::execute(&mut buffer), 0);
+    assert_eq!(crate::execute::<Selected>(&mut buffer), 0);
     assert_eq!(buffer, expected);
 }
 
@@ -81,21 +99,21 @@ const LEGACY: (u32, &[u8], &[u8], [u32; 3]) = (4, b"abcz\0abdz\0", b"", [u32::MA
 #[test]
 fn pinned_workload_vector_matches_every_response_byte() {
     let (n, input, scratch, [lo, hi, digest]) = LEGACY;
-    let mut buffer = request(crate::TASK_ID.into(), n, 0, input, scratch.len());
+    let mut buffer = request(Selected::TASK_ID.into(), n, 0, input, scratch.len());
     let expected = response(buffer.clone(), [0, 3, lo, hi, digest], scratch);
-    assert_eq!(crate::execute(&mut buffer), 0);
+    assert_eq!(crate::execute::<Selected>(&mut buffer), 0);
     assert_eq!(buffer, expected);
 }
 
 fn rejects(mut buffer: Vec<u8>, status: u32) {
     let expected = response(buffer.clone(), [status, 0, 0, 0, 0], &[]);
-    assert_eq!(crate::execute(&mut buffer), status);
+    assert_eq!(crate::execute::<Selected>(&mut buffer), status);
     assert_eq!(buffer, expected);
 }
 
 #[test]
 fn rejects_invalid_headers_before_running_work() {
-    let task = u32::from(crate::TASK_ID);
+    let task = u32::from(Selected::TASK_ID);
     let request = request(task, 1, 0, b"", 0);
     for (offset, value, status) in [(0, 0, 1), (4, 3, 2), (6, 63, 2), (8, 8, 3), (56, 1, 5)] {
         let mut buffer = request.clone();
@@ -103,24 +121,24 @@ fn rejects_invalid_headers_before_running_work() {
         rejects(buffer, status);
     }
     let mut truncated = request[..8257].to_vec();
-    assert_eq!(crate::execute(&mut truncated), 7);
+    assert_eq!(crate::execute::<Selected>(&mut truncated), 7);
     assert_eq!(truncated, request[..8257]);
 }
 
 fn check_round(n: u32, variant: u32, input: &[u8], output: &[u8], lo: u32, hi: u32) {
-    let mut buffer = request(crate::TASK_ID.into(), n, variant, input, output.len());
+    let mut buffer = request(Selected::TASK_ID.into(), n, variant, input, output.len());
     let digest = (0..3).fold(1u32 ^ 0x811c9dc5, |d, round| {
         (d.rotate_left(5) ^ lo).wrapping_add(hi ^ round ^ 0x9e3779b9)
     });
     let expected = response(buffer.clone(), [0, 3, lo, hi, digest], output);
-    assert_eq!(crate::execute(&mut buffer), 0);
+    assert_eq!(crate::execute::<Selected>(&mut buffer), 0);
     assert_eq!(buffer, expected);
 }
 
 #[cfg(feature = "matmul")]
 #[test]
 fn matmul_accepts_dimension_boundaries_and_rejects_invalid_values_and_layouts() {
-    let task = u32::from(crate::TASK_ID);
+    let task = u32::from(Selected::TASK_ID);
     for n in [1, 3, 26] {
         let a = (0..n * n).map(|i| (i * 17 + 31) % 256).collect::<Vec<_>>();
         let b = (0..n * n)

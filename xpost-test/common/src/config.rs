@@ -118,13 +118,23 @@ impl Default for FirewallConfig {
     }
 }
 
-/// EXB2 modes. Legacy `arms` remains a read alias.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecBenchSampling {
+    #[default]
+    Medium,
+    Full,
+}
+
+/// Standalone EXB2 selection. Legacy `arms` remains a read alias.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExecBenchConfig {
     #[serde(default = "default_exec_modes", alias = "arms")]
     pub modes: Vec<String>,
     #[serde(default)]
     pub workloads: Vec<String>,
+    #[serde(default)]
+    pub sampling: ExecBenchSampling,
 }
 
 fn default_exec_modes() -> Vec<String> {
@@ -136,6 +146,7 @@ impl Default for ExecBenchConfig {
         Self {
             modes: default_exec_modes(),
             workloads: Vec::new(),
+            sampling: ExecBenchSampling::default(),
         }
     }
 }
@@ -233,6 +244,12 @@ impl FileConfig {
     fn validate(&self) -> Result<()> {
         if self.run.is_empty() {
             bail!("profile.toml `run` must list at least one experiment");
+        }
+        if self.exec_bench.sampling == ExecBenchSampling::Full
+            && self.run.len() != 1
+            && self.run.iter().any(|name| name == "exec_bench")
+        {
+            bail!("standalone EXB2 Full requires `run = [\"exec_bench\"]`");
         }
         if self.run.len() != 1
             && self.run.iter().any(|name| {
